@@ -1,40 +1,10 @@
 import logging
 from functools import partial
 
-from django.core.cache import cache
-from django.db import transaction
 
-from efsm.exceptions import ManyTransitions, TransitionNotAllowed
+from django_logic.exceptions import ManyTransitions, TransitionNotAllowed
 
 logger = logging.getLogger(__name__)
-
-
-class BaseCommand:
-    def __init__(self, commands=None):
-        self.commands = commands or []
-
-    def execute(self):
-        raise NotImplementedError
-
-
-class CeleryCommand(BaseCommand):
-    def execute(self):
-        # TODO: wrap all commands into celery task with asck late = True
-        # TODO: execute them in a queue
-        pass
-
-
-class Command(BaseCommand):
-    def execute(self):
-        for command in self.commands:
-            command()
-
-
-class Conditions(BaseCommand):
-    # TODO: support hints
-
-    def execute(self):
-        return all(command() for command in self.commands)
 
 
 class Process:
@@ -55,10 +25,8 @@ class Process:
     conditions = None
     permissions = None
 
-    def __init__(self, state_field, user=None):
+    def __init__(self, state_field: str, user=None):
         """
-
-        :param instance:
         :param state_field:
         :param user:
         """
@@ -98,7 +66,7 @@ class Process:
 
         for transition in self.transitions:
             # transition validation
-            if getattr(self.instance, self.state_field) in transition.sources and transition.validate():
+            if getattr(self.instance, self.state_field) in transition.sources:
                 yield transition
         # TODO:
         # for sub_process in self.nested_processes:
@@ -144,91 +112,3 @@ class ProcessManager:
         if self.id is not None and 'update_fields' not in kwargs:
             kwargs['update_fields'] = self.non_state_fields
         super().save(*args, **kwargs)
-
-
-# def success(instance):
-#     logger.info('Transition started: {app_label}.{model_name}.{method_name} '
-#                 '(instance id {instance_id})'.format(
-#         app_label=instance._meta.app_label,
-#         model_name=instance._meta.model_name,
-#         method_name=self.action_name,
-#         instance_id=instance.id
-#     ))
-#
-#     # TODO: processing state should be taken either from process or transition
-#     instance._set_state(instance, state_field, instance.target)
-#     instance._unlock(instance)
-#     # TODO: run callbacks
-#     # TODO: catch exceptions and use failure handler
-#
-
-class Transition:
-    """
-    Transition could be defined as a class or as an object and used as an object
-    - action name
-    - transitions name
-    - target
-    - it changes the the state of the object from source to target by triggering available action via transition name
-    - validation if the action is available throughout permissions and conditions
-    - run side effects and call backs
-    """
-    def __init__(self, action_name, target, sources, **kwargs):
-        self.action_name = action_name
-        self.target = target
-        self.sources = sources
-        self.side_effects = kwargs.get('side_effects')
-        self.callbacks = kwargs.get('callbacks')
-        self.failure_handler = kwargs.get('failure_handler')
-        self.processing_state = kwargs.get('processing_state')
-        self.permissions = kwargs.get('permissions')
-        self.conditions = kwargs.get('conditions')
-        self.parent_process = None  # initialised by process
-
-    def change_state(self, instance, state_field):
-        # TODO: consider adding the process as it also has side effects and callback (or remove them from it)
-        # run the conditions and permissions
-        # Lock state
-        # run side effects
-        # change state via transition to the next state
-        # run callbacks
-        print("ALL WORKS WITH ", instance, state_field)
-
-        if self._is_locked(instance):
-            raise TransitionNotAllowed("State is locked")
-
-        self._lock(instance)
-        # self.side_effects.add(success(self))
-        try:
-            self.side_effects.execute()
-        except Exception as ex:
-            pass
-            # TODO: logger
-        else:
-            self._unlock(instance)
-
-
-    def _get_hash(self, instance):
-        return "FSM-{}-{}-{}".format(instance._meta.app_label, instance._meta.model_name, instance.pk)
-
-    def _lock(self, instance):
-        cache.set(self._get_hash(instance), True)
-
-    def _unlock(self, instance):
-        cache.delete(self._get_hash(instance))
-
-    def _is_locked(self, instance):
-        return cache.get(self._get_hash(instance)) or False
-
-    def _get_db_state(self, instance, state_field):
-        """
-        Fetches state directly from db instead of model instance.
-        """
-        return instance._meta.model.objects.values_list(state_field, flat=True).get(pk=instance.id)
-
-    def _set_state(self, instance, state_field, state):
-        """
-        Sets intermediate state to instance's field until transition is over.
-        """
-        self._lock(instance)
-        # TODO: how would it work if it's used within another transition?
-        instance._meta.model.objects.filter(pk=instance.id).update(**{state_field: state})

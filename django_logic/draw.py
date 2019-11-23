@@ -76,8 +76,8 @@ def annotate_nodes(process, node_name=None):
 
     for state in process.states:
         node['nodes'].append({
-            'id': state,
-            'name': state,
+            'id': state[0],  # todo: make it explicit
+            'name': state[0],
             'type': 'state',
         })
 
