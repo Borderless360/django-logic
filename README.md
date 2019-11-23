@@ -1,4 +1,6 @@
 # Django-Logic (under development)
+[![Build Status](https://travis-ci.org/Borderless360/django-logic.svg?branch=master)](https://travis-ci.org/Borderless360/django-logic)
+
 django-logic - easy way to implement state-based business logic 
 
 Django Logic is a lightweight workflow framework that provides an additional layer to implement the business logic with a Django. Inspired by Django FSM package and UML-state machine, we have developed a package which tends to solve a problem “Where to put the business logic in Django”. 
