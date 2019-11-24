@@ -3,13 +3,15 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SECRET_KEY = 'django_logic'
 
+PROJECT_APPS = [
+    'django_logic',
+    'app',
+]
 
 INSTALLED_APPS = [
     'django.contrib.auth',
     'django.contrib.contenttypes',
-    'django_logic',
-    'tests.app',
-]
+] + PROJECT_APPS
 
 MIDDLEWARE = []
 

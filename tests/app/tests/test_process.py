@@ -1,7 +1,7 @@
 from django.test import TestCase
 
-from tests.app.models import Invoice
-from tests.app.process import InvoiceProcess
+from app.models import Invoice
+from app.process import InvoiceProcess
 
 
 class ProcessTestCase(TestCase):
