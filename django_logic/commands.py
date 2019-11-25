@@ -8,8 +8,7 @@ class BaseCommand:
 
 class CeleryCommand(BaseCommand):
     def execute(self):
-        # TODO: wrap all commands into celery task with asck late = True
-        # TODO: execute them in a queue
+        # TODO: https://github.com/Borderless360/django-logic/issues/1
         pass
 
 

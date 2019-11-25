@@ -13,7 +13,7 @@ class Transition:
     - validation if the action is available throughout permissions and conditions
     - run side effects and call backs
     """
-    def __init__(self, action_name, target, sources, **kwargs):
+    def __init__(self, action_name, sources, target, **kwargs):
         self.action_name = action_name
         self.target = target
         self.sources = sources
@@ -32,10 +32,10 @@ class Transition:
         # run side effects
         # change state via transition to the next state
         # run callbacks
-        if self._is_locked(instance):
+        if self._is_locked(instance, state_field):
             raise TransitionNotAllowed("State is locked")
 
-        self._lock(instance)
+        self._lock(instance, state_field)
         # self.side_effects.add(success(self))
         try:
             self.side_effects.execute()
@@ -43,30 +43,36 @@ class Transition:
             pass
 
         self._set_state(instance, state_field, self.target)
-        self._unlock(instance)
+        self._unlock(instance, state_field)
 
-    def _get_hash(self, instance):
-        return "FSM-{}-{}-{}".format(instance._meta.app_label, instance._meta.model_name, instance.pk)
+    def _get_hash(self, instance, state_field):
+        # TODO: https://github.com/Borderless360/django-logic/issues/3
+        return "{}-{}-{}-{}".format(instance._meta.app_label,
+                                    instance._meta.model_name,
+                                    state_field,
+                                    instance.pk)
 
-    def _lock(self, instance):
-        cache.set(self._get_hash(instance), True)
+    def _lock(self, instance, state_field: str):
+        cache.set(self._get_hash(instance, state_field), True)
 
-    def _unlock(self, instance):
-        cache.delete(self._get_hash(instance))
+    def _unlock(self, instance, state_field: str):
+        cache.delete(self._get_hash(instance, state_field))
 
-    def _is_locked(self, instance):
-        return cache.get(self._get_hash(instance)) or False
+    def _is_locked(self, instance, state_field: str):
+        return cache.get(self._get_hash(instance, state_field)) or False
 
-    def _get_db_state(self, instance, state_field):
+    @staticmethod
+    def _get_db_state(instance, state_field):
         """
         Fetches state directly from db instead of model instance.
         """
         return instance._meta.model.objects.values_list(state_field, flat=True).get(pk=instance.id)
 
-    def _set_state(self, instance, state_field, state):
+    @staticmethod
+    def _set_state(instance, state_field, state):
         """
         Sets intermediate state to instance's field until transition is over.
         """
-        # TODO: how would it work if it's used within another transition?
+        # TODO: how would it work if it's used within another transaction?
         instance._meta.model.objects.filter(pk=instance.id).update(**{state_field: state})
         instance.refresh_from_db()

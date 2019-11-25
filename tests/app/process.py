@@ -7,7 +7,7 @@ class InvoiceProcess(Process):
     states = (
         ('draft', 'Draft'),
         ('paid', 'Paid'),
-        ('voided', 'Voided'),
+        ('void', 'Void'),
     )
 
     transitions = [
