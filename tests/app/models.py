@@ -8,7 +8,7 @@ class Invoice(ProcessManager.bind_state_fields(status=InvoiceProcess), models.Mo
     status = models.CharField(choices=InvoiceProcess.states, max_length=16, blank=True)
 
     def __str__(self):
-        return self.reference
+        return self.status
 
 
 class Order(models.Model):

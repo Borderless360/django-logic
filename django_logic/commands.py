@@ -2,7 +2,7 @@ class BaseCommand:
     def __init__(self, commands=None):
         self.commands = commands or []
 
-    def execute(self):
+    def execute(self, *args, **kwargs):
         raise NotImplementedError
 
 
@@ -13,14 +13,16 @@ class CeleryCommand(BaseCommand):
 
 
 class Command(BaseCommand):
-    def execute(self):
+    def execute(self, instance: any):
         for command in self.commands:
-            command()
+            command(instance)
 
 
 class Conditions(BaseCommand):
-    # TODO: support hints
+    def execute(self, instance: any):
+        return all(command(instance) for command in self.commands)
 
-    def execute(self):
-        return all(command() for command in self.commands)
 
+class Permissions(BaseCommand):
+    def execute(self, instance: any, user: any):
+        return all(command(instance,  user) for command in self.commands)

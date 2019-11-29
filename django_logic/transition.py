@@ -25,6 +25,26 @@ class Transition:
         self.conditions = kwargs.get('conditions')
         self.parent_process = None  # initialised by process
 
+    def __str__(self):
+        return "Transition: {} to {}".format(self.action_name, self.target)
+
+    def validate(self, instance: any, user=None) -> bool:
+        """
+        It validates this process to meet conditions and pass permissions
+        :param instance: any instance used to meet conditions
+        :param user: any object used to pass permissions
+        :return: True or False
+        """
+        if self.permissions is not None:
+            if not self.permissions.execute(instance, user):
+                return False
+
+        if self.conditions is not None:
+            if not self.conditions().execute(instance):
+                return False
+
+        return True
+
     def change_state(self, instance, state_field):
         # TODO: consider adding the process as it also has side effects and callback (or remove them from it)
         # run the conditions and permissions
