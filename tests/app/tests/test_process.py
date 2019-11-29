@@ -26,7 +26,6 @@ class User:
 
 
 class Instance:
-
     def __init__(self, state):
         self.is_available = True
         self.state = state
@@ -67,7 +66,7 @@ class ValidateProcessTestCase(TestCase):
         self.assertTrue(MyProcess('state').validate())
         self.assertTrue(MyProcess('state').validate(self.user))
 
-    def test_permissions_pass(self):
+    def test_permissions_successfully(self):
         class MyProcess(Process):
             permissions = Permissions([allow])
 
@@ -98,7 +97,7 @@ class ValidateProcessTestCase(TestCase):
         process = MyProcess(state_field='state', instance=Instance('draft'))
         self.assertTrue(process.validate(self.user))
 
-    def test_conditions_pass(self):
+    def test_conditions_successfully(self):
         class MyProcess(Process):
             conditions = Conditions([is_available])
 
@@ -124,7 +123,7 @@ class ValidateProcessTestCase(TestCase):
         self.assertFalse(process.validate())
         self.assertFalse(process.validate(self.user))
 
-    def test_permissions_and_conditions_pass(self):
+    def test_permissions_and_conditions_successfully(self):
         class MyProcess(Process):
             permissions = Permissions([allow])
             conditions = Conditions([is_available])
@@ -186,7 +185,24 @@ class GetAvailableTransitionsTestCase(TestCase):
         process = ChildProcess(instance=Instance('closed'), state_field='state')
         self.assertEqual(list(process.get_available_transitions()), [])
 
-    def test_conditions_and_permissions_pass(self):
+    def test_process_fail(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
+        class ChildProcess(Process):
+            conditions = Conditions([not_available])
+            transitions = [transition1, transition2]
+
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions()), [])
+
+        process = ChildProcess(instance=Instance('done'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions()), [])
+
+        process = ChildProcess(instance=Instance('closed'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions()), [])
+
+    def test_conditions_and_permissions_successfully(self):
         transition1 = Transition('action', sources=['draft'], target='done')
         transition2 = Transition('action', sources=['done'], target='closed')
 
@@ -204,40 +220,336 @@ class GetAvailableTransitionsTestCase(TestCase):
         process = ChildProcess(instance=Instance('closed'), state_field='state')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
-    # TODO: test
-    def nested_permissions_successfully(self):
+    def test_conditions_and_permissions_fail(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
+        class ChildProcess(Process):
+            conditions = Conditions([is_available])
+            permissions = Permissions([disallow])
+            transitions = [transition1, transition2]
+
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
+
+        process = ChildProcess(instance=Instance('done'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
+
+        process = ChildProcess(instance=Instance('closed'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
+
+    def test_nested_process_permissions_successfully(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
         class ChildProcess(Process):
             permissions = Permissions([allow])
+            transitions = [transition1, transition2]
 
-        self.assertTrue(ChildProcess('state').validate())
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
             permissions = Permissions([allow])
             nested_processes = (ChildProcess, )
 
-        self.assertTrue(ParentProcess('state').validate())
+        process = ParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
             permissions = Permissions([allow])
             nested_processes = (ParentProcess, )
 
-        self.assertTrue(GrandParentProcess('state').validate())
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
-    # TODO: test
-    def nested_permissions_fail(self):
+    def test_nested_process_permissions_fail(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
         class ChildProcess(Process):
-            permissions = Permissions([allow])
+            permissions = Permissions([disallow])
+            transitions = [transition1, transition2]
 
-        self.assertTrue(ChildProcess('state').validate())
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class ParentProcess(Process):
-            permissions = Permissions([disallow])  # disallow
+            permissions = Permissions([allow])
             nested_processes = (ChildProcess,)
 
-        self.assertFalse(ParentProcess('state').validate())
+        process = ParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class GrandParentProcess(Process):
             permissions = Permissions([allow])
             nested_processes = (ParentProcess,)
 
-        self.assertFalse(GrandParentProcess('state').validate())
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
+
+    def test_nested_process_conditions_successfully(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
+        class ChildProcess(Process):
+            conditions = Conditions([is_available])
+            transitions = [transition1, transition2]
+
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+        class ParentProcess(Process):
+            conditions = Conditions([is_available])
+            nested_processes = (ChildProcess, )
+
+        process = ParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+        class GrandParentProcess(Process):
+            conditions = Conditions([is_available])
+            nested_processes = (ParentProcess, )
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+    def test_nested_process_conditions_fail(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
+        class ChildProcess(Process):
+            conditions = Conditions([is_available])
+            transitions = [transition1, transition2]
+
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+        class ParentProcess(Process):
+            conditions = Conditions([not_available])
+            nested_processes = (ChildProcess, )
+
+        process = ParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
+
+        class GrandParentProcess(Process):
+            conditions = Conditions([is_available])
+            nested_processes = (ParentProcess, )
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
+
+    def test_nested_process_successfully(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
+        class ChildProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            transitions = [transition1, transition2]
+
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+        class ParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            nested_processes = (ChildProcess, )
+
+        process = ParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+        class GrandParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            nested_processes = (ParentProcess, )
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+    def test_nested_process_fail(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
+        class ChildProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            transitions = [transition1, transition2]
+
+        process = ChildProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+        class ParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            nested_processes = (ChildProcess, )
+
+        process = ParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
+
+        class GrandParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([not_available])
+            nested_processes = (ParentProcess, )
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        self.assertEqual(list(process.get_available_transitions(self.user)), [])
+
+    def test_nested_process_with_nested_transitions_successfully(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+        transition3 = Transition('action', sources=['draft'], target='approved')
+        transition4 = Transition('action', sources=['done'], target='closed')
+        transition5 = Transition('action', sources=['draft'], target='declined')
+
+        class ChildProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            transitions = [transition1, transition2]
+
+        class ParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            nested_processes = (ChildProcess,)
+            transitions = [transition3, transition4]
+
+        class GrandParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            nested_processes = (ParentProcess,)
+
+            transitions = [transition5]
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition1, transition3, transition5])
+
+        process = GrandParentProcess(instance=Instance('done'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition2, transition4])
+
+    def test_nested_process_with_nested_transitions_fail(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+        transition3 = Transition('action', sources=['draft'], target='approved')
+        transition4 = Transition('action', sources=['done'], target='closed')
+        transition5 = Transition('action', sources=['draft'], target='declined')
+
+        class ChildProcess(Process):
+            permissions = Permissions([disallow])
+            conditions = Conditions([is_available])
+            transitions = [transition1, transition2]
+
+        class ParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            nested_processes = (ChildProcess,)
+            transitions = [transition3, transition4]
+
+        class GrandParentProcess(Process):
+            permissions = Permissions([allow])
+            conditions = Conditions([is_available])
+            nested_processes = (ParentProcess,)
+
+            transitions = [transition5]
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition3, transition5])
+
+        process = GrandParentProcess(instance=Instance('done'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition4])
+
+    def test_nested_process_with_nested_transitions_conditions_and_permissions_successfully(self):
+        transition1 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['draft'],
+                                 target='done')
+        transition2 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['done'],
+                                 target='closed')
+        transition3 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['draft'],
+                                 target='approved')
+        transition4 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['done'],
+                                 target='closed')
+        transition5 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['draft'],
+                                 target='declined')
+
+        class ChildProcess(Process):
+            transitions = [transition1, transition2]
+
+        class ParentProcess(Process):
+            nested_processes = (ChildProcess,)
+            transitions = [transition3, transition4]
+
+        class GrandParentProcess(Process):
+            nested_processes = (ParentProcess,)
+
+            transitions = [transition5]
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition1, transition3, transition5])
+
+        process = GrandParentProcess(instance=Instance('done'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition2, transition4])
+
+    def test_nested_process_with_nested_transitions_conditions_and_permissions_fail(self):
+        transition1 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['draft'],
+                                 target='done')
+        transition2 = Transition('action',
+                                 permissions=Permissions([disallow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['done'],
+                                 target='closed')
+        transition3 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([not_available]),
+                                 sources=['draft'],
+                                 target='approved')
+        transition4 = Transition('action',
+                                 permissions=Permissions([allow]),
+                                 conditions=Conditions([is_available]),
+                                 sources=['done'],
+                                 target='closed')
+        transition5 = Transition('action',
+                                 permissions=Permissions([disallow]),
+                                 conditions=Conditions([not_available]),
+                                 sources=['draft'],
+                                 target='declined')
+
+        class ChildProcess(Process):
+            transitions = [transition1, transition2]
+
+        class ParentProcess(Process):
+            nested_processes = (ChildProcess,)
+            transitions = [transition3, transition4]
+
+        class GrandParentProcess(Process):
+            nested_processes = (ParentProcess,)
+
+            transitions = [transition5]
+
+        process = GrandParentProcess(instance=Instance('draft'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition1])
+
+        process = GrandParentProcess(instance=Instance('done'), state_field='state')
+        for transition in process.get_available_transitions(self.user):
+            self.assertIn(transition, [transition4])

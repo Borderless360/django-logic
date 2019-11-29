@@ -61,9 +61,9 @@ class Process:
 
     def validate(self, user=None) -> bool:
         """
-        :param instance:
-        :param user:
-        :return:
+        It validates this process to meet conditions and pass permissions
+        :param user: any object used to pass permissions
+        :return: True or False
         """
         if self.permissions is not None:
             if not self.permissions.execute(self.instance, user):
@@ -75,10 +75,12 @@ class Process:
 
         return True
 
-    def get_available_transitions(self, user=None):
+    def get_available_transitions(self, user=(None or any)):
         """
+        It returns all available transition which meet conditions and pass permissions.
+        Including nested processes.
         :param user: any object which used to validate permissions
-        :return:
+        :return: yield `django_logic.Transition`
         """
         if not self.validate(user):
             return
@@ -90,7 +92,7 @@ class Process:
 
         for sub_process_class in self.nested_processes:
             sub_process = sub_process_class(state_field=self.state_field,
-                                            isntance=self.instance)
+                                            instance=self.instance)
             for transition in sub_process.get_available_transitions(user):
                 yield transition
 
