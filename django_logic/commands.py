@@ -1,30 +1,53 @@
-class BaseTransitionCommand(object):
+class BaseCommand(object):
     """
     Command descriptor
     """
-    def __init__(self, commands=None, transition=None, *args, **kwargs):
-        self.commands = commands or []
-        self.transition = transition
+    def __set__(self, instance, value):
+        self._commands = value
 
-    def __get__(self, transition, owner):
-        if self.transition is None:
-            self.transition = transition
-        return self
-
-    def __set__(self, transition, commands):
-        if self.transition is None:
-            self.transition = transition
-        self.commands = commands
-
-    def __delete__(self, instance):
-        del self.commands
+    @property
+    def commands(self):
+        return self._commands
 
     def execute(self, *args, **kwargs):
         raise NotImplementedError
 
 
-class SideEffects(BaseTransitionCommand):
+class Conditions(BaseCommand):
+    def __init__(self, commands=None):
+        self._commands = commands or []
+
+    def execute(self, instance: any):
+        return all(command(instance) for command in self.commands)
+
+
+class Permissions(BaseCommand):
+    def __init__(self, commands=None):
+        self._commands = commands or []
+
+    def execute(self, instance: any, user: any):
+        return all(command(instance,  user) for command in self.commands)
+
+
+class TransitionCommandDescriptor(object):
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, transition, owner):
+        self.transition = transition
+        return self
+
+    def __set__(self, transition, commands):
+        transition.__dict__[self.name] = commands
+
+    @property
+    def commands(self):
+        return self.transition.__dict__[self.name]
+
+
+class SideEffects(TransitionCommandDescriptor, BaseCommand):
     def execute(self, instance: any, field_name):
+        print('Side effects execute', self.commands)
         try:
             for command in self.commands:
                 command(instance)
@@ -34,7 +57,7 @@ class SideEffects(BaseTransitionCommand):
             self.transition.complete_transition(instance, field_name)
 
 
-class Callbacks(BaseTransitionCommand):
+class Callbacks(TransitionCommandDescriptor, BaseCommand):
     def execute(self, instance, field_name):
         try:
             for command in self.commands:
@@ -42,13 +65,3 @@ class Callbacks(BaseTransitionCommand):
         except Exception:
             # TODO: logger
             pass
-
-
-class Conditions(BaseTransitionCommand):
-    def execute(self, instance: any):
-        return all(command(instance) for command in self.commands)
-
-
-class Permissions(BaseTransitionCommand):
-    def execute(self, instance: any, user: any):
-        return all(command(instance,  user) for command in self.commands)
