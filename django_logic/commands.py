@@ -47,11 +47,11 @@ class TransitionCommandDescriptor(object):
 
 class SideEffects(TransitionCommandDescriptor, BaseCommand):
     def execute(self, instance: any, field_name):
-        print('Side effects execute', self.commands)
         try:
             for command in self.commands:
                 command(instance)
         except Exception:
+            # TODO: handle exception
             self.transition.fail_transition(instance, field_name)
         else:
             self.transition.complete_transition(instance, field_name)
@@ -63,5 +63,5 @@ class Callbacks(TransitionCommandDescriptor, BaseCommand):
             for command in self.commands:
                 command(instance)
         except Exception:
-            # TODO: logger
+            # TODO: handle exception
             pass

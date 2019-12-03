@@ -77,6 +77,15 @@ class Transition(object):
         instance.refresh_from_db()
         
     def change_state(self, instance, field_name):
+        """
+        This method changes a state of the provided instance and file name by the following algorithm:
+        - Lock state
+        - Change state to `in progress` if such exists
+        - Run side effects which should run `complete_transition` in case of success
+        or `fail_transition` in case of failure.
+        :param instance: any
+        :param field_name: str
+        """
         if self._is_locked(instance, field_name):
             raise TransitionNotAllowed("State is locked")
 
@@ -86,10 +95,23 @@ class Transition(object):
         self.side_effects.execute(instance, field_name)
 
     def complete_transition(self, instance, field_name):
+        """
+        It completes the transition process for provided instance and filed name.
+        The instance will be unlocked and callbacks exc
+        :param instance:
+        :param field_name:
+        :return:
+        """
         self._set_state(instance, field_name, self.target)
         self._unlock(instance, field_name)
         self.callbacks.execute(instance, field_name)
     
     def fail_transition(self, instance, field_name):
-        self._set_state(instance, field_name, self.failed_state)
+        """
+        It triggers fail transition in case of any failure during the side effects execution.
+        :param instance: any
+        :param field_name: str
+        """
+        if self.failed_state:
+            self._set_state(instance, field_name, self.failed_state)
         self._unlock(instance, field_name)
