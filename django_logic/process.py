@@ -1,13 +1,13 @@
 import logging
 from functools import partial
 
-
+from django_logic.commands import Conditions, Permissions
 from django_logic.exceptions import ManyTransitions, TransitionNotAllowed
 
 logger = logging.getLogger(__name__)
 
 
-class Process:
+class Process(object):
     """
     Process should be explicitly defined as a class and used as an object.
     - process name
@@ -22,14 +22,14 @@ class Process:
     states = []
     nested_processes = []
     transitions = []
-    conditions = None
-    permissions = None
+    conditions = Conditions()
+    permissions = Permissions()
 
-    def __init__(self, state_field: str, instance=None):
+    def __init__(self, field_name: str, instance=None):
         """
-        :param state_field:
+        :param field_name:
         """
-        self.state_field = state_field
+        self.field_name = field_name
         self.instance = instance
 
     def __get__(self, instance, owner):
@@ -38,15 +38,12 @@ class Process:
         return self
 
     def __getattr__(self, item):
-        transitions = list(filter(
-            lambda transition:  transition.action_name == item,
-            self.get_available_transitions()
-        ))
+        transitions = list(self.get_available_transitions(action_name=item))
 
         if len(transitions) == 1:
             return partial(transitions[0].change_state,
                            instance=self.instance,
-                           state_field=self.state_field)
+                           field_name=self.field_name)
 
         # This exceptions should be handled otherwise it will be very annoying
         elif transitions:
@@ -65,20 +62,14 @@ class Process:
         :param user: any object used to pass permissions
         :return: True or False
         """
-        if self.permissions is not None:
-            if not self.permissions.execute(self.instance, user):
-                return False
+        return (self.permissions.execute(self.instance, user) and
+                self.conditions.execute(self.instance))
 
-        if self.conditions is not None:
-            if not self.conditions.execute(self.instance):
-                return False
-
-        return True
-
-    def get_available_transitions(self, user=(None or any)):
+    def get_available_transitions(self, user=None, action_name=None):
         """
         It returns all available transition which meet conditions and pass permissions.
         Including nested processes.
+        :param action_name:
         :param user: any object which used to validate permissions
         :return: yield `django_logic.Transition`
         """
@@ -86,14 +77,19 @@ class Process:
             return
 
         for transition in self.transitions:
-            state = getattr(self.instance, self.state_field)
-            if state in transition.sources and transition.validate(user):
+            state = getattr(self.instance, self.field_name)  # TODO: get state from db
+            if action_name is not None and transition.action_name != action_name:
+                continue
+
+            if state in transition.sources and transition.validate(self.instance,
+                                                                   self.field_name,
+                                                                   user):
                 yield transition
 
         for sub_process_class in self.nested_processes:
-            sub_process = sub_process_class(state_field=self.state_field,
-                                            instance=self.instance)
-            for transition in sub_process.get_available_transitions(user):
+            sub_process = sub_process_class(instance=self.instance, field_name=self.field_name)
+            for transition in sub_process.get_available_transitions(user=user,
+                                                                    action_name=action_name):
                 yield transition
 
 
@@ -105,5 +101,6 @@ class ProcessManager:
             if not issubclass(process_class, Process):
                 raise TypeError('Must be a sub class of Process')
             process_name = '{}_process'.format(state_field)
-            parameters[process_name] = process_class(state_field)
+            parameters[process_name] = property(lambda self: process_class(field_name=state_field,
+                                                                           instance=self))
         return type('Process', (cls, ), parameters)
