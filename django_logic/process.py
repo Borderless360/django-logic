@@ -77,7 +77,7 @@ class Process(object):
             return
 
         for transition in self.transitions:
-            state = getattr(self.instance, self.field_name)  # TODO: get state from db
+            state = getattr(self.instance, self.field_name)
             if action_name is not None and transition.action_name != action_name:
                 continue
 
