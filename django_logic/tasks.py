@@ -1,5 +1,3 @@
-from celery import signature, group, chain, shared_task
-from celery.result import AsyncResult
 from django.apps import apps
 from django.db import transaction
 
@@ -10,34 +8,40 @@ class TransitionTaskFailed(Exception):
     pass
 
 
-@shared_task(acks_late=True)
-def complete_transition(*args, **kwargs):
-    app = apps.get_app_config(kwargs['app_label'])
-    model = app.get_model(kwargs['model_name'])
-    instance = model.objects.get(id=kwargs['instance_id'])
-    transition = kwargs['transition']
-
-    transition.complete_transition(instance, kwargs['field_name'])
-
-
-@shared_task(acks_late=True)
-def fail_transition(task_id, *args, **kwargs):
-    try:
-        transition = kwargs['transition']
-        try:
-            # Exception passed through args
-            exc = args[0]
-        except IndexError:
-            task = AsyncResult(task_id)
-            exc = task.info
-
+try:
+    from celery import signature, group, chain, shared_task
+    from celery.result import AsyncResult
+except ImportError:
+    pass  # TODO: handle
+else:
+    @shared_task(acks_late=True)
+    def complete_transition(*args, **kwargs):
         app = apps.get_app_config(kwargs['app_label'])
         model = app.get_model(kwargs['model_name'])
         instance = model.objects.get(id=kwargs['instance_id'])
-        transition.fail_transition(instance, kwargs['field_name'])
-    except Exception:
-        # TODO: add logger
-        print('Exception')
+        transition = kwargs['transition']
+
+        transition.complete_transition(instance, kwargs['field_name'])
+
+
+    @shared_task(acks_late=True)
+    def fail_transition(task_id, *args, **kwargs):
+        try:
+            transition = kwargs['transition']
+            try:
+                # Exception passed through args
+                exc = args[0]
+            except IndexError:
+                task = AsyncResult(task_id)
+                exc = task.info
+
+            app = apps.get_app_config(kwargs['app_label'])
+            model = app.get_model(kwargs['model_name'])
+            instance = model.objects.get(id=kwargs['instance_id'])
+            transition.fail_transition(instance, kwargs['field_name'])
+        except Exception:
+            # TODO: add logger
+            print('Exception')
 
 
 class SideEffectTasks(SideEffects):

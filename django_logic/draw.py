@@ -82,7 +82,7 @@ def annotate_nodes(process, node_name=None):
         })
 
     # process conditions
-    if process.conditions is not None:
+    if process.conditions.commands:
         node['nodes'].append({
             'id': get_conditions_id(process),
             'name': '\n'.join([condition.__name__ for condition in process.conditions.commands]),
@@ -97,7 +97,7 @@ def annotate_nodes(process, node_name=None):
             'type': 'transition',
         })
         # transition conditions
-        if transition.conditions is not None:
+        if transition.conditions.commands:
             node['nodes'].append({
                 'id': get_conditions_id(transition),
                 'name': '\n'.join([condition.__name__ for condition in transition.conditions.commands]),
@@ -154,7 +154,7 @@ def fsm_paths(process, state):
             current = get_object_id(transition)
             add_path(transition.target, current)
 
-            if transition.conditions is not None:
+            if transition.conditions.commands:
                 target = get_conditions_id(transition)
                 add_path(current, target)
                 current = target
