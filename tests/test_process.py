@@ -1,24 +1,8 @@
 from django.test import TestCase
 
 from app.models import Invoice
-from app.process import InvoiceProcess
 
 from django_logic import Process, Transition, Permissions, Conditions
-
-
-class InvoiceProcessTestCase(TestCase):
-    def setUp(self):
-        self.process_class = InvoiceProcess
-
-    def test_process_class_method(self):
-        self.assertEqual(self.process_class.get_process_name(), 'Invoice Process')
-
-    def test_invoice_process(self):
-        # TODO: remove once everything else is covered
-        invoice = Invoice.objects.create(status='draft')
-        invoice.status_process.approve()
-        invoice.refresh_from_db()
-        self.assertEqual(invoice.status, 'approved')
 
 
 class User:
@@ -33,8 +17,8 @@ def disallow(instance, user):
     return False
 
 
-def is_available(instance):
-    return instance.is_available
+def is_editable(instance):
+    return not instance.customer_received
 
 
 def not_available(instance):
@@ -93,7 +77,7 @@ class ValidateProcessTestCase(TestCase):
 
     def test_conditions_successfully(self):
         class MyProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertTrue(process.validate())
@@ -109,10 +93,10 @@ class ValidateProcessTestCase(TestCase):
         self.assertFalse(process.validate(self.user))
 
         class AnotherProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
 
         instance = Invoice(status='draft')
-        instance.is_available = False
+        instance.customer_received = True
         process = AnotherProcess(field_name='status', instance=instance)
         self.assertFalse(process.validate())
         self.assertFalse(process.validate(self.user))
@@ -120,7 +104,7 @@ class ValidateProcessTestCase(TestCase):
     def test_permissions_and_conditions_successfully(self):
         class MyProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertFalse(process.validate())
@@ -129,7 +113,7 @@ class ValidateProcessTestCase(TestCase):
     def test_permissions_and_conditions_fail(self):
         class MyProcess(Process):
             permissions = Permissions([allow, disallow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertFalse(process.validate())
@@ -137,7 +121,7 @@ class ValidateProcessTestCase(TestCase):
 
         class AnotherProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available, not_available])
+            conditions = Conditions([is_editable, not_available])
 
         process = AnotherProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertFalse(process.validate())
@@ -145,7 +129,7 @@ class ValidateProcessTestCase(TestCase):
 
         class FinalProcess(Process):
             permissions = Permissions([allow, disallow])
-            conditions = Conditions([is_available, not_available])
+            conditions = Conditions([is_editable, not_available])
 
         process = FinalProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertFalse(process.validate())
@@ -201,7 +185,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition2 = Transition('action', sources=['done'], target='closed')
 
         class ChildProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             permissions = Permissions([allow])
             transitions = [transition1, transition2]
 
@@ -219,7 +203,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition2 = Transition('action', sources=['done'], target='closed')
 
         class ChildProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             permissions = Permissions([disallow])
             transitions = [transition1, transition2]
 
@@ -287,21 +271,21 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition2 = Transition('action', sources=['done'], target='closed')
 
         class ChildProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
         process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
 
         process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
         process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
@@ -312,7 +296,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition2 = Transition('action', sources=['done'], target='closed')
 
         class ChildProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
         process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
@@ -326,7 +310,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class GrandParentProcess(Process):
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
         process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
@@ -338,7 +322,7 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class ChildProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
         process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
@@ -346,7 +330,7 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class ParentProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
 
         process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
@@ -354,7 +338,7 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class GrandParentProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
         process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
@@ -366,7 +350,7 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class ChildProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
         process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
@@ -374,7 +358,7 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class ParentProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
 
         process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
@@ -397,18 +381,18 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class ChildProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
         class ParentProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
             transitions = [transition3, transition4]
 
         class GrandParentProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
             transitions = [transition5]
@@ -431,18 +415,18 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class ChildProcess(Process):
             permissions = Permissions([disallow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
         class ParentProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
             transitions = [transition3, transition4]
 
         class GrandParentProcess(Process):
             permissions = Permissions([allow])
-            conditions = Conditions([is_available])
+            conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
             transitions = [transition5]
@@ -456,25 +440,25 @@ class GetAvailableTransitionsTestCase(TestCase):
             self.assertIn(transition, [transition4])
 
     def test_nested_process_with_nested_transitions_conditions_and_permissions_successfully(self):
-        transition1 = Transition('action', permissions=[allow], conditions=[is_available],
+        transition1 = Transition('action', permissions=[allow], conditions=[is_editable],
                                  sources=['draft'],
                                  target='done')
-        transition2 = Transition('action', permissions=[allow], conditions=[is_available],
+        transition2 = Transition('action', permissions=[allow], conditions=[is_editable],
                                  sources=['done'],
                                  target='closed')
         transition3 = Transition('action',
                                  permissions=[allow],
-                                 conditions=[is_available],
+                                 conditions=[is_editable],
                                  sources=['draft'],
                                  target='approved')
         transition4 = Transition('action',
                                  permissions=[allow],
-                                 conditions=[is_available],
+                                 conditions=[is_editable],
                                  sources=['done'],
                                  target='closed')
         transition5 = Transition('action',
                                  permissions=[allow],
-                                 conditions=[is_available],
+                                 conditions=[is_editable],
                                  sources=['draft'],
                                  target='declined')
 
@@ -501,12 +485,12 @@ class GetAvailableTransitionsTestCase(TestCase):
     def test_nested_process_with_nested_transitions_conditions_and_permissions_fail(self):
         transition1 = Transition('action',
                                  permissions=[allow],
-                                 conditions=[is_available],
+                                 conditions=[is_editable],
                                  sources=['draft'],
                                  target='done')
         transition2 = Transition('action',
                                  permissions=[disallow],
-                                 conditions=[is_available],
+                                 conditions=[is_editable],
                                  sources=['done'],
                                  target='closed')
         transition3 = Transition('action',
@@ -516,7 +500,7 @@ class GetAvailableTransitionsTestCase(TestCase):
                                  target='approved')
         transition4 = Transition('action',
                                  permissions=[allow],
-                                 conditions=[is_available],
+                                 conditions=[is_editable],
                                  sources=['done'],
                                  target='closed')
         transition5 = Transition('action',
