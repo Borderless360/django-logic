@@ -5,13 +5,26 @@ SECRET_KEY = 'django_logic'
 
 PROJECT_APPS = [
     'django_logic',
-    'app',
+    'demo',
 ]
 
 INSTALLED_APPS = [
     'django.contrib.auth',
     'django.contrib.contenttypes',
 ] + PROJECT_APPS
+
+try:
+    import rest_framework
+except ImportError:
+    pass
+else:
+    INSTALLED_APPS += ['rest_framework']
+    REST_FRAMEWORK = {
+        'DEFAULT_PERMISSION_CLASSES': [
+            'rest_framework.permissions.AllowAny'
+        ]
+    }
+ROOT_URLCONF = 'tests.urls'
 
 MIDDLEWARE = []
 

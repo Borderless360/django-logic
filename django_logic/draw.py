@@ -62,14 +62,13 @@ def annotate_nodes(process, node_name=None):
         ]
     }
     """
-    process_name = process.get_process_name()
     node_name = node_name or ''
-    node_name += process_name + '|'
+    node_name += process.get_readable_name() + '|'
 
     # process
     node = {
         'id': get_object_id(process),
-        'name': process_name,
+        'name': process.get_readable_name(),
         'type': 'process',
         'nodes': []
     }

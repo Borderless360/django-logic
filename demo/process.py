@@ -7,8 +7,6 @@ class CeleryTransition(Transition):
 
 
 class InvoiceProcess(Process):
-    process_name = 'Invoice Process'
-
     states = (
         ('draft', 'Draft'),
         ('paid', 'Paid'),

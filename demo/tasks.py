@@ -1,6 +1,6 @@
 from celery import shared_task
 
-from app.models import Invoice
+from demo.models import Invoice
 
 
 @shared_task(acks_late=True)

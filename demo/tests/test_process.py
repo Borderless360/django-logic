@@ -1,7 +1,7 @@
 from django.test import TestCase
 
-from app.models import Invoice
-from app.process import InvoiceProcess
+from demo.models import Invoice
+from demo.process import InvoiceProcess
 
 
 class InvoiceProcessTestCase(TestCase):
@@ -9,10 +9,10 @@ class InvoiceProcessTestCase(TestCase):
         self.process_class = InvoiceProcess
 
     def test_process_class_method(self):
-        self.assertEqual(self.process_class.get_process_name(), 'Invoice Process')
+        self.assertEqual(self.process_class.get_readable_name(), 'Invoice Process')
 
     def test_invoice_process(self):
         invoice = Invoice.objects.create(status='draft')
-        invoice.status_process.approve()
+        invoice.invoice_process.approve()
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, 'approved')

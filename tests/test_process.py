@@ -1,6 +1,6 @@
 from django.test import TestCase
 
-from app.models import Invoice
+from demo.models import Invoice
 
 from django_logic import Process, Transition, Permissions, Conditions
 

@@ -3,6 +3,7 @@ from functools import partial
 
 from django_logic.commands import Conditions, Permissions
 from django_logic.exceptions import ManyTransitions, TransitionNotAllowed
+from django_logic.utils import convert_to_snake_case, convert_to_readable_name
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,6 @@ class Process(object):
     - validate - conditions and permissions of the process affects all transitions/processes inside
     - has methods like get_all_available_transitions, etc
     """
-    process_name = None
     states = []
     nested_processes = []
     transitions = []
@@ -54,7 +54,11 @@ class Process(object):
     
     @classmethod
     def get_process_name(cls):
-        return cls.process_name or str(cls.__name__)
+        return convert_to_snake_case(str(cls.__name__))
+
+    @classmethod
+    def get_readable_name(cls):
+        return convert_to_readable_name(str(cls.__name__))
 
     def validate(self, user=None) -> bool:
         """
@@ -100,7 +104,7 @@ class ProcessManager:
         for state_field, process_class in kwargs.items():
             if not issubclass(process_class, Process):
                 raise TypeError('Must be a sub class of Process')
-            process_name = '{}_process'.format(state_field)
-            parameters[process_name] = property(lambda self: process_class(field_name=state_field,
-                                                                           instance=self))
+            parameters[process_class.get_process_name()] = property(lambda self: process_class(
+                field_name=state_field,
+                instance=self))
         return type('Process', (cls, ), parameters)
