@@ -8,6 +8,6 @@ install:
   - pip install coveralls
 # command to run tests
 script:
-  - coverage run ./tests/manage.py test
+  - coverage run --source=django_logic/ ./tests/manage.py test
 after_success:
   - coveralls
