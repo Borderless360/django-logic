@@ -1,6 +1,6 @@
 from django.db import models
 
-from app.process import InvoiceProcess
+from demo.process import InvoiceProcess
 
 from django_logic.process import ProcessManager
 

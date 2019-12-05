@@ -1,5 +1,5 @@
 from django.test import TestCase
-from app.models import Invoice, Order
+from demo.models import Invoice, Order
 from django_logic.transition import Transition
 
 
@@ -11,9 +11,9 @@ class TransitionTestCase(TestCase):
 
     def test_get_hash(self):
         self.assertEqual(self.transition._get_hash(self.order, 'payment_status'),
-                         'app-order-payment_status-{}'.format(self.order.pk))
+                         'demo-order-payment_status-{}'.format(self.order.pk))
         self.assertEqual(self.transition._get_hash(self.invoice, 'status'),
-                         'app-invoice-status-{}'.format(self.invoice.pk))
+                         'demo-invoice-status-{}'.format(self.invoice.pk))
 
     def test_get_db_state(self):
         self.assertEqual(self.transition._get_db_state(self.invoice, 'status'), 'draft')
