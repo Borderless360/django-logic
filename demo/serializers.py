@@ -4,7 +4,13 @@ from demo.models import Invoice
 
 
 class InvoiceSerializer(serializers.ModelSerializer):
+    actions = serializers.SerializerMethodField()
+
     class Meta:
         model = Invoice
-        fields = ['id', 'status', 'customer_received', 'is_available']
-        readonly = ['id', 'status']
+        fields = ('id', 'status', 'customer_received', 'is_available', 'actions')
+        readonly = ('id', 'status')
+
+    def get_actions(self, instance):
+        return list(set([transition.action_name for transition in
+                         instance.invoice_process.get_available_transitions()]))

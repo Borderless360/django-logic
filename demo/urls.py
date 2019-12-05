@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from demo.views import InvoiceViewSet
+from demo.viewsets import InvoiceViewSet
 
 app_name = 'api'
 

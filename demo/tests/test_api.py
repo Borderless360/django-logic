@@ -12,7 +12,8 @@ class InvoiceAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         invoice = Invoice.objects.last()
         self.assertEqual(response.json(), {'id': invoice.pk,
-                                           'status': '',
+                                           'status': 'draft',
+                                           'actions': ['approve', 'void'],
                                            'customer_received': False,
                                            'is_available': True} )
 
@@ -23,5 +24,6 @@ class InvoiceAPITestCase(APITestCase):
         self.assertEqual(response.json(),
                          [{'id': invoice.pk,
                            'status': 'draft',
+                           'actions': ['approve', 'void'],
                            'customer_received': False,
                            'is_available': True}])
