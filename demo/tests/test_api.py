@@ -15,7 +15,7 @@ class InvoiceAPITestCase(APITestCase):
                                            'status': 'draft',
                                            'actions': ['approve', 'void'],
                                            'customer_received': False,
-                                           'is_available': True} )
+                                           'is_available': True})
 
     def test_get_invoices(self):
         url = reverse('demo:invoice-list')

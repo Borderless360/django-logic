@@ -12,5 +12,5 @@ class InvoiceSerializer(serializers.ModelSerializer):
         readonly = ('id', 'status')
 
     def get_actions(self, instance):
-        return list(set([transition.action_name for transition in
-                         instance.invoice_process.get_available_transitions()]))
+        return sorted(set([transition.action_name for transition in
+                           instance.invoice_process.get_available_transitions()]))
