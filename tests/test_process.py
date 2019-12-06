@@ -144,7 +144,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         class ChildProcess(Process):
             pass
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions()), [])
 
     def test_process(self):
@@ -154,13 +154,13 @@ class GetAvailableTransitionsTestCase(TestCase):
         class ChildProcess(Process):
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions()), [transition1])
 
-        process = ChildProcess(instance=Invoice(status='done'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         self.assertEqual(list(process.get_available_transitions()), [transition2])
 
-        process = ChildProcess(instance=Invoice(status='closed'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='closed'), field_name='status')
         self.assertEqual(list(process.get_available_transitions()), [])
 
     def test_process_fail(self):
@@ -171,13 +171,13 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([not_available])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions()), [])
 
-        process = ChildProcess(instance=Invoice(status='done'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         self.assertEqual(list(process.get_available_transitions()), [])
 
-        process = ChildProcess(instance=Invoice(status='closed'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='closed'), field_name='status')
         self.assertEqual(list(process.get_available_transitions()), [])
 
     def test_conditions_and_permissions_successfully(self):
@@ -189,13 +189,13 @@ class GetAvailableTransitionsTestCase(TestCase):
             permissions = Permissions([allow])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
-        process = ChildProcess(instance=Invoice(status='done'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition2])
 
-        process = ChildProcess(instance=Invoice(status='closed'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='closed'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
     def test_conditions_and_permissions_fail(self):
@@ -207,13 +207,13 @@ class GetAvailableTransitionsTestCase(TestCase):
             permissions = Permissions([disallow])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
-        process = ChildProcess(instance=Invoice(status='done'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
-        process = ChildProcess(instance=Invoice(status='closed'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='closed'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
     def test_nested_process_permissions_successfully(self):
@@ -224,21 +224,21 @@ class GetAvailableTransitionsTestCase(TestCase):
             permissions = Permissions([allow])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
             permissions = Permissions([allow])
             nested_processes = (ChildProcess,)
 
-        process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
             permissions = Permissions([allow])
             nested_processes = (ParentProcess,)
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
     def test_nested_process_permissions_fail(self):
@@ -249,21 +249,21 @@ class GetAvailableTransitionsTestCase(TestCase):
             permissions = Permissions([disallow])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class ParentProcess(Process):
             permissions = Permissions([allow])
             nested_processes = (ChildProcess,)
 
-        process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class GrandParentProcess(Process):
             permissions = Permissions([allow])
             nested_processes = (ParentProcess,)
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
     def test_nested_process_conditions_successfully(self):
@@ -274,21 +274,21 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
             conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
 
-        process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
             conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
     def test_nested_process_conditions_fail(self):
@@ -299,21 +299,21 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
             conditions = Conditions([not_available])
             nested_processes = (ChildProcess,)
 
-        process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class GrandParentProcess(Process):
             conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
     def test_nested_process_successfully(self):
@@ -325,7 +325,7 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
@@ -333,7 +333,7 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
 
-        process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
@@ -341,7 +341,7 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([is_editable])
             nested_processes = (ParentProcess,)
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
     def test_nested_process_fail(self):
@@ -353,7 +353,7 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([is_editable])
             transitions = [transition1, transition2]
 
-        process = ChildProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
@@ -361,7 +361,7 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([is_editable])
             nested_processes = (ChildProcess,)
 
-        process = ParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
@@ -369,7 +369,7 @@ class GetAvailableTransitionsTestCase(TestCase):
             conditions = Conditions([not_available])
             nested_processes = (ParentProcess,)
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
     def test_nested_process_with_nested_transitions_successfully(self):
@@ -397,12 +397,12 @@ class GetAvailableTransitionsTestCase(TestCase):
 
             transitions = [transition5]
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
 
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition1, transition3, transition5])
 
-        process = GrandParentProcess(instance=Invoice(status='done'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition2, transition4])
 
@@ -431,11 +431,11 @@ class GetAvailableTransitionsTestCase(TestCase):
 
             transitions = [transition5]
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition3, transition5])
 
-        process = GrandParentProcess(instance=Invoice(status='done'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition4])
 
@@ -474,11 +474,11 @@ class GetAvailableTransitionsTestCase(TestCase):
 
             transitions = [transition5]
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition1, transition3, transition5])
 
-        process = GrandParentProcess(instance=Invoice(status='done'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition2, transition4])
 
@@ -521,10 +521,10 @@ class GetAvailableTransitionsTestCase(TestCase):
 
             transitions = [transition5]
 
-        process = GrandParentProcess(instance=Invoice(status='draft'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition1])
 
-        process = GrandParentProcess(instance=Invoice(status='done'), field_name='status')
+        process = GrandParentProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition4])

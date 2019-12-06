@@ -10,37 +10,37 @@ class TransitionTestCase(TestCase):
         self.transition = Transition('test', sources=[], target='cancelled')
 
     def test_get_hash(self):
-        self.assertEqual(self.transition._get_hash(self.order, 'payment_status'),
+        self.assertEqual(self.transition.state.get_hash(self.order, 'payment_status'),
                          'demo-order-payment_status-{}'.format(self.order.pk))
-        self.assertEqual(self.transition._get_hash(self.invoice, 'status'),
+        self.assertEqual(self.transition.state.get_hash(self.invoice, 'status'),
                          'demo-invoice-status-{}'.format(self.invoice.pk))
 
     def test_get_db_state(self):
-        self.assertEqual(self.transition._get_db_state(self.invoice, 'status'), 'draft')
-        self.assertEqual(self.transition._get_db_state(self.order, 'payment_status'), 'paid')
+        self.assertEqual(self.transition.state.get_db_state(self.invoice, 'status'), 'draft')
+        self.assertEqual(self.transition.state.get_db_state(self.order, 'payment_status'), 'paid')
     
     def test_lock(self):
-        self.assertFalse(self.transition._is_locked(self.invoice, 'status'))
-        self.assertFalse(self.transition._is_locked(self.order, 'payment_status'))
-        self.transition._lock(self.invoice, 'status')
-        self.transition._lock(self.order, 'payment_status')
-        self.assertTrue(self.transition._is_locked(self.invoice, 'status'))
-        self.assertTrue(self.transition._is_locked(self.order, 'payment_status'))
+        self.assertFalse(self.transition.state.is_locked(self.invoice, 'status'))
+        self.assertFalse(self.transition.state.is_locked(self.order, 'payment_status'))
+        self.transition.state.lock(self.invoice, 'status')
+        self.transition.state.lock(self.order, 'payment_status')
+        self.assertTrue(self.transition.state.is_locked(self.invoice, 'status'))
+        self.assertTrue(self.transition.state.is_locked(self.order, 'payment_status'))
 
         # nothing should happen
-        self.transition._lock(self.invoice, 'status')
-        self.transition._lock(self.order, 'payment_status')
-        self.assertTrue(self.transition._is_locked(self.invoice, 'status'))
-        self.assertTrue(self.transition._is_locked(self.order, 'payment_status'))
+        self.transition.state.lock(self.invoice, 'status')
+        self.transition.state.lock(self.order, 'payment_status')
+        self.assertTrue(self.transition.state.is_locked(self.invoice, 'status'))
+        self.assertTrue(self.transition.state.is_locked(self.order, 'payment_status'))
 
-        self.transition._unlock(self.invoice, 'status')
-        self.transition._unlock(self.order, 'payment_status')
-        self.assertFalse(self.transition._is_locked(self.invoice, 'status'))
-        self.assertFalse(self.transition._is_locked(self.order, 'payment_status'))
+        self.transition.state.unlock(self.invoice, 'status')
+        self.transition.state.unlock(self.order, 'payment_status')
+        self.assertFalse(self.transition.state.is_locked(self.invoice, 'status'))
+        self.assertFalse(self.transition.state.is_locked(self.order, 'payment_status'))
 
     def test_set_state(self):
-        self.transition._set_state(self.order, 'payment_status', 'unpaid')
-        self.transition._set_state(self.invoice, 'status', 'void')
+        self.transition.state.set_state(self.order, 'payment_status', 'unpaid')
+        self.transition.state.set_state(self.invoice, 'status', 'void')
         self.assertEqual(self.order.payment_status, 'unpaid')
         self.assertEqual(self.invoice.status, 'void')
         # make sure it was saved to db
@@ -52,11 +52,11 @@ class TransitionTestCase(TestCase):
     def test_change_state(self):
         self.transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, self.transition.target)
-        self.assertFalse(self.transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(self.transition.state.is_locked(self.invoice, 'status'))
 
         self.transition.change_state(self.order, 'payment_status')
         self.assertEqual(self.order.payment_status, self.transition.target)
-        self.assertFalse(self.transition._is_locked(self.order, 'payment_status'))
+        self.assertFalse(self.transition.state.is_locked(self.order, 'payment_status'))
 
 
 def disable_invoice(invoice: Invoice):
@@ -83,7 +83,7 @@ class TransitionSideEffectsTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, transition.target)
         self.assertFalse(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
     def test_many_side_effects(self):
         transition = Transition('test', sources=[], target='cancelled',
@@ -92,7 +92,7 @@ class TransitionSideEffectsTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, transition.target)
         self.assertTrue(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
     def test_failure_during_side_effect(self):
         transition = Transition('test', sources=[], target='cancelled',
@@ -101,7 +101,7 @@ class TransitionSideEffectsTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, 'draft')
         self.assertFalse(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
     def test_failure_during_side_effect_with_failed_state(self):
         transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
@@ -110,7 +110,7 @@ class TransitionSideEffectsTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, 'failed')
         self.assertFalse(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
 
 class TransitionCallbacksTestCase(TestCase):
@@ -123,7 +123,7 @@ class TransitionCallbacksTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, transition.target)
         self.assertFalse(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
     def test_many_callbacks(self):
         transition = Transition('test', sources=[], target='cancelled',
@@ -132,7 +132,7 @@ class TransitionCallbacksTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, transition.target)
         self.assertTrue(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
     def test_failure_during_callbacks(self):
         transition = Transition('test', sources=[], target='cancelled',
@@ -141,7 +141,7 @@ class TransitionCallbacksTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, 'cancelled')
         self.assertFalse(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
     def test_failure_during_callbacks_with_failed_state(self):
         transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
@@ -150,4 +150,4 @@ class TransitionCallbacksTestCase(TestCase):
         transition.change_state(self.invoice, 'status')
         self.assertEqual(self.invoice.status, 'failed')
         self.assertFalse(self.invoice.is_available)
-        self.assertFalse(transition._is_locked(self.invoice, 'status'))
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
