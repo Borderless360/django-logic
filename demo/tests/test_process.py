@@ -16,3 +16,13 @@ class InvoiceProcessTestCase(TestCase):
         invoice.invoice_process.approve()
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, 'approved')
+
+    def test_invoice_save(self):
+        invoice = Invoice.objects.create(status='draft')
+        invoice.status = 'paid'
+        invoice.save()
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'draft')
+        invoice.invoice_process.approve()
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'approved')
