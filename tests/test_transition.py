@@ -64,6 +64,12 @@ def disable_invoice(invoice: Invoice):
     invoice.save()
 
 
+def update_invoice(invoice, is_available, customer_received):
+    invoice.is_available = is_available
+    invoice.customer_received = customer_received
+    invoice.save()
+
+
 def enable_invoice(invoice: Invoice):
     invoice.is_available = True
     invoice.save()
@@ -112,6 +118,18 @@ class TransitionSideEffectsTestCase(TestCase):
         self.assertFalse(self.invoice.is_available)
         self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
 
+    def test_side_effect_with_parameters(self):
+        update_invoice(self.invoice, is_available=True, customer_received=True)
+        transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
+                                side_effects=[update_invoice])
+        self.invoice.refresh_from_db()
+        self.assertTrue(self.invoice.is_available)
+        self.assertTrue(self.invoice.customer_received)
+        transition.change_state(self.invoice, 'status', is_available=False, customer_received=False)
+        self.invoice.refresh_from_db()
+        self.assertFalse(self.invoice.is_available)
+        self.assertFalse(self.invoice.customer_received)
+
 
 class TransitionCallbacksTestCase(TestCase):
     def setUp(self) -> None:
@@ -151,3 +169,15 @@ class TransitionCallbacksTestCase(TestCase):
         self.assertEqual(self.invoice.status, 'failed')
         self.assertFalse(self.invoice.is_available)
         self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
+
+    def test_callbacks_with_parameters(self):
+        update_invoice(self.invoice, is_available=True, customer_received=True)
+        transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
+                                callbacks=[update_invoice])
+        self.invoice.refresh_from_db()
+        self.assertTrue(self.invoice.is_available)
+        self.assertTrue(self.invoice.customer_received)
+        transition.change_state(self.invoice, 'status', is_available=False, customer_received=False)
+        self.invoice.refresh_from_db()
+        self.assertFalse(self.invoice.is_available)
+        self.assertFalse(self.invoice.customer_received)

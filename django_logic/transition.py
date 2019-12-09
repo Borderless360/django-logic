@@ -46,7 +46,7 @@ class Transition(object):
                 self.permissions.execute(instance, user) and
                 self.conditions.execute(instance))
 
-    def change_state(self, instance, field_name):
+    def change_state(self, instance, field_name, **kwargs):
         """
         This method changes a state of the provided instance and file name by the following algorithm:
         - Lock state
@@ -62,9 +62,9 @@ class Transition(object):
         self.state.lock(instance, field_name)
         if self.in_progress_state:
             self.state.set_state(instance, field_name, self.in_progress_state)
-        self.side_effects.execute(instance, field_name)
+        self.side_effects.execute(instance, field_name, **kwargs)
 
-    def complete_transition(self, instance, field_name):
+    def complete_transition(self, instance, field_name, **kwargs):
         """
         It completes the transition process for provided instance and filed name.
         The instance will be unlocked and callbacks exc
@@ -74,7 +74,7 @@ class Transition(object):
         """
         self.state.set_state(instance, field_name, self.target)
         self.state.unlock(instance, field_name)
-        self.callbacks.execute(instance, field_name)
+        self.callbacks.execute(instance, field_name, **kwargs)
     
     def fail_transition(self, instance, field_name):
         """
