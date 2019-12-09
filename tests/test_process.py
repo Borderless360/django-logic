@@ -528,3 +528,93 @@ class GetAvailableTransitionsTestCase(TestCase):
         process = GrandParentProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition4])
+
+
+def disable_invoice(invoice: Invoice):
+    invoice.is_available = False
+    invoice.customer_received = False
+    invoice.save()
+
+
+def update_invoice(invoice, is_available, customer_received):
+    invoice.is_available = is_available
+    invoice.customer_received = customer_received
+    invoice.save()
+
+
+def enable_invoice(invoice: Invoice):
+    invoice.is_available = True
+    invoice.save()
+
+
+def fail_invoice(invoice: Invoice):
+    raise Exception
+
+
+class ApplyTransitionTestCase(TestCase):
+    def setUp(self) -> None:
+        self.user = User()
+        self.invoice = Invoice.objects.create(status='draft')
+
+    def test_simple_transition(self):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled')
+            ]
+
+        process = TestProcess(instance=self.invoice, field_name='status')
+        process.cancel()
+        self.assertEqual(self.invoice.status, 'cancelled')
+
+    def test_several_transitions(self):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled'),
+                Transition('undo', sources=['cancelled'], target='draft')
+            ]
+
+        process = TestProcess(instance=self.invoice, field_name='status')
+        process.cancel()
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'cancelled')
+        process.undo()
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'draft')
+
+    def test_transition_with_side_effect(self):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled', side_effects=[disable_invoice]),
+                Transition('undo', sources=['cancelled'], target='draft', side_effects=[update_invoice])
+            ]
+        self.assertTrue(self.invoice.is_available)
+        process = TestProcess(instance=self.invoice, field_name='status')
+        process.cancel()
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'cancelled')
+        self.assertFalse(self.invoice.is_available)
+        self.assertFalse(self.invoice.customer_received)
+        process.undo(is_available=True, customer_received=True)
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'draft')
+        self.assertTrue(self.invoice.is_available)
+        self.assertTrue(self.invoice.customer_received)
+
+    def test_transition_with_callbacks(self):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled', callbacks=[disable_invoice]),
+                Transition('undo', sources=['cancelled'], target='draft', callbacks=[update_invoice])
+            ]
+        self.assertTrue(self.invoice.is_available)
+        process = TestProcess(instance=self.invoice, field_name='status')
+        process.cancel()
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'cancelled')
+        self.assertFalse(self.invoice.is_available)
+        self.assertFalse(self.invoice.customer_received)
+        process.undo(is_available=True, customer_received=True)
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'draft')
+        self.assertTrue(self.invoice.is_available)
+        self.assertTrue(self.invoice.customer_received)
