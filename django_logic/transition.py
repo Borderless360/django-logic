@@ -19,7 +19,7 @@ class Transition(object):
     conditions = Conditions()
     state = State()
 
-    def __init__(self, action_name, sources, target, **kwargs):
+    def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
         self.target = target
         self.sources = sources

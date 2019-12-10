@@ -23,8 +23,10 @@ class Process(object):
     states = []
     nested_processes = []
     transitions = []
-    conditions = Conditions()
-    permissions = Permissions()
+    conditions = []
+    permissions = []
+    conditions_class = Conditions
+    permissions_class = Permissions
 
     def __init__(self, field_name: str, instance=None):
         """
@@ -67,8 +69,10 @@ class Process(object):
         :param user: any object used to pass permissions
         :return: True or False
         """
-        return (self.permissions.execute(self.instance, user) and
-                self.conditions.execute(self.instance))
+        permissions = self.permissions_class(commands=self.permissions)
+        conditions = self.conditions_class(commands=self.conditions)
+        return (permissions.execute(self.instance, user) and
+                conditions.execute(self.instance))
 
     def get_available_transitions(self, user=None, action_name=None):
         """
@@ -81,8 +85,8 @@ class Process(object):
         if not self.validate(user):
             return
 
+        state = State().get_db_state(self.instance, self.field_name)
         for transition in self.transitions:
-            state = State().get_db_state(self.instance, self.field_name)
             if action_name is not None and transition.action_name != action_name:
                 continue
 

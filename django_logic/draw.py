@@ -81,7 +81,7 @@ def annotate_nodes(process, node_name=None):
         })
 
     # process conditions
-    if process.conditions.commands:
+    if process.conditions:
         node['nodes'].append({
             'id': get_conditions_id(process),
             'name': '\n'.join([condition.__name__ for condition in process.conditions.commands]),
