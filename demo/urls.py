@@ -5,5 +5,5 @@ from demo.viewsets import InvoiceViewSet
 app_name = 'api'
 
 router = routers.DefaultRouter()
-router.register(r'invoices', InvoiceViewSet, base_name='invoice')
+router.register(r'invoices', InvoiceViewSet, basename='invoice')
 urlpatterns = router.urls
