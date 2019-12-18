@@ -35,11 +35,6 @@ class Process(object):
         self.field_name = field_name
         self.instance = instance
 
-    def __get__(self, instance, owner):
-        if self.instance is None:
-            self.instance = instance
-        return self
-
     def __getattr__(self, item):
         transitions = list(self.get_available_transitions(action_name=item))
 
