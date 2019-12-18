@@ -13,7 +13,7 @@ class InvoiceAPITestCase(APITestCase):
         invoice = Invoice.objects.last()
         self.assertEqual(response.json(), {'id': invoice.pk,
                                            'status': 'draft',
-                                           'actions': ['approve', 'void'],
+                                           'actions': ['approve', 'demo', 'void'],
                                            'customer_received': False,
                                            'is_available': True})
 
@@ -24,6 +24,6 @@ class InvoiceAPITestCase(APITestCase):
         self.assertEqual(response.json(),
                          [{'id': invoice.pk,
                            'status': 'draft',
-                           'actions': ['approve', 'void'],
+                           'actions': ['approve', 'demo', 'void'],
                            'customer_received': False,
                            'is_available': True}])
