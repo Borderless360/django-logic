@@ -1,7 +1,7 @@
 # Django-Logic
 
-[![Build Status](https://travis-ci.org/Borderless360/django-logic.svg?branch=master)](https://travis-ci.org/Borderless360/django-logic) [![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master)
-
+[![Build Status](https://travis-ci.org/Borderless360/django-logic.svg?branch=master)](https://travis-ci.org/Borderless360/django-logic) [![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master) [![Documentation Status](https://readthedocs.org/projects/django-logic/badge/?version=latest)](https://django-logic.readthedocs.io/en/latest/?badge=latest)
+     
 Django Logic is a lightweight workflow framework aims to solve an open problem "Where to put the business logic in Django?".
 
 Full documentation for the project is available at https://django-logic.readthedocs.io
