@@ -226,7 +226,7 @@ def get_graph_from_process(process_class, state, skip_main_process=False):
     return graph
 
 
-def view_process(process_class, state, skip_main_process=False):
+def display_process(process_class, state, skip_main_process=False):
     graph = get_graph_from_process(process_class, state, skip_main_process)
     try:
         graph.view()
