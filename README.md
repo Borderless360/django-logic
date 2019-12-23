@@ -5,6 +5,8 @@ django-logic - easy way to implement state-based business logic
 
 Django Logic is a lightweight workflow framework aims to solve an open problem "Where to put the business logic in Django?".
 
+Full documentation for the project is available at https://django-logic.readthedocs.io
+
  The Django-Logic package provides a set of tools helping to build a reliable product within a limited time. Here is the functionality the package offers for you:
 - Implement state-based business processes combined into Processes. 
 - Provides a business logic layer as a set of conditions, side-effects, permissions, and even celery-tasks combined into a transition class.
