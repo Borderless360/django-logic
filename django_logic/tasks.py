@@ -45,7 +45,7 @@ else:
 
 
 class SideEffectTasks(SideEffects):
-    def execute(self, instance: any, field_name):
+    def execute(self, instance: any, field_name: str, **kwargs):
         if not self.commands:
             return super(SideEffectTasks, self).execute(instance, field_name)
 
@@ -63,7 +63,7 @@ class SideEffectTasks(SideEffects):
 
 
 class CallbacksTasks(Callbacks):
-    def execute(self, instance, field_name):
+    def execute(self, instance, field_name: str, **kwargs):
         if not self.commands:
             return super(CallbacksTasks, self).execute(instance, field_name)
 

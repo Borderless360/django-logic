@@ -10,7 +10,7 @@ class BaseCommand(object):
         self.name = name
 
     def __get__(self, instance, owner):
-        self.instance = instance
+        self.transition = instance
         return self
 
     def __set__(self, instance, commands):
@@ -18,7 +18,7 @@ class BaseCommand(object):
 
     @property
     def commands(self):
-        return self.instance.__dict__[self.name] if self.name is not None else self._commands
+        return self.transition.__dict__[self.name] if self.name is not None else self._commands
 
     def execute(self, *args, **kwargs):
         raise NotImplementedError
@@ -35,19 +35,19 @@ class Permissions(BaseCommand):
 
 
 class SideEffects(BaseCommand):
-    def execute(self, instance: any, field_name, **kwargs):
+    def execute(self, instance: any, field_name: str, **kwargs):
         try:
             for command in self.commands:
                 command(instance, **kwargs)
         except Exception:
             # TODO: handle exception
-            self.instance.fail_transition(instance, field_name)
+            self.transition.fail_transition(instance, field_name)
         else:
-            self.instance.complete_transition(instance, field_name, **kwargs)
+            self.transition.complete_transition(instance, field_name, **kwargs)
 
 
 class Callbacks(BaseCommand):
-    def execute(self, instance, field_name, **kwargs):
+    def execute(self, instance: any, field_name: str, **kwargs):
         try:
             for command in self.commands:
                 command(instance, **kwargs)
