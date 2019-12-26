@@ -40,8 +40,7 @@ class SideEffects(BaseCommand):
             for command in self.commands:
                 command(instance, **kwargs)
         except Exception:
-            # TODO: handle exception
-            self.transition.fail_transition(instance, field_name)
+            self.transition.fail_transition(instance, field_name, **kwargs)
         else:
             self.transition.complete_transition(instance, field_name, **kwargs)
 

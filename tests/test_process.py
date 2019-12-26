@@ -618,3 +618,20 @@ class ApplyTransitionTestCase(TestCase):
         self.assertEqual(self.invoice.status, 'draft')
         self.assertTrue(self.invoice.is_available)
         self.assertTrue(self.invoice.customer_received)
+
+    def test_transition_with_failure_callbacks(self):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled', callbacks=[disable_invoice]),
+                Transition('undo', sources=['draft'], target='draft', side_effects=[fail_invoice], failed_state='failed', failure_callbacks=[update_invoice])
+            ]
+        update_invoice(self.invoice, is_available=False, customer_received=False)
+        self.assertFalse(self.invoice.is_available)
+        self.assertFalse(self.invoice.customer_received)
+        self.assertEqual(self.invoice.status, 'draft')
+        process = TestProcess(instance=self.invoice, field_name='status')
+        process.undo(is_available=True, customer_received=True)
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'failed')
+        self.assertTrue(self.invoice.is_available)
+        self.assertTrue(self.invoice.customer_received)

@@ -79,6 +79,11 @@ def fail_invoice(invoice: Invoice):
     raise Exception
 
 
+def receive_invoice(invoice: Invoice):
+    invoice.customer_received = True
+    invoice.save()
+
+
 class TransitionSideEffectsTestCase(TestCase):
     def setUp(self) -> None:
         self.invoice = Invoice.objects.create(status='draft')
@@ -179,5 +184,43 @@ class TransitionCallbacksTestCase(TestCase):
         self.assertTrue(self.invoice.customer_received)
         transition.change_state(self.invoice, 'status', is_available=False, customer_received=False)
         self.invoice.refresh_from_db()
+        self.assertFalse(self.invoice.is_available)
+        self.assertFalse(self.invoice.customer_received)
+
+
+class TransitionFailureCallbacksTestCase(TestCase):
+    def setUp(self) -> None:
+        self.invoice = Invoice.objects.create(status='draft')
+
+    def test_one_callback(self):
+        transition = Transition('test', sources=[], target='success', side_effects=[fail_invoice],
+                                failure_callbacks=[disable_invoice], failed_state='failed')
+        self.assertTrue(self.invoice.is_available)
+        transition.change_state(self.invoice, 'status')
+        self.assertEqual(self.invoice.status, 'failed')
+        self.assertFalse(self.invoice.is_available)
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
+
+    def test_many_callback(self):
+        transition = Transition('test', sources=[], target='success', side_effects=[fail_invoice],
+                                failure_callbacks=[disable_invoice, receive_invoice], failed_state='failed')
+        self.assertTrue(self.invoice.is_available)
+        self.assertFalse(self.invoice.customer_received)
+        transition.change_state(self.invoice, 'status')
+        self.assertEqual(self.invoice.status, 'failed')
+        self.assertFalse(self.invoice.is_available)
+        self.assertTrue(self.invoice.customer_received)
+        self.assertFalse(transition.state.is_locked(self.invoice, 'status'))
+
+    def test_callbacks_with_parameters(self):
+        update_invoice(self.invoice, is_available=True, customer_received=True)
+        transition = Transition('test', sources=[], target='success', failed_state='failed',
+                                side_effects=[fail_invoice], failure_callbacks=[update_invoice])
+        self.invoice.refresh_from_db()
+        self.assertTrue(self.invoice.is_available)
+        self.assertTrue(self.invoice.customer_received)
+        transition.change_state(self.invoice, 'status', is_available=False, customer_received=False)
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'failed')
         self.assertFalse(self.invoice.is_available)
         self.assertFalse(self.invoice.customer_received)
