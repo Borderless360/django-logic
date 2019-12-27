@@ -20,8 +20,9 @@ else:
         model = app.get_model(kwargs['model_name'])
         instance = model.objects.get(id=kwargs['instance_id'])
         transition = kwargs['transition']
+        field_name = kwargs.pop('field_name')
 
-        transition.complete_transition(instance, kwargs['field_name'])
+        transition.complete_transition(instance, field_name, **kwargs)
 
 
     @shared_task(acks_late=True)
@@ -38,7 +39,8 @@ else:
             app = apps.get_app_config(kwargs['app_label'])
             model = app.get_model(kwargs['model_name'])
             instance = model.objects.get(id=kwargs['instance_id'])
-            transition.fail_transition(instance, kwargs['field_name'])
+            field_name = kwargs.pop('field_name')
+            transition.fail_transition(instance, field_name, **kwargs)
         except Exception:
             # TODO: add logger
             print('Exception')

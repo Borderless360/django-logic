@@ -15,6 +15,7 @@ class Transition(object):
     """
     side_effects = SideEffects()
     callbacks = Callbacks()
+    failure_callbacks = Callbacks()
     permissions = Permissions()
     conditions = Conditions()
     state = State()
@@ -25,7 +26,7 @@ class Transition(object):
         self.sources = sources
         self.in_progress_state = kwargs.get('in_progress_state')
         self.failed_state = kwargs.get('failed_state')
-        self.failure_handler = kwargs.get('failure_handler')
+        self.failure_callbacks = kwargs.get('failure_callbacks', [])
         self.side_effects = kwargs.get('side_effects', [])
         self.callbacks = kwargs.get('callbacks', [])
         self.permissions = kwargs.get('permissions', [])
@@ -76,7 +77,7 @@ class Transition(object):
         self.state.unlock(instance, field_name)
         self.callbacks.execute(instance, field_name, **kwargs)
     
-    def fail_transition(self, instance, field_name):
+    def fail_transition(self, instance, field_name, **kwargs):
         """
         It triggers fail transition in case of any failure during the side effects execution.
         :param instance: any
@@ -85,3 +86,4 @@ class Transition(object):
         if self.failed_state:
             self.state.set_state(instance, field_name, self.failed_state)
         self.state.unlock(instance, field_name)
+        self.failure_callbacks.execute(instance, field_name, **kwargs)
