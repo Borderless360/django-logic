@@ -34,10 +34,6 @@ DATABASES = {
         'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
     }
 }
-CELERY_BROKER_URL = 'amqp://guest:guest@127.0.0.1:5672//'
-# TODO: add warning to the doc
-CELERY_TASK_SERIALIZER = 'pickle'
-CELERY_ACCEPT_CONTENT = ['json', 'pickle', 'application/x-python-serialize']
 
 CACHES = {
     'default': {

@@ -1,1 +1,1 @@
--r requirements/base.txt
+django>=2.0

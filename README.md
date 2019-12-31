@@ -10,9 +10,8 @@ Full documentation for the project is available at [wiki](https://github.com/Bor
 - Implement state-based business processes combined into Processes. 
 - Provides a business logic layer as a set of conditions, side-effects, permissions, and even celery-tasks combined into a transition class.
 - In progress states 
-- REST API actions - every transition could be turned into a POST request action within seconds by extending your ViewSet and Serialiser of Django-Rest-Framework 
-- Form buttons (TODO) - add buttons to your form and templates based on available transitions 
-- Background side-effects before or after transition executed. It gives you reach functionality to implement complicated business rules without into details.
+- REST API actions - every transition could be turned into a POST request action within seconds by extending your ViewSet and Serialiser of Django-Rest-Framework  
+- Background transitions via [django-logic-celery](https://github.com/Borderless360/django-logic-celery).
 - Draw your business processes to get a full picture of all transitions and conditions. 
 - Easy to read the business process 
 - One and only one way to implement business logic. You will be able to extend and improve the Django-Logic functionality and available handlers. However, the business logic will remain the same and by following SOLID principles. 
@@ -47,7 +46,10 @@ class Process(BaseProcess):
         Transition(action_name='void', sources=['draft', 'approved'], target='void'),
     ]
 ```
-3. Display the process. 
+3. Display the process. It requires to install graphviz.
+```bash
+pip install graphviz
+``` 
 
 [![][invoice-img]][invoice-img]
 
