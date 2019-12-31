@@ -5,7 +5,7 @@ from django_logic.state import State
 
 class Transition(object):
     """
-    Transition could be defined as a class or as an object and used as an object
+    Transition could be defined as a class and used as an object
     - action name
     - transitions name
     - target
