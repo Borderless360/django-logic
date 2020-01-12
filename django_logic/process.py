@@ -100,13 +100,14 @@ class Process(object):
 class ProcessManager:
     @classmethod
     def bind_state_fields(cls, **kwargs):
+        def make_process_getter(field_name, field_class):
+            return lambda self: field_class(field_name=field_name, instance=self)
+
         parameters = {'state_fields': []}
         for state_field, process_class in kwargs.items():
             if not issubclass(process_class, Process):
                 raise TypeError('Must be a sub class of Process')
-            parameters[process_class.get_process_name()] = property(lambda self: process_class(
-                field_name=state_field,
-                instance=self))
+            parameters[process_class.get_process_name()] = property(make_process_getter(state_field, process_class))
             parameters['state_fields'].append(state_field)
         return type('Process', (cls, ), parameters)
 
