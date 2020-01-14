@@ -9,7 +9,7 @@ class InvoiceProcessTestCase(TestCase):
         self.process_class = InvoiceProcess
 
     def test_process_class_method(self):
-        self.assertEqual(self.process_class.get_readable_name(), 'Invoice Process')
+        self.assertEqual(self.process_class.process_name, 'invoice_process')
 
     def test_invoice_process(self):
         invoice = Invoice.objects.create(status='draft')
