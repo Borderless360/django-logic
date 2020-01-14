@@ -2,6 +2,7 @@ from django_logic import Process, Transition
 
 
 class InvoiceProcess(Process):
+    process_name = 'invoice_process'
     states = (
         ('draft', 'Draft'),
         ('paid', 'Paid'),

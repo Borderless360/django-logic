@@ -9,10 +9,14 @@ def get_conditions_id(obj):
     return '{}|conditions'.format(id(obj))
 
 
+def get_readable_process_name(process) -> str:
+    return ' '.join(process.process_name.split('_')).capitalize()
+
+
 def annotate_nodes(process, node_name=None):
     """
     This function annotate node names and nodes into two dicts:
-    - node_names contains either process or trasition unique node name.
+    - node_names contains either process or transition unique node name.
     - nodes contains the information of the given process
     :param process: Process class
     :param node_name: None or str
@@ -63,12 +67,12 @@ def annotate_nodes(process, node_name=None):
     }
     """
     node_name = node_name or ''
-    node_name += process.get_readable_name() + '|'
+    node_name += get_readable_process_name(process) + '|'
 
     # process
     node = {
         'id': get_object_id(process),
-        'name': process.get_readable_name(),
+        'name': get_readable_process_name(process),
         'type': 'process',
         'nodes': []
     }
@@ -84,7 +88,7 @@ def annotate_nodes(process, node_name=None):
     if process.conditions:
         node['nodes'].append({
             'id': get_conditions_id(process),
-            'name': '\n'.join([condition.__name__ for condition in process.conditions.commands]),
+            'name': '\n'.join([condition.__name__ for condition in process.conditions]),
             'type': 'process_conditions',
         })
 

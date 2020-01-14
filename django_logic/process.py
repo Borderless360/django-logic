@@ -4,7 +4,6 @@ from functools import partial
 from django_logic.commands import Conditions, Permissions
 from django_logic.exceptions import ManyTransitions, TransitionNotAllowed
 from django_logic.state import State
-from django_logic.utils import convert_to_snake_case, convert_to_readable_name
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +26,9 @@ class Process(object):
     permissions = []
     conditions_class = Conditions
     permissions_class = Permissions
+    process_name = 'process'
 
-    def __init__(self, field_name: str, instance=None):
+    def __init__(self, field_name: str,instance=None):
         """
         :param field_name:
         """
@@ -49,14 +49,6 @@ class Process(object):
         else:
             # TODO: transition not available
             raise TransitionNotAllowed('Transition not allowed')
-    
-    @classmethod
-    def get_process_name(cls):
-        return convert_to_snake_case(str(cls.__name__))
-
-    @classmethod
-    def get_readable_name(cls):
-        return convert_to_readable_name(str(cls.__name__))
 
     def validate(self, user=None) -> bool:
         """
@@ -107,7 +99,7 @@ class ProcessManager:
         for state_field, process_class in kwargs.items():
             if not issubclass(process_class, Process):
                 raise TypeError('Must be a sub class of Process')
-            parameters[process_class.get_process_name()] = property(make_process_getter(state_field, process_class))
+            parameters[process_class.process_name] = property(make_process_getter(state_field, process_class))
             parameters['state_fields'].append(state_field)
         return type('Process', (cls, ), parameters)
 
