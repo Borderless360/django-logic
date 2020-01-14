@@ -19,7 +19,6 @@ class Process(object):
     - validate - conditions and permissions of the process affects all transitions/processes inside
     - has methods like get_all_available_transitions, etc
     """
-    states = []
     nested_processes = []
     transitions = []
     conditions = []

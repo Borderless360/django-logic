@@ -1,3 +1,5 @@
+import re
+
 from graphviz import Digraph
 
 
@@ -10,10 +12,28 @@ def get_conditions_id(obj):
 
 
 def get_readable_process_name(process) -> str:
-    return ' '.join(process.process_name.split('_')).capitalize()
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1 \2', str(process.__name__))
+    return re.sub('([a-z0-9])([A-Z])', r'\1 \2', s1)
 
 
-def annotate_nodes(process, node_name=None):
+def get_states(process) -> set:
+    states = set()
+    for transition in process.transitions:
+        states.add(transition.target)
+        if transition.in_progress_state:
+            states.add(transition.in_progress_state)
+        # states |= set(transition.sources)  # not sure
+    return states
+
+
+def get_all_states(process) -> set:
+    states = get_states(process)
+    for sub_process in process.nested_processes:
+        states |= get_all_states(sub_process)
+    return states
+
+
+def annotate_nodes(process, node_name=None, used_states=None):
     """
     This function annotate node names and nodes into two dicts:
     - node_names contains either process or transition unique node name.
@@ -68,7 +88,7 @@ def annotate_nodes(process, node_name=None):
     """
     node_name = node_name or ''
     node_name += get_readable_process_name(process) + '|'
-
+    used_states = used_states or set()
     # process
     node = {
         'id': get_object_id(process),
@@ -76,13 +96,6 @@ def annotate_nodes(process, node_name=None):
         'type': 'process',
         'nodes': []
     }
-
-    for state in process.states:
-        node['nodes'].append({
-            'id': state[0],  # todo: make it explicit
-            'name': state[0],
-            'type': 'state',
-        })
 
     # process conditions
     if process.conditions:
@@ -107,10 +120,31 @@ def annotate_nodes(process, node_name=None):
                 'type': 'transition_conditions',
             })
 
+    #  states = sub statses - ( process states + int sub states)
+
+    states = get_states(process)
+    for sub_process1 in process.nested_processes:
+        for sub_process2 in process.nested_processes:
+            if sub_process1 != sub_process2:
+                states |= (get_all_states(sub_process1) & get_all_states(sub_process2))
+
+    for state in states - used_states:
+        node['nodes'].append({
+            'id': state,
+            'name': state,
+            'type': 'state',
+        })
+
     for sub_process in process.nested_processes:
-        node['nodes'].append(annotate_nodes(sub_process, node_name))
+        # then it has to have only states which are available inside of that sub process
+        node['nodes'].append(annotate_nodes(sub_process, node_name, used_states=states | used_states))
 
     return node
+
+
+# Push states algorithm
+# every process should return all states inside
+# if state exists only in one direction push it there and remove from other directions
 
 
 def fsm_paths(process, state):
