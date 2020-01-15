@@ -1,24 +1,14 @@
 class BaseCommand(object):
     """
-    Command descriptor
+    Command
     """
-    def __init__(self, commands=None):
+    def __init__(self, commands=None, transition=None):
         self._commands = commands or []
-        self.name = None
-
-    def __set_name__(self, owner, name):
-        self.name = name
-
-    def __get__(self, instance, owner):
-        self.transition = instance
-        return self
-
-    def __set__(self, instance, commands):
-        instance.__dict__[self.name] = commands
+        self._transition = transition
 
     @property
     def commands(self):
-        return self.transition.__dict__[self.name] if self.name is not None else self._commands
+        return self._commands
 
     def execute(self, *args, **kwargs):
         raise NotImplementedError
@@ -26,23 +16,23 @@ class BaseCommand(object):
 
 class Conditions(BaseCommand):
     def execute(self, instance: any, **kwargs):
-        return all(command(instance, **kwargs) for command in self.commands)
+        return all(command(instance, **kwargs) for command in self._commands)
 
 
 class Permissions(BaseCommand):
     def execute(self, instance: any, user: any, **kwargs):
-        return all(command(instance,  user, **kwargs) for command in self.commands)
+        return all(command(instance,  user, **kwargs) for command in self._commands)
 
 
 class SideEffects(BaseCommand):
     def execute(self, instance: any, field_name: str, **kwargs):
         try:
-            for command in self.commands:
+            for command in self._commands:
                 command(instance, **kwargs)
         except Exception:
-            self.transition.fail_transition(instance, field_name, **kwargs)
+            self._transition.fail_transition(instance, field_name, **kwargs)
         else:
-            self.transition.complete_transition(instance, field_name, **kwargs)
+            self._transition.complete_transition(instance, field_name, **kwargs)
 
 
 class Callbacks(BaseCommand):
