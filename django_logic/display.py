@@ -16,133 +16,153 @@ def get_readable_process_name(process) -> str:
     return re.sub('([a-z0-9])([A-Z])', r'\1 \2', s1)
 
 
-def get_states(process) -> set:
+def get_target_states(process) -> set:
+    states = set()
+    for transition in process.transitions:
+        states.add(transition.target)
+        if transition.in_progress_state:
+            states.add(transition.in_progress_state)
+    return states
+
+
+def get_all_target_states(process) -> set:
+    states = get_target_states(process)
+    for sub_process in process.nested_processes:
+        states |= get_all_target_states(sub_process)
+    return states
+
+
+def get_all_states(process) -> set:
     states = set()
     for transition in process.transitions:
         states.add(transition.target)
         if transition.in_progress_state:
             states.add(transition.in_progress_state)
         states |= set(transition.sources)
+        for sub_process in process.nested_processes:
+            states |= get_all_states(sub_process)
     return states
 
 
-def get_all_states(process) -> set:
-    states = get_states(process)
-    for sub_process in process.nested_processes:
-        states |= get_all_states(sub_process)
-    return states
-
-
-def annotate_nodes(process, node_name=None, used_states=None):
+def annotate_nodes(process):
     """
-    This function annotate node names and nodes into two dicts:
-    - node_names contains either process or transition unique node name.
-    - nodes contains the information of the given process
-    :param process: Process class
-    :param node_name: None or str
-    :param used_states: ignores the states to be displayed going forward
-    It should return a directed graph where every node has unique name,
-    nodes could be connected by arrows.
+      This function annotate node names and nodes into two dicts:
+      - node_names contains either process or transition unique node name.
+      - nodes contains the information of the given process
+      :param process: Process class
+      It should return a directed graph where every node has unique name,
+      nodes could be connected by arrows.
 
-    It assigns a state to a node only and only if the state hasn't been used before in the graph.
-    In other words, a state is always on an upper level before it's used. It helps to display sub graphs
-    around that state, which provides better understanding how the process structured.
+      It assigns a state to a node only and only if the state hasn't been used before in the graph.
+      In other words, a state is always on an upper level before it's used. It helps to display sub graphs
+      around that state, which provides better understanding how the process structured.
 
-    Supported the following types of nodes:
-    - process
-    - process_conditions
-    - transition
-    - transition_conditions
-    - state
+      Supported the following types of nodes:
+      - process
+      - process_conditions
+      - transition
+      - transition_conditions
+      - state
 
-    and list of paths - from and to
+      and list of paths - from and to
 
-    parameters:
-    - node_name - unique node name. It needs to know exact node path,
-        as there is no unique identifier between transitions, processes and other nodes.
-        So, the node name is combined through the graph path.
+      parameters:
+      - node_name - unique node name. It needs to know exact node path,
+          as there is no unique identifier between transitions, processes and other nodes.
+          So, the node name is combined through the graph path.
 
-    - name - displayed name
-    - type - could be: process, process_conditions, transition, transition_conditions
+      - name - displayed name
+      - type - could be: process, process_conditions, transition, transition_conditions
 
-    # Example:
-    nodes = {
-        'name': 'Main process',
-        'type': 'process',
-        'nodes': [
-            {
-                'name': 'my unique name of the node',
-                'nodes': [
-                    {
-                        'type': 'transition',
-                        'name': 'my transition'
-                    },
-                    {
-                        'type': 'condition',
-                        'name': 'my condition'
-                    }
-                ],
-                'type': 'process'
-            },
-            {
-                'name': 'my state',
-                'type': 'state',
-            }
-        ]
-    }
-    """
-    node_name = node_name or ''
-    node_name += get_readable_process_name(process) + '|'
-    used_states = used_states or set()
-    # process
-    node = {
-        'id': get_object_id(process),
-        'name': get_readable_process_name(process),
-        'type': 'process',
-        'nodes': []
-    }
+      # Example:
+      nodes = {
+          'name': 'Main process',
+          'type': 'process',
+          'nodes': [
+              {
+                  'name': 'my unique name of the node',
+                  'nodes': [
+                      {
+                          'type': 'transition',
+                          'name': 'my transition'
+                      },
+                      {
+                          'type': 'condition',
+                          'name': 'my condition'
+                      }
+                  ],
+                  'type': 'process'
+              },
+              {
+                  'name': 'my state',
+                  'type': 'state',
+              }
+          ]
+      }
+      """
+    used_states = set()
 
-    # process conditions
-    if process.conditions:
-        node['nodes'].append({
-            'id': get_conditions_id(process),
-            'name': '\n'.join([condition.__name__ for condition in process.conditions]),
-            'type': 'process_conditions',
-        })
+    def annotate_process_nodes(process, node_name):
+        node_name += get_readable_process_name(process) + '|'
+        # process
+        node = {
+            'id': get_object_id(process),
+            'name': get_readable_process_name(process),
+            'type': 'process',
+            'nodes': []
+        }
 
-    # transitions
-    for transition in process.transitions:
-        node['nodes'].append({
-            'id': get_object_id(transition),
-            'name': transition.action_name,
-            'type': 'transition',
-        })
-        # transition conditions
-        if transition.conditions.commands:
+        # process conditions
+        if process.conditions:
             node['nodes'].append({
-                'id': get_conditions_id(transition),
-                'name': '\n'.join([condition.__name__ for condition in transition.conditions.commands]),
-                'type': 'transition_conditions',
+                'id': get_conditions_id(process),
+                'name': '\n'.join([condition.__name__ for condition in process.conditions]),
+                'type': 'process_conditions',
             })
 
-    # it finds all intersections between the current process' states and its sub process' states
-    states = get_states(process)
-    for sub_process1 in process.nested_processes:
-        for sub_process2 in process.nested_processes:
-            if sub_process1 != sub_process2:
-                states |= (get_all_states(sub_process1) & get_all_states(sub_process2))
+        # transitions
+        for transition in process.transitions:
+            node['nodes'].append({
+                'id': get_object_id(transition),
+                'name': transition.action_name,
+                'type': 'transition',
+            })
+            # transition conditions
+            if transition.conditions.commands:
+                node['nodes'].append({
+                    'id': get_conditions_id(transition),
+                    'name': '\n'.join([condition.__name__ for condition in transition.conditions.commands]),
+                    'type': 'transition_conditions',
+                })
 
-    # it should assign all intersect states excluding used states before
-    for state in states - used_states:
+        # it finds all intersections between the current process' states and its sub process' states
+        states = get_target_states(process)
+        for sub_process1 in process.nested_processes:
+            for sub_process2 in process.nested_processes:
+                if sub_process1 != sub_process2:
+                    states |= (get_all_target_states(sub_process1) &
+                               get_all_target_states(sub_process2))
+
+        # it should assign all intersect states excluding used states before
+        for state in states - used_states:
+            node['nodes'].append({
+                'id': state,
+                'name': state,
+                'type': 'state',
+            })
+            used_states.add(state)
+
+        for sub_process in process.nested_processes:
+            node['nodes'].append(annotate_process_nodes(sub_process, node_name))
+        return node
+
+    node = annotate_process_nodes(process, node_name='')
+    for state in get_all_states(process) - used_states:
         node['nodes'].append({
             'id': state,
             'name': state,
             'type': 'state',
         })
-
-    for sub_process in process.nested_processes:
-        # then, it has to pass union of used states and displayed states to the sub process
-        node['nodes'].append(annotate_nodes(sub_process, node_name, used_states=states | used_states))
 
     return node
 
@@ -154,10 +174,8 @@ def fsm_paths(process, state):
     def add_path(target, source):
         """
         the path given from the target to the source, but it should swap when added
-        and check that it doesn't exist.
         """
-        if (source, target) not in paths:
-            paths.add((source, target))
+        paths.add((source, target))
 
     def get_available_transitions(process_class, state):
         for transition in process_class.transitions:
