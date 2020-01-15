@@ -48,7 +48,7 @@ class ValidateProcessTestCase(TestCase):
         class MyProcess(Process):
             permissions = [allow]
 
-        self.assertFalse(MyProcess('state').validate())
+        self.assertTrue(MyProcess('state').validate())
         self.assertTrue(MyProcess('state').validate(self.user))
 
     def test_permission_fail(self):
@@ -58,14 +58,14 @@ class ValidateProcessTestCase(TestCase):
             permissions = [allow]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertFalse(process.validate())
+        self.assertTrue(process.validate())
         self.assertFalse(process.validate(self.user))
 
         class AnotherProcess(Process):
             permissions = [allow, disallow]
 
         process = AnotherProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertFalse(process.validate())
+        self.assertTrue(process.validate())
         self.assertFalse(process.validate(self.user))
 
     def test_empty_conditions(self):
@@ -107,7 +107,7 @@ class ValidateProcessTestCase(TestCase):
             conditions = [is_editable]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertFalse(process.validate())
+        self.assertTrue(process.validate())
         self.assertTrue(process.validate(self.user))
 
     def test_permissions_and_conditions_fail(self):
@@ -116,7 +116,7 @@ class ValidateProcessTestCase(TestCase):
             conditions = [is_editable]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertFalse(process.validate())
+        self.assertTrue(process.validate())
         self.assertFalse(process.validate(self.user))
 
         class AnotherProcess(Process):
