@@ -16,12 +16,24 @@ class BaseCommand(object):
 
 class Conditions(BaseCommand):
     def execute(self, instance: any, **kwargs):
+        """
+        It checks every condition for the provided instance by executing every command
+        :param instance: any
+        :return: True or False
+        """
         return all(command(instance, **kwargs) for command in self._commands)
 
 
 class Permissions(BaseCommand):
     def execute(self, instance: any, user: any, **kwargs):
-        return all(command(instance,  user, **kwargs) for command in self._commands)
+        """
+        It checks the permissions for the provided user and instance by executing evey command
+        If user is None then permissions passed
+        :param instance: any
+        :param user: any or None
+        :return: True or False
+        """
+        return user is None or all(command(instance,  user, **kwargs) for command in self._commands)
 
 
 class SideEffects(BaseCommand):
