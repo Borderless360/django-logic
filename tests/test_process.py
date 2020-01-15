@@ -34,22 +34,22 @@ class ValidateProcessTestCase(TestCase):
             pass
 
         process = MyProcess(field_name='status')
-        self.assertTrue(process.validate())
-        self.assertTrue(process.validate(self.user))
+        self.assertTrue(process.is_valid())
+        self.assertTrue(process.is_valid(self.user))
 
     def test_empty_permissions(self):
         class MyProcess(Process):
             permissions = []
 
-        self.assertTrue(MyProcess('state').validate())
-        self.assertTrue(MyProcess('state').validate(self.user))
+        self.assertTrue(MyProcess('state').is_valid())
+        self.assertTrue(MyProcess('state').is_valid(self.user))
 
     def test_permissions_successfully(self):
         class MyProcess(Process):
             permissions = [allow]
 
-        self.assertTrue(MyProcess('state').validate())
-        self.assertTrue(MyProcess('state').validate(self.user))
+        self.assertTrue(MyProcess('state').is_valid())
+        self.assertTrue(MyProcess('state').is_valid(self.user))
 
     def test_permission_fail(self):
         self.user.is_allowed = False
@@ -58,30 +58,30 @@ class ValidateProcessTestCase(TestCase):
             permissions = [allow]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertTrue(process.validate())
-        self.assertFalse(process.validate(self.user))
+        self.assertTrue(process.is_valid())
+        self.assertFalse(process.is_valid(self.user))
 
         class AnotherProcess(Process):
             permissions = [allow, disallow]
 
         process = AnotherProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertTrue(process.validate())
-        self.assertFalse(process.validate(self.user))
+        self.assertTrue(process.is_valid())
+        self.assertFalse(process.is_valid(self.user))
 
     def test_empty_conditions(self):
         class MyProcess(Process):
             conditions = []
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertTrue(process.validate(self.user))
+        self.assertTrue(process.is_valid(self.user))
 
     def test_conditions_successfully(self):
         class MyProcess(Process):
             conditions = [is_editable]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertTrue(process.validate())
-        self.assertTrue(process.validate(self.user))
+        self.assertTrue(process.is_valid())
+        self.assertTrue(process.is_valid(self.user))
 
     def test_conditions_fail(self):
         class MyProcess(Process):
@@ -89,8 +89,8 @@ class ValidateProcessTestCase(TestCase):
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
 
-        self.assertFalse(process.validate())
-        self.assertFalse(process.validate(self.user))
+        self.assertFalse(process.is_valid())
+        self.assertFalse(process.is_valid(self.user))
 
         class AnotherProcess(Process):
             conditions = [is_editable]
@@ -98,8 +98,8 @@ class ValidateProcessTestCase(TestCase):
         instance = Invoice(status='draft')
         instance.customer_received = True
         process = AnotherProcess(field_name='status', instance=instance)
-        self.assertFalse(process.validate())
-        self.assertFalse(process.validate(self.user))
+        self.assertFalse(process.is_valid())
+        self.assertFalse(process.is_valid(self.user))
 
     def test_permissions_and_conditions_successfully(self):
         class MyProcess(Process):
@@ -107,8 +107,8 @@ class ValidateProcessTestCase(TestCase):
             conditions = [is_editable]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertTrue(process.validate())
-        self.assertTrue(process.validate(self.user))
+        self.assertTrue(process.is_valid())
+        self.assertTrue(process.is_valid(self.user))
 
     def test_permissions_and_conditions_fail(self):
         class MyProcess(Process):
@@ -116,24 +116,35 @@ class ValidateProcessTestCase(TestCase):
             conditions = [is_editable]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertTrue(process.validate())
-        self.assertFalse(process.validate(self.user))
+        self.assertTrue(process.is_valid())
+        self.assertFalse(process.is_valid(self.user))
 
         class AnotherProcess(Process):
             permissions = [allow]
             conditions = [is_editable, not_available]
 
         process = AnotherProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertFalse(process.validate())
-        self.assertFalse(process.validate(self.user))
+        self.assertFalse(process.is_valid())
+        self.assertFalse(process.is_valid(self.user))
 
         class FinalProcess(Process):
             permissions = [allow, disallow]
             conditions = [is_editable, not_available]
 
         process = FinalProcess(field_name='status', instance=Invoice(status='draft'))
-        self.assertFalse(process.validate())
-        self.assertFalse(process.validate(self.user))
+        self.assertFalse(process.is_valid())
+        self.assertFalse(process.is_valid(self.user))
+
+    def test_getattr_is_valid_name_and_transition(self):
+        class MyProcess(Process):
+            transitions = [Transition('is_valid', sources=['draft'], target='valid')]
+
+        invoice = Invoice.objects.create(status='draft')
+        process = MyProcess(instance=invoice, field_name='status')
+        # transition shouldn't be executed
+        self.assertTrue(process.is_valid())
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'draft')
 
 
 class GetAvailableTransitionsTestCase(TestCase):
@@ -528,6 +539,17 @@ class GetAvailableTransitionsTestCase(TestCase):
         process = GrandParentProcess(instance=Invoice.objects.create(status='done'), field_name='status')
         for transition in process.get_available_transitions(self.user):
             self.assertIn(transition, [transition4])
+
+    def test_getattr_get_available_transition_name_and_transition(self):
+        class MyProcess(Process):
+            transitions = [Transition('get_available_transition', sources=['draft'], target='valid')]
+
+        invoice = Invoice.objects.create(status='draft')
+        process = MyProcess(instance=invoice, field_name='status')
+        # transition shouldn't be executed
+        self.assertEqual(list(process.get_available_transitions()), MyProcess.transitions)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'draft')
 
 
 def disable_invoice(invoice: Invoice):

@@ -35,7 +35,7 @@ class Transition(object):
     def __str__(self):
         return "Transition: {} to {}".format(self.action_name, self.target)
 
-    def validate(self, instance: any, field_name: str, user=None) -> bool:
+    def is_valid(self, instance: any, field_name: str, user=None) -> bool:
         """
         It validates this process to meet conditions and pass permissions
         :param field_name:

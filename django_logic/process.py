@@ -46,10 +46,9 @@ class Process(object):
         elif transitions:
             raise ManyTransitions("There are several transitions available")
         else:
-            # TODO: transition not available
             raise TransitionNotAllowed('Transition not allowed')
 
-    def validate(self, user=None) -> bool:
+    def is_valid(self, user=None) -> bool:
         """
         It validates this process to meet conditions and pass permissions
         :param user: any object used to pass permissions
@@ -68,7 +67,7 @@ class Process(object):
         :param user: any object which used to validate permissions
         :return: yield `django_logic.Transition`
         """
-        if not self.validate(user):
+        if not self.is_valid(user):
             return
 
         state = State().get_db_state(self.instance, self.field_name)
@@ -76,7 +75,7 @@ class Process(object):
             if action_name is not None and transition.action_name != action_name:
                 continue
 
-            if state in transition.sources and transition.validate(self.instance,
+            if state in transition.sources and transition.is_valid(self.instance,
                                                                    self.field_name,
                                                                    user):
                 yield transition
