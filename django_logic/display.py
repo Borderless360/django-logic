@@ -22,7 +22,7 @@ def get_states(process) -> set:
         states.add(transition.target)
         if transition.in_progress_state:
             states.add(transition.in_progress_state)
-        # states |= set(transition.sources)  # not sure
+        states |= set(transition.sources)
     return states
 
 
@@ -40,8 +40,13 @@ def annotate_nodes(process, node_name=None, used_states=None):
     - nodes contains the information of the given process
     :param process: Process class
     :param node_name: None or str
+    :param used_states: ignores the states to be displayed going forward
     It should return a directed graph where every node has unique name,
     nodes could be connected by arrows.
+
+    It assigns a state to a node only and only if the state hasn't been used before in the graph.
+    In other words, a state is always on an upper level before it's used. It helps to display sub graphs
+    around that state, which provides better understanding how the process structured.
 
     Supported the following types of nodes:
     - process
@@ -120,14 +125,14 @@ def annotate_nodes(process, node_name=None, used_states=None):
                 'type': 'transition_conditions',
             })
 
-    #  states = sub statses - ( process states + int sub states)
-
+    # it finds all intersections between the current process' states and its sub process' states
     states = get_states(process)
     for sub_process1 in process.nested_processes:
         for sub_process2 in process.nested_processes:
             if sub_process1 != sub_process2:
                 states |= (get_all_states(sub_process1) & get_all_states(sub_process2))
 
+    # it should assign all intersect states excluding used states before
     for state in states - used_states:
         node['nodes'].append({
             'id': state,
@@ -136,15 +141,10 @@ def annotate_nodes(process, node_name=None, used_states=None):
         })
 
     for sub_process in process.nested_processes:
-        # then it has to have only states which are available inside of that sub process
+        # then, it has to pass union of used states and displayed states to the sub process
         node['nodes'].append(annotate_nodes(sub_process, node_name, used_states=states | used_states))
 
     return node
-
-
-# Push states algorithm
-# every process should return all states inside
-# if state exists only in one direction push it there and remove from other directions
 
 
 def fsm_paths(process, state):
