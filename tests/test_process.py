@@ -551,6 +551,15 @@ class GetAvailableTransitionsTestCase(TestCase):
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, 'draft')
 
+    def test_get_non_existing_transition(self):
+        class MyProcess(Process):
+            transitions = [Transition('validate', sources=['draft'], target='valid')]
+
+        invoice = Invoice.objects.create(status='draft')
+        process = MyProcess(instance=invoice, field_name='status')
+        with self.assertRaises(AttributeError):
+            process.test()
+
 
 def disable_invoice(invoice: Invoice):
     invoice.is_available = False

@@ -45,8 +45,7 @@ class Process(object):
         # This exceptions should be handled otherwise it will be very annoying
         elif transitions:
             raise ManyTransitions("There are several transitions available")
-        else:
-            raise TransitionNotAllowed('Transition not allowed')
+        raise AttributeError(f"Process class {self.__class__} has no transition with action name {item}")
 
     def is_valid(self, user=None) -> bool:
         """
