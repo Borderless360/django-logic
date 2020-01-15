@@ -13,11 +13,11 @@ class Transition(object):
     - validation if the action is available throughout permissions and conditions
     - run side effects and call backs
     """
-    side_effects = SideEffects()
-    callbacks = Callbacks()
-    failure_callbacks = Callbacks()
-    permissions = Permissions()
-    conditions = Conditions()
+    side_effects_class = SideEffects
+    callbacks_class = Callbacks
+    failure_callbacks_class = Callbacks
+    permissions_class = Permissions
+    conditions_class = Conditions
     state = State()
 
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
@@ -26,11 +26,11 @@ class Transition(object):
         self.sources = sources
         self.in_progress_state = kwargs.get('in_progress_state')
         self.failed_state = kwargs.get('failed_state')
-        self.failure_callbacks = kwargs.get('failure_callbacks', [])
-        self.side_effects = kwargs.get('side_effects', [])
-        self.callbacks = kwargs.get('callbacks', [])
-        self.permissions = kwargs.get('permissions', [])
-        self.conditions = kwargs.get('conditions', [])
+        self.failure_callbacks = self.failure_callbacks_class(kwargs.get('failure_callbacks', []), transition=self)
+        self.side_effects = self.side_effects_class(kwargs.get('side_effects', []), transition=self)
+        self.callbacks = self.callbacks_class(kwargs.get('callbacks', []), transition=self)
+        self.permissions = self.permissions_class(kwargs.get('permissions', []), transition=self)
+        self.conditions = self.conditions_class(kwargs.get('conditions', []), transition=self)
 
     def __str__(self):
         return "Transition: {} to {}".format(self.action_name, self.target)

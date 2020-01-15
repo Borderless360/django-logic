@@ -27,7 +27,7 @@ class Process(object):
     permissions_class = Permissions
     process_name = 'process'
 
-    def __init__(self, field_name: str,instance=None):
+    def __init__(self, field_name: str, instance=None):
         """
         :param field_name:
         """
