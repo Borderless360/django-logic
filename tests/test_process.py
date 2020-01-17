@@ -33,7 +33,7 @@ class ValidateProcessTestCase(TestCase):
         class MyProcess(Process):
             pass
 
-        process = MyProcess(field_name='status')
+        process = MyProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertTrue(process.is_valid())
         self.assertTrue(process.is_valid(self.user))
 
@@ -41,15 +41,15 @@ class ValidateProcessTestCase(TestCase):
         class MyProcess(Process):
             permissions = []
 
-        self.assertTrue(MyProcess('state').is_valid())
-        self.assertTrue(MyProcess('state').is_valid(self.user))
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid())
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid(self.user))
 
     def test_permissions_successfully(self):
         class MyProcess(Process):
             permissions = [allow]
 
-        self.assertTrue(MyProcess('state').is_valid())
-        self.assertTrue(MyProcess('state').is_valid(self.user))
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid())
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid(self.user))
 
     def test_permission_fail(self):
         self.user.is_allowed = False

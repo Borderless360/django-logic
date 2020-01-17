@@ -1,35 +1,44 @@
+import logging
+from hashlib import blake2b
 from django.core.cache import cache
 
 
 class State(object):
-    @staticmethod
-    def get_db_state(instance, field_name):
+    def __init__(self, instance: any, field_name: str, queryset=None):
+        self.instance = instance
+        self.queryset = queryset or instance._meta.model.objects.all()
+        self.field_name = field_name
+
+    def get_db_state(self):
         """
         Fetches state directly from db instead of model instance.
         """
-        return instance._meta.model.objects.values_list(field_name, flat=True).get(pk=instance.id)
+        return self.queryset.values_list(self.field_name, flat=True).get(pk=self.instance.id)
 
-    @staticmethod
-    def set_state(instance, field_name, state):
+    @property  # TODO: change to cached
+    def cached_state(self):
+        return self.get_db_state()
+
+    def set_state(self, state):
         """
         Sets intermediate state to instance's field until transition is over.
         """
         # TODO: how would it work if it's used within another transaction?
-        instance._meta.model.objects.filter(pk=instance.id).update(**{field_name: state})
-        instance.refresh_from_db()
+        self.queryset.filter(pk=self.instance.id).update(**{self.field_name: state})
+        self.instance.refresh_from_db()
 
-    def get_hash(self, instance, field_name):
-        # TODO: https://github.com/Borderless360/django-logic/issues/3
-        return "{}-{}-{}-{}".format(instance._meta.app_label,
-                                    instance._meta.model_name,
-                                    field_name,
-                                    instance.pk)
+    def _get_hash(self):
+        key = "{}-{}-{}-{}".format(self.instance._meta.app_label,
+                                   self.instance._meta.model_name,
+                                   self.field_name,
+                                   self.instance.pk)
+        return blake2b(key.encode(), digest_size=16).hexdigest()
 
-    def lock(self, instance, field_name: str):
-        cache.set(self.get_hash(instance, field_name), True)
+    def lock(self):
+        cache.set(self._get_hash(), True)
 
-    def unlock(self, instance, field_name: str):
-        cache.delete(self.get_hash(instance, field_name))
+    def unlock(self):
+        cache.delete(self._get_hash())
 
-    def is_locked(self, instance, field_name: str):
-        return cache.get(self.get_hash(instance, field_name)) or False
+    def is_locked(self):
+        return cache.get(self._get_hash()) or False

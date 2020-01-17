@@ -18,7 +18,6 @@ class Transition(object):
     failure_callbacks_class = Callbacks
     permissions_class = Permissions
     conditions_class = Conditions
-    state = State()
 
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
@@ -35,19 +34,20 @@ class Transition(object):
     def __str__(self):
         return "Transition: {} to {}".format(self.action_name, self.target)
 
-    def is_valid(self, instance: any, field_name: str, user=None) -> bool:
+    def is_valid(self, state: State, user=None) -> bool:
         """
         It validates this process to meet conditions and pass permissions
+        :param state: State object
         :param field_name:
         :param instance: any instance used to meet conditions
         :param user: any object used to pass permissions
         :return: True or False
         """
-        return (not self.state.is_locked(instance, field_name) and
-                self.permissions.execute(instance, user) and
-                self.conditions.execute(instance))
+        return (not state.is_locked() and
+                self.permissions.execute(state, user) and
+                self.conditions.execute(state))
 
-    def change_state(self, instance, field_name, **kwargs):
+    def change_state(self, state: State , **kwargs):
         """
         This method changes a state of the provided instance and file name by the following algorithm:
         - Lock state
@@ -57,15 +57,15 @@ class Transition(object):
         :param instance: any
         :param field_name: str
         """
-        if self.state.is_locked(instance, field_name):
+        if state.is_locked():
             raise TransitionNotAllowed("State is locked")
 
-        self.state.lock(instance, field_name)
+        state.lock()
         if self.in_progress_state:
-            self.state.set_state(instance, field_name, self.in_progress_state)
-        self.side_effects.execute(instance, field_name, **kwargs)
+            state.set_state(self.in_progress_state)
+        self.side_effects.execute(state, **kwargs)
 
-    def complete_transition(self, instance, field_name, **kwargs):
+    def complete_transition(self, state: State, **kwargs):
         """
         It completes the transition process for provided instance and filed name.
         The instance will be unlocked and callbacks exc
@@ -73,17 +73,17 @@ class Transition(object):
         :param field_name:
         :return:
         """
-        self.state.set_state(instance, field_name, self.target)
-        self.state.unlock(instance, field_name)
-        self.callbacks.execute(instance, field_name, **kwargs)
+        state.set_state(self.target)
+        state.unlock()
+        self.callbacks.execute(state, **kwargs)
     
-    def fail_transition(self, instance, field_name, **kwargs):
+    def fail_transition(self, state: State, **kwargs):
         """
         It triggers fail transition in case of any failure during the side effects execution.
         :param instance: any
         :param field_name: str
         """
         if self.failed_state:
-            self.state.set_state(instance, field_name, self.failed_state)
-        self.state.unlock(instance, field_name)
-        self.failure_callbacks.execute(instance, field_name, **kwargs)
+            state.set_state(self.failed_state)
+        state.unlock()
+        self.failure_callbacks.execute(state, **kwargs)

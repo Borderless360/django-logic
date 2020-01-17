@@ -2,7 +2,7 @@ import logging
 from functools import partial
 
 from django_logic.commands import Conditions, Permissions
-from django_logic.exceptions import ManyTransitions, TransitionNotAllowed
+from django_logic.exceptions import ManyTransitions
 from django_logic.state import State
 
 logger = logging.getLogger(__name__)
@@ -25,22 +25,32 @@ class Process(object):
     permissions = []
     conditions_class = Conditions
     permissions_class = Permissions
+    state_class = State
     process_name = 'process'
+    queryset = None  # It should be set up once for the main process
 
-    def __init__(self, field_name: str, instance=None):
+    def __init__(self, field_name='', instance=None, state=None):
         """
         :param field_name:
+        :param instance:
         """
         self.field_name = field_name
         self.instance = instance
+
+        if field_name is '' or instance is None:
+            assert state is not None
+            self.state = state
+        elif state is None:
+            assert field_name and instance is not None
+            self.state = self.state_class(queryset=self.queryset, instance=instance, field_name=field_name)
+        else:
+            raise AttributeError('Process class requires either state field name and instance or state object')
 
     def __getattr__(self, item):
         transitions = list(self.get_available_transitions(action_name=item))
 
         if len(transitions) == 1:
-            return partial(transitions[0].change_state,
-                           instance=self.instance,
-                           field_name=self.field_name)
+            return partial(transitions[0].change_state, self.state)
 
         # This exceptions should be handled otherwise it will be very annoying
         elif transitions:
@@ -55,35 +65,30 @@ class Process(object):
         """
         permissions = self.permissions_class(commands=self.permissions)
         conditions = self.conditions_class(commands=self.conditions)
-        return (permissions.execute(self.instance, user) and
-                conditions.execute(self.instance))
+        return (permissions.execute(self.state, user) and
+                conditions.execute(self.state))
 
     def get_available_transitions(self, user=None, action_name=None):
         """
         It returns all available transition which meet conditions and pass permissions.
         Including nested processes.
-        :param action_name:
         :param user: any object which used to validate permissions
+        :param action_name: str
         :return: yield `django_logic.Transition`
         """
         if not self.is_valid(user):
             return
 
-        state = State().get_db_state(self.instance, self.field_name)
         for transition in self.transitions:
             if action_name is not None and transition.action_name != action_name:
                 continue
 
-            if state in transition.sources and transition.is_valid(self.instance,
-                                                                   self.field_name,
-                                                                   user):
+            if self.state.cached_state in transition.sources and transition.is_valid(self.state, user):
                 yield transition
 
         for sub_process_class in self.nested_processes:
-            sub_process = sub_process_class(instance=self.instance, field_name=self.field_name)
-            for transition in sub_process.get_available_transitions(user=user,
-                                                                    action_name=action_name):
-                yield transition
+            sub_process = sub_process_class(state=self.state)
+            yield from sub_process.get_available_transitions(user=user, action_name=action_name)
 
 
 class ProcessManager:
@@ -107,7 +112,7 @@ class ProcessManager:
         """
         field_names = set()
         for field in self._meta.fields:
-            if not field.primary_key and not field.name in self.state_fields:
+            if not field.primary_key and field.name not in self.state_fields:
                 field_names.add(field.name)
 
                 if field.name != field.attname:

@@ -20,6 +20,8 @@ def get_target_states(process) -> set:
     states = set()
     for transition in process.transitions:
         states.add(transition.target)
+        if transition.failed_state:
+            states.add(transition.failed_state)
         if transition.in_progress_state:
             states.add(transition.in_progress_state)
     return states
