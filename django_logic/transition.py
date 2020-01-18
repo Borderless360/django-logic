@@ -1,3 +1,5 @@
+import logging
+
 from django_logic.commands import SideEffects, Callbacks, Permissions, Conditions
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
@@ -18,7 +20,6 @@ class Transition(object):
     failure_callbacks_class = Callbacks
     permissions_class = Permissions
     conditions_class = Conditions
-    state = State()
 
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
@@ -35,55 +36,57 @@ class Transition(object):
     def __str__(self):
         return "Transition: {} to {}".format(self.action_name, self.target)
 
-    def is_valid(self, instance: any, field_name: str, user=None) -> bool:
+    def is_valid(self, state: State, user=None) -> bool:
         """
         It validates this process to meet conditions and pass permissions
-        :param field_name:
-        :param instance: any instance used to meet conditions
+        :param state: State object
         :param user: any object used to pass permissions
         :return: True or False
         """
-        return (not self.state.is_locked(instance, field_name) and
-                self.permissions.execute(instance, user) and
-                self.conditions.execute(instance))
+        return (not state.is_locked() and
+                self.permissions.execute(state, user) and
+                self.conditions.execute(state))
 
-    def change_state(self, instance, field_name, **kwargs):
+    def change_state(self, state: State, **kwargs):
         """
-        This method changes a state of the provided instance and file name by the following algorithm:
+        This method changes a state by the following algorithm:
         - Lock state
         - Change state to `in progress` if such exists
         - Run side effects which should run `complete_transition` in case of success
         or `fail_transition` in case of failure.
-        :param instance: any
-        :param field_name: str
+        :param state: State object
         """
-        if self.state.is_locked(instance, field_name):
+        if state.is_locked():
+            logging.info(f'{state.instance_key} is locked')
             raise TransitionNotAllowed("State is locked")
 
-        self.state.lock(instance, field_name)
+        state.lock()
+        logging.info(f'{state.instance_key} has been locked')
         if self.in_progress_state:
-            self.state.set_state(instance, field_name, self.in_progress_state)
-        self.side_effects.execute(instance, field_name, **kwargs)
+            state.set_state(self.in_progress_state)
+            logging.info(f'{state.instance_key} state changed to {self.in_progress_state}')
+        self.side_effects.execute(state, **kwargs)
 
-    def complete_transition(self, instance, field_name, **kwargs):
+    def complete_transition(self, state: State, **kwargs):
         """
-        It completes the transition process for provided instance and filed name.
-        The instance will be unlocked and callbacks exc
-        :param instance:
-        :param field_name:
-        :return:
+        It completes the transition process for provided state.
+        The instance will be unlocked and callbacks executed
+        :param state: State object
         """
-        self.state.set_state(instance, field_name, self.target)
-        self.state.unlock(instance, field_name)
-        self.callbacks.execute(instance, field_name, **kwargs)
-    
-    def fail_transition(self, instance, field_name, **kwargs):
+        state.set_state(self.target)
+        logging.info(f'{state.instance_key} state changed to {self.target}')
+        state.unlock()
+        logging.info(f'{state.instance_key} has been unlocked')
+        self.callbacks.execute(state, **kwargs)
+
+    def fail_transition(self, state: State, **kwargs):
         """
         It triggers fail transition in case of any failure during the side effects execution.
-        :param instance: any
-        :param field_name: str
+        :param state: State object
         """
         if self.failed_state:
-            self.state.set_state(instance, field_name, self.failed_state)
-        self.state.unlock(instance, field_name)
-        self.failure_callbacks.execute(instance, field_name, **kwargs)
+            state.set_state(self.failed_state)
+            logging.info(f'{state.instance_key} state changed to {self.failed_state}')
+        state.unlock()
+        logging.info(f'{state.instance_key} has been unlocked')
+        self.failure_callbacks.execute(state, **kwargs)

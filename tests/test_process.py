@@ -3,14 +3,21 @@ from django.test import TestCase
 from demo.models import Invoice
 
 from django_logic import Process, Transition
+from django_logic.exceptions import TransitionNotAllowed
 
 
 class User:
-    is_allowed = True
+    def __init__(self, is_allowed=True, is_staff=False):
+        self.is_allowed = is_allowed
+        self.is_staff = is_staff
 
 
-def allow(instance, user):
-    return user is not None and user.is_allowed
+def allowed(instance, user):
+    return user.is_allowed and not user.is_staff
+
+
+def is_staff(instance, user):
+    return user.is_staff
 
 
 def disallow(instance, user):
@@ -21,8 +28,33 @@ def is_editable(instance):
     return not instance.customer_received
 
 
+def is_available(instance):
+    return instance.is_available
+
+
 def not_available(instance):
     return False
+
+
+def disable_invoice(invoice: Invoice):
+    invoice.is_available = False
+    invoice.customer_received = False
+    invoice.save()
+
+
+def update_invoice(invoice, is_available, customer_received):
+    invoice.is_available = is_available
+    invoice.customer_received = customer_received
+    invoice.save()
+
+
+def enable_invoice(invoice: Invoice):
+    invoice.is_available = True
+    invoice.save()
+
+
+def fail_invoice(invoice: Invoice):
+    raise Exception
 
 
 class ValidateProcessTestCase(TestCase):
@@ -33,7 +65,7 @@ class ValidateProcessTestCase(TestCase):
         class MyProcess(Process):
             pass
 
-        process = MyProcess(field_name='status')
+        process = MyProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertTrue(process.is_valid())
         self.assertTrue(process.is_valid(self.user))
 
@@ -41,28 +73,28 @@ class ValidateProcessTestCase(TestCase):
         class MyProcess(Process):
             permissions = []
 
-        self.assertTrue(MyProcess('state').is_valid())
-        self.assertTrue(MyProcess('state').is_valid(self.user))
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid())
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid(self.user))
 
     def test_permissions_successfully(self):
         class MyProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
 
-        self.assertTrue(MyProcess('state').is_valid())
-        self.assertTrue(MyProcess('state').is_valid(self.user))
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid())
+        self.assertTrue(MyProcess('state', instance=Invoice(status='draft')).is_valid(self.user))
 
     def test_permission_fail(self):
         self.user.is_allowed = False
 
         class MyProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertTrue(process.is_valid())
         self.assertFalse(process.is_valid(self.user))
 
         class AnotherProcess(Process):
-            permissions = [allow, disallow]
+            permissions = [allowed, disallow]
 
         process = AnotherProcess(field_name='status', instance=Invoice(status='draft'))
         self.assertTrue(process.is_valid())
@@ -103,7 +135,7 @@ class ValidateProcessTestCase(TestCase):
 
     def test_permissions_and_conditions_successfully(self):
         class MyProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
@@ -112,7 +144,7 @@ class ValidateProcessTestCase(TestCase):
 
     def test_permissions_and_conditions_fail(self):
         class MyProcess(Process):
-            permissions = [allow, disallow]
+            permissions = [allowed, disallow]
             conditions = [is_editable]
 
         process = MyProcess(field_name='status', instance=Invoice(status='draft'))
@@ -120,7 +152,7 @@ class ValidateProcessTestCase(TestCase):
         self.assertFalse(process.is_valid(self.user))
 
         class AnotherProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable, not_available]
 
         process = AnotherProcess(field_name='status', instance=Invoice(status='draft'))
@@ -128,7 +160,7 @@ class ValidateProcessTestCase(TestCase):
         self.assertFalse(process.is_valid(self.user))
 
         class FinalProcess(Process):
-            permissions = [allow, disallow]
+            permissions = [allowed, disallow]
             conditions = [is_editable, not_available]
 
         process = FinalProcess(field_name='status', instance=Invoice(status='draft'))
@@ -197,7 +229,7 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         class ChildProcess(Process):
             conditions = [is_editable]
-            permissions = [allow]
+            permissions = [allowed]
             transitions = [transition1, transition2]
 
         process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
@@ -232,21 +264,21 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition2 = Transition('action', sources=['done'], target='closed')
 
         class ChildProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             transitions = [transition1, transition2]
 
         process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             nested_processes = (ChildProcess,)
 
         process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             nested_processes = (ParentProcess,)
 
         process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
@@ -264,14 +296,14 @@ class GetAvailableTransitionsTestCase(TestCase):
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class ParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             nested_processes = (ChildProcess,)
 
         process = ParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
         self.assertEqual(list(process.get_available_transitions(self.user)), [])
 
         class GrandParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             nested_processes = (ParentProcess,)
 
         process = GrandParentProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
@@ -332,7 +364,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition2 = Transition('action', sources=['done'], target='closed')
 
         class ChildProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             transitions = [transition1, transition2]
 
@@ -340,7 +372,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             nested_processes = (ChildProcess,)
 
@@ -348,7 +380,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             nested_processes = (ParentProcess,)
 
@@ -360,7 +392,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition2 = Transition('action', sources=['done'], target='closed')
 
         class ChildProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             transitions = [transition1, transition2]
 
@@ -368,7 +400,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class ParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             nested_processes = (ChildProcess,)
 
@@ -376,7 +408,7 @@ class GetAvailableTransitionsTestCase(TestCase):
         self.assertEqual(list(process.get_available_transitions(self.user)), [transition1])
 
         class GrandParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [not_available]
             nested_processes = (ParentProcess,)
 
@@ -391,18 +423,18 @@ class GetAvailableTransitionsTestCase(TestCase):
         transition5 = Transition('action', sources=['draft'], target='declined')
 
         class ChildProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             transitions = [transition1, transition2]
 
         class ParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             nested_processes = (ChildProcess,)
             transitions = [transition3, transition4]
 
         class GrandParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             nested_processes = (ParentProcess,)
 
@@ -430,13 +462,13 @@ class GetAvailableTransitionsTestCase(TestCase):
             transitions = [transition1, transition2]
 
         class ParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             nested_processes = (ChildProcess,)
             transitions = [transition3, transition4]
 
         class GrandParentProcess(Process):
-            permissions = [allow]
+            permissions = [allowed]
             conditions = [is_editable]
             nested_processes = (ParentProcess,)
 
@@ -451,24 +483,24 @@ class GetAvailableTransitionsTestCase(TestCase):
             self.assertIn(transition, [transition4])
 
     def test_nested_process_with_nested_transitions_conditions_and_permissions_successfully(self):
-        transition1 = Transition('action', permissions=[allow], conditions=[is_editable],
+        transition1 = Transition('action', permissions=[allowed], conditions=[is_editable],
                                  sources=['draft'],
                                  target='done')
-        transition2 = Transition('action', permissions=[allow], conditions=[is_editable],
+        transition2 = Transition('action', permissions=[allowed], conditions=[is_editable],
                                  sources=['done'],
                                  target='closed')
         transition3 = Transition('action',
-                                 permissions=[allow],
+                                 permissions=[allowed],
                                  conditions=[is_editable],
                                  sources=['draft'],
                                  target='approved')
         transition4 = Transition('action',
-                                 permissions=[allow],
+                                 permissions=[allowed],
                                  conditions=[is_editable],
                                  sources=['done'],
                                  target='closed')
         transition5 = Transition('action',
-                                 permissions=[allow],
+                                 permissions=[allowed],
                                  conditions=[is_editable],
                                  sources=['draft'],
                                  target='declined')
@@ -495,7 +527,7 @@ class GetAvailableTransitionsTestCase(TestCase):
 
     def test_nested_process_with_nested_transitions_conditions_and_permissions_fail(self):
         transition1 = Transition('action',
-                                 permissions=[allow],
+                                 permissions=[allowed],
                                  conditions=[is_editable],
                                  sources=['draft'],
                                  target='done')
@@ -505,12 +537,12 @@ class GetAvailableTransitionsTestCase(TestCase):
                                  sources=['done'],
                                  target='closed')
         transition3 = Transition('action',
-                                 permissions=[allow],
+                                 permissions=[allowed],
                                  conditions=[not_available],
                                  sources=['draft'],
                                  target='approved')
         transition4 = Transition('action',
-                                 permissions=[allow],
+                                 permissions=[allowed],
                                  conditions=[is_editable],
                                  sources=['done'],
                                  target='closed')
@@ -557,29 +589,8 @@ class GetAvailableTransitionsTestCase(TestCase):
 
         invoice = Invoice.objects.create(status='draft')
         process = MyProcess(instance=invoice, field_name='status')
-        with self.assertRaises(AttributeError):
+        with self.assertRaises(TransitionNotAllowed):
             process.test()
-
-
-def disable_invoice(invoice: Invoice):
-    invoice.is_available = False
-    invoice.customer_received = False
-    invoice.save()
-
-
-def update_invoice(invoice, is_available, customer_received):
-    invoice.is_available = is_available
-    invoice.customer_received = customer_received
-    invoice.save()
-
-
-def enable_invoice(invoice: Invoice):
-    invoice.is_available = True
-    invoice.save()
-
-
-def fail_invoice(invoice: Invoice):
-    raise Exception
 
 
 class ApplyTransitionTestCase(TestCase):
@@ -604,11 +615,10 @@ class ApplyTransitionTestCase(TestCase):
                 Transition('undo', sources=['cancelled'], target='draft')
             ]
 
-        process = TestProcess(instance=self.invoice, field_name='status')
-        process.cancel()
+        TestProcess(instance=self.invoice, field_name='status').cancel()
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'cancelled')
-        process.undo()
+        TestProcess(instance=self.invoice, field_name='status').undo()
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'draft')
 
@@ -619,13 +629,12 @@ class ApplyTransitionTestCase(TestCase):
                 Transition('undo', sources=['cancelled'], target='draft', side_effects=[update_invoice])
             ]
         self.assertTrue(self.invoice.is_available)
-        process = TestProcess(instance=self.invoice, field_name='status')
-        process.cancel()
+        TestProcess(instance=self.invoice, field_name='status').cancel()
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'cancelled')
         self.assertFalse(self.invoice.is_available)
         self.assertFalse(self.invoice.customer_received)
-        process.undo(is_available=True, customer_received=True)
+        TestProcess(instance=self.invoice, field_name='status').undo(is_available=True, customer_received=True)
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'draft')
         self.assertTrue(self.invoice.is_available)
@@ -638,13 +647,12 @@ class ApplyTransitionTestCase(TestCase):
                 Transition('undo', sources=['cancelled'], target='draft', callbacks=[update_invoice])
             ]
         self.assertTrue(self.invoice.is_available)
-        process = TestProcess(instance=self.invoice, field_name='status')
-        process.cancel()
+        TestProcess(instance=self.invoice, field_name='status').cancel()
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'cancelled')
         self.assertFalse(self.invoice.is_available)
         self.assertFalse(self.invoice.customer_received)
-        process.undo(is_available=True, customer_received=True)
+        TestProcess(instance=self.invoice, field_name='status').undo(is_available=True, customer_received=True)
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'draft')
         self.assertTrue(self.invoice.is_available)
@@ -666,3 +674,51 @@ class ApplyTransitionTestCase(TestCase):
         self.assertEqual(self.invoice.status, 'failed')
         self.assertTrue(self.invoice.is_available)
         self.assertTrue(self.invoice.customer_received)
+
+    def test_same_action_name_with_several_conditions(self):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled', conditions=[is_editable]),
+                Transition('cancel', sources=['draft', ], target='cancelled', conditions=[is_available])
+            ]
+        invoice = Invoice.objects.create(status='draft')
+        update_invoice(invoice, customer_received=True, is_available=False)
+
+        with self.assertRaises(TransitionNotAllowed):
+            # not editable and not available
+            TestProcess('status', invoice).cancel()
+        self.assertEqual(invoice.status, 'draft')
+
+        # is editable, but not available
+        update_invoice(invoice, customer_received=False, is_available=False)
+        TestProcess('status', invoice).cancel()
+        self.assertEqual(invoice.status, 'cancelled')
+
+        invoice = Invoice.objects.create(status='draft')
+        # is available, but not editable
+        update_invoice(invoice, customer_received=True, is_available=True)
+        TestProcess('status', invoice).cancel()
+        self.assertEqual(invoice.status, 'cancelled')
+
+    def test_same_action_name_with_several_permissions(self):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled', permissions=[is_staff]),
+                Transition('cancel', sources=['draft', ], target='cancelled', permissions=[allowed])
+            ]
+
+        user = User(is_allowed=True)
+        staff = User(is_staff=True)
+
+        invoice = Invoice.objects.create(status='draft')
+        with self.assertRaises(TransitionNotAllowed):
+            # either user or staff
+            TestProcess('status', invoice).cancel()
+
+        self.assertEqual(invoice.status, 'draft')
+        TestProcess('status', invoice).cancel(user=user)
+        self.assertEqual(invoice.status, 'cancelled')
+
+        invoice = Invoice.objects.create(status='draft')
+        TestProcess('status', invoice).cancel(user=staff)
+        self.assertEqual(invoice.status, 'cancelled')
