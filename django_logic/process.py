@@ -41,7 +41,10 @@ class Process(object):
             self.state = state
         elif state is None:
             assert field_name and instance is not None
-            self.state = self.state_class(queryset=self.queryset, instance=instance, field_name=field_name)
+            self.state = self.state_class(queryset=self.queryset,
+                                          instance=instance,
+                                          field_name=field_name,
+                                          process_name=self.process_name)
         else:
             raise AttributeError('Process class requires either state field name and instance or state object')
 

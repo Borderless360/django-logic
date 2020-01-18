@@ -44,7 +44,7 @@ class Permissions(BaseCommand):
 class SideEffects(BaseCommand):
     def execute(self, state: State, **kwargs):
         """Side-effects execution"""
-        logging.info(f'{state.instance_key} side-effects of {self._transition.action_name} started')
+        logging.info(f"{state.instance_key} side-effects of '{self._transition.action_name}' action started")
         try:
             for command in self._commands:
                 command(state.instance, **kwargs)

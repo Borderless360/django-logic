@@ -1,14 +1,15 @@
-import logging
 from hashlib import blake2b
 from django.core.cache import cache
 from django.utils.functional import cached_property
 
 
 class State(object):
-    def __init__(self, instance: any, field_name: str, queryset=None):
+    def __init__(self, instance: any, field_name: str, process_name=None, queryset=None):
         self.instance = instance
         self.queryset = queryset or instance._meta.model.objects.all()
         self.field_name = field_name
+        # save process name if access to process needed
+        self.process_name = process_name
 
     def get_db_state(self):
         """
@@ -30,10 +31,10 @@ class State(object):
 
     @property
     def instance_key(self):
-        return "{}.{}.{}.{}".format(self.instance._meta.app_label,
-                                    self.instance._meta.model_name,
-                                    self.field_name,
-                                    self.instance.pk)
+        return f'{self.instance._meta.app_label}-' \
+               f'{self.instance._meta.model_name}-' \
+               f'{self.field_name}-' \
+               f'{self.instance.pk}'
 
     def _get_hash(self):
         return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
