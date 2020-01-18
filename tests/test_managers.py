@@ -1,3 +1,4 @@
+from django.db import models
 from django.test import TestCase
 
 from django_logic.process import ProcessManager, Process
@@ -6,6 +7,7 @@ from django_logic.transition import Transition
 
 class FirstProcess(Process):
     process_name = 'first_process'
+    queryset = models.Manager()  # fake it to pass init
     transitions = [
         Transition(action_name='transition1', sources=['state1'], target='state3')
     ]
@@ -13,6 +15,7 @@ class FirstProcess(Process):
 
 class SecondProcess(Process):
     process_name = 'second_process'
+    queryset = models.Manager()  # fake it to pass init
     transitions = [
         Transition(action_name='transition2', sources=['state2'], target='state3')
     ]

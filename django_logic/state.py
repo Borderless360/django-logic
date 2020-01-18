@@ -1,6 +1,7 @@
 import logging
 from hashlib import blake2b
 from django.core.cache import cache
+from django.utils.functional import cached_property
 
 
 class State(object):
@@ -15,7 +16,7 @@ class State(object):
         """
         return self.queryset.values_list(self.field_name, flat=True).get(pk=self.instance.id)
 
-    @property  # TODO: change to cached
+    @cached_property
     def cached_state(self):
         return self.get_db_state()
 
@@ -27,12 +28,15 @@ class State(object):
         self.queryset.filter(pk=self.instance.id).update(**{self.field_name: state})
         self.instance.refresh_from_db()
 
+    @property
+    def instance_key(self):
+        return "{}.{}.{}.{}".format(self.instance._meta.app_label,
+                                    self.instance._meta.model_name,
+                                    self.field_name,
+                                    self.instance.pk)
+
     def _get_hash(self):
-        key = "{}-{}-{}-{}".format(self.instance._meta.app_label,
-                                   self.instance._meta.model_name,
-                                   self.field_name,
-                                   self.instance.pk)
-        return blake2b(key.encode(), digest_size=16).hexdigest()
+        return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
 
     def lock(self):
         cache.set(self._get_hash(), True)

@@ -1,3 +1,5 @@
+import logging
+
 from django_logic.commands import SideEffects, Callbacks, Permissions, Conditions
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
@@ -38,8 +40,6 @@ class Transition(object):
         """
         It validates this process to meet conditions and pass permissions
         :param state: State object
-        :param field_name:
-        :param instance: any instance used to meet conditions
         :param user: any object used to pass permissions
         :return: True or False
         """
@@ -47,31 +47,31 @@ class Transition(object):
                 self.permissions.execute(state, user) and
                 self.conditions.execute(state))
 
-    def change_state(self, state: State , **kwargs):
+    def change_state(self, state: State, **kwargs):
         """
-        This method changes a state of the provided instance and file name by the following algorithm:
+        This method changes a state by the following algorithm:
         - Lock state
         - Change state to `in progress` if such exists
         - Run side effects which should run `complete_transition` in case of success
         or `fail_transition` in case of failure.
-        :param instance: any
-        :param field_name: str
+        :param state: State object
         """
         if state.is_locked():
+            logging.info(f'{state.instance_key} is locked')
             raise TransitionNotAllowed("State is locked")
 
         state.lock()
+        logging.info(f'{state.instance_key} has been locked')
         if self.in_progress_state:
             state.set_state(self.in_progress_state)
+            logging.info(f'{state.instance_key} state changed to {self.in_progress_state}')
         self.side_effects.execute(state, **kwargs)
 
     def complete_transition(self, state: State, **kwargs):
         """
-        It completes the transition process for provided instance and filed name.
-        The instance will be unlocked and callbacks exc
-        :param instance:
-        :param field_name:
-        :return:
+        It completes the transition process for provided state.
+        The instance will be unlocked and callbacks executed
+        :param state: State object
         """
         state.set_state(self.target)
         state.unlock()
@@ -80,8 +80,7 @@ class Transition(object):
     def fail_transition(self, state: State, **kwargs):
         """
         It triggers fail transition in case of any failure during the side effects execution.
-        :param instance: any
-        :param field_name: str
+        :param state: State object
         """
         if self.failed_state:
             state.set_state(self.failed_state)

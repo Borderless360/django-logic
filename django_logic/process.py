@@ -2,7 +2,7 @@ import logging
 from functools import partial
 
 from django_logic.commands import Conditions, Permissions
-from django_logic.exceptions import ManyTransitions
+from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 
 logger = logging.getLogger(__name__)
@@ -31,12 +31,11 @@ class Process(object):
 
     def __init__(self, field_name='', instance=None, state=None):
         """
-        :param field_name:
-        :param instance:
+        :param field_name: state or status field name
+        :param instance: Model instance
         """
         self.field_name = field_name
         self.instance = instance
-
         if field_name is '' or instance is None:
             assert state is not None
             self.state = state
@@ -47,15 +46,28 @@ class Process(object):
             raise AttributeError('Process class requires either state field name and instance or state object')
 
     def __getattr__(self, item):
-        transitions = list(self.get_available_transitions(action_name=item))
+        return partial(self._get_transition_method, item)
+
+    def _get_transition_method(self, action_name: str, **kwargs):
+        """
+        It returns a callable transition method by provided action name.
+        """
+        user = kwargs.pop('user') if 'user' in kwargs else None
+        transitions = list(self.get_available_transitions(action_name=action_name, user=user))
 
         if len(transitions) == 1:
-            return partial(transitions[0].change_state, self.state)
+            transition = transitions[0]
+            logger.info(f"{self.state.instance_key}, process {self.process_name} "
+                        f"executes '{action_name}' transition from {self.state.cached_state} "
+                        f"to {transition.target}")
+            return transition.change_state(self.state, **kwargs)
 
-        # This exceptions should be handled otherwise it will be very annoying
-        elif transitions:
-            raise ManyTransitions("There are several transitions available")
-        raise AttributeError(f"Process class {self.__class__} has no transition with action name {item}")
+        elif len(transitions) > 1:
+            logger.error(f"Runtime error: {self.state.instance_key} has several "
+                         f"transitions with action name '{action_name}'. "
+                         f"Make sure to specify conditions and permissions accordingly to fix such case")
+            raise TransitionNotAllowed("There are several transitions available")
+        raise TransitionNotAllowed(f"Process class {self.__class__} has no transition with action name {action_name}")
 
     def is_valid(self, user=None) -> bool:
         """
