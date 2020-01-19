@@ -27,7 +27,7 @@ class Process(object):
     permissions_class = Permissions
     state_class = State
     process_name = 'process'
-    queryset = None  # It should be set up once for the main process
+    queryset_name = 'objects'
 
     def __init__(self, field_name='', instance=None, state=None):
         """
@@ -41,7 +41,7 @@ class Process(object):
             self.state = state
         elif state is None:
             assert field_name and instance is not None
-            self.state = self.state_class(queryset=self.queryset,
+            self.state = self.state_class(queryset_name=self.queryset_name,
                                           instance=instance,
                                           field_name=field_name,
                                           process_name=self.process_name)

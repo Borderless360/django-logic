@@ -4,18 +4,20 @@ from django.utils.functional import cached_property
 
 
 class State(object):
-    def __init__(self, instance: any, field_name: str, process_name=None, queryset=None):
+    def __init__(self, instance: any, field_name: str, process_name=None, queryset_name=None):
         self.instance = instance
-        self.queryset = queryset or instance._meta.model.objects.all()
+        self.queryset_name = queryset_name or 'objects'
         self.field_name = field_name
-        # save process name if access to process needed
         self.process_name = process_name
+
+    def get_queryset(self):
+        return getattr(self.instance._meta.model, self.queryset_name).all()
 
     def get_db_state(self):
         """
         Fetches state directly from db instead of model instance.
         """
-        return self.queryset.values_list(self.field_name, flat=True).get(pk=self.instance.id)
+        return self.get_queryset().values_list(self.field_name, flat=True).get(pk=self.instance.id)
 
     @cached_property
     def cached_state(self):
@@ -26,7 +28,7 @@ class State(object):
         Sets intermediate state to instance's field until transition is over.
         """
         # TODO: how would it work if it's used within another transaction?
-        self.queryset.filter(pk=self.instance.id).update(**{self.field_name: state})
+        self.get_queryset().filter(pk=self.instance.id).update(**{self.field_name: state})
         self.instance.refresh_from_db()
 
     @property
