@@ -1,2 +1,6 @@
-class TransitionNotAllowed(Exception):
+class DjangoLogicException(Exception):
+    pass
+
+
+class TransitionNotAllowed(DjangoLogicException):
     pass

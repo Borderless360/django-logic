@@ -36,24 +36,24 @@ def not_available(instance):
     return False
 
 
-def disable_invoice(invoice: Invoice):
+def disable_invoice(invoice: Invoice, *args, **kwargs):
     invoice.is_available = False
     invoice.customer_received = False
     invoice.save()
 
 
-def update_invoice(invoice, is_available, customer_received):
+def update_invoice(invoice, is_available, customer_received, *args, **kwargs):
     invoice.is_available = is_available
     invoice.customer_received = customer_received
     invoice.save()
 
 
-def enable_invoice(invoice: Invoice):
+def enable_invoice(invoice: Invoice, *args, **kwargs):
     invoice.is_available = True
     invoice.save()
 
 
-def fail_invoice(invoice: Invoice):
+def fail_invoice(invoice: Invoice, *args, **kwargs):
     raise Exception
 
 

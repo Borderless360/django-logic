@@ -51,7 +51,7 @@ class SideEffects(BaseCommand):
         except Exception as error:
             logging.error(f"{state.instance_key} side-effects of "
                           f"'{self._transition.action_name}' action failed with {error}")
-            self._transition.fail_transition(state, **kwargs)
+            self._transition.fail_transition(state, error, **kwargs)
         else:
             logging.info(f"{state.instance_key} side-effects of "
                          f"'{self._transition.action_name}' action succeed")
