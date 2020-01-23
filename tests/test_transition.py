@@ -2,6 +2,7 @@ from django.test import TestCase
 from demo.models import Invoice
 from django_logic.state import State
 from django_logic.transition import Transition
+from unittest.mock import patch
 
 
 def disable_invoice(invoice: Invoice, *args, **kwargs):
@@ -27,6 +28,9 @@ def fail_invoice(invoice: Invoice, *args, **kwargs):
 def receive_invoice(invoice: Invoice, *args, **kwargs):
     invoice.customer_received = True
     invoice.save()
+
+def debug_action(*args, **kwargs):
+    pass
 
 
 class TransitionSideEffectsTestCase(TestCase):
@@ -185,3 +189,20 @@ class TransitionFailureCallbacksTestCase(TestCase):
         self.assertFalse(self.invoice.is_available)
         self.assertFalse(self.invoice.customer_received)
         self.assertFalse(state.is_locked())
+
+    @patch('tests.test_transition.debug_action')
+    def test_failure_callback_exception_passed(self, debug_mock):
+        update_invoice(self.invoice, is_available=True, customer_received=True)
+        transition = Transition('test', sources=[], target='success', failed_state='failed',
+                                side_effects=[fail_invoice], failure_callbacks=[debug_action])
+        self.invoice.refresh_from_db()
+        state = State(self.invoice, 'status')
+        transition.change_state(state, foo="bar")
+        self.assertTrue(debug_mock.called)
+        self.assertEqual(debug_mock.call_count, 1)
+        call_args = debug_mock.call_args[0]
+        call_kwargs = debug_mock.call_args[1]
+        self.assertEqual(call_args, (self.invoice,))
+        self.assertEqual(len(call_kwargs), 2)
+        self.assertTrue(isinstance(call_kwargs['exception'], Exception))
+        self.assertEqual(call_kwargs['foo'], 'bar')
