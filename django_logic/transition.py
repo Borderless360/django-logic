@@ -79,14 +79,15 @@ class Transition(object):
         logging.info(f'{state.instance_key} has been unlocked')
         self.callbacks.execute(state, **kwargs)
 
-    def fail_transition(self, state: State, **kwargs):
+    def fail_transition(self, state: State, exception: Exception, **kwargs):
         """
         It triggers fail transition in case of any failure during the side effects execution.
         :param state: State object
+        :param exception: Exception that caused transition failure
         """
         if self.failed_state:
             state.set_state(self.failed_state)
             logging.info(f'{state.instance_key} state changed to {self.failed_state}')
         state.unlock()
         logging.info(f'{state.instance_key} has been unlocked')
-        self.failure_callbacks.execute(state, **kwargs)
+        self.failure_callbacks.execute(state, exception=exception, **kwargs)
