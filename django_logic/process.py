@@ -66,7 +66,7 @@ class Process(object):
             return transition.change_state(self.state, **kwargs)
 
         elif len(transitions) > 1:
-            logger.error(f"Runtime error: {self.state.instance_key} has several "
+            logger.info(f"Runtime error: {self.state.instance_key} has several "
                          f"transitions with action name '{action_name}'. "
                          f"Make sure to specify conditions and permissions accordingly to fix such case")
             raise TransitionNotAllowed("There are several transitions available")
