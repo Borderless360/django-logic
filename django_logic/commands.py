@@ -44,17 +44,16 @@ class Permissions(BaseCommand):
 class SideEffects(BaseCommand):
     def execute(self, state: State, **kwargs):
         """Side-effects execution"""
-        logging.info(f"{state.instance_key} side-effects of '{self._transition.action_name}' action started")
+        logging.info(f"{state.instance_key} side effects of '{self._transition.action_name}' started")
         try:
             for command in self._commands:
                 command(state.instance, **kwargs)
         except Exception as error:
-            logging.error(f"{state.instance_key} side-effects of "
-                          f"'{self._transition.action_name}' action failed with {error}")
+            logging.info(f"{state.instance_key} side effects of '{self._transition.action_name}' failed with {error}")
+            logging.exception(error)
             self._transition.fail_transition(state, error, **kwargs)
         else:
-            logging.info(f"{state.instance_key} side-effects of "
-                         f"'{self._transition.action_name}' action succeed")
+            logging.info(f"{state.instance_key} side-effects of '{self._transition.action_name}' succeeded")
             self._transition.complete_transition(state, **kwargs)
 
 
@@ -70,5 +69,5 @@ class Callbacks(BaseCommand):
             for command in self.commands:
                 command(state.instance, **kwargs)
         except Exception as error:
-            logging.error(f"{state.instance_key} callbacks of "
-                          f"'{self._transition.action_name}` action failed with {error}")
+            logging.info(f"{state.instance_key} callbacks of '{self._transition.action_name}` failed with {error}")
+            logging.exception(error)
