@@ -67,8 +67,8 @@ class Process(object):
 
         elif len(transitions) > 1:
             logger.info(f"Runtime error: {self.state.instance_key} has several "
-                         f"transitions with action name '{action_name}'. "
-                         f"Make sure to specify conditions and permissions accordingly to fix such case")
+                        f"transitions with action name '{action_name}'. "
+                        f"Make sure to specify conditions and permissions accordingly to fix such case")
             raise TransitionNotAllowed("There are several transitions available")
         raise TransitionNotAllowed(f"Process class {self.__class__} has no transition with action name {action_name}")
 
@@ -82,6 +82,17 @@ class Process(object):
         conditions = self.conditions_class(commands=self.conditions)
         return (permissions.execute(self.state, user) and
                 conditions.execute(self.state))
+
+    def get_available_actions(self, user=None, action_name=None):
+        """
+        It returns a list of available action names, every name is unique,
+        in contrast with `get_available_transitions` where the transitions might have the same names.
+        :param user: any object which used to validate permissions
+        :param action_name: str
+        :return: list
+        """
+        return list(set([transition.action_name for transition in
+                         self.get_available_transitions(user, action_name)]))
 
     def get_available_transitions(self, user=None, action_name=None):
         """

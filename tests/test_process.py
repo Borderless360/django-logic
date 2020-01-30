@@ -179,6 +179,21 @@ class ValidateProcessTestCase(TestCase):
         self.assertEqual(invoice.status, 'draft')
 
 
+class GetAvailableActionsTestCase(TestCase):
+    def setUp(self) -> None:
+        self.user = User()
+
+    def get_actions_with_the_same_name(self):
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['done'], target='closed')
+
+        class ChildProcess(Process):
+            transitions = [transition1, transition2]
+
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
+        self.assertEqual(list(process.get_available_actions()), ['action'])
+
+
 class GetAvailableTransitionsTestCase(TestCase):
     def setUp(self) -> None:
         self.user = User()
