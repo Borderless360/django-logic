@@ -89,10 +89,10 @@ class Process(object):
         in contrast with `get_available_transitions` where the transitions might have the same names.
         :param user: any object which used to validate permissions
         :param action_name: str
-        :return: list
+        :return: sorted list
         """
-        return list(set([transition.action_name for transition in
-                         self.get_available_transitions(user, action_name)]))
+        return sorted(set([transition.action_name for transition in
+                           self.get_available_transitions(user, action_name)]))
 
     def get_available_transitions(self, user=None, action_name=None):
         """

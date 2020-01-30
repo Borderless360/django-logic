@@ -183,15 +183,26 @@ class GetAvailableActionsTestCase(TestCase):
     def setUp(self) -> None:
         self.user = User()
 
-    def get_actions_with_the_same_name(self):
+    def test_get_actions_with_the_same_name(self):
         transition1 = Transition('action', sources=['draft'], target='done')
-        transition2 = Transition('action', sources=['done'], target='closed')
+        transition2 = Transition('action', sources=['draft'], target='closed')
 
         class ChildProcess(Process):
             transitions = [transition1, transition2]
 
         process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
-        self.assertEqual(list(process.get_available_actions()), ['action'])
+        self.assertEqual(process.get_available_actions(), ['action'])
+
+    def test_get_sorted_list(self):
+        transition1 = Transition('cancel', sources=['draft'], target='done')
+        transition2 = Transition('action', sources=['draft'], target='closed')
+        transition3 = Transition('bulk_action', sources=['draft'], target='closed')
+
+        class ChildProcess(Process):
+            transitions = [transition1, transition2, transition3]
+
+        process = ChildProcess(instance=Invoice.objects.create(status='draft'), field_name='status')
+        self.assertEqual(process.get_available_actions(), ['action', 'bulk_action', 'cancel'])
 
 
 class GetAvailableTransitionsTestCase(TestCase):
