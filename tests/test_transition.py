@@ -1,8 +1,10 @@
+from unittest.mock import patch
+
 from django.test import TestCase
-from demo.models import Invoice
+
 from django_logic.state import State
 from django_logic.transition import Transition
-from unittest.mock import patch
+from tests.models import Invoice
 
 
 def disable_invoice(invoice: Invoice, *args, **kwargs):
