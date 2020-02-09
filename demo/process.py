@@ -1,6 +1,6 @@
 from model_utils import Choices
 
-from demo.conditions import is_lock_available
+from demo.conditions import is_user, is_staff, is_planned, is_lock_available
 from django_logic import Process, Transition
 
 LOCK_STATES = Choices(
@@ -11,9 +11,6 @@ LOCK_STATES = Choices(
 
 
 class UserLockerProcess(Process):
-    def is_user(self, user):
-        return not user.is_staff
-
     permissions = [is_user]
     transitions = [
         Transition(
@@ -30,11 +27,9 @@ class UserLockerProcess(Process):
 
 
 class StaffLockerProcess(Process):
-    def is_staff(self, user):
-        return user.is_staff
-
     permissions = [is_staff]
-    all_states = [s for s in LOCK_STATES]
+    all_states = [x for x, y in LOCK_STATES]
+
     transitions = [
         Transition(
             action_name='lock',
@@ -49,16 +44,18 @@ class StaffLockerProcess(Process):
         Transition(
             action_name='maintain',
             sources=all_states,
-            target=LOCK_STATES.maintenance
+            target=LOCK_STATES.maintenance,
+            conditions=[is_planned]
         )
     ]
 
 
 class LockerProcess(Process):
     states = LOCK_STATES
+
     conditions = [is_lock_available]
 
     nested_processes = [
-        UserLockerProcess,
         StaffLockerProcess,
+        UserLockerProcess,
     ]
