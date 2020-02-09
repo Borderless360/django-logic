@@ -1,6 +1,7 @@
 from django.test import TestCase
-from demo.models import Invoice
+
 from django_logic.state import State
+from tests.models import Invoice
 
 
 class StateTestCase(TestCase):

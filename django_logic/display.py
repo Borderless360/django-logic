@@ -113,7 +113,13 @@ def annotate_nodes(process):
             'type': 'process',
             'nodes': []
         }
-
+        # process permissions as conditions
+        if process.permissions:
+            node['nodes'].append({
+                'id': get_conditions_id(process),
+                'name': '\n'.join([permission.__name__ for permission in process.permissions]),
+                'type': 'process_conditions',
+            })
         # process conditions
         if process.conditions:
             node['nodes'].append({
@@ -129,6 +135,13 @@ def annotate_nodes(process):
                 'name': transition.action_name,
                 'type': 'transition',
             })
+            # transition permissions as conditions
+            if transition.permissions.commands:
+                node['nodes'].append({
+                    'id': get_conditions_id(transition),
+                    'name': '\n'.join([permission.__name__ for permission in transition.permissions.commands]),
+                    'type': 'transition_conditions',
+                })
             # transition conditions
             if transition.conditions.commands:
                 node['nodes'].append({

@@ -6,6 +6,7 @@ SECRET_KEY = 'django_logic'
 PROJECT_APPS = [
     'django_logic',
     'demo',
+    'tests',
 ]
 
 INSTALLED_APPS = [
@@ -41,8 +42,8 @@ CACHES = {
         'LOCATION': 'django_logic',
     }
 }
-
-MIGRATION_MODULES = {
-    'auth': None,
-    'contenttypes': None,
-}
+#
+# MIGRATION_MODULES = {
+#     'auth': None,
+#     'contenttypes': None,
+# }

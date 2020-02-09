@@ -1,16 +1,16 @@
 from rest_framework import serializers
 
-from demo.models import Invoice
+from demo.models import Lock
 
 
-class InvoiceSerializer(serializers.ModelSerializer):
+class LockerSerializer(serializers.ModelSerializer):
     actions = serializers.SerializerMethodField()
 
     class Meta:
-        model = Invoice
-        fields = ('id', 'status', 'customer_received', 'is_available', 'actions')
+        model = Lock
+        fields = ('id', 'actions', 'status')
         readonly = ('id', 'status')
 
     def get_actions(self, instance):
         return sorted(set([transition.action_name for transition in
-                           instance.invoice_process.get_available_transitions()]))
+                           instance.process.get_available_transitions()]))

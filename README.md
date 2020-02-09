@@ -28,57 +28,57 @@ pip install django-logic
 ```
 
 ## Usage
-1. Create a django project and start a new app
-2. Create a new file `process.py` under the app and define your process.
+#### Transition
+#### Process
 ```python
-from django_logic import Process as BaseProcess, Transition
+from django_logic import Process, Transition
 
-
-class Process(BaseProcess):
-    states = (
-        ('draft', 'Draft'),
-        ('paid', 'Paid'),
-        ('void', 'Void'),
-    )
-
+class ApprovalProcess(Process):
     transitions = [
         Transition(action_name='approve', sources=['draft'], target='approved'),
         Transition(action_name='void', sources=['draft', 'approved'], target='void'),
     ]
 ```
-3. Display the process. It requires to install graphviz.
+#### Nested processes 
+
+
+#### Display process
+Drawing a process with the following elements:
+- Process - a transparent rectangle 
+- Transition - a grey rectangle 
+- State - a transparent ellipse 
+- Process' conditions and permissions are defined inside of related process as a transparent diamond
+- Transition' conditions and permissions are defined inside of related transition's process as a grey diamond
+   
+[![][diagram-img]][diagram-img]
+From this diagram you can visually check that the following the business requirements have been implemented properly:
+- Personnel involved: User and Staff
+- Lock has to be available before any actions taken. It's  defined by a condition  `is_lock_available`. 
+- User is able to lock and unlock an available locker. 
+- Staff is able to lock, unlock and put a locker under maintenance if such was planned.  
+
+Drawing such diagram requires installing graphviz.
 ```bash
 pip install graphviz
 ``` 
+Run this command
+```python
+from django_logic.display import * 
+from demo.process import LockerProcess
+display_process(LockerProcess, state='open', skip_main_process=True)
+```
 
-[![][invoice-img]][invoice-img]
-
-4. Bind the process with a model 
+Bind the process with a model 
 ```python
 from django.db import models
+from demo.process import LockerProcess
 from django_logic.process import ProcessManager
-from .process import Process as InvoiceProcess
 
 
-class Invoice(ProcessManager.bind_state_fields(status=InvoiceProcess), models.Model):
-    status = models.CharField(choices=InvoiceProcess.states, default='draft', max_length=16, blank=True)
+class Lock(ProcessManager.bind_state_fields(status=LockerProcess), models.Model):
+    status = models.CharField(choices=LockerProcess.states, default=LockerProcess.states.open, max_length=16, blank=True)
 ``` 
-5. Usage
-```python
-invoice = Invoice.objects.create()
-print(list([transition.action_name for transition in invoice.process.get_available_transitions())])
->> ['approve', 'void']
-invoice.process.approve()
-invoice.status
->> 'approved'
 
-print(list([transition.action_name for transition in invoice.process.get_available_transitions())])
->> ['void']
-invoice.process.void()
-invoice.status
->> 'void'
-
-```
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
@@ -91,4 +91,4 @@ Please make sure to update tests as appropriate.
 Under development
 
 
-[invoice-img]: https://user-images.githubusercontent.com/6745569/71333209-2840f080-2574-11ea-84e6-633f20d7d78f.png
+[diagram-img]: https://user-images.githubusercontent.com/6745569/74101382-25c24680-4b74-11ea-8767-0eabd4f27ebc.png

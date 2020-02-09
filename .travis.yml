@@ -6,6 +6,7 @@ python:
 install:
   - pip install -r requirements.txt
   - pip install django-rest-framework
+  - pip install django-model-utils
   - pip install coveralls
 # command to run tests
 script:

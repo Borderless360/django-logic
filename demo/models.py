@@ -1,18 +1,12 @@
 from django.db import models
-
-from demo.process import InvoiceProcess
-
+from demo.process import LockerProcess
 from django_logic.process import ProcessManager
 
 
-class Invoice(ProcessManager.bind_state_fields(status=InvoiceProcess), models.Model):
-    status = models.CharField(choices=InvoiceProcess.states, default='draft', max_length=16, blank=True)
-    customer_received = models.BooleanField(default=False)
+class Lock(ProcessManager.bind_state_fields(status=LockerProcess), models.Model):
+    status = models.CharField(choices=LockerProcess.states, default=LockerProcess.states.open, max_length=16, blank=True)
+    customer_received_notice = models.BooleanField(default=False)
     is_available = models.BooleanField(default=True)
 
     def __str__(self):
         return self.status
-
-
-class Order(models.Model):
-    payment_status = models.CharField(max_length=16, blank=True)

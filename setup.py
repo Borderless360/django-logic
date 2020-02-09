@@ -13,7 +13,7 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="https://github.com/Borderless360/django-logic",
     keywords="django",
-    packages=setuptools.find_packages(),
+    packages=setuptools.find_packages(exclude=['tests*', 'demo*']),
     include_package_data=True,
     zip_safe=False,
     license='MIT License',
