@@ -4,6 +4,7 @@ from tests.models import Invoice
 
 from django_logic import Process, Transition
 from django_logic.exceptions import TransitionNotAllowed
+from unittest.mock import patch
 
 
 class User:
@@ -748,3 +749,18 @@ class ApplyTransitionTestCase(TestCase):
         invoice = Invoice.objects.create(status='draft')
         TestProcess('status', invoice).cancel(user=staff)
         self.assertEqual(invoice.status, 'cancelled')
+
+    @patch('django_logic.transition.Transition.change_state')
+    def test_kwargs_passed(self, change_state):
+        class TestProcess(Process):
+            transitions = [
+                Transition('cancel', sources=['draft', ], target='cancelled')
+            ]
+
+        process = TestProcess(instance=self.invoice, field_name='status')
+        process.cancel(foo='bar', user='user')
+        self.assertTrue(change_state.called)
+        self.assertEqual(change_state.call_args[1], {
+            'foo': 'bar',
+            'user': 'user'
+        })
