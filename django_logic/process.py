@@ -55,7 +55,7 @@ class Process(object):
         """
         It returns a callable transition method by provided action name.
         """
-        user = kwargs.pop('user') if 'user' in kwargs else None
+        user = kwargs['user'] if 'user' in kwargs else None
         transitions = list(self.get_available_transitions(action_name=action_name, user=user))
 
         if len(transitions) == 1:
