@@ -19,6 +19,24 @@ Full documentation for the project is available at [wiki](https://github.com/Bor
 - Protects from overwritten states, locks, etc. already implemented in Django Logic and you could control the behaviour. 
 - Several states can be combined under the same Model.
 
+## Definitions 
+- **Transition** class changes a state of an object from one to another. It also contains its own conditions,
+ permissions, side-effects, callbacks, and failure callbacks. 
+- **Side-Effects** class defines a set of _idempotent functions_ that executing within one particular transition
+ before reaching the `target` state. During the execution, the state changes to the `in_progress` state.
+ In case, if one of the functions interrupts the execution, then it changes to the `failed` state.
+- **Callbacks** class defines a set of _idempotent functions_ that executiing within one particular transition
+ after reaching the `target` state. In case, if one of the functions interrupts the execution, it will log
+  an exception and the execution will be stopped (without changing the state to failed). 
+- **Failure callbakcs** class defines a set of _idempotent functions_ that executing within one particular 
+transition in case if one of the side-effects has been failed to execute. 
+- **Conditions** class defines a set of _pure functions_ which receives an object and return `True` or `False` based on 
+one particular requirement.
+- **Permissions** class defines a set of _pure functions_ which receives an object and user, then returns `True` or 
+`False` based on given permissions.
+- **Process** class defines a set of transitions with some common conditions and permissions.
+- **Nested Process** class defines a set of processes with some common conditions and permissions.
+
 ## Installation
 
 Use the package manager [pip](https://pip.pypa.io/en/stable/) to install Django-Logic.
