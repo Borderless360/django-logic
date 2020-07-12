@@ -1,6 +1,9 @@
 import re
 
-from graphviz import Digraph
+try:
+    from graphviz import Digraph
+except ModuleNotFoundError:
+    print("Install `graphviz` for correct use")
 
 
 def get_object_id(obj) -> str:
