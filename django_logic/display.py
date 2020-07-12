@@ -3,20 +3,37 @@ import re
 from graphviz import Digraph
 
 
-def get_object_id(obj):
+def get_object_id(obj) -> str:
+    """
+    Returns the identity of the object as str
+    """
     return str(id(obj))
 
 
-def get_conditions_id(obj):
+def get_conditions_id(obj) -> str:
+    """
+    Returns the identity of class Conditions as str
+    """
     return '{}|conditions'.format(id(obj))
 
 
 def get_readable_process_name(process) -> str:
-    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1 \2', str(process.__name__))
+    """
+    Returns readable process name
+    """
+    process_name = process.process_name
+    if process_name == 'process':
+        process_name = process.__name__
+
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1 \2', str(process_name))
     return re.sub('([a-z0-9])([A-Z])', r'\1 \2', s1)
 
 
 def get_target_states(process) -> set:
+    """
+    Returns a set of target states of provided transitions under the process,
+    including 'in progress' and 'failed' states
+    """
     states = set()
     for transition in process.transitions:
         states.add(transition.target)
@@ -28,6 +45,10 @@ def get_target_states(process) -> set:
 
 
 def get_all_target_states(process) -> set:
+    """
+    Returns a set of all target states of provided process class,
+    including target states of nested processes.
+    """
     states = get_target_states(process)
     for sub_process in process.nested_processes:
         states |= get_all_target_states(sub_process)
@@ -35,14 +56,21 @@ def get_all_target_states(process) -> set:
 
 
 def get_all_states(process) -> set:
+    """
+    Returns a set of all states available under provided process, including nested process
+    """
     states = set()
     for transition in process.transitions:
         states.add(transition.target)
         if transition.in_progress_state:
             states.add(transition.in_progress_state)
+        if transition.failed_state:
+            states.add(transition.failed_state)
         states |= set(transition.sources)
-        for sub_process in process.nested_processes:
-            states |= get_all_states(sub_process)
+
+    for sub_process in process.nested_processes:
+        states |= get_all_states(sub_process)
+
     return states
 
 
@@ -302,4 +330,7 @@ def display_process(process_class, state, skip_main_process=False):
     try:
         graph.view()
     except Exception as ex:
-        print(ex.stderr)
+        if hasattr(ex, 'stderr'):
+            print(ex.stderr)
+        else:
+            print(ex)
