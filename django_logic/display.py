@@ -3,6 +3,7 @@ import re
 try:
     from graphviz import Digraph
 except ModuleNotFoundError:
+    # TODO: better handling
     print("Install `graphviz` for correct use")
 
 
@@ -81,14 +82,14 @@ def annotate_nodes(process):
     """
       This function annotate node names and nodes into two dicts:
       - node_names contains either process or transition unique node name.
-      - nodes contains the information of the given process
+      - nodes contain the information of the given process
       :param process: Process class
-      It should return a directed graph where every node has unique name,
+      It should return a directed graph where every node has a unique name,
       nodes could be connected by arrows.
 
       It assigns a state to a node only and only if the state hasn't been used before in the graph.
-      In other words, a state is always on an upper level before it's used. It helps to display sub graphs
-      around that state, which provides better understanding how the process structured.
+      In other words, a state is always on an upper level before it's used. It helps to display sub-graphs
+      around that state, which provides a better understanding of how the process structured.
 
       Supported the following types of nodes:
       - process
@@ -100,8 +101,8 @@ def annotate_nodes(process):
       and list of paths - from and to
 
       parameters:
-      - node_name - unique node name. It needs to know exact node path,
-          as there is no unique identifier between transitions, processes and other nodes.
+      - node_name - unique node name. It needs to know the exact node path,
+          as there is no unique identifier between transitions, processes, and other nodes.
           So, the node name is combined through the graph path.
 
       - name - displayed name
@@ -135,32 +136,32 @@ def annotate_nodes(process):
       """
     used_states = set()
 
-    def annotate_process_nodes(process, node_name):
-        node_name += get_readable_process_name(process) + '|'
+    def annotate_sub_process_nodes(sub_process, node_name):
+        node_name += get_readable_process_name(sub_process) + '|'
         # process
         node = {
-            'id': get_object_id(process),
-            'name': get_readable_process_name(process),
+            'id': get_object_id(sub_process),
+            'name': get_readable_process_name(sub_process),
             'type': 'process',
             'nodes': []
         }
         # process permissions as conditions
-        if process.permissions:
+        if sub_process.permissions:
             node['nodes'].append({
-                'id': get_conditions_id(process),
-                'name': '\n'.join([permission.__name__ for permission in process.permissions]),
+                'id': get_conditions_id(sub_process),
+                'name': '\n'.join([permission.__name__ for permission in sub_process.permissions]),
                 'type': 'process_conditions',
             })
         # process conditions
-        if process.conditions:
+        if sub_process.conditions:
             node['nodes'].append({
-                'id': get_conditions_id(process),
-                'name': '\n'.join([condition.__name__ for condition in process.conditions]),
+                'id': get_conditions_id(sub_process),
+                'name': '\n'.join([condition.__name__ for condition in sub_process.conditions]),
                 'type': 'process_conditions',
             })
 
         # transitions
-        for transition in process.transitions:
+        for transition in sub_process.transitions:
             node['nodes'].append({
                 'id': get_object_id(transition),
                 'name': transition.action_name,
@@ -182,35 +183,36 @@ def annotate_nodes(process):
                 })
 
         # it finds all intersections between the current process' states and its sub process' states
-        states = get_target_states(process)
-        for sub_process1 in process.nested_processes:
-            for sub_process2 in process.nested_processes:
+        states = get_target_states(sub_process)
+        for sub_process1 in sub_process.nested_processes:
+            for sub_process2 in sub_process.nested_processes:
                 if sub_process1 != sub_process2:
                     states |= (get_all_target_states(sub_process1) &
                                get_all_target_states(sub_process2))
 
-        # it should assign all intersect states excluding used states before
-        for state in states - used_states:
+        # it assigns all intersect states to this particular process level for better visibility,
+        # as the states that deeper than this process should not intersect with each other.
+        for state_name in states - used_states:
             node['nodes'].append({
-                'id': state,
-                'name': state,
+                'id': state_name,
+                'name': state_name,
                 'type': 'state',
             })
-            used_states.add(state)
+            used_states.add(state_name)
 
-        for sub_process in process.nested_processes:
-            node['nodes'].append(annotate_process_nodes(sub_process, node_name))
+        for sub_process in sub_process.nested_processes:
+            node['nodes'].append(annotate_sub_process_nodes(sub_process, node_name))
         return node
 
-    node = annotate_process_nodes(process, node_name='')
+    main_node = annotate_sub_process_nodes(process, node_name='')
     for state in get_all_states(process) - used_states:
-        node['nodes'].append({
+        main_node['nodes'].append({
             'id': state,
             'name': state,
             'type': 'state',
         })
 
-    return node
+    return main_node
 
 
 def fsm_paths(process, state):
