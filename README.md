@@ -1,4 +1,4 @@
-![django-logic](https://user-images.githubusercontent.com/6745569/87846343-bcecb080-c901-11ea-8dff-8f2dd1e6f311.png)
+![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
 [![Build Status](https://travis-ci.org/Borderless360/django-logic.svg?branch=master)](https://travis-ci.org/Borderless360/django-logic) [![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master)
      
