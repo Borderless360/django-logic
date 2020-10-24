@@ -28,7 +28,7 @@ Full documentation for the project is available at [wiki](https://github.com/Bor
 - **Callbacks** class defines a set of _idempotent functions_ that executiing within one particular transition
  after reaching the `target` state. In case, if one of the functions interrupts the execution, it will log
   an exception and the execution will be stopped (without changing the state to failed). 
-- **Failure callbakcs** class defines a set of _idempotent functions_ that executing within one particular 
+- **Failure callbacks** class defines a set of _idempotent functions_ that executing within one particular 
 transition in case if one of the side-effects has been failed to execute. 
 - **Conditions** class defines a set of _pure functions_ which receives an object and return `True` or `False` based on 
 one particular requirement.
