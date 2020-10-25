@@ -42,7 +42,7 @@ pip install django-logic
 ```python
 INSTALLED_APPS = (
     ...
-    'django_fsm',
+    'django_logic',
     ...
 )
 ```
@@ -73,7 +73,7 @@ ApprovalProcess = ProcessManager.bind_state_fields(my_status=ApprovalProcess, my
 
 class Invoice(ApprovalProcess, models.Model):
     my_status = models.CharField(choices=ApprovalProcess.states, default='draft', max_length=16, blank=True)
-    my_state = models.CharField(choices=ApprovalProcess.states, default='open', max_length=16, blank=True)
+    my_state = models.CharField(choices=LockProcess.states, default='open', max_length=16, blank=True)
 ```
 
 3. Bind the process with a model by inheriting the binding class.
