@@ -12,21 +12,23 @@ This concept provides you a place for the business logic, rather than splitting 
 serializers or even worse, in templates. 
 
 ## Definitions 
-- **Transition** class changes a state of an object from one to another. It also contains its own conditions,
+- **Transition** - class changes a state of an object from one to another. It also contains its own conditions,
  permissions, side-effects, callbacks, and failure callbacks. 
-- **Side-effects** class defines a set of functions that executing within one particular transition
+- **Action** - in contrast with the transition, the action does not change the state. 
+But it contains its own conditions, permissions, side-effects, callbacks, and failure callbacks. 
+- **Side-effects** - class defines a set of functions that executing within one particular transition
  before reaching the `target` state. During the execution, the state changes to the `in_progress` state.
  In case, if one of the functions interrupts the execution, then it changes to the `failed` state.
-- **Callbacks** class defines a set of functions that executing within one particular transition
+- **Callbacks** - class defines a set of functions that executing within one particular transition
  after reaching the `target` state. In case, if one of the functions interrupts the execution, it will log
  an exception and the execution will be stopped (without changing the state to failed). 
-- **Failure callbacks** class defines a set of functions that executing within one particular 
+- **Failure callbacks** - class defines a set of functions that executing within one particular 
 transition in case if one of the side-effects has been failed to execute. 
-- **Conditions** class defines a set of functions which receives an object
+- **Conditions** - class defines a set of functions which receives an object
  and return `True` or `False` based on one particular requirement.
-- **Permissions** class defines a set of functions which receives an object and user, then returns `True` or 
+- **Permissions** - class defines a set of functions which receives an object and user, then returns `True` or 
 `False` based on given permissions.
-- **Process** class defines a set of transitions with some common conditions and permissions.
+- **Process** - class defines a set of transitions with some common conditions and permissions.
 It also accepts nested processes that allow building the hierarchy.
 
 ## Installation
@@ -42,13 +44,13 @@ pip install django-logic
 ```python
 INSTALLED_APPS = (
     ...
-    'django_fsm',
+    'django_logic',
     ...
 )
 ```
 1. Define a process class with some transitions.
 ```python
-from django_logic import Process as BaseProcess, Transition, ProcessManager
+from django_logic import Process as BaseProcess, Transition, ProcessManager, Action
 
 
 class Process(BaseProcess):
@@ -60,6 +62,7 @@ class Process(BaseProcess):
     transitions = [
         Transition(action_name='approve', sources=['draft'], target='approved'),
         Transition(action_name='void', sources=['draft', 'approved'], target='void'),
+        Action(action_name='update', side_effects=[update_data]),
     ]
 ```
 2. Define a binding class and status field. 
@@ -118,6 +121,12 @@ class Process(BaseProcess):
             ],
             sources=['approved'],
             target='void'
+        ),
+        Action(
+            action_name='update', 
+            side_effects=[
+                update_data
+            ],
         ),
     ]
 ```

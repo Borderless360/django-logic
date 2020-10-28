@@ -141,8 +141,8 @@ class Action(Transition):
     Otherwise if an exception has been raised it start executing `failure callbacks` and
     changes the state to the failed one and unlocks the state field.
     """
-    def __init__(self, action_name: str, **kwargs):
-        super().__init__(action_name=action_name, sources=[],  target='', **kwargs)
+    def __init__(self, action_name: str,  sources: list, **kwargs):
+        super().__init__(action_name=action_name, sources=sources,  target='', **kwargs)
 
     def __str__(self):
         return f"Action: {self.action_name}"
