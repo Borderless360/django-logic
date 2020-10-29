@@ -116,7 +116,7 @@ class Process(BaseProcess):
         ),
         Transition(
             action_name='void', 
-            callbakcs=[
+            callbacks=[
                 send_void_invoice_email_to_accountant
             ],
             sources=['approved'],
