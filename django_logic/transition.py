@@ -96,7 +96,10 @@ class Transition(BaseTransition):
             logging.info(f'{state.instance_key} is locked')
             raise TransitionNotAllowed("State is locked")
 
-        state.lock()
+        if not state.lock():
+            # in case of race conditions
+            raise TransitionNotAllowed("State is locked")
+
         logging.info(f'{state.instance_key} has been locked')
         if self.in_progress_state:
             state.set_state(self.in_progress_state)

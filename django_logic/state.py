@@ -42,10 +42,39 @@ class State(object):
         return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
 
     def lock(self):
-        cache.set(self._get_hash(), True)
+        """
+        It locks the state for 3 years.
+        It returns True if it's been locked and False otherwise.
+        """
+        cache.set(self._get_hash(), True, 99999999)
+        return True
 
     def unlock(self):
+        """
+        It unclocks the current state
+        """
         cache.delete(self._get_hash())
 
     def is_locked(self):
+        """
+        It checks whether the state was locked or not.
+        It might return False due to the race conditions.
+        However, `lock` method should guarantees it will be locked only once.
+        """
         return cache.get(self._get_hash()) or False
+
+
+class RedisState(State):
+    """
+    RedisState implements the optimistic locking of the state
+    and guarantees to be locked only once.
+    Basically, it provides a solution to the race conditions problem for the state
+    being available in parallel execution of a transition.
+    """
+    def lock(self):
+        """
+        It locks the state only once for 3 years.
+        nx - sets the value only
+        It returns True if it's been locked and False otherwise.
+        """
+        return cache.set(self._get_hash(), True, 99999999, nx=True) or False
