@@ -74,7 +74,7 @@ class RedisState(State):
     def lock(self):
         """
         It locks the state only once for 3 years.
-        nx - sets the value only
+        nx - sets the value only once, if it was set up before it guarantees to return False.
         It returns True if it's been locked and False otherwise.
         """
         return cache.set(self._get_hash(), True, 99999999, nx=True) or False
