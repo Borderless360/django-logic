@@ -40,7 +40,8 @@ def get_target_states(process) -> set:
     """
     states = set()
     for transition in process.transitions:
-        states.add(transition.target)
+        if transition.target:
+            states.add(transition.target)
         if transition.failed_state:
             states.add(transition.failed_state)
         if transition.in_progress_state:
@@ -65,7 +66,8 @@ def get_all_states(process) -> set:
     """
     states = set()
     for transition in process.transitions:
-        states.add(transition.target)
+        if transition.target:
+            states.add(transition.target)
         if transition.in_progress_state:
             states.add(transition.in_progress_state)
         if transition.failed_state:
@@ -255,7 +257,8 @@ def fsm_paths(process, state):
 
         for transition in get_available_transitions(process, current_state):
             current = get_object_id(transition)
-            add_path(transition.target, current)
+            if transition.target:
+                add_path(transition.target, current)
 
             if transition.conditions.commands:
                 target = get_conditions_id(transition)
