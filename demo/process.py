@@ -1,7 +1,7 @@
 from model_utils import Choices
 
 from demo.conditions import is_user, is_staff, is_planned, is_lock_available
-from django_logic import Process, Transition
+from django_logic import Process, Transition, Action
 
 LOCK_STATES = Choices(
     ('maintenance', 'Under maintenance'),
@@ -13,6 +13,10 @@ LOCK_STATES = Choices(
 class UserLockerProcess(Process):
     permissions = [is_user]
     transitions = [
+        Action(
+            action_name='refresh',
+            sources=[LOCK_STATES.open, LOCK_STATES.locked]
+        ),
         Transition(
             action_name='lock',
             sources=[LOCK_STATES.open],
