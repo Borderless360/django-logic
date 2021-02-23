@@ -13,7 +13,7 @@ class InvoiceAPITestCase(APITestCase):
         locker = Lock.objects.last()
         self.assertEqual(response.json(), {'id': locker.pk,
                                            'status': 'open',
-                                           'actions': ['lock', 'refresh']})
+                                           'actions': ['lock',]})
 
     def test_get_invoices(self):
         url = reverse('demo:lock-list')
@@ -21,5 +21,5 @@ class InvoiceAPITestCase(APITestCase):
         response = self.client.get(url)
         self.assertEqual(response.json(),
                          [{'id': invoice.pk,
-                           'actions': ['lock', 'refresh'],
+                           'actions': ['lock',],
                            'status': 'open'}])
