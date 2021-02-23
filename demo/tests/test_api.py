@@ -21,5 +21,5 @@ class InvoiceAPITestCase(APITestCase):
         response = self.client.get(url)
         self.assertEqual(response.json(),
                          [{'id': invoice.pk,
-                           'actions': ['lock', ],
+                           'actions': ['lock', 'refresh'],
                            'status': 'open'}])
