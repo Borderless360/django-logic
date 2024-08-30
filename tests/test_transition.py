@@ -3,7 +3,7 @@ from unittest.mock import patch
 from django.test import TestCase
 
 from django_logic.state import State
-from django_logic import Transition, Action
+from django_logic import Transition, Action, Process
 from tests.models import Invoice
 
 
@@ -376,3 +376,51 @@ class ActionFailureCallbacksTestCase(TestCase):
         self.assertEqual(len(call_kwargs), 2)
         self.assertTrue(isinstance(call_kwargs['exception'], Exception))
         self.assertEqual(call_kwargs['foo'], 'bar')
+
+
+class TransitionNextTransitionTestCase(TestCase):
+    TRANSITION_NAME = 'transition_test'
+    NEXT_TRANSITION_NAME = 'next_transition_test'
+
+    def setUp(self) -> None:
+        self.invoice = Invoice.objects.create(status=Invoice.STATUS_DRAFT)
+        self.state = State(self.invoice, 'status', 'process')
+
+        # next transition
+        self.next_transition = Transition(self.NEXT_TRANSITION_NAME,
+                                          sources=[Invoice.STATUS_SUCCESS],
+                                          target=Invoice.STATUS_CANCELLED)
+
+        class TestProcess(Process):
+            transitions = [
+                self.next_transition,
+            ]
+
+        self.process = TestProcess(instance=self.invoice, state=self.state)
+        self.invoice.process = self.process
+
+    def test_successful_next_transition(self):
+        transition1 = Transition(self.TRANSITION_NAME,
+                                 sources=[Invoice.STATUS_DRAFT],
+                                 target=Invoice.STATUS_SUCCESS,
+                                 next_transition=self.NEXT_TRANSITION_NAME)
+        self.process.transitions.append(transition1)
+
+        with patch.object(self.next_transition, 'change_state') as next_transition_mock:
+            transition1.change_state(self.state)
+
+        next_transition_mock.assert_called_once()
+
+    def test_failed_next_transition(self):
+        transition1 = Transition(self.TRANSITION_NAME,
+                                 sources=[Invoice.STATUS_DRAFT],
+                                 target=Invoice.STATUS_SUCCESS,
+                                 failed_state=Invoice.STATUS_FAILED,
+                                 side_effects=[fail_invoice],
+                                 next_transition=self.NEXT_TRANSITION_NAME)
+        self.process.transitions.append(transition1)
+
+        with patch.object(self.next_transition, 'change_state') as next_transition_mock:
+            transition1.change_state(self.state)
+
+        next_transition_mock.assert_not_called()
