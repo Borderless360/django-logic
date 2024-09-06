@@ -1,7 +1,7 @@
 import logging
 from abc import ABC
 
-from django_logic.commands import SideEffects, Callbacks, Permissions, Conditions
+from django_logic.commands import SideEffects, Callbacks, Permissions, Conditions, NextTransition
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 
@@ -15,6 +15,7 @@ class BaseTransition(ABC):
     failure_callbacks_class = Callbacks
     permissions_class = Permissions
     conditions_class = Conditions
+    next_transition_class = NextTransition
 
     def is_valid(self, state: State, user=None) -> bool:
         raise NotImplementedError
@@ -68,6 +69,7 @@ class Transition(BaseTransition):
         self.callbacks = self.callbacks_class(kwargs.get('callbacks', []), transition=self)
         self.permissions = self.permissions_class(kwargs.get('permissions', []), transition=self)
         self.conditions = self.conditions_class(kwargs.get('conditions', []), transition=self)
+        self.next_transition = self.next_transition_class(kwargs.get('next_transition', None))
 
     def __str__(self):
         return f"Transition: {self.action_name} to {self.target}"
@@ -117,6 +119,7 @@ class Transition(BaseTransition):
         state.unlock()
         logging.info(f'{state.instance_key} has been unlocked')
         self.callbacks.execute(state, **kwargs)
+        self.next_transition.execute(state, **kwargs)
 
     def fail_transition(self, state: State, exception: Exception, **kwargs):
         """

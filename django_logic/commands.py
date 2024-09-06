@@ -71,3 +71,26 @@ class Callbacks(BaseCommand):
         except Exception as error:
             logging.info(f"{state.instance_key} callbacks of '{self._transition.action_name}` failed with {error}")
             logging.exception(error)
+
+
+class NextTransition(object):
+    """
+    Runs next transition if it is specified
+    """
+    _next_transition: str
+
+    def __init__(self, next_transition: str = None):
+        self._next_transition = next_transition
+
+    def execute(self, state: State, **kwargs):
+        if not self._next_transition:
+            return
+
+        process = getattr(state.instance, state.process_name)
+        transitions = list(process.get_available_transitions(action_name=self._next_transition,
+                                                             user=kwargs.get('user', None)))
+        if not transitions:
+            return None
+
+        transition = transitions[0]
+        transition.change_state(state, **kwargs)
