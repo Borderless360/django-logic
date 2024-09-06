@@ -14,6 +14,8 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
 ] + PROJECT_APPS
 
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
 try:
     import rest_framework
 except ImportError:
@@ -47,3 +49,5 @@ CACHES = {
 #     'auth': None,
 #     'contenttypes': None,
 # }
+
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']

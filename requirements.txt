@@ -1,1 +1,4 @@
 django>=2.0
+django-model-utils==4.5.1
+djangorestframework==3.15.2
+graphviz==0.20.3
