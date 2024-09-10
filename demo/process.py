@@ -1,13 +1,7 @@
-from model_utils import Choices
-
+from demo.choices import LOCK_STATES
 from demo.conditions import is_user, is_staff, is_planned, is_lock_available
-from django_logic import Process, Transition, Action
-
-LOCK_STATES = Choices(
-    ('maintenance', 'Under maintenance'),
-    ('locked', 'Locked'),
-    ('open', 'Open'),
-)
+from demo.models import Lock
+from django_logic import Process, Transition, Action, ProcessManager
 
 
 class UserLockerProcess(Process):
@@ -63,3 +57,6 @@ class LockerProcess(Process):
         StaffLockerProcess,
         UserLockerProcess,
     ]
+
+
+ProcessManager.bind_model_process(Lock, LockerProcess, 'status')

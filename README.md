@@ -48,57 +48,64 @@ INSTALLED_APPS = (
     ...
 )
 ```
-1. Define a process class with some transitions.
+
+1. Define django model with one or more state fields. 
 ```python
-from django_logic import Process as BaseProcess, Transition, ProcessManager, Action
+from django.db import models
 
 
-class Process(BaseProcess):
-    states = (
-        ('draft', 'Draft'),
-        ('approved', 'Approved'),
-        ('void', 'Void'),
-    )
+MY_STATE_CHOICES = (
+     ('draft', 'Draft'),
+     ('approved', 'Approved'),
+     ('void', 'Void'),
+ )
+
+class Invoice(models.Model):
+    my_state = models.CharField(choices=MY_STATE_CHOICES, default='open', max_length=16, blank=True)    
+    my_status = models.CharField(choices=MY_STATE_CHOICES, default='draft', max_length=16, blank=True)
+    
+```
+
+2. Define a process class with some transitions.
+```python
+from django_logic import Process as BaseProcess, Transition, Action
+from .choices import MY_STATE_CHOICES
+
+
+class MyProcess(BaseProcess):
+    states = MY_STATE_CHOICES
     transitions = [
         Transition(action_name='approve', sources=['draft'], target='approved'),
         Transition(action_name='void', sources=['draft', 'approved'], target='void'),
         Action(action_name='update', side_effects=[update_data]),
     ]
 ```
-2. Define a binding class and status field. 
-```python
-ApprovalProcess = ProcessManager.bind_state_fields(status=Process)
-```
-You can call the status or state field as you wish, just make sure it's defined in the model. 
-Furthermore, it supports several state fields. For example:  
-```python
-ApprovalProcess = ProcessManager.bind_state_fields(my_status=ApprovalProcess, my_state=LockProcess)
 
-class Invoice(ApprovalProcess, models.Model):
-    my_status = models.CharField(choices=ApprovalProcess.states, default='draft', max_length=16, blank=True)
-    my_state = models.CharField(choices=LockProcess.states, default='open', max_length=16, blank=True)
-```
-
-3. Bind the process with a model by inheriting the binding class.
+3. Bind the process with a model.
 ```python
-from django.db import models
-from .process import ApprovalProcess
+from django_logic import Process as BaseProcess, Transition, ProcessManager, Action
+from .models import Invoice, MY_STATE_CHOICES
 
-class Invoice(ApprovalProcess, models.Model):
-    status = models.CharField(choices=ApprovalProcess.states, default='draft', max_length=16, blank=True)
+
+class MyProcess(BaseProcess):
+    states = MY_STATE_CHOICES
+    transitions = [
+        Transition(action_name='approve', sources=['draft'], target='approved'),
+        Transition(action_name='void', sources=['draft', 'approved'], target='void'),
+        Action(action_name='update', side_effects=[update_data]),
+    ]
+
+ProcessManager.bind_model_process(Invoice, MyProcess, state_field='my_state')
 ``` 
 
 4. Advance your process with conditions, side-effects, and callbacks into the process
 ```python 
-class Process(BaseProcess):
+class MyProcess(BaseProcess):
+    process_name = 'my_process' 
     permissions = [
         is_accountant, 
     ]
-    states = (
-        ('draft', 'Draft'),
-        ('approved', 'Approved'),
-        ('void', 'Void'),
-    )
+    states = MY_STATE_CHOICES
     transitions = [
         Transition(
             action_name='approve',
@@ -147,16 +154,16 @@ from invoices.models import Invoice
 
 def approve_view(request, pk):
     invoice = Invoice.objects.get(pk=pk)
-    invoice.process.approve(user=request.user)
+    invoice.my_process.approve(user=request.user)
 ``` 
 
 7. If you want to override the value of the state field, it must be done explicitly. For example: 
 ```python
-Invoice.objects.filter(status='draft').update(status='open')
+Invoice.objects.filter(status='draft').update(my_state='open')
 # or 
 invoice = Invoice.objects.get(pk=pk)
-invoice.status = 'open'
-invoice.save(update_fields=['status'])
+invoice.my_state = 'open'
+invoice.save(update_fields=['my_state'])
 ```
 Save without `update_fields` won't update the value of the state field in order to protect the data from corrupting. 
 
@@ -165,7 +172,7 @@ Save without `update_fields` won't update the value of the state field in order 
 from django_logic.exceptions import TransitionNotAllowed
 
 try:
-    invoice.process.approve()
+    invoice.my_process.approve()
 except TransitionNotAllowed:
     logger.error('Approve is not allowed') 
 ```
