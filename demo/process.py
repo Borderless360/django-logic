@@ -1,6 +1,5 @@
-from demo.choices import LOCK_STATES
 from demo.conditions import is_user, is_staff, is_planned, is_lock_available
-from demo.models import Lock
+from demo.models import Lock, LOCK_STATES
 from django_logic import Process, Transition, Action, ProcessManager
 
 

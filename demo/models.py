@@ -1,6 +1,12 @@
 from django.db import models
+from model_utils import Choices
 
-from demo.choices import LOCK_STATES
+
+LOCK_STATES = Choices(
+    ('maintenance', 'Under maintenance'),
+    ('locked', 'Locked'),
+    ('open', 'Open'),
+)
 
 
 class Lock( models.Model):
