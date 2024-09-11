@@ -106,6 +106,8 @@ class Transition(BaseTransition):
         if self.in_progress_state:
             state.set_state(self.in_progress_state)
             logging.info(f'{state.instance_key} state changed to {self.in_progress_state}')
+
+        self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
 
     def complete_transition(self, state: State, **kwargs):
@@ -134,6 +136,10 @@ class Transition(BaseTransition):
         logging.info(f'{state.instance_key} has been unlocked')
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
+    @staticmethod
+    def _init_transition_context(context: dict) -> None:
+        context['transition_context'] = {}
+
 
 class Action(Transition):
     """
@@ -159,6 +165,7 @@ class Action(Transition):
         or `fail_transition` in case of failure.
         :param state: State object
         """
+        self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
 
     def complete_transition(self, state: State, **kwargs):
