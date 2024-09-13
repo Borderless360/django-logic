@@ -427,8 +427,15 @@ class TransitionNextTransitionTestCase(TestCase):
 
 
 class InitTransitionContextTestCase(TestCase):
-    def test_init_transition_test(self):
+    def test_init_transition_context_test(self):
         initial_context = {'test_key': 1}
         Transition._init_transition_context(initial_context)
-        self.assertEqual(initial_context['transition_context'], {})
+        self.assertEqual(initial_context['context'], {})
         self.assertEqual(initial_context['test_key'], 1)
+
+    def test_existing_transition_context_test(self):
+        initial_context = {
+            'context': {'a': 1},
+        }
+        Transition._init_transition_context(initial_context)
+        self.assertEqual(initial_context['context'], {'a': 1})

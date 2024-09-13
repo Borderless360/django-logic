@@ -137,8 +137,9 @@ class Transition(BaseTransition):
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
     @staticmethod
-    def _init_transition_context(context: dict) -> None:
-        context['transition_context'] = {}
+    def _init_transition_context(kwargs: dict) -> None:
+        if 'context' not in kwargs:
+            kwargs['context'] = {}
 
 
 class Action(Transition):
