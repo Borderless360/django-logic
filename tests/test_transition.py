@@ -206,7 +206,7 @@ class TransitionFailureCallbacksTestCase(TestCase):
         call_args = debug_mock.call_args[0]
         call_kwargs = debug_mock.call_args[1]
         self.assertEqual(call_args, (self.invoice,))
-        self.assertEqual(len(call_kwargs), 2)
+        self.assertEqual(len(call_kwargs), 3)
         self.assertTrue(isinstance(call_kwargs['exception'], Exception))
         self.assertEqual(call_kwargs['foo'], 'bar')
 
@@ -373,7 +373,7 @@ class ActionFailureCallbacksTestCase(TestCase):
         call_args = debug_mock.call_args[0]
         call_kwargs = debug_mock.call_args[1]
         self.assertEqual(call_args, (self.invoice,))
-        self.assertEqual(len(call_kwargs), 2)
+        self.assertEqual(len(call_kwargs), 3)
         self.assertTrue(isinstance(call_kwargs['exception'], Exception))
         self.assertEqual(call_kwargs['foo'], 'bar')
 
@@ -424,3 +424,18 @@ class TransitionNextTransitionTestCase(TestCase):
             transition1.change_state(self.state)
 
         next_transition_mock.assert_not_called()
+
+
+class InitTransitionContextTestCase(TestCase):
+    def test_init_transition_context_test(self):
+        initial_context = {'test_key': 1}
+        Transition._init_transition_context(initial_context)
+        self.assertEqual(initial_context['context'], {})
+        self.assertEqual(initial_context['test_key'], 1)
+
+    def test_existing_transition_context_test(self):
+        initial_context = {
+            'context': {'a': 1},
+        }
+        Transition._init_transition_context(initial_context)
+        self.assertEqual(initial_context['context'], {'a': 1})
