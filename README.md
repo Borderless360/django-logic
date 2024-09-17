@@ -57,6 +57,7 @@ from django.db import models
 MY_STATE_CHOICES = (
      ('draft', 'Draft'),
      ('approved', 'Approved'),
+     ('paid', 'Paid'),
      ('void', 'Void'),
  )
 
@@ -76,6 +77,7 @@ class MyProcess(BaseProcess):
     states = MY_STATE_CHOICES
     transitions = [
         Transition(action_name='approve', sources=['draft'], target='approved'),
+        Transition(action_name='pay', sources=['approve'], target='paid'),
         Transition(action_name='void', sources=['draft', 'approved'], target='void'),
         Action(action_name='update', side_effects=[update_data]),
     ]
@@ -98,7 +100,7 @@ class MyProcess(BaseProcess):
 ProcessManager.bind_model_process(Invoice, MyProcess, state_field='my_state')
 ``` 
 
-4. Advance your process with conditions, side-effects, and callbacks into the process
+4. Advance your process with conditions, side-effects, and callbacks into the process. Use next_transition to automatically continue the process. 
 ```python 
 class MyProcess(BaseProcess):
     process_name = 'my_process' 
@@ -119,8 +121,17 @@ class MyProcess(BaseProcess):
             ],
             callbacks=[
                 send_approved_invoice_email_to_accountant, 
-            ]
+            ],
+            next_transition='pay' 
         ),
+        Transition(
+            action_name='pay',
+            sources=['approved'],
+            target='paid',
+            side_effects=[
+                make_payment, 
+            ]
+        ),         
         Transition(
             action_name='void', 
             callbacks=[
@@ -154,8 +165,9 @@ from invoices.models import Invoice
 
 def approve_view(request, pk):
     invoice = Invoice.objects.get(pk=pk)
-    invoice.my_process.approve(user=request.user)
-``` 
+    invoice.my_process.approve(user=request.user, context={'my_var': 1})
+```
+Use context to pass data between side-effects and callbacks.
 
 7. If you want to override the value of the state field, it must be done explicitly. For example: 
 ```python
