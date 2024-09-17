@@ -1,10 +1,16 @@
 from django.db import models
-from demo.process import LockerProcess
-from django_logic.process import ProcessManager
+from model_utils import Choices
 
 
-class Lock(ProcessManager.bind_state_fields(status=LockerProcess), models.Model):
-    status = models.CharField(choices=LockerProcess.states, default=LockerProcess.states.open, max_length=16, blank=True)
+LOCK_STATES = Choices(
+    ('maintenance', 'Under maintenance'),
+    ('locked', 'Locked'),
+    ('open', 'Open'),
+)
+
+
+class Lock( models.Model):
+    status = models.CharField(choices=LOCK_STATES, default=LOCK_STATES.open, max_length=16, blank=True)
     customer_received_notice = models.BooleanField(default=False)
     is_available = models.BooleanField(default=True)
 

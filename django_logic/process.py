@@ -1,4 +1,5 @@
 import logging
+import warnings
 from functools import partial
 
 from django_logic.commands import Conditions, Permissions
@@ -119,7 +120,20 @@ class Process(object):
 
 class ProcessManager:
     @classmethod
+    def bind_model_process(cls, model, process_class, state_field: str = 'state') -> None:
+        def make_process_getter(field_name, field_class):
+            return lambda self: field_class(field_name=field_name, instance=self)
+
+        setattr(model, process_class.process_name, property(make_process_getter(state_field, process_class)))
+
+    @classmethod
     def bind_state_fields(cls, **kwargs):
+        warnings.warn(
+            "bind_state_fields is deprecated and will be removed in future versions. "
+            "Use bind_model_process instead",
+            DeprecationWarning
+        )
+
         def make_process_getter(field_name, field_class):
             return lambda self: field_class(field_name=field_name, instance=self)
 
