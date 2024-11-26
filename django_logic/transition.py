@@ -1,9 +1,11 @@
-import logging
 from abc import ABC
 
 from django_logic.commands import SideEffects, Callbacks, Permissions, Conditions, NextTransition
 from django_logic.exceptions import TransitionNotAllowed
+from django_logic.logger import get_logger
 from django_logic.state import State
+
+logger = get_logger(module_name=__name__)
 
 
 class BaseTransition(ABC):
@@ -95,17 +97,17 @@ class Transition(BaseTransition):
         :param state: State object
         """
         if state.is_locked():
-            logging.info(f'{state.instance_key} is locked')
+            logger.log(f'{state.instance_key} is locked')
             raise TransitionNotAllowed("State is locked")
 
         if not state.lock():
             # in case of race conditions
             raise TransitionNotAllowed("State is locked")
 
-        logging.info(f'{state.instance_key} has been locked')
+        logger.log(f'{state.instance_key} has been locked')
         if self.in_progress_state:
             state.set_state(self.in_progress_state)
-            logging.info(f'{state.instance_key} state changed to {self.in_progress_state}')
+            logger.log(f'{state.instance_key} state changed to {self.in_progress_state}')
 
         self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
@@ -117,9 +119,9 @@ class Transition(BaseTransition):
         :param state: State object
         """
         state.set_state(self.target)
-        logging.info(f'{state.instance_key} state changed to {self.target}')
+        logger.log(f'{state.instance_key} state changed to {self.target}')
         state.unlock()
-        logging.info(f'{state.instance_key} has been unlocked')
+        logger.log(f'{state.instance_key} has been unlocked')
         self.callbacks.execute(state, **kwargs)
         self.next_transition.execute(state, **kwargs)
 
@@ -131,9 +133,9 @@ class Transition(BaseTransition):
         """
         if self.failed_state:
             state.set_state(self.failed_state)
-            logging.info(f'{state.instance_key} state changed to {self.failed_state}')
+            logger.log(f'{state.instance_key} state changed to {self.failed_state}')
         state.unlock()
-        logging.info(f'{state.instance_key} has been unlocked')
+        logger.log(f'{state.instance_key} has been unlocked')
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
     @staticmethod

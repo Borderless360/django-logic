@@ -1,12 +1,12 @@
-import logging
 import warnings
 from functools import partial
 
 from django_logic.commands import Conditions, Permissions
 from django_logic.exceptions import TransitionNotAllowed
+from django_logic.logger import get_logger
 from django_logic.state import State
 
-logger = logging.getLogger(__name__)
+logger = get_logger(module_name=__name__)
 
 
 class Process(object):
@@ -61,15 +61,15 @@ class Process(object):
 
         if len(transitions) == 1:
             transition = transitions[0]
-            logger.info(f"{self.state.instance_key}, process {self.process_name} "
-                        f"executes '{action_name}' transition from {self.state.cached_state} "
-                        f"to {transition.target}")
+            logger.log(f"{self.state.instance_key}, process {self.process_name} "
+                       f"executes '{action_name}' transition from {self.state.cached_state} "
+                       f"to {transition.target}")
             return transition.change_state(self.state, **kwargs)
 
         elif len(transitions) > 1:
-            logger.info(f"Runtime error: {self.state.instance_key} has several "
-                        f"transitions with action name '{action_name}'. "
-                        f"Make sure to specify conditions and permissions accordingly to fix such case")
+            logger.log(f"Runtime error: {self.state.instance_key} has several "
+                       f"transitions with action name '{action_name}'. "
+                       f"Make sure to specify conditions and permissions accordingly to fix such case")
             raise TransitionNotAllowed("There are several transitions available")
         raise TransitionNotAllowed(f"Process class {self.__class__} has no transition with action name {action_name}")
 
