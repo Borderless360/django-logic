@@ -2,9 +2,11 @@ import logging
 from abc import ABC, abstractmethod
 
 from django.conf import settings
-
+from django.core.exceptions import ImproperlyConfigured
+from django.utils.module_loading import import_string
 
 DISABLE_LOGGING = getattr(settings, 'DJANGO_LOGIC_DISABLE_LOGGING', False)
+CUSTOM_LOGGER = getattr(settings, 'DJANGO_LOGIC_CUSTOM_LOGGER', None)
 
 
 class AbstractLogger(ABC):
@@ -45,5 +47,12 @@ class NullLogger(AbstractLogger):
 def get_logger(**kwargs) -> AbstractLogger:
     if DISABLE_LOGGING:
         return NullLogger()
+
+    if CUSTOM_LOGGER:
+        try:
+            custom_logger_class = import_string(CUSTOM_LOGGER)
+        except ImportError as e:
+            raise ImproperlyConfigured(f"Custom logger import error: {e}")
+        return custom_logger_class(**kwargs)
 
     return DefaultLogger(**kwargs)
