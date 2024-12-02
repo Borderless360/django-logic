@@ -5,8 +5,6 @@ from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import get_logger
 from django_logic.state import State
 
-logger = get_logger(module_name=__name__)
-
 
 class BaseTransition(ABC):
     """
@@ -72,6 +70,7 @@ class Transition(BaseTransition):
         self.permissions = self.permissions_class(kwargs.get('permissions', []), transition=self)
         self.conditions = self.conditions_class(kwargs.get('conditions', []), transition=self)
         self.next_transition = self.next_transition_class(kwargs.get('next_transition', None))
+        self.logger = get_logger(module_name=__name__)
 
     def __str__(self):
         return f"Transition: {self.action_name} to {self.target}"
@@ -97,17 +96,18 @@ class Transition(BaseTransition):
         :param state: State object
         """
         if state.is_locked():
-            logger.log(f'{state.instance_key} is locked')
+            self.logger.info(f'{state.instance_key} is locked', state_data=state.serialize())
             raise TransitionNotAllowed("State is locked")
 
         if not state.lock():
             # in case of race conditions
             raise TransitionNotAllowed("State is locked")
 
-        logger.log(f'{state.instance_key} has been locked')
+        self.logger.info(f'{state.instance_key} has been locked', state_data=state.serialize())
         if self.in_progress_state:
             state.set_state(self.in_progress_state)
-            logger.log(f'{state.instance_key} state changed to {self.in_progress_state}')
+            self.logger.info(f'{state.instance_key} state changed to {self.in_progress_state}',
+                             state_data=state.serialize())
 
         self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
@@ -119,9 +119,9 @@ class Transition(BaseTransition):
         :param state: State object
         """
         state.set_state(self.target)
-        logger.log(f'{state.instance_key} state changed to {self.target}')
+        self.logger.info(f'{state.instance_key} state changed to {self.target}', state_data=state.serialize())
         state.unlock()
-        logger.log(f'{state.instance_key} has been unlocked')
+        self.logger.info(f'{state.instance_key} has been unlocked', state_data=state.serialize())
         self.callbacks.execute(state, **kwargs)
         self.next_transition.execute(state, **kwargs)
 
@@ -133,9 +133,10 @@ class Transition(BaseTransition):
         """
         if self.failed_state:
             state.set_state(self.failed_state)
-            logger.log(f'{state.instance_key} state changed to {self.failed_state}')
+            self.logger.info(f'{state.instance_key} state changed to {self.failed_state}',
+                             state_data=state.serialize())
         state.unlock()
-        logger.log(f'{state.instance_key} has been unlocked')
+        self.logger.info(f'{state.instance_key} has been unlocked', state_data=state.serialize())
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
     @staticmethod

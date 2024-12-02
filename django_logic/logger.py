@@ -10,12 +10,15 @@ CUSTOM_LOGGER = getattr(settings, 'DJANGO_LOGIC_CUSTOM_LOGGER', None)
 
 
 class AbstractLogger(ABC):
-    @abstractmethod
-    def log(self, message: str) -> None:
+    def __init__(self, **kwargs):
         pass
 
     @abstractmethod
-    def error(self, exception: BaseException) -> None:
+    def info(self, message: str, **kwargs) -> None:
+        pass
+
+    @abstractmethod
+    def error(self, exception: BaseException, **kwargs) -> None:
         pass
 
 
@@ -24,23 +27,27 @@ class DefaultLogger(AbstractLogger):
     logger = None
 
     def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         module_name = kwargs.get('module_name', '')
         self.logger = logging.getLogger(module_name)
 
-    def log(self, message: str) -> None:
+    def info(self, message: str, **kwargs) -> None:
         self.logger.info(message)
 
-    def error(self, exception: BaseException) -> None:
+    def error(self, exception: BaseException, **kwargs) -> None:
         self.logger.exception(exception)
 
 
 class NullLogger(AbstractLogger):
     """ Logger that doesn't write messages """
 
-    def log(self, message: str) -> None:
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def info(self, message: str, **kwargs) -> None:
         pass
 
-    def error(self, exception: BaseException) -> None:
+    def error(self, exception: BaseException, **kwargs) -> None:
         pass
 
 
