@@ -1,3 +1,4 @@
+from django_logic.constants import LogType
 from django_logic.logger import get_logger
 from django_logic.state import State
 
@@ -45,19 +46,22 @@ class SideEffects(BaseCommand):
     def execute(self, state: State, **kwargs):
         """Side-effects execution"""
         self.logger.info(f"{state.instance_key} side effects of '{self._transition.action_name}' started",
-                         state_data=state.serialize())
+                         log_type=LogType.TRANSITION_DEBUG,
+                         log_data=state.serialize())
         try:
             for command in self._commands:
                 command(state.instance, **kwargs)
         except Exception as error:
             self.logger.info(f"{state.instance_key} side effects of '{self._transition.action_name}' failed "
                              f"with {error}",
-                             state_data=state.serialize())
-            self.logger.error(error, state_data=state.serialize())
+                             log_type=LogType.TRANSITION_DEBUG,
+                             log_data=state.serialize())
+            self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.serialize())
             self._transition.fail_transition(state, error, **kwargs)
         else:
             self.logger.info(f"{state.instance_key} side-effects of '{self._transition.action_name}' succeeded",
-                             state_data=state.serialize())
+                             log_type=LogType.TRANSITION_DEBUG,
+                             log_data=state.serialize())
             self._transition.complete_transition(state, **kwargs)
 
 
@@ -74,8 +78,9 @@ class Callbacks(BaseCommand):
                 command(state.instance, **kwargs)
         except Exception as error:
             self.logger.info(f"{state.instance_key} callbacks of '{self._transition.action_name}` failed with {error}",
-                             state_data=state.serialize())
-            self.logger.error(error, state_data=state.serialize())
+                             log_type=LogType.TRANSITION_DEBUG,
+                             log_data=state.serialize())
+            self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.serialize())
 
 
 class NextTransition(object):

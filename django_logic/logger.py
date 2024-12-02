@@ -5,6 +5,8 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import import_string
 
+from django_logic.constants import LogType
+
 DISABLE_LOGGING = getattr(settings, 'DJANGO_LOGIC_DISABLE_LOGGING', False)
 CUSTOM_LOGGER = getattr(settings, 'DJANGO_LOGIC_CUSTOM_LOGGER', None)
 

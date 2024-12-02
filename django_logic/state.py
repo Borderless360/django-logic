@@ -42,10 +42,11 @@ class State(object):
         return {
             'app_label': self.instance._meta.app_label,
             'model_name': self.instance._meta.model_name,
-            'instance_id': self.instance.pk,
             'queryset_name': self.queryset_name,
-            'field_name': self.field_name,
             'process_name': self.process_name,
+            'field_name': self.field_name,
+            'instance_id': self.instance.pk,
+            'current_state': getattr(self.instance, self.field_name),
         }
 
     def _get_hash(self):

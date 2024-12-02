@@ -2,5 +2,8 @@ from enum import Enum
 
 
 class LogType(Enum):
-     INFO,
-     STATE_CHANGED
+    TRANSITION_DEBUG = 'transition_debug',
+    TRANSITION_ERROR = 'transition_error',
+    TRANSITION_COMPLETED = 'transition_completed'
+    TRANSITION_FAILED = 'transition_failed'
+
