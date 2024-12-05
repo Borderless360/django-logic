@@ -99,7 +99,7 @@ class Transition(BaseTransition):
         if state.is_locked():
             self.logger.info(f'{state.instance_key} is locked',
                              log_type=LogType.TRANSITION_DEBUG,
-                             log_data=state.serialize())
+                             log_data=state.get_log_data())
             raise TransitionNotAllowed("State is locked")
 
         if not state.lock():
@@ -108,12 +108,13 @@ class Transition(BaseTransition):
 
         self.logger.info(f'{state.instance_key} has been locked',
                          log_type=LogType.TRANSITION_DEBUG,
-                         log_data=state.serialize())
+                         log_data=state.get_log_data())
         if self.in_progress_state:
             state.set_state(self.in_progress_state)
+            log_data = state.get_log_data().update({'user': kwargs.get('user', None)})
             self.logger.info(f'{state.instance_key} state changed to {self.in_progress_state}',
                              log_type=LogType.TRANSITION_DEBUG,
-                             log_data=state.serialize())
+                             log_data=log_data)
 
         self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
@@ -125,13 +126,15 @@ class Transition(BaseTransition):
         :param state: State object
         """
         state.set_state(self.target)
+        log_data = state.get_log_data()
+        log_data.update({'user': kwargs.get('user', None)})
         self.logger.info(f'{state.instance_key} state changed to {self.target}',
                          log_type=LogType.TRANSITION_COMPLETED,
-                         log_data=state.serialize())
+                         log_data=log_data)
         state.unlock()
         self.logger.info(f'{state.instance_key} has been unlocked',
                          log_type=LogType.TRANSITION_DEBUG,
-                         log_data=state.serialize())
+                         log_data=state.get_log_data())
         self.callbacks.execute(state, **kwargs)
         self.next_transition.execute(state, **kwargs)
 
@@ -143,13 +146,15 @@ class Transition(BaseTransition):
         """
         if self.failed_state:
             state.set_state(self.failed_state)
+            log_data = state.get_log_data()
+            log_data.update({'user': kwargs.get('user', None)})
             self.logger.info(f'{state.instance_key} state changed to {self.failed_state}',
                              log_type=LogType.TRANSITION_FAILED,
-                             log_data=state.serialize())
+                             log_data=log_data)
         state.unlock()
         self.logger.info(f'{state.instance_key} has been unlocked',
                          log_type=LogType.TRANSITION_DEBUG,
-                         log_data=state.serialize())
+                         log_data=state.get_log_data())
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
     @staticmethod

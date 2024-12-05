@@ -47,7 +47,7 @@ class SideEffects(BaseCommand):
         """Side-effects execution"""
         self.logger.info(f"{state.instance_key} side effects of '{self._transition.action_name}' started",
                          log_type=LogType.TRANSITION_DEBUG,
-                         log_data=state.serialize())
+                         log_data=state.get_log_data())
         try:
             for command in self._commands:
                 command(state.instance, **kwargs)
@@ -55,13 +55,13 @@ class SideEffects(BaseCommand):
             self.logger.info(f"{state.instance_key} side effects of '{self._transition.action_name}' failed "
                              f"with {error}",
                              log_type=LogType.TRANSITION_DEBUG,
-                             log_data=state.serialize())
-            self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.serialize())
+                             log_data=state.get_log_data())
+            self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.get_log_data())
             self._transition.fail_transition(state, error, **kwargs)
         else:
             self.logger.info(f"{state.instance_key} side-effects of '{self._transition.action_name}' succeeded",
                              log_type=LogType.TRANSITION_DEBUG,
-                             log_data=state.serialize())
+                             log_data=state.get_log_data())
             self._transition.complete_transition(state, **kwargs)
 
 
@@ -79,8 +79,8 @@ class Callbacks(BaseCommand):
         except Exception as error:
             self.logger.info(f"{state.instance_key} callbacks of '{self._transition.action_name}` failed with {error}",
                              log_type=LogType.TRANSITION_DEBUG,
-                             log_data=state.serialize())
-            self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.serialize())
+                             log_data=state.get_log_data())
+            self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.get_log_data())
 
 
 class NextTransition(object):

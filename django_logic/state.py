@@ -38,15 +38,12 @@ class State(object):
                f'{self.field_name}-' \
                f'{self.instance.pk}'
 
-    def serialize(self):
+    def get_log_data(self):
         return {
-            'app_label': self.instance._meta.app_label,
-            'model_name': self.instance._meta.model_name,
+            'instance': self.instance,
             'queryset_name': self.queryset_name,
             'process_name': self.process_name,
             'field_name': self.field_name,
-            'instance_id': self.instance.pk,
-            'current_state': getattr(self.instance, self.field_name),
         }
 
     def _get_hash(self):
