@@ -38,6 +38,14 @@ class State(object):
                f'{self.field_name}-' \
                f'{self.instance.pk}'
 
+    def get_log_data(self):
+        return {
+            'instance': self.instance,
+            'queryset_name': self.queryset_name,
+            'process_name': self.process_name,
+            'field_name': self.field_name,
+        }
+
     def _get_hash(self):
         return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
 
