@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="django-logic",
-    version="0.1.3",
+    version="0.1.4",
     author="Emil Balashov",
     author_email="emil@borderless360.com",
     description="Django Logic - easy way to implement state-based business logic",
