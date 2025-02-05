@@ -36,7 +36,7 @@ class Process(object):
         """
         self.field_name = field_name
         self.instance = instance
-        if field_name is '' or instance is None:
+        if field_name == '' or instance is None:
             assert state is not None
             self.state = state
         elif state is None:
