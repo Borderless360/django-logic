@@ -76,6 +76,9 @@ class Transition(BaseTransition):
     def __str__(self):
         return f"Transition: {self.action_name} to {self.target}"
 
+    def __repr__(self):
+        return self.__str__()
+
     def is_valid(self, state: State, user=None) -> bool:
         """
         It validates this process to meet conditions and pass permissions
