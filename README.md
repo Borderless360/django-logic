@@ -205,16 +205,6 @@ From this diagram you can visually check that the following the business require
 - User is able to lock and unlock an available locker. 
 - Staff is able to lock, unlock and put a locker under maintenance if such was planned.  
 
-Drawing such diagram requires installing graphviz.
-```bash
-pip install graphviz
-``` 
-Run this command
-```python
-from django_logic.display import * 
-from demo.process import LockerProcess
-display_process(LockerProcess, state='open', skip_main_process=True)
-```
 
 ## Django-Logic vs Django FSM 
 [Django FSM](https://github.com/viewflow/django-fsm) is a parent package of Django-Logic. 
