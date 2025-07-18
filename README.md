@@ -1,9 +1,5 @@
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
-[![Build Status](https://travis-ci.org/Borderless360/django-logic.svg?branch=master)](https://travis-ci.org/Borderless360/django-logic) 
-[![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master)
-[![Python Version](https://img.shields.io/pypi/pyversions/django-logic.svg)](https://pypi.org/project/django-logic/)
-[![Django Version](https://img.shields.io/badge/django-2.0%20%7C%202.1%20%7C%202.2-blue.svg)](https://www.djangoproject.com/)
 [![License](https://img.shields.io/pypi/l/django-logic.svg)](https://github.com/Borderless360/django-logic/blob/master/LICENSE)
      
 Django Logic is a lightweight workflow framework for Django that makes it easy to implement complex business logic using finite-state machines (FSM). It provides a clean, declarative way to manage state transitions, permissions, and side effects in your Django applications.
