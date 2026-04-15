@@ -1,11 +1,18 @@
-from django.urls import include, path, reverse
-from rest_framework.test import APITestCase
-from rest_framework import status
+import unittest
 
+try:
+    from rest_framework.test import APITestCase
+    from rest_framework import status
+    HAS_DRF = True
+except ImportError:
+    HAS_DRF = False
+
+from django.urls import include, path, reverse
 from demo.models import Lock
 
 
-class InvoiceAPITestCase(APITestCase):
+@unittest.skipUnless(HAS_DRF, "djangorestframework not installed")
+class InvoiceAPITestCase(APITestCase if HAS_DRF else unittest.TestCase):
     def test_create_invoice(self):
         url = reverse('demo:lock-list')
         response = self.client.post(url, data={}, format='json')
