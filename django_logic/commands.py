@@ -1,7 +1,7 @@
 from django_logic.logger import transition_logger as logger, TransitionEventType
 from django_logic.state import State
 from django_logic.constants import LogType
-from django_logic.logger import get_logger
+from django_logic.logger import _get_logger_no_warn
 
 
 class BaseCommand(object):
@@ -12,7 +12,7 @@ class BaseCommand(object):
         self._commands = commands or []
         self._transition = transition
         # DEPRECATED
-        self.logger = get_logger(module_name=__name__)
+        self.logger = _get_logger_no_warn(module_name=__name__)
 
     @property
     def commands(self):
@@ -69,8 +69,7 @@ class SideEffects(BaseCommand):
 
             logger.error(f'{kwargs.get("tr_id")} {error}')
             self._transition.fail_transition(state, error, **kwargs)
-            # Re-raise the exception to propagate to parent transitions
-            # raise
+            raise
         else:
             # DEPRECATED
             self.logger.info(f"{state.instance_key} side-effects of '{self._transition.action_name}' succeeded",

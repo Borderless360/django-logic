@@ -1,4 +1,5 @@
 import logging
+import warnings
 from abc import ABC, abstractmethod
 from enum import Enum
 
@@ -7,11 +8,11 @@ from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import import_string
 from django_logic.constants import LogType
 
-# DEPRECATED
+# DEPRECATED — will be removed in 0.3.0
 DISABLE_LOGGING = getattr(settings, 'DJANGO_LOGIC_DISABLE_LOGGING', False)
 CUSTOM_LOGGER = getattr(settings, 'DJANGO_LOGIC_CUSTOM_LOGGER', None)
 
-# DEPRECATED
+# DEPRECATED — will be removed in 0.3.0
 class AbstractLogger(ABC):
     def __init__(self, **kwargs):
         pass
@@ -53,8 +54,12 @@ class NullLogger(AbstractLogger):
     def error(self, exception: BaseException, **kwargs) -> None:
         pass
 
-# DEPRECATED
-def get_logger(**kwargs) -> AbstractLogger:
+# DEPRECATED — will be removed in 0.3.0
+def _get_logger_no_warn(**kwargs) -> AbstractLogger:
+    """Internal factory — same as get_logger() but without the deprecation warning.
+    Used by Transition/Process/Command __init__ so that object construction
+    doesn't flood logs with warnings.  The warning fires only when external
+    code calls the public get_logger() API."""
     if DISABLE_LOGGING:
         return NullLogger()
 
@@ -66,6 +71,17 @@ def get_logger(**kwargs) -> AbstractLogger:
         return custom_logger_class(**kwargs)
 
     return DefaultLogger(**kwargs)
+
+
+# DEPRECATED — will be removed in 0.3.0
+def get_logger(**kwargs) -> AbstractLogger:
+    warnings.warn(
+        "get_logger() is deprecated and will be removed in django-logic 0.3.0. "
+        "Use the standard 'django-logic' and 'django-logic.transition' Python loggers instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _get_logger_no_warn(**kwargs)
 
 # The main logger for logging all activity of django-logic.
 logger: logging.Logger = logging.getLogger('django-logic')

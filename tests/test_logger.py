@@ -66,8 +66,8 @@ class TransitionLoggingTestCase(TestCase):
         )
         state = State(self.invoice, 'status')
 
-        # with self.assertRaises(Exception):
-        transition.change_state(state)
+        with self.assertRaises(Exception):
+            transition.change_state(state)
 
         # Check for Set State log (state changed to failed)
         failed_logs = [log for log in self.logs.get_logs()
@@ -87,8 +87,8 @@ class TransitionLoggingTestCase(TestCase):
         )
         state = State(self.invoice, 'status')
 
-        # with self.assertRaises(Exception):
-        transition.change_state(state)
+        with self.assertRaises(Exception):
+            transition.change_state(state)
 
         # Check for error logs (level should be ERROR)
         error_logs = [log for log in self.logs.get_logs() if log.get('level') == 'ERROR']
@@ -140,8 +140,8 @@ class TransitionLoggingTestCase(TestCase):
         )
         state = State(self.invoice, 'status')
 
-        # with self.assertRaises(Exception):
-        transition.change_state(state)
+        with self.assertRaises(Exception):
+            transition.change_state(state)
 
         # Check for side effects failed log (SideEffect in message) and error log
         self.assertTrue(self.logs.has_log('SideEffect'))
@@ -267,8 +267,8 @@ class ActionLoggingTestCase(TestCase):
         )
         state = State(self.invoice, 'status')
 
-        # with self.assertRaises(Exception):
-        action.change_state(state)
+        with self.assertRaises(Exception):
+            action.change_state(state)
 
         # Check for Set State log (state changed to failed)
         failed_logs = [log for log in self.logs.get_logs()
@@ -287,8 +287,8 @@ class ActionLoggingTestCase(TestCase):
         )
         state = State(self.invoice, 'status')
 
-        # with self.assertRaises(Exception):
-        action.change_state(state)
+        with self.assertRaises(Exception):
+            action.change_state(state)
 
         # Check for error logs (level should be ERROR)
         error_logs = [log for log in self.logs.get_logs() if log.get('level') == 'ERROR']

@@ -4,7 +4,7 @@ from uuid import UUID
 from django_logic.constants import LogType
 from django_logic.commands import SideEffects, Callbacks, FailureSideEffects, Permissions, Conditions, NextTransition
 from django_logic.exceptions import TransitionNotAllowed
-from django_logic.logger import get_logger
+from django_logic.logger import _get_logger_no_warn
 from django_logic.logger import transition_logger, TransitionEventType
 from django_logic.state import State
 
@@ -66,8 +66,10 @@ class Transition(BaseTransition):
         """
         self.action_name = action_name
         self.target = target
-        self.sources = sources
+        self.sources = list(sources)
         self.in_progress_state = kwargs.get('in_progress_state')
+        if self.in_progress_state and self.in_progress_state not in self.sources:
+            self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
         self.failure_callbacks = self.failure_callbacks_class(kwargs.get('failure_callbacks', []), transition=self)
         self.failure_side_effects = self.failure_side_effects_class(kwargs.get('failure_side_effects', []), transition=self)
@@ -77,7 +79,7 @@ class Transition(BaseTransition):
         self.conditions = self.conditions_class(kwargs.get('conditions', []), transition=self)
         self.next_transition = self.next_transition_class(kwargs.get('next_transition', None))
         # DEPRECATED
-        self.logger = get_logger(module_name=__name__)
+        self.logger = _get_logger_no_warn(module_name=__name__)
 
     def __str__(self):
         return f"Transition: {self.action_name} to {self.target}"
@@ -119,7 +121,7 @@ class Transition(BaseTransition):
         # Only the root transition in phase 2 skips lock; nested transitions must lock and log.
         skip_lock = (
             kwargs.get('background_mode_phase_2', False)
-            and kwargs.get('root_id') == kwargs.get('tr_id')
+            and str(kwargs.get('root_id')) == str(kwargs.get('tr_id'))
         )
         if not skip_lock:
             if state.is_locked() or not state.lock():
@@ -139,7 +141,8 @@ class Transition(BaseTransition):
             if self.in_progress_state:
                 state.set_state(self.in_progress_state)
                 # DEPRECATED
-                log_data = state.get_log_data().update({'user': kwargs.get('user', None)})
+                log_data = state.get_log_data()
+                log_data.update({'user': kwargs.get('user', None)})
                 self.logger.info(f'{state.instance_key} state changed to {self.in_progress_state}',
                                 log_type=LogType.TRANSITION_DEBUG,
                                 log_data=log_data)
@@ -162,14 +165,7 @@ class Transition(BaseTransition):
                 raise
         else:
             self._init_transition_context(kwargs)
-            try:
-                self.side_effects.execute(state, **kwargs)
-            except Exception as e:
-                transition_logger.error(
-                    f"{kwargs.get('tr_id')} {TransitionEventType.FAIL.value}: {type(e).__name__}: {e}",
-                    exc_info=True,
-                )
-                # raise
+            self.side_effects.execute(state, **kwargs)
 
         return kwargs.get('tr_id', None)
 
