@@ -1,6 +1,7 @@
+from django_logic.logger import transition_logger as logger, TransitionEventType
+from django_logic.state import State
 from django_logic.constants import LogType
 from django_logic.logger import get_logger
-from django_logic.state import State
 
 
 class BaseCommand(object):
@@ -10,6 +11,7 @@ class BaseCommand(object):
     def __init__(self, commands=None, transition=None):
         self._commands = commands or []
         self._transition = transition
+        # DEPRECATED
         self.logger = get_logger(module_name=__name__)
 
     @property
@@ -21,17 +23,17 @@ class BaseCommand(object):
 
 
 class Conditions(BaseCommand):
-    def execute(self, state: State, **kwargs):
+    def execute(self, instance: object, **kwargs):
         """
         It checks every condition for the provided instance by executing every command
         :param state: State object
         :return: True or False
         """
-        return all(command(state.instance, **kwargs) for command in self._commands)
+        return all(command(instance, **kwargs) for command in self._commands)
 
 
 class Permissions(BaseCommand):
-    def execute(self, state: State, user: any, **kwargs):
+    def execute(self, instance: object, user: any, **kwargs):
         """
         It checks the permissions for the provided user and instance by executing evey command
         If user is None then permissions passed
@@ -39,26 +41,38 @@ class Permissions(BaseCommand):
         :param user: any or None
         :return: True or False
         """
-        return user is None or all(command(state.instance,  user, **kwargs) for command in self._commands)
+        # TODO: If user is None then permissions passed, it's dangerous
+        return user is None or all(command(instance,  user, **kwargs) for command in self._commands)
 
 
 class SideEffects(BaseCommand):
     def execute(self, state: State, **kwargs):
         """Side-effects execution"""
+        # DEPRECATED
         self.logger.info(f"{state.instance_key} side effects of '{self._transition.action_name}' started",
                          log_type=LogType.TRANSITION_DEBUG,
                          log_data=state.get_log_data())
         try:
+            logger.info(f'{kwargs.get("tr_id")} SideEffects {len(self._commands)}')
             for command in self._commands:
+                logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} {command.__name__}'
+                )
                 command(state.instance, **kwargs)
         except Exception as error:
+            # DEPRECATED
             self.logger.info(f"{state.instance_key} side effects of '{self._transition.action_name}' failed "
                              f"with {error}",
                              log_type=LogType.TRANSITION_DEBUG,
                              log_data=state.get_log_data())
             self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.get_log_data())
+
+            logger.error(f'{kwargs.get("tr_id")} {error}')
             self._transition.fail_transition(state, error, **kwargs)
+            # Re-raise the exception to propagate to parent transitions
+            # raise
         else:
+            # DEPRECATED
             self.logger.info(f"{state.instance_key} side-effects of '{self._transition.action_name}' succeeded",
                              log_type=LogType.TRANSITION_DEBUG,
                              log_data=state.get_log_data())
@@ -70,27 +84,57 @@ class Callbacks(BaseCommand):
         """
         Callback execution method.
         It runs commands one by one, if any of them raises an exception
-        it will stop execution and send a message to logger.
+        it will stop execution and send a message to the logger.
         Please note, it doesn't run failure callbacks in case of exception.
         """
+        logger.info(f'{kwargs.get("tr_id")} Callbacks {len(self._commands)}')
+        command_name = None
         try:
             for command in self.commands:
+                command_name = command.__name__
+                logger.info(f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} {command_name}')
                 command(state.instance, **kwargs)
         except Exception as error:
+            # DEPRECATED
             self.logger.info(f"{state.instance_key} callbacks of '{self._transition.action_name}` failed with {error}",
-                             log_type=LogType.TRANSITION_DEBUG,
-                             log_data=state.get_log_data())
-            self.logger.error(error, log_type=LogType.TRANSITION_ERROR, log_data=state.get_log_data())
+                            log_type=LogType.TRANSITION_DEBUG,
+                            log_data=state.get_log_data())
+            logger.error(f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} {command_name}: {error}', exc_info=True, extra={'kwargs': kwargs})
+            # ignore any errors in callbacks
+
+
+class FailureSideEffects(BaseCommand):
+    def execute(self, state: State, **kwargs):
+        """
+        Failure side-effects execution method.
+        Runs after side-effects fail and before the state is unlocked.
+        If any command raises an exception it will stop execution and log the error.
+        """
+        try:
+            logger.info(f'{kwargs.get("tr_id")} FailureSideEffects {len(self._commands)}')
+            for command in self.commands:
+                logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.FAILURE_SIDE_EFFECT.value} {command.__name__}'
+                )
+                command(state.instance, **kwargs)
+        except Exception as error:
+            logger.error(error)
+            # ignore any errors in failure side effects
 
 
 class NextTransition(object):
     """
     Runs next transition if it is specified
+    Note: we cannot use side-effect or callback to run next transition,
+    because the next transition should be executed after state is unlocked in the same thread.
+    Callbacks can be executed in another thread.
     """
     _next_transition: str
 
     def __init__(self, next_transition: str = None):
         self._next_transition = next_transition
+
+    _BACKGROUND_MODE_KEYS = frozenset(('background_mode', 'background_mode_phase_2'))
 
     def execute(self, state: State, **kwargs):
         if not self._next_transition:
@@ -103,4 +147,10 @@ class NextTransition(object):
             return None
 
         transition = transitions[0]
-        transition.change_state(state, **kwargs)
+        next_kwargs = {k: v for k, v in kwargs.items() if k not in self._BACKGROUND_MODE_KEYS}
+        try:
+            return transition.change_state(state, **next_kwargs)
+        except Exception as error:
+            # Ignore any errors in the next transition, 
+            # it should not impact the main transition execution
+            logger.error(error)

@@ -1,6 +1,9 @@
 from hashlib import blake2b
+from django.conf import settings
 from django.core.cache import cache
 from django.utils.functional import cached_property
+
+LOCK_TIMEOUT = getattr(settings, 'DJANGO_LOGIC', {}).get('LOCK_TIMEOUT', 7200)  # 2 hours by default
 
 
 class State(object):
@@ -19,16 +22,13 @@ class State(object):
         """
         return self.get_queryset().values_list(self.field_name, flat=True).get(pk=self.instance.id)
 
-    @cached_property
-    def cached_state(self):
-        return self.get_db_state()
-
     def set_state(self, state):
         """
         Sets intermediate state to instance's field until transition is over.
         """
-        # TODO: how would it work if it's used within another transaction?
-        self.get_queryset().filter(pk=self.instance.id).update(**{self.field_name: state})
+        setattr(self.instance, self.field_name, state)
+        # update with single instance save to apply overloaded save method
+        self.instance.save(update_fields=[self.field_name])
         self.instance.refresh_from_db()
 
     @property
@@ -45,6 +45,9 @@ class State(object):
             'process_name': self.process_name,
             'field_name': self.field_name,
         }
+    
+    def get_state(self):
+        return getattr(self.instance, self.field_name)
 
     def _get_hash(self):
         return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
@@ -54,12 +57,12 @@ class State(object):
         It locks the state for 3 years.
         It returns True if it's been locked and False otherwise.
         """
-        cache.set(self._get_hash(), True, 99999999)
+        cache.set(self._get_hash(), True, LOCK_TIMEOUT)
         return True
 
     def unlock(self):
         """
-        It unclocks the current state
+        It unlocks the current state
         """
         cache.delete(self._get_hash())
 
@@ -74,15 +77,42 @@ class State(object):
 
 class RedisState(State):
     """
-    RedisState implements the optimistic locking of the state
-    and guarantees to be locked only once.
-    Basically, it provides a solution to the race conditions problem for the state
-    being available in parallel execution of a transition.
+    RedisState uses a single Redis key for both locking and state storage.
+
+    The key's existence means the state is locked; its value is the current
+    state. This makes the state immediately visible to all processes
+    regardless of DB transaction isolation.
+
+    lock()      → atomically creates the key with the current state (nx=True)
+    set_state() → overwrites the key value with the new state + persists to DB
+                  (resets TTL so the lock stays alive while making progress)
+    get_state() → reads from the key (fallback to instance attr when unlocked)
+    unlock()    → deletes the key; DB is the source of truth again
+
+    If the process crashes without calling unlock(), the key expires
+    after lock_timeout seconds and the state becomes available again.
     """
+    lock_timeout = LOCK_TIMEOUT
+
     def lock(self):
-        """
-        It locks the state only once for 3 years.
-        nx - sets the value only once, if it was set up before it guarantees to return False.
-        It returns True if it's been locked and False otherwise.
-        """
-        return cache.set(self._get_hash(), True, 99999999, nx=True) or False
+        current = super().get_state()
+        return cache.set(self._get_hash(), current, self.lock_timeout, nx=True) or False
+
+    def is_locked(self):
+        return cache.get(self._get_hash()) is not None
+
+    def set_state(self, state):
+        cache.set(self._get_hash(), state, self.lock_timeout)
+        super().set_state(state)
+
+    def get_state(self):
+        cached = cache.get(self._get_hash())
+        if cached is not None:
+            return cached
+        return super().get_state()
+
+    def get_db_state(self):
+        cached = cache.get(self._get_hash())
+        if cached is not None:
+            return cached
+        return super().get_db_state()

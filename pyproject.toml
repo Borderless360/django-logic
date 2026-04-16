@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-logic"
+version = "0.2.0"
+description = "Django Logic - easy way to implement state-based business logic"
+readme = "README.md"
+license = { text = "MIT License" }
+authors = [
+    { name = "Emil Balashov", email = "emil@borderless360.com" },
+    { name = "Andrey Omelyanuk", email = "omelyanukandrey@gmail.com" }
+]
+keywords = ["django"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Framework :: Django",
+    "Framework :: Django :: 4.0",
+    "Framework :: Django :: 5.0",
+    "Framework :: Django :: 5.1",
+    "Framework :: Django :: 5.2",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "django>=4.0",
+    "django-model-utils>=4.5.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "djangorestframework>=3.14.0",
+    "coverage>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Borderless360/django-logic"
+Repository = "https://github.com/Borderless360/django-logic"
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "demo*"]
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.coverage.run]
+source = ["django_logic"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

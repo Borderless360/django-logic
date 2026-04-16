@@ -619,6 +619,41 @@ class GetAvailableTransitionsTestCase(TestCase):
         with self.assertRaises(TransitionNotAllowed):
             process.test()
 
+    def test_get_transition_by_action_name_ignore_sources(self):
+        """Background mode phase 2: state is in_progress_state, not in sources."""
+        class MyProcess(Process):
+            transitions = [
+                Transition('process', sources=['draft'], target='done',
+                           in_progress_state='processing'),
+            ]
+
+        invoice = Invoice.objects.create(status='processing')
+        process = MyProcess(instance=invoice, field_name='status')
+
+        with self.assertRaises(TransitionNotAllowed):
+            process.get_transition_by_action_name('process')
+
+        transition = process.get_transition_by_action_name('process', ignore_sources=True)
+        self.assertEqual(transition.action_name, 'process')
+        self.assertEqual(transition.target, 'done')
+
+    def test_get_available_transitions_ignore_sources(self):
+        """ignore_sources=True yields transitions regardless of current state."""
+        transition1 = Transition('action', sources=['draft'], target='done')
+        transition2 = Transition('other', sources=['done'], target='closed')
+
+        class MyProcess(Process):
+            transitions = [transition1, transition2]
+
+        invoice = Invoice.objects.create(status='processing')
+        process = MyProcess(instance=invoice, field_name='status')
+
+        self.assertEqual(list(process.get_available_transitions()), [])
+        self.assertEqual(
+            list(process.get_available_transitions(ignore_sources=True)),
+            [transition1, transition2],
+        )
+
 
 class ApplyTransitionTestCase(TestCase):
     def setUp(self) -> None:
@@ -760,7 +795,6 @@ class ApplyTransitionTestCase(TestCase):
         process = TestProcess(instance=self.invoice, field_name='status')
         process.cancel(foo='bar', user='user')
         self.assertTrue(change_state.called)
-        self.assertEqual(change_state.call_args[1], {
-            'foo': 'bar',
-            'user': 'user'
-        })
+        call_kwargs = change_state.call_args[1]
+        self.assertEqual(call_kwargs['foo'], 'bar')
+        self.assertEqual(call_kwargs['user'], 'user')
