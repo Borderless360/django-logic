@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.0]
+
+### Breaking Changes
+
+- **Removed `django_logic.constants` and the `LogType` enum.** All state-change logging now flows through the standard `django-logic` / `django-logic.transition` Python loggers.
+- **Removed the legacy logger abstraction.** `AbstractLogger`, `DefaultLogger`, `NullLogger`, `get_logger()`, `DJANGO_LOGIC_DISABLE_LOGGING`, `DJANGO_LOGIC_CUSTOM_LOGGER` are gone. Configure logging through Django `LOGGING` as you would for any other library.
+- **Removed `Transition.run_in_background()` / `background_mode` / `background_mode_phase_2` kwargs.** The new `BackgroundTransition` class owns background dispatch end-to-end; there is no per-call opt-in on the base `Transition`.
+- **Removed the in-tree `demo/` app** (moved to the separate [django-logic-demo](https://github.com/Borderless360/django-logic-demo) project).
+- **DRF moved to an optional dependency** (`pip install django-logic[drf]`). The core library no longer imports Django REST Framework.
+- **`in_progress_state` must be unique within a `Process`.** Declaring two transitions on the same process with the same `in_progress_state` now raises `ImproperlyConfigured` at class-creation time.
+
+### New Features — `django_logic.background`
+
+- **`BackgroundTransition` and `BackgroundAction`** — durable, queue-routed background execution with DB persistence (`TransitionMessage`), partial-unique concurrency guard, automatic retry, and a single-task execution model. All side-effects plus the target-state write happen inside one `acks_late=True` Celery task, inside one atomic block.
+- **Two execution modes** — `DJANGO_LOGIC['BACKGROUND_EXECUTION']` selects `'celery'` (production) or `'sync'` (tests, management commands, Django shell). Sync mode runs phase 2 inline in the same process, bypasses `transaction.on_commit`, and propagates exceptions to the caller — no Celery broker required for tests.
+- **`sync_execution()` context manager** — force Sync mode for a block of code regardless of the global setting.
+- **`retry_pending()`** — run the periodic safety-net task once inline, useful for tests that want to simulate "time passed".
+- **Explicit queue routing, no default.** Every `BackgroundTransition` must declare `queue='...'`. Missing `queue=` raises `ImproperlyConfigured`. The periodic safety-net tasks run on `DJANGO_LOGIC['STARTER_QUEUE']`.
+- **Periodic safety-net tasks** — `retry_stale_transitions`, `cleanup_completed_transitions`, `detect_stuck_transitions`.
+- **kwargs serialization** — built-in handling of `request`, `user` → `user_id`, `UUID` → `str`, `datetime`/`date` → `.isoformat()`; unserializable values are rejected at phase 1 rather than phase 2.
+
+### Settings
+
+```python
+DJANGO_LOGIC = {
+    'LOCK_TIMEOUT': 7200,
+    'BACKGROUND_EXECUTION': 'celery',  # or 'sync'
+    'STARTER_QUEUE': 'django_logic.starter',  # required in Celery mode
+    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
+    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
+    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
+}
+```
+
+### Dependencies
+
+- `celery` is now an optional extra (`pip install django-logic[celery]`). The library imports cleanly without it; in Sync mode, Celery is not required at all.
+
+---
+
 ## [0.2.0]
 
 ### Breaking Changes

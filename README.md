@@ -595,78 +595,128 @@ Transition(
 )
 ```
 
-## Background Mode & Celery Integration
+## Background Transitions
 
-Long-running side effects (payment processing, PDF generation, external API calls) can block the request/response cycle. Django-Logic provides two approaches to offload work to background workers.
+For long-running side-effects (payment processing, PDF generation, external API calls), use `BackgroundTransition` / `BackgroundAction` from `django_logic.background`. They provide:
 
-### Background Mode (built-in)
+- **Durable execution.** Every background transition is persisted as a `TransitionMessage` row inside the same atomic block that writes `in_progress_state`. Worker crashes, broker losses, and dropped `transaction.on_commit` hooks are all recovered by a periodic safety-net task.
+- **Per-transition queue routing — no default queue.** Every transition declares its own `queue='...'`. Missing the argument is a boot-time error, not a runtime surprise.
+- **Two execution modes.** `'celery'` dispatches to a Celery worker. `'sync'` runs phase 2 inline in the same process — ideal for unit tests, CI, management commands, and the Django shell. No Celery broker is needed to test business processes.
+- **Single-task execution.** All side-effects plus the target-state write happen inside **one** Celery task with `acks_late=True`, inside **one** atomic block. A worker crash re-delivers the whole task; the state never gets stuck mid-flight between side-effects.
 
-Background mode runs the **entire transition** in a background worker using a two-phase protocol:
+### Install
 
-1. **Phase 1** (web process): lock the state, set `in_progress_state` (if configured), dispatch task to the message broker.
-2. **Phase 2** (worker process): execute side effects, complete or fail the transition. The lock acquired in Phase 1 is reused (not re-acquired).
-
-Only the **root transition** can be run in background. Nested transitions triggered by `next_transition` or callbacks always run inline.
-
-To enable background mode, subclass `Transition` and override `run_in_background()`:
-
-```python
-from celery import shared_task
-from django_logic import Transition
-from django_logic.utils import restore_action, restore_user_object
-
-
-@shared_task(acks_late=True)
-def run_transition_task(**task_kwargs):
-    """Celery task that executes Phase 2 of a background transition."""
-    restore_user_object(task_kwargs)
-    user = task_kwargs.pop('user', None)
-    process, transition = restore_action(
-        app_label=task_kwargs['app_label'],
-        model_name=task_kwargs['model_name'],
-        instance_id=task_kwargs['instance_id'],
-        field_name=task_kwargs['field_name'],
-        process_class=task_kwargs['process_class'],
-        action_name=task_kwargs['action_name'],
-        user=user,
-    )
-    transition.change_state(
-        process.state,
-        background_mode_phase_2=True,
-        user=user,
-        **{k: task_kwargs[k] for k in ('tr_id', 'root_id', 'parent_id', 'process_class') if k in task_kwargs},
-    )
-
-
-class BackgroundTransition(Transition):
-    def run_in_background(self, state, **kwargs):
-        task_kwargs = self.get_task_kwargs(state, **kwargs)
-        run_transition_task.delay(**task_kwargs)
+```bash
+pip install django-logic[celery]   # production
+pip install django-logic            # tests / sync mode only
 ```
 
-Then use `BackgroundTransition` in your process and pass `background_mode=True` when calling the action:
+Add `'django_logic.background'` to `INSTALLED_APPS` and configure:
 
 ```python
+DJANGO_LOGIC = {
+    'LOCK_TIMEOUT': 7200,
+    'BACKGROUND_EXECUTION': 'celery',   # or 'sync' for tests/CI
+    'STARTER_QUEUE': 'django_logic.starter',
+    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
+    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
+    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
+}
+```
+
+Run `manage.py migrate` to create the `TransitionMessage` table.
+
+### Declare a background transition
+
+```python
+from django_logic import Process, Transition, ProcessManager
+from django_logic.background import BackgroundTransition, BackgroundAction
+
+
 class OrderProcess(Process):
     transitions = [
+        Transition(
+            action_name='approve',
+            sources=['draft'],
+            target='approved',
+            side_effects=[validate_order],
+        ),
         BackgroundTransition(
-            action_name='pay',
-            sources=['pending'],
-            target='paid',
-            in_progress_state='processing',
-            failed_state='payment_failed',
-            side_effects=[process_payment, send_receipt],
+            action_name='fulfil',
+            sources=['approved'],
+            target='fulfilled',
+            in_progress_state='fulfilling',
+            failed_state='fulfilment_failed',
+            queue='django_logic.critical',
+            side_effects=[reserve_stock, generate_labels, call_courier],
             callbacks=[send_confirmation_email],
+        ),
+        BackgroundTransition(
+            action_name='generate_export',
+            sources=['fulfilled'],
+            target='exported',
+            in_progress_state='exporting',
+            failed_state='export_failed',
+            queue='django_logic.slow',
+            side_effects=[build_csv, upload_to_s3],
+        ),
+        BackgroundAction(
+            action_name='sync_inventory',
+            sources=['fulfilled'],
+            queue='django_logic.fast',
+            side_effects=[push_to_erp],
         ),
     ]
 
-# In your view — returns immediately after locking
-order.order_process.pay(user=request.user, background_mode=True)
+
+ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
 ```
 
-The call returns a `tr_id` (UUID) immediately. The state moves to `processing` while the worker executes side effects. On success it becomes `paid`; on failure — `payment_failed`.
+### Call it
 
-> **Tip:** Use `RedisState` with background mode to make state changes immediately visible across processes, regardless of DB transaction isolation.
+```python
+# In a view — returns immediately (Celery mode) or after phase 2 completes (Sync mode).
+tr_id = order.process.fulfil(user=request.user)
+```
+
+### Testing your processes
+
+Set `BACKGROUND_EXECUTION='sync'` in test settings and every `instance.process.fulfil(...)` call runs phase 1 **and** phase 2 inline:
+
+```python
+class FulfilmentTests(TestCase):
+    def test_happy_path(self):
+        order = Order.objects.create(status='approved')
+        order.process.fulfil()
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'fulfilled')
+
+    def test_side_effect_failure_propagates(self):
+        order = Order.objects.create(status='approved')
+        with patch('myapp.services.call_courier', side_effect=CourierError):
+            with self.assertRaises(CourierError):
+                order.process.fulfil()
+```
+
+If the global setting is `'celery'` but you need Sync mode for a specific block, use the context manager:
+
+```python
+from django_logic.background import sync_execution
+
+with sync_execution():
+    order.process.fulfil()
+```
+
+### Suggested queue layout
+
+```
+django_logic.fast       — < 1s work (notifications, cache invalidations)
+django_logic.critical   — user-facing with SLA (fulfilment, payments)
+django_logic.slow       — > 30s work (exports, reports)
+django_logic.starter    — the framework's periodic safety-net tasks
+```
+
+The periodic starter re-dispatches stale transitions back to their own queue — retried slow jobs never jump to the critical queue.
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.

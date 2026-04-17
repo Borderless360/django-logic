@@ -4,31 +4,34 @@ Planned changes for upcoming versions of django-logic.
 
 ---
 
-## 0.3.0
+## 0.3.0 — COMPLETE
 
-### Remove deprecated code
-- [ ] Remove legacy logging: `LogType`, `AbstractLogger`, `DefaultLogger`, `NullLogger`, `get_logger()`
-- [ ] Remove settings `DJANGO_LOGIC_DISABLE_LOGGING` and `DJANGO_LOGIC_CUSTOM_LOGGER`
-- [ ] Remove all `self.logger` references from commands, transitions, process
+- [x] Remove legacy logging (`LogType`, `AbstractLogger`, `DefaultLogger`, `NullLogger`, `get_logger()`)
+- [x] Remove `DJANGO_LOGIC_DISABLE_LOGGING` / `DJANGO_LOGIC_CUSTOM_LOGGER` settings
+- [x] Remove all `self.logger` references from commands, transitions, process
+- [x] DRF and Celery as optional extras
+- [x] Remove `background_mode` / `run_in_background` from base `Transition`
+- [x] Ship `django_logic.background` (`BackgroundTransition`, `BackgroundAction`)
+- [x] TransitionMessage model + migrations, partial unique constraint, retry/cleanup periodic tasks
+- [x] Sync execution mode + `sync_execution()` context manager
+- [x] Class-time validation: required `queue=`, unique `in_progress_state` within a Process
+- [x] Move in-tree demo to the `django-logic-demo` repo
 
-### DRF as an optional dependency
-- [ ] Move `djangorestframework` from hard dependencies to `[project.optional-dependencies]` (the core library does not import DRF)
+## 1.0.0
 
+- [ ] Scenario-based testing framework (`django_logic.testing`): `ProcessScenario`, snapshot/replay, AI-readable failure output
+- [ ] Admin + DRF integration modules
+- [ ] Execution timing instrumentation (`started_at`, `completed_at`, `duration_ms` on `TransitionMessage`)
+- [ ] Configurable per-transition timeouts
+- [ ] `manage.py transition_status` management command
+- [ ] Better error messages (include current state + available transitions)
+- [ ] Automated PyPI publishing on tag push
+- [ ] Full type annotations (`mypy --strict`)
+- [ ] Docs site (MkDocs Material)
 
-### Logging from State instead of Transition
-- [ ] Move log calls to `State` methods instead of `Transition` (TODO in `transition.py:181`)
+## Later
 
-### NextTransition via callbacks
-- [ ] Consider executing next_transition via a callback instead of a separate step (TODO in `transition.py:192`)
-
-### UUID for Actions
-- [ ] Add UUID generation (`tr_id`) for `Action.change_state` (TODO in `transition.py:281`)
-
-### Exceptions in root transition
-- [ ] Revisit behaviour: currently root transition swallows exceptions and returns `tr_id` — this contradicts the documentation which shows `try/except TransitionNotAllowed`
-
-### PyPI
-- [ ] Set up automated publishing via GitHub Actions (on tag push)
-
-### Demo
-- [ ] Move demo to `django-logic-demo` repo
+- [ ] Durable callbacks (opt-in `phase` column on `TransitionMessage`)
+- [ ] Non-Celery backends (RQ, Dramatiq) behind a pluggable dispatcher interface
+- [ ] `django-logic-viz` (Mermaid/Graphviz from process definitions)
+- [ ] `django-logic-history` (generalised audit log)

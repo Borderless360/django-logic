@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "0.2.0"
-description = "Django Logic - easy way to implement state-based business logic"
+version = "0.3.0"
+description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
 authors = [
     { name = "Emil Balashov", email = "emil@borderless360.com" },
     { name = "Andrey Omelyanuk", email = "omelyanukandrey@gmail.com" }
 ]
-keywords = ["django"]
+keywords = ["django", "fsm", "state-machine", "workflow", "celery", "background", "business-logic"]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
@@ -39,9 +39,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+celery = [
+    "celery>=5.0",
+]
+redis = [
+    "django-redis>=5.0.0",
+]
+drf = [
+    "djangorestframework>=3.14.0",
+]
 dev = [
     "djangorestframework>=3.14.0",
+    "celery>=5.0",
     "coverage>=7.0",
+    "pytest>=8.0",
+    "pytest-django>=4.8",
 ]
 
 [project.urls]

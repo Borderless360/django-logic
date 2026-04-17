@@ -1,0 +1,197 @@
+- Time out
+- retry attempt
+- average of functions exuction
+- report on what’s working slow
+- calculate the number of queuse and workers per X orders X clients
+- task that runs every X minutes that runs fallback function for “stuck” and retries based on the number of attempt for a particular process or transation
+- if there is a inifinte loop inside of the simple transiton then we should receive a notification that fall back function cannot execute (e.g. count attempts of fall back function run) so we have to manually investigate the bug
+- Clickhouse could help to aggregate the logs
+- wrapper on function that will “learn” the time outs and allow us to use either the code based constants or use redis constants for time outs
+
+```python
+[Start: Function Call]
+|
+V
+[Log Start Time (Django Logger + DB Model)]
+|
+V
+[Execute Task]
+|--[Success]--> [Log End Time, Update Duration/Average] --> [End]
+|
+|--[Timeout/Exceed Average]--> [Check Fallback Availability]
+|   |
+|   |--[Available (e.g., Fulfillment)]--> [Invoke Fallback] --> [Retry (3-5x, Backoff 1-60s)] --> [Update Status/Retry Count]
+|   |
+|   |--[Not Available (e.g., Infinite Loop)]--> [Flag Investigation Needed] --> [Alert via Email/Slack]
+|
+|--[Failure/Exception]--> [Log Error] --> [Autoretry with Jitter] --> [If Max Retries: Mark Failure]
+|
+V
+[Periodic Monitor (Celery Beat: Every 1 min)]
+|--[Query Running Tasks/DB Logs]
+|--[Compare vs. Average]
+|--[Trigger Actions if Overrun]
+|
+[End]
+```
+
+# Draft
+
+Here is my suggestion to solve the problem with Django logic. The biggest problem right now is that we first of all we don't know where the problems happening and we don't measure them and we don't know how much execution time we need for one problem or another. That starts with the two problems or identifying of these problems whether the orders, for example, are being stuck in fulfilling process or they're just being fulfilled and they are in a queue. To resolve this problem I suggest that we use the timeout and retry attempt. It will be working slightly different in my understanding from what we have right now. And what we can do is that we can measure every function on how quickly it works, and just submit this information to logs. Then since it's submitted to logs, we can use the tools like click house observability and calculate the averages for every function that runs through the transition, whether it's in side effects or callbacks, whether it's salary tasks or whatever that doesn't stop us to change the django-logic library to just log that functionality. And as soon as we know the functions that run on average quite a long time we can investigate them and optimise or solve the problem of why they're stuck. Since we know that a as soon as we have the table of execution of every task and their averages, we can create a timeout function that will trigger the fall back. I suggest based on previous experience especially suggestions from Dima, we can have a salary task that will run periodically for example every minute that will check the currently execution of the task. Or functions that are above this average of their execution if such occurs then we can trigger immediately a fallback. Here we need to know that not all of the fallbacks will work perfectly so for example if we have a simple transition that stuck in an infinite loop of execution there is not so much options for us to kill this task or function. And we don't need to do that immediately but since we have this information and we can create a record in the database that this particular function is required to be debunked and investigated as it runs through or above the average time and there is no ability for us to fallback that. More complicated processes like fulfilment process for orders and fulfilment, the fallback function is already developed and we can most of the time run it easily so the order for example will go to action required and we can even attempt to re-fulfil it automatically several times so for example if it's a timeout execution there is no problems for us to run that attempt in several minutes and a few times. That would for example allow us to solve the problem with couriers like Aramex and Canada Post. So that will allow us to fulfil most of the orders and avoid the problems with timeouts or on their third party side. However there is a problem still how to set the timeout limit without accessing the database too often or any other like for example Redis and so on. The simple functionality and most of the time could be easily implemented by allowing most of the functions transitions and so on be executed above their limit soon as soon as we see the problem there then we can fine tune that particular task or function and that fine tuning can be done by a simple wrapper or on the part through the Python on the Celery task or the function where we can set the limit. Sometimes that limit might be adjustable and this adjustment can be done for example if Through the Redis table or even Postgres as if, uh, that function could be executed, mm, for example more than thirty minutes or we need sometimes forty minutes or if we want to reduce it to ten. Then that simple, uh, adjustment can be done through the database and there is no overhead on the execution to the database. Um, that will allow us fine-tune the system and that will allow us to identify... The bottlenecks and find the functions that require optimisation very easily within the Django logic processes. 
+
+### Technical Requirements for Enhancing Django-Logic Process Monitoring and Handling
+
+### Key Points
+
+- **Core Issue Addressed**: The system currently lacks visibility into where execution problems occur, does not measure them, and has no data on required execution times for various processes, such as identifying if orders are stuck in fulfillment or queued.
+- **Primary Solution**: Implement timeouts and retry attempts in a modified way, including logging execution times for all functions, using observability (e.g. ClickHouse) tools to calculate averages, and triggering fallbacks for long-running tasks.
+- **Monitoring and Optimization**: Log function performance across side effects, callbacks, Celery tasks, etc., to identify bottlenecks; modify the django-logic library as needed to enable this logging without disrupting operations.
+- **Fallback Mechanisms**: Use periodic Celery tasks to check for tasks exceeding averages and trigger fallbacks; handle simple vs. complex processes differently, with automatic retries for fulfillment issues.
+- **Timeout Configuration**: Set limits via wrappers or directly on tasks/functions, with adjustable thresholds stored in Redis or Postgres to avoid frequent access overhead, enabling fine-tuning based on observed performance.
+- **Expected Outcomes**: This approach will likely improve system reliability by resolving timeouts with third-party services (e.g., couriers like Aramex and Canada Post), though not all fallbacks may work perfectly for issues like infinite loops, requiring investigation records in the database.
+
+### Purpose
+
+This document outlines requirements for a proposed enhancement to the Django application using the django-logic library. The goal is to address visibility gaps in process execution, particularly in order fulfillment, by introducing measurement, logging, timeout handling, and fallback mechanisms. These changes aim to prevent stuck processes, optimize performance, and provide data-driven insights without introducing significant overhead.
+
+### Scope
+
+The requirements apply to all functions involved in transitions, side effects, callbacks, and Celery tasks within the django-logic framework. Focus areas include order fulfillment processes, but the solution is extensible to other areas. Modifications to the django-logic library are permitted to support logging, but core functionality must remain intact.
+
+### Assumptions and Constraints
+
+- Existing fallback functions for complex processes (e.g., order fulfillment) are already developed and can be invoked.
+- Tools like ClickHouse for observability are available or can be integrated.
+- Database (Postgres) and caching (Redis) accesses for configurations should minimize runtime overhead.
+- Not all scenarios (e.g., infinite loops) can be automatically resolved; manual investigation will be flagged via database records.
+
+---
+
+### Enhancing Monitoring and Fallback Mechanisms in Django-Logic for Improved Process Reliability
+
+This technical requirements document formalizes a proposed solution to address critical visibility and performance issues in a Django-based system utilizing the django-logic library. The primary challenge stems from a lack of insight into execution problems: the system does not currently identify where bottlenecks occur, measure their impact, or quantify the execution time required for various tasks. This opacity particularly affects processes like order fulfillment, where it is unclear whether orders are genuinely stuck in the fulfilling stage or simply queued for processing. Without such metrics, troubleshooting and optimization efforts are reactive and inefficient.
+
+The proposed enhancements introduce systematic measurement, logging, and automated handling mechanisms, including timeouts, retries, and fallbacks. These changes draw from prior experiences, such as suggestions from team members (e.g., Dima), and aim to create a more resilient system. By logging execution details and leveraging observability tools, the solution enables data-driven identification of slow functions. Periodic checks via Celery tasks will trigger interventions for exceeding thresholds, while configurable timeouts ensure flexibility without excessive resource use. This approach not only resolves immediate issues like timeouts with third-party couriers (e.g., Aramex and Canada Post) but also facilitates long-term optimization of the django-logic processes.
+
+### Problem Statement
+
+The current system exhibits several deficiencies:
+
+- **Lack of Visibility**: There is no mechanism to pinpoint where problems are occurring, such as in specific functions or transitions.
+- **Absence of Measurement**: Execution times for individual problems or tasks are not tracked, making it impossible to establish baselines or detect anomalies.
+- **Uncertainty in Process States**: For instance, in order fulfillment, it is unclear if delays result from stuck processes (e.g., infinite loops) or queue backlogs.
+- **Ineffective Handling**: Existing timeout and retry mechanisms operate in a suboptimal manner, without dynamic adjustments or comprehensive logging.
+- **Optimization Gaps**: Without average execution data, functions that consistently run long cannot be proactively investigated or optimized.
+- **Third-Party Integration Issues**: Timeouts or failures on external services (e.g., couriers) lead to unhandled stuck orders, impacting overall reliability.
+
+These issues collectively result in delayed resolutions, potential data inconsistencies, and increased manual intervention.
+
+### Proposed Solution Overview
+
+To mitigate these problems, the solution incorporates the following high-level components:
+
+- **Execution Time Logging**: Measure and log the performance of every function involved in transitions, side effects, callbacks, Celery tasks, or other django-logic elements.
+- **Observability Integration**: Submit logs to tools like ClickHouse to compute averages and aggregates for function execution times.
+- **Timeout and Fallback Triggering**: Implement a dynamic timeout system that uses calculated averages to detect overruns and invoke fallbacks.
+- **Periodic Monitoring Task**: Deploy a Celery task running at regular intervals (e.g., every minute) to scan for long-running executions and initiate appropriate actions.
+- **Retry Mechanisms**: For recoverable processes, enable automatic retries with delays.
+- **Configuration Flexibility**: Allow adjustable timeout limits via low-overhead storage (e.g., Redis or Postgres) to fine-tune without runtime penalties.
+- **Investigation Flagging**: For non-recoverable issues (e.g., infinite loops), record details in the database for manual review.
+
+This solution modifies the django-logic library minimally to include logging capabilities, ensuring compatibility with existing workflows.
+
+### Detailed Functional Requirements
+
+### 1. Execution Time Measurement and Logging
+
+- Every function within the django-logic framework must be instrumented to measure its execution time.
+- This includes functions in transitions, side effects, callbacks, Celery tasks, and any other relevant components.
+- Upon completion (or timeout), submit execution details to logs, including function name, start/end times, duration, and context (e.g., task ID, order ID).
+- The django-logic library shall be updated to support this logging natively, without halting or altering core functionality.
+- Logs must be formatted for easy ingestion by observability tools like ClickHouse.
+
+### 2. Observability and Average Calculation
+
+- Use logged data to calculate average execution times for each function via tools such as ClickHouse.
+- Averages should be computed periodically (e.g., daily or on-demand) and stored accessibly for reference.
+- Enable querying of these averages to identify functions that "run on average quite a long time."
+- Once identified, these functions must be flagged for investigation, optimization, or problem-solving (e.g., why they are stuck).
+
+### 3. Timeout Function and Fallback Triggering
+
+- Develop a timeout function that references the calculated averages to determine thresholds.
+- If a function exceeds its average execution time, trigger a fallback mechanism.
+- Not all fallbacks will be effective; for example:
+    - In simple transitions stuck in an infinite loop, options to kill the task are limited.
+    - Do not terminate immediately; instead, create a database record indicating the function requires debugging and investigation, noting it runs above the average with no viable fallback.
+- For more complicated processes, such as order fulfillment:
+    - Leverage existing developed fallback functions.
+    - Move the order to an "action required" state.
+    - Attempt automatic re-fulfillment several times, with delays (e.g., in several minutes).
+- This retry approach should resolve issues with third-party couriers like Aramex and Canada Post by allowing fulfillment despite timeouts on their side.
+
+### 4. Periodic Monitoring via Celery Task
+
+- Implement a Celery task that runs periodically (e.g., every minute).
+- This task shall check currently executing tasks or functions.
+- Identify those exceeding their average execution time.
+- Upon detection, immediately trigger the appropriate fallback or record for investigation.
+
+### 5. Timeout Limit Configuration
+
+- Address the challenge of setting timeout limits without frequent database or Redis accesses.
+- For most functions, transitions, and tasks, allow execution above initial limits; intervene only upon observed problems.
+- Fine-tune problematic tasks/functions via:
+    - A simple wrapper on the Python side.
+    - Direct configuration on Celery tasks or functions.
+- Limits may be adjustable dynamically:
+    - Store configurations in Redis or Postgres (e.g., set a function to allow 30 minutes, adjustable to 40 or 10 minutes).
+    - Ensure no overhead on execution-time accesses to the database; configurations are loaded once or cached.
+- This setup enables system-wide fine-tuning to identify bottlenecks and optimize functions within Django-logic processes easily.
+
+### Non-Functional Requirements
+
+- **Performance**: Logging and monitoring must introduce minimal overhead; aim for <5% increase in execution time.
+- **Scalability**: The solution should handle high volumes of tasks without degrading system performance.
+- **Reliability**: Fallbacks and retries must be idempotent to avoid data corruption.
+- **Security**: Database records for investigations must include audit trails (e.g., timestamps, user/context).
+- **Maintainability**: Modifications to django-logic should be modular and well-documented.
+- **Testing**: Require unit tests for logging, timeout logic, and Celery tasks; integration tests for fallback scenarios.
+
+### Implementation Considerations
+
+- **Library Modifications**: Update django-logic to include decorators or hooks for logging execution times.
+- **Database Schema Additions**: Add tables/fields for investigation records (e.g., function_name, execution_time, average_time, timestamp, status).
+- **Celery Integration**: Ensure the periodic task is scheduled via beat and handles concurrency safely.
+- **Observability Setup**: Configure log forwarding to ClickHouse; define queries for averages (e.g., GROUP BY function_name).
+- **Fallback Examples**:
+    - Simple Transition: Log overrun and flag in DB.
+    - Order Fulfillment: Invoke fallback, set to "action required," retry 3-5 times with 5-minute intervals.
+- **Adjustment Mechanism**: Use a configuration model in Postgres or Redis keys (e.g., "function:order_fulfill:timeout=1800" seconds).
+
+### Benefits and Expected Impact
+
+- **Improved Visibility**: Provides a "table of execution" for every task, enabling quick bottleneck identification.
+- **Enhanced Reliability**: Automates handling of timeouts, reducing stuck orders and manual interventions.
+- **Optimization Opportunities**: Data-driven insights allow targeted optimizations, potentially reducing average execution times.
+- **Third-Party Resilience**: Solves specific issues with couriers by enabling retries, fulfilling most orders despite external delays.
+- **Flexibility**: Adjustable limits ensure the system can adapt to varying loads or requirements without code changes.
+
+This comprehensive approach transforms the system from reactive to proactive, leveraging data to maintain high performance in Django-logic-driven processes. Implementation should proceed in phases: logging first, then monitoring, followed by timeouts and fallbacks, with thorough testing at each stage.
+
+User - order fulfill on the frontend
+
+- post → App  order.process.fulfill
+    - if APP - run_celery_action(order, ‘fulfil’, ‘params’)
+    - if FSM  -
+        - task execution
+- App Response
+
+Two types of Transitions:
+
+- Run  (sync)
+- Background Run (async)
+
+Enable courier account - no business logic - await response with updated states - python functions
+
+Order fulfilment - a lot of business logic - execution in background - python functions - no celery tasks

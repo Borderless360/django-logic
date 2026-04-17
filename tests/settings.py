@@ -1,35 +1,24 @@
 import os
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SECRET_KEY = 'django_logic'
 
-PROJECT_APPS = [
-    'django_logic',
-    'demo',
-    'tests',
-]
-
 INSTALLED_APPS = [
     'django.contrib.auth',
     'django.contrib.contenttypes',
-] + PROJECT_APPS
+    'django_logic',
+    'django_logic.background',
+    'tests',
+    'tests.stability',
+    'tests.background',
+]
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-try:
-    import rest_framework
-except ImportError:
-    pass
-else:
-    INSTALLED_APPS += ['rest_framework']
-    REST_FRAMEWORK = {
-        'DEFAULT_PERMISSION_CLASSES': [
-            'rest_framework.permissions.AllowAny'
-        ]
-    }
 ROOT_URLCONF = 'tests.urls'
 
-MIDDLEWARE = []
+MIDDLEWARE: list = []
 
 DATABASES = {
     'default': {
@@ -44,10 +33,14 @@ CACHES = {
         'LOCATION': 'django_logic',
     }
 }
-#
-# MIGRATION_MODULES = {
-#     'auth': None,
-#     'contenttypes': None,
-# }
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+
+DJANGO_LOGIC = {
+    'LOCK_TIMEOUT': 7200,
+    'BACKGROUND_EXECUTION': 'sync',
+    'STARTER_QUEUE': 'django_logic.starter',
+    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
+    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
+    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
+}
