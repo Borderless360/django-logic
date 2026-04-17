@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: django_logic_test
+      POSTGRES_USER: django_logic
+      POSTGRES_PASSWORD: django_logic
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U django_logic -d django_logic_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  stability-tests:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DJANGO_SETTINGS_MODULE: tests.settings_stability
+      DATABASE_URL: postgres://django_logic:django_logic@postgres:5432/django_logic_test
+      REDIS_URL: redis://redis:6379/0
+    command: >
+      python tests/manage.py test tests.stability
+        --verbosity=2
+        --tag=stability

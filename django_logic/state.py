@@ -1,9 +1,11 @@
 from hashlib import blake2b
 from django.conf import settings
 from django.core.cache import cache
-from django.utils.functional import cached_property
 
-LOCK_TIMEOUT = getattr(settings, 'DJANGO_LOGIC', {}).get('LOCK_TIMEOUT', 7200)  # 2 hours by default
+
+def _get_lock_timeout():
+    """Read LOCK_TIMEOUT from settings on every call (not cached at import time)."""
+    return getattr(settings, 'DJANGO_LOGIC', {}).get('LOCK_TIMEOUT', 7200)
 
 
 class State(object):
@@ -57,7 +59,7 @@ class State(object):
         Atomically locks the state.
         Returns True if the lock was acquired, False if already locked.
         """
-        return cache.add(self._get_hash(), True, LOCK_TIMEOUT)
+        return cache.add(self._get_hash(), True, _get_lock_timeout())
 
     def unlock(self):
         """
@@ -78,6 +80,10 @@ class RedisState(State):
     """
     RedisState uses a single Redis key for both locking and state storage.
 
+    Requires ``django-redis`` as the cache backend (``pip install django-logic[redis]``).
+    Django's built-in ``RedisCache`` does not support the ``nx=True`` parameter
+    used by ``lock()``.
+
     The key's existence means the state is locked; its value is the current
     state. This makes the state immediately visible to all processes
     regardless of DB transaction isolation.
@@ -91,8 +97,11 @@ class RedisState(State):
     If the process crashes without calling unlock(), the key expires
     after lock_timeout seconds and the state becomes available again.
     """
-    lock_timeout = LOCK_TIMEOUT
     _SENTINEL = '__django_logic_locked__'
+
+    @property
+    def lock_timeout(self):
+        return _get_lock_timeout()
 
     def _store_value(self, state):
         """Wrap None state values with a sentinel so is_locked() works."""
