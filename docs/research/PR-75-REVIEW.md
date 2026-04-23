@@ -5,6 +5,15 @@
 > **Status:** Superseded by [PR #76](https://github.com/Borderless360/django-logic/pull/76) (release/0.2.0 with bug fixes)
 > **Size:** +1,617 / −195 across 27 files (2 commits)
 > **Note:** This is a historical review. All 9 bugs identified here have been fixed in PR #76.
+>
+> **⚠ Historical document.** Many APIs described below (`background_mode` /
+> `run_in_background` kwargs, `Transition.get_task_kwargs`,
+> `django_logic.utils.restore_action` / `restore_user_object` /
+> `get_process_and_state`, `ignore_sources` parameter, `LogType`,
+> `TransitionEventType.BACKGROUND_MODE`) were **removed** in 0.3.0
+> as part of the Stage 2 rewrite around `django_logic.background`.
+> See `docs/PLAN.md` §4 for the current design and `CHANGELOG.md` for
+> the 0.3.0 removal list.
 
 ---
 

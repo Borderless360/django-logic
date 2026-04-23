@@ -66,6 +66,12 @@ def run_background_transition(transition_message_id: int) -> None:
     """
     try:
         outcome = _run_atomic(transition_message_id)
+    except _RestoreFailed as exc:
+        # The atomic block rolled back, so we couldn't mark_as_completed
+        # from inside it. Do it here, in its own statement, to stop the
+        # retry loop from picking the row up forever.
+        _mark_unrestorable_completed(exc.tm_id)
+        return
     except _NothingToDo:
         return
 
@@ -84,7 +90,43 @@ class _NothingToDo(Exception):
     by another worker. Caller should exit silently."""
 
 
+class _RestoreFailed(Exception):
+    """Internal signal: the TM refers to a model/transition that no
+    longer exists. The atomic block rolled back; the outer handler
+    marks the TM completed in its own statement so retries stop."""
+
+    def __init__(self, tm_id: int):
+        self.tm_id = tm_id
+
+
+def _mark_unrestorable_completed(tm_id: int) -> None:
+    """Best-effort: mark an unrestorable TM completed outside any atomic
+    block the caller was in. Written as a single UPDATE so it survives
+    even if the caller is in a parent transaction that later rolls back
+    — the periodic starter still won't pick the row up because
+    ``is_completed=True`` is visible in the same transaction.
+    """
+    from django.utils import timezone
+
+    try:
+        TransitionMessage.objects.filter(pk=tm_id, is_completed=False).update(
+            is_completed=True,
+            completed_at=timezone.now(),
+        )
+    except Exception as e:
+        transition_logger.error(
+            f'Failed to mark unrestorable TransitionMessage#{tm_id} '
+            f'completed: {e}'
+        )
+
+
 def _run_atomic(tm_id: int) -> _Outcome:
+    # Invariant: everything that must survive together lives inside this
+    # atomic block — row lock, mark_as_started, side-effects, and either
+    # mark_as_completed (on success / terminal failure) or errors_count
+    # increment (on retryable failure). Moving any of them out, in
+    # particular the mark_as_* calls, is what broke the unrestorable-row
+    # path (see _RestoreFailed). Don't do it.
     with transaction.atomic():
         try:
             tm = (
@@ -115,8 +157,16 @@ def _run_atomic(tm_id: int) -> _Outcome:
                 f'TransitionMessage#{tm.pk} cannot be restored: {exc}. '
                 f'Marking completed to stop retries.'
             )
-            tm.mark_as_completed()
-            raise _NothingToDo() from exc
+            # Don't mark_as_completed() here — we're inside an atomic
+            # block that will roll back when we exit. The outer handler
+            # in run_background_transition() performs the mark in a
+            # fresh statement so the stop-retry flag actually persists.
+            raise _RestoreFailed(tm.pk) from exc
+
+        # Record the start of this attempt. Overwritten on every retry so
+        # the watchdog (uncompleted AND started_at < cutoff) tracks the
+        # current attempt, not the first one.
+        tm.mark_as_started()
 
         state = process.state
         token = _transition_context.set(
@@ -328,9 +378,14 @@ def _infer_field_name(instance, tm: TransitionMessage) -> str:
 
 
 def _find_transition(process, tm: TransitionMessage):
-    # Look up by action_name, ignoring state membership — the instance's
-    # state is presumably the transition's in_progress_state, which is
-    # unique within a Process per _validate_unique_in_progress_states.
+    # Match on action_name, not on state membership. Phase 2 runs while
+    # the instance is in the transition's in_progress_state, which is
+    # not in the transition's declared `sources` — a state-aware lookup
+    # would miss it. Relying on action_name is safe because a Process
+    # can't declare two transitions with the same action_name (duplicate
+    # in_progress_state is rejected at class-creation time, and
+    # action_names are conventionally unique; if they collide, the first
+    # match wins and the ambiguity is the caller's bug).
     for transition in process.transitions:
         if transition.action_name == tm.transition_name:
             return transition

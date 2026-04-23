@@ -122,8 +122,6 @@ class NextTransition:
     class.
     """
 
-    _BACKGROUND_MODE_KEYS = frozenset(('background_mode', 'background_mode_phase_2'))
-
     def __init__(self, next_transition: str | None = None):
         self._next_transition = next_transition
 
@@ -142,11 +140,8 @@ class NextTransition:
             return None
 
         transition = transitions[0]
-        next_kwargs = {
-            k: v for k, v in kwargs.items() if k not in self._BACKGROUND_MODE_KEYS
-        }
         try:
-            return transition.change_state(state, **next_kwargs)
+            return transition.change_state(state, **kwargs)
         except Exception as error:
             # Follow-up transition failures must not bubble into the current one.
             transition_logger.error(error)

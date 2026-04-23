@@ -441,6 +441,14 @@ class TransitionMessage(TimeStampedModel):
     last_error_dt = DateTimeField(blank=True, null=True)
     last_error_message = TextField(blank=True)
 
+    # Phase-2 timing. started_at is overwritten on every attempt so a
+    # watchdog can find hung attempts via (is_completed=False AND
+    # started_at < cutoff). completed_at + duration_ms are written once,
+    # when the row is marked completed (success or terminal failure).
+    started_at = DateTimeField(blank=True, null=True)
+    completed_at = DateTimeField(blank=True, null=True)
+    duration_ms = PositiveIntegerField(blank=True, null=True)
+
     app_label = CharField(max_length=100)
     model_name = CharField(max_length=100)
     instance_id = PositiveIntegerField()
@@ -457,7 +465,21 @@ class TransitionMessage(TimeStampedModel):
                 name='only_one_uncompleted_transition_per_instance',
             )
         ]
+        indexes = [
+            Index(fields=['is_completed', 'created']),
+            Index(fields=['app_label', 'model_name', 'instance_id']),
+            Index(fields=['is_completed', 'started_at']),  # watchdog
+        ]
 ```
+
+#### Unrestorable rows
+
+If phase 2 can't resolve the `(model, instance, process, transition)`
+tuple (model uninstalled, transition renamed, etc.) the runner marks
+the row `is_completed=True` in its own UPDATE statement, **outside**
+the atomic block whose rollback would otherwise discard the mark.
+Without this hoist the periodic starter would re-dispatch the same
+unrestorable row every `RETRY_MINUTES` forever.
 
 ### 2.9 Periodic safety-net tasks
 
@@ -577,7 +599,33 @@ alongside it:
 The full public `django_logic.testing` API (scenario framework,
 snapshots, AI-readable output) lands in Stage 3 as planned.
 
-### 2.17 Tests (for Stage 2 itself)
+### 2.17 Operational extras that shipped with Stage 2
+
+These are the small, self-contained pieces that were pulled forward from
+Stage 3 because they're either free or prerequisites for the GV
+migration's operational visibility:
+
+- **Timing fields on `TransitionMessage`** (§2.8). Enables a
+  "hung-attempt" watchdog with no extra moving parts.
+- **Unrestorable-row hoist.** Phase 2 marks permanently-unrestorable
+  TMs completed in a single `UPDATE` *outside* the failed atomic
+  block, so the periodic starter stops picking them up. Pattern:
+
+  ```
+  try:
+      outcome = _run_atomic(tm_id)
+  except _RestoreFailed as exc:
+      # Atomic block rolled back; run the mark in a fresh statement
+      # so is_completed=True persists.
+      _mark_unrestorable_completed(exc.tm_id)
+      return
+  ```
+
+  The in-atomic `mark_as_completed()` call that previously "looked
+  right" was a bug — the `_NothingToDo` raise made the savepoint roll
+  back and took the mark with it.
+
+### 2.18 Tests (for Stage 2 itself)
 
 - Phase 1: atomic rollback on IntegrityError, kwargs serialization,
   on_commit dispatch (Celery mode) vs inline dispatch (Sync mode)
@@ -593,7 +641,7 @@ snapshots, AI-readable output) lands in Stage 3 as planned.
 - Sync mode + Celery not installed: works; setting `BACKGROUND_EXECUTION='celery'`
   without Celery raises `ImproperlyConfigured` at app-ready time
 
-### 2.18 Integration into GV
+### 2.19 Integration into GV
 
 This version will be vendored into the GV project under its own import
 path, then migrated transition-by-transition. Only after GV is fully
@@ -621,12 +669,13 @@ tr_id SideEffect function_name started
 tr_id SideEffect function_name completed duration_ms=1234
 ```
 
-### 3.2 Transition timing on TransitionMessage
+### 3.2 Transition timing on TransitionMessage — ✅ SHIPPED IN 0.3.0
 
-Add fields to `TransitionMessage`:
-- `started_at` — when phase 2 began executing
-- `completed_at` — when transition completed or failed
-- `duration_ms` — computed on completion
+The three fields (`started_at`, `completed_at`, `duration_ms`) plus the
+`(is_completed, started_at)` watchdog index already landed with Stage 2
+— see §2.8 above. Stage 3 only owns the *surfaces* that consume them:
+the `transition_status` management command (§3.4) and the docs page on
+observability (§3.6).
 
 ### 3.3 Configurable timeout per transition
 

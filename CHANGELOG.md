@@ -21,6 +21,24 @@
 - **Periodic safety-net tasks** — `retry_stale_transitions`, `cleanup_completed_transitions`, `detect_stuck_transitions`.
 - **kwargs serialization** — built-in handling of `request`, `user` → `user_id`, `UUID` → `str`, `datetime`/`date` → `.isoformat()`; unserializable values are rejected at phase 1 rather than phase 2.
 
+### Observability
+
+- **`TransitionMessage` timing fields** — `started_at`, `completed_at`, `duration_ms`. `started_at` is (re)written at the top of every phase-2 attempt so a watchdog can scan `is_completed=False AND started_at < cutoff` to find hung attempts. `completed_at` is set once when the row is marked completed (success or terminal failure); `duration_ms` measures the last attempt only. Backed by a new `dl_bg_started_idx` index on `(is_completed, started_at)`.
+
+### Bug Fixes
+
+- **Unrestorable `TransitionMessage` rows now stop retrying.** If phase 2 can't restore the instance, process, or transition (e.g. the model was uninstalled, the transition renamed), the TM is now marked `is_completed=True` in its own statement, outside the failed atomic block. Previously the `mark_as_completed()` call was rolled back along with the atomic block, so the periodic starter would re-dispatch the same unrestorable row every `RETRY_MINUTES` forever.
+
+### Internal cleanup
+
+- **Removed `Transition.get_task_kwargs()`** — replaced by `django_logic.background.serializers.serialize_kwargs` + the `TransitionMessage.kwargs` JSONField.
+- **Removed `django_logic.utils` module** (`restore_user_object`, `restore_action`, `get_process_instance`, `get_process_and_state`) — the durable single-task runner owns restoration end-to-end via its own `_restore()` helper.
+- **Removed `ProcessManager.bind_state_fields()`**, `ProcessManager.save()`, and `ProcessManager.non_state_fields` (deprecated since 0.2.0).
+- **Removed `Process.queryset_name`** and the `queryset_name` parameter on `State`. `State.get_db_state()` uses `model._default_manager` directly.
+- **Removed the `ignore_sources` parameter** from `Process.get_available_transitions()` and `Process.get_transition_by_action_name()`. `Transition.__init__` already appends `in_progress_state` to `sources`, so a mid-flight instance finds its own transition without the escape hatch.
+- **Removed `TransitionEventType.BACKGROUND_MODE`** and the `_BACKGROUND_MODE_KEYS` filter in `NextTransition` — both were part of the PR #75 fire-and-forget design, now gone.
+- **`State.set_state()`** now calls `refresh_from_db(fields=[self.field_name])` instead of a full refresh, so in-memory mutations from side-effects survive the state write.
+
 ### Settings
 
 ```python

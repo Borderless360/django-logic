@@ -74,17 +74,15 @@ class TestPeriodicStarterContract(StabilityTestCase):
             self.assertFalse(state.is_locked())
 
     def test_fulfill_transition_available_from_in_progress_state(self):
-        """
-        The 'fulfill' transition has in_progress_state='fulfilling' added
-        to its sources, so restore_action can find it during retry.
+        """The 'fulfill' transition has ``in_progress_state='fulfilling'``,
+        which is appended to its sources — so phase 2 / retry paths can
+        look it up even when the instance is already in-flight.
         """
         order = Order.objects.create(status='fulfilling')
         process = OrderProcess(field_name='status', instance=order)
 
         transitions = list(
-            process.get_available_transitions(
-                action_name='fulfill', ignore_sources=True
-            )
+            process.get_available_transitions(action_name='fulfill')
         )
         self.assertEqual(len(transitions), 1)
         self.assertEqual(transitions[0].action_name, 'fulfill')

@@ -66,6 +66,9 @@ class Transition(BaseTransition):
         self.sources = list(sources)
         self.in_progress_state = kwargs.get('in_progress_state')
         if self.in_progress_state and self.in_progress_state not in self.sources:
+            # Treat the in-progress state as a valid source of the same
+            # transition so phase 2 / retry paths can look the transition
+            # up from an already-in-flight instance.
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
         self.failure_callbacks = self.failure_callbacks_class(
@@ -172,31 +175,6 @@ class Transition(BaseTransition):
     @staticmethod
     def _init_transition_context(kwargs: dict) -> None:
         kwargs.setdefault('context', {})
-
-    def get_task_kwargs(self, state: State, **kwargs) -> dict:
-        """Serialize enough context for the transition to be restored
-        in a worker process. Used by ``BackgroundTransition``.
-        """
-        task_kwargs = {
-            'app_label': state.instance._meta.app_label,
-            'model_name': state.instance._meta.model_name,
-            'instance_id': state.instance.pk,
-            'action_name': self.action_name,
-            'target': self.target,
-            'process_name': state.process_name,
-            'field_name': state.field_name,
-            'process_class': kwargs.get('process_class'),
-        }
-        if 'user_id' in kwargs:
-            task_kwargs['user_id'] = kwargs['user_id']
-        elif (user := kwargs.get('user')) is not None:
-            task_kwargs['user_id'] = user.id
-
-        for key in ('tr_id', 'root_id', 'parent_id'):
-            if key in kwargs:
-                task_kwargs[key] = str(kwargs[key]) if kwargs[key] else None
-
-        return task_kwargs
 
 
 class Action(Transition):

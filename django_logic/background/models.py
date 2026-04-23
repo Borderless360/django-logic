@@ -22,6 +22,16 @@ class TransitionMessage(TimeStampedModel):
     last_error_dt = models.DateTimeField(blank=True, null=True)
     last_error_message = models.TextField(blank=True)
 
+    # Phase-2 timing. ``started_at`` is (re)written at the top of every
+    # phase-2 attempt, so on retry it reflects the *current* attempt —
+    # a watchdog can scan ``is_completed=False AND started_at < cutoff``
+    # to find hung attempts. ``completed_at`` is set once when the row
+    # is marked completed (success or terminal failure). ``duration_ms``
+    # measures the last attempt only; null if phase 2 never ran.
+    started_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    duration_ms = models.PositiveIntegerField(blank=True, null=True)
+
     app_label = models.CharField(max_length=100)
     model_name = models.CharField(max_length=100)
     instance_id = models.PositiveIntegerField()
@@ -41,6 +51,10 @@ class TransitionMessage(TimeStampedModel):
                 fields=['app_label', 'model_name', 'instance_id'],
                 name='dl_bg_instance_idx',
             ),
+            models.Index(
+                fields=['is_completed', 'started_at'],
+                name='dl_bg_started_idx',
+            ),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -57,9 +71,28 @@ class TransitionMessage(TimeStampedModel):
             f'{self.transition_name} on {self.queue_name}'
         )
 
+    def mark_as_started(self) -> None:
+        """Record the start of a phase-2 attempt.
+
+        Called on every attempt, including retries — ``started_at`` is
+        overwritten so the watchdog sees the current attempt's start,
+        not the first one.
+        """
+        self.started_at = timezone.now()
+        self.save(update_fields=['started_at', 'modified'])
+
     def mark_as_completed(self) -> None:
+        now = timezone.now()
         self.is_completed = True
-        self.save(update_fields=['is_completed', 'modified'])
+        self.completed_at = now
+        update_fields = ['is_completed', 'completed_at', 'modified']
+        if self.started_at is not None:
+            delta = now - self.started_at
+            # Clamp to 0 to absorb clock skew; cap into PositiveIntegerField.
+            ms = max(int(delta.total_seconds() * 1000), 0)
+            self.duration_ms = ms
+            update_fields.append('duration_ms')
+        self.save(update_fields=update_fields)
 
     def record_error(self, exception: BaseException) -> None:
         self.errors_count = (self.errors_count or 0) + 1

@@ -9,29 +9,33 @@ def _get_lock_timeout():
 
 
 class State(object):
-    def __init__(self, instance: any, field_name: str, process_name=None, queryset_name=None):
+    def __init__(self, instance: any, field_name: str, process_name=None):
         self.instance = instance
-        self.queryset_name = queryset_name or 'objects'
         self.field_name = field_name
         self.process_name = process_name
-
-    def get_queryset(self):
-        return getattr(self.instance._meta.model, self.queryset_name).all()
 
     def get_db_state(self):
         """
         Fetches state directly from db instead of model instance.
         """
-        return self.get_queryset().values_list(self.field_name, flat=True).get(pk=self.instance.id)
+        model = type(self.instance)
+        return (
+            model._default_manager
+            .values_list(self.field_name, flat=True)
+            .get(pk=self.instance.pk)
+        )
 
     def set_state(self, state):
-        """
-        Sets intermediate state to instance's field until transition is over.
+        """Persist the state field without touching other in-memory fields.
+
+        ``update_fields=[self.field_name]`` respects custom ``save()``
+        overrides. ``refresh_from_db(fields=[self.field_name])`` only
+        re-reads the state column — any side-effect mutations on other
+        attributes survive.
         """
         setattr(self.instance, self.field_name, state)
-        # update with single instance save to apply overloaded save method
         self.instance.save(update_fields=[self.field_name])
-        self.instance.refresh_from_db()
+        self.instance.refresh_from_db(fields=[self.field_name])
 
     @property
     def instance_key(self):
@@ -40,14 +44,6 @@ class State(object):
                f'{self.field_name}-' \
                f'{self.instance.pk}'
 
-    def get_log_data(self):
-        return {
-            'instance': self.instance,
-            'queryset_name': self.queryset_name,
-            'process_name': self.process_name,
-            'field_name': self.field_name,
-        }
-    
     def get_state(self):
         return getattr(self.instance, self.field_name)
 
