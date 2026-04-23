@@ -13,22 +13,31 @@ Tasks defined here:
   messages back to their own queue.
 * :func:`cleanup_completed_transitions` — periodic; deletes old
   completed messages.
-* :func:`detect_stuck_transitions` — periodic; logs/alerts on messages
-  that have hit ``MAX_ERRORS``.
+* :func:`detect_stuck_transitions` — periodic; finalizes messages
+  stuck at ``MAX_ERRORS`` (writes ``failed_state``, runs
+  ``failure_side_effects``, marks completed) so the retry loop stops.
+* :func:`watchdog_stale_attempts` — periodic; abandons phase-2
+  attempts whose current run has exceeded their declared
+  ``timeout_seconds``.
 
-All four are registered under the ``django_logic`` namespace.
+All five are registered under the ``django_logic`` namespace.
 """
 from __future__ import annotations
 
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import Min
 from django.utils import timezone
 
 from django_logic.background import settings as bg_settings
 from django_logic.background.models import TransitionMessage
-from django_logic.background.runner import run_background_transition
-from django_logic.logger import logger, transition_logger
+from django_logic.background.runner import (
+    abandon_timed_out_attempt,
+    finalize_stuck_attempt,
+    run_background_transition,
+)
+from django_logic.logger import logger
 
 
 try:
@@ -159,22 +168,106 @@ def cleanup_completed_transitions() -> int:
     bind=False,
 )
 def detect_stuck_transitions() -> int:
-    """Periodic: log/alert on messages that hit ``MAX_ERRORS`` without completing.
+    """Periodic: finalize messages stuck at ``MAX_ERRORS`` so they reach a
+    terminal state (``failed_state`` if declared on the transition) and
+    get out of the retry set.
 
-    Returns the number of stuck rows found. Emits one ERROR log line per row.
+    Previously this only logged; a row that hit MAX_ERRORS without going
+    through the in-task terminal path (e.g. worker killed mid-atomic
+    after ``record_error`` committed on a prior attempt) would sit
+    uncompleted forever. Now each such row is forcibly terminated,
+    with one ERROR log line per row.
+
+    Rows currently being processed by a worker (row-locked) are skipped
+    this tick — the running attempt will finalize them naturally.
+
+    Returns the number of rows finalized.
     """
     max_errors = bg_settings.max_errors()
-    stuck = (
+    stuck_ids = list(
         TransitionMessage.objects
         .filter(is_completed=False, errors_count__gte=max_errors)
+        .values_list('pk', flat=True)
     )
-    count = 0
-    for tm in stuck.iterator():
-        transition_logger.error(
-            f'Stuck transition: TransitionMessage#{tm.pk} '
-            f'{tm.app_label}.{tm.model_name}#{tm.instance_id} '
-            f'{tm.transition_name} queue={tm.queue_name} '
-            f'errors={tm.errors_count} last_error={tm.last_error_message!r}'
-        )
-        count += 1
-    return count
+    finalized = 0
+    for tm_id in stuck_ids:
+        try:
+            if finalize_stuck_attempt(tm_id):
+                finalized += 1
+        except Exception as e:
+            # One bad row shouldn't stop the scan.
+            logger.error(
+                f'detect_stuck_transitions: failed to finalize '
+                f'TransitionMessage#{tm_id}: {e}'
+            )
+    return finalized
+
+
+@_celery_shared_task(
+    acks_late=True,
+    name='django_logic.watchdog_stale_attempts',
+    bind=False,
+)
+def watchdog_stale_attempts() -> int:
+    """Periodic: abandon phase-2 attempts that have been running beyond
+    their declared ``timeout_seconds``.
+
+    Only rows that opted in via ``BackgroundTransition(timeout=N)`` are
+    scanned. For each stale row we record a synthetic ``TimeoutError``
+    so the retry machinery treats it as a failed attempt; when
+    ``errors_count`` hits ``MAX_ERRORS`` the row is finalized with
+    ``failed_state`` (if declared).
+
+    Rows held by a running worker (``select_for_update(nowait)``) are
+    skipped this tick — the live worker will finish or fail on its own.
+    The watchdog is about abandoned attempts, not slow ones.
+
+    Returns the number of rows touched.
+    """
+    return _watchdog_stale_attempts_inline()
+
+
+def _watchdog_stale_attempts_inline() -> int:
+    """Scan uncompleted timeout rows for stale attempts.
+
+    The scan is narrowed by a DB-side ``started_at`` floor: we first
+    compute ``Min(timeout_seconds)`` over in-flight timeout rows, then
+    filter ``started_at < now - min_timeout``. That bound excludes every
+    row whose attempt can't possibly be stale yet, regardless of its
+    per-row timeout. The remaining per-row comparison runs in Python
+    (portable across backends).
+
+    At low volumes the floor is effectively free; at high volumes it
+    keeps the working set bounded by "rows old enough for the fastest
+    timeout to fire".
+    """
+    now = timezone.now()
+
+    base = TransitionMessage.objects.filter(
+        is_completed=False,
+        started_at__isnull=False,
+        timeout_seconds__isnull=False,
+    )
+    min_timeout = base.aggregate(m=Min('timeout_seconds'))['m']
+    if min_timeout is None:
+        return 0
+
+    floor = now - timedelta(seconds=min_timeout)
+    candidates = (
+        base.filter(started_at__lt=floor)
+        .values_list('pk', 'started_at', 'timeout_seconds')
+    )
+
+    touched = 0
+    for pk, started_at, timeout_seconds in candidates:
+        if started_at + timedelta(seconds=timeout_seconds) >= now:
+            continue
+        try:
+            if abandon_timed_out_attempt(pk):
+                touched += 1
+        except Exception as e:
+            logger.error(
+                f'watchdog_stale_attempts: failed on '
+                f'TransitionMessage#{pk}: {e}'
+            )
+    return touched

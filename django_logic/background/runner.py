@@ -120,6 +120,157 @@ def _mark_unrestorable_completed(tm_id: int) -> None:
         )
 
 
+def abandon_timed_out_attempt(tm_id: int) -> bool:
+    """Record a synthetic timeout error on a TM whose current attempt
+    has exceeded its declared ``timeout_seconds``.
+
+    Skips rows currently held by a worker (``select_for_update(nowait)``
+    → OperationalError) — we only act on abandoned attempts. When the
+    error count reaches ``MAX_ERRORS`` the row is finalized in the same
+    atomic block (failed_state + failure_side_effects + mark_as_completed)
+    so the retry loop stops.
+
+    .. note::
+
+        The watchdog cannot distinguish a genuinely abandoned attempt
+        (worker crashed / lost DB connection) from a live-but-slow one
+        that has kept its Python state but dropped its row lock. In the
+        latter case, the watchdog will acquire the row and re-dispatch
+        while the original worker is still executing side-effects. This
+        is safe per the reliability contract: side-effects MUST be
+        idempotent (§2.7), so re-running them from scratch is acceptable.
+        The original worker's eventual ``mark_as_completed`` / ``record_error``
+        will either succeed (completing the row) or fail harmlessly
+        against a completed row.
+
+    Returns True if the row was touched, False if skipped.
+    """
+    with transaction.atomic():
+        try:
+            tm = (
+                TransitionMessage.objects
+                .select_for_update(nowait=True)
+                .get(pk=tm_id, is_completed=False)
+            )
+        except TransitionMessage.DoesNotExist:
+            return False
+        except OperationalError:
+            transition_logger.info(
+                f'watchdog: TransitionMessage#{tm_id} currently locked '
+                f'by a worker; deferring abandon'
+            )
+            return False
+
+        transition_logger.error(
+            f'watchdog: TransitionMessage#{tm.pk} '
+            f'{tm.app_label}.{tm.model_name}#{tm.instance_id} '
+            f'{tm.transition_name} exceeded timeout_seconds='
+            f'{tm.timeout_seconds}; recording timeout error'
+        )
+        err = TimeoutError(
+            f'[watchdog timeout] attempt exceeded '
+            f'timeout_seconds={tm.timeout_seconds}'
+        )
+        tm.record_error(err)
+
+        max_errors = bg_settings.max_errors()
+        if tm.errors_count >= max_errors:
+            # Terminal. Finalize inside this same atomic — we already
+            # hold the row lock so we cannot recurse through
+            # finalize_stuck_attempt (deadlock).
+            _finalize_terminal_from_watchdog(tm, err, source='watchdog')
+        return True
+
+
+def finalize_stuck_attempt(tm_id: int) -> bool:
+    """Force a stuck (``errors_count >= MAX_ERRORS``, uncompleted) TM
+    into a terminal state (``failed_state`` + ``failure_side_effects``
+    + ``mark_as_completed``).
+
+    Called by ``detect_stuck_transitions``. If the row is currently
+    locked by a worker running phase 2 we exit silently — the running
+    attempt will finalize on its own. Otherwise we restore the
+    transition, run the terminal-failure sequence, and mark completed.
+
+    Returns True if the row was finalized, False if skipped.
+    """
+    with transaction.atomic():
+        try:
+            tm = (
+                TransitionMessage.objects
+                .select_for_update(nowait=True)
+                .get(pk=tm_id, is_completed=False)
+            )
+        except TransitionMessage.DoesNotExist:
+            return False
+        except OperationalError:
+            transition_logger.info(
+                f'detect_stuck: TransitionMessage#{tm_id} locked by a '
+                f'worker; deferring finalization'
+            )
+            return False
+
+        transition_logger.error(
+            f'Stuck transition: TransitionMessage#{tm.pk} '
+            f'{tm.app_label}.{tm.model_name}#{tm.instance_id} '
+            f'{tm.transition_name} queue={tm.queue_name} '
+            f'errors={tm.errors_count} '
+            f'last_error={tm.last_error_message!r}; forcing terminal state'
+        )
+        # Rehydrate an exception from the stored last_error_message so
+        # failure_side_effects see the same error shape the final in-task
+        # attempt would have seen.
+        err = RuntimeError(
+            f'[detect_stuck] {tm.last_error_message or "transition stuck"}'
+        )
+        _finalize_terminal_from_watchdog(tm, err, source='detect_stuck')
+        return True
+
+
+def _finalize_terminal_from_watchdog(
+    tm: TransitionMessage,
+    exception: BaseException,
+    source: str,
+) -> None:
+    """Shared terminal-failure path for the watchdog / detect-stuck tasks.
+
+    Must run inside the caller's atomic block, with the TM row already
+    locked. Mirrors ``_handle_failure``'s terminal branch: set
+    failed_state, run failure_side_effects (capturing swallowed errors
+    onto the TM), mark completed.
+
+    If the transition can't be restored (model uninstalled / transition
+    renamed), we still mark_as_completed so the retry loop stops;
+    failed_state and failure_side_effects are skipped — there's nothing
+    to call them on.
+    """
+    try:
+        _, process, transition = _restore(tm)
+    except _Restore_Failed:
+        tm.mark_as_completed()
+        return
+
+    kwargs = dict(tm.kwargs or {})
+    restore_user(kwargs)
+    state = process.state
+
+    if transition.failed_state:
+        state.set_state(transition.failed_state)
+        transition_logger.info(
+            f'{source}: set failed_state={transition.failed_state} '
+            f'on {state.instance_key}'
+        )
+
+    # Symmetric with _handle_failure: run failure_side_effects inside
+    # the atomic block, capture any swallowed exception on the TM.
+    fse_error = transition.failure_side_effects.execute(
+        state, exception=exception, **kwargs
+    )
+    if fse_error is not None:
+        tm.record_failure_side_effect_error(fse_error)
+    tm.mark_as_completed()
+
+
 def _run_atomic(tm_id: int) -> _Outcome:
     # Invariant: everything that must survive together lives inside this
     # atomic block — row lock, mark_as_started, side-effects, and either
@@ -256,14 +407,14 @@ def _handle_failure(
             f'{transition.failed_state}'
         )
     # failure_side_effects run inside the atomic block, before unlock —
-    # idempotent per the reliability contract.
-    try:
-        transition.failure_side_effects.execute(
-            state, exception=error, **kwargs
-        )
-    except Exception:
-        # FailureSideEffects already swallows internally, but belt-and-braces.
-        pass
+    # idempotent per the reliability contract. Swallowed exceptions are
+    # returned so we can surface them on the TM (otherwise cleanup bugs
+    # are invisible).
+    fse_error = transition.failure_side_effects.execute(
+        state, exception=error, **kwargs
+    )
+    if fse_error is not None:
+        tm.record_failure_side_effect_error(fse_error)
     tm.mark_as_completed()
     return _Outcome(
         terminal=True,
@@ -378,14 +529,15 @@ def _infer_field_name(instance, tm: TransitionMessage) -> str:
 
 
 def _find_transition(process, tm: TransitionMessage):
-    # Match on action_name, not on state membership. Phase 2 runs while
-    # the instance is in the transition's in_progress_state, which is
-    # not in the transition's declared `sources` — a state-aware lookup
-    # would miss it. Relying on action_name is safe because a Process
-    # can't declare two transitions with the same action_name (duplicate
-    # in_progress_state is rejected at class-creation time, and
-    # action_names are conventionally unique; if they collide, the first
-    # match wins and the ambiguity is the caller's bug).
+    # Match on action_name. The class-creation time validator
+    # ``_validate_unique_background_action_names`` guarantees that no
+    # two transitions on a Process — background or otherwise — can
+    # share an ``action_name`` with a background one, so the first
+    # match is unambiguous. A state-aware lookup would not work here:
+    # phase 2 runs while the instance sits in ``in_progress_state``
+    # (not in the transition's declared ``sources``), and the sync
+    # path's ``get_transition_by_action_name`` is gated on state
+    # membership. We bypass that gate deliberately.
     for transition in process.transitions:
         if transition.action_name == tm.transition_name:
             return transition

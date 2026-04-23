@@ -44,6 +44,8 @@ class BackgroundTransition(Transition):
           must be unique within a :class:`django_logic.Process`.
     """
 
+    is_background = True
+
     def __init__(
         self,
         action_name: str,
@@ -51,6 +53,7 @@ class BackgroundTransition(Transition):
         target: str,
         *,
         queue: str,
+        timeout: int | None = None,
         **kwargs,
     ):
         if not queue or not isinstance(queue, str):
@@ -59,7 +62,15 @@ class BackgroundTransition(Transition):
                 f"'queue' string. No default queue is provided — every "
                 f"background transition must declare its own."
             )
+        if timeout is not None:
+            if not isinstance(timeout, int) or timeout <= 0:
+                raise ImproperlyConfigured(
+                    f"BackgroundTransition '{action_name}': timeout must "
+                    f"be a positive integer number of seconds, got "
+                    f"{timeout!r}."
+                )
         self.queue = queue
+        self.timeout = timeout
         super().__init__(
             action_name=action_name, sources=sources, target=target, **kwargs
         )
@@ -124,6 +135,7 @@ class BackgroundTransition(Transition):
                     process_name=state.process_name,
                     transition_name=self.action_name,
                     queue_name=self.queue,
+                    timeout_seconds=self.timeout,
                     kwargs=serialized,
                     **instance_lookup,
                 )

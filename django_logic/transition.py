@@ -35,6 +35,18 @@ class BaseTransition(ABC):
     conditions_class = Conditions
     next_transition_class = NextTransition
 
+    # Class-level marker; overridden to ``True`` by ``BackgroundTransition``.
+    #
+    # Used by ``Process.__init_subclass__`` to enforce unique background
+    # ``action_name``s without importing ``BackgroundTransition`` (that
+    # would create a circular: ``process → background.transitions →
+    # transition → process``). Kept as a stable public attribute so third
+    # parties can introspect a transition without caring about concrete
+    # subclasses (e.g. admin tooling, code-gen). Duck-typed by design;
+    # ``isinstance(..., BackgroundTransition)`` is equivalent but more
+    # coupling-heavy for callers.
+    is_background: bool = False
+
     def is_valid(self, instance, user=None) -> bool:
         raise NotImplementedError
 

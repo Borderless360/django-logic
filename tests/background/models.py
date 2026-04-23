@@ -29,6 +29,12 @@ def bg_failure_callback(instance, **kwargs):
     instance.save(update_fields=['cb_log'])
 
 
+def bg_fse_boom(instance, **kwargs):
+    """Failure-side-effect that itself raises — used to test that the
+    swallowed exception is recorded on the TransitionMessage."""
+    raise RuntimeError('cleanup exploded')
+
+
 class Widget(models.Model):
     status = models.CharField(max_length=32, default='draft')
     se_log = models.TextField(default='', blank=True)
@@ -71,6 +77,26 @@ class WidgetProcess(Process):
             queue='django_logic.critical',
             side_effects=[bg_boom],
             failure_callbacks=[bg_failure_callback],
+        ),
+        BackgroundTransition(
+            action_name='crash_with_bad_cleanup',
+            sources=['draft'],
+            target='cwbc_target',
+            in_progress_state='cwbc_in_progress',
+            failed_state='cwbc_failed',
+            queue='django_logic.critical',
+            side_effects=[bg_boom],
+            failure_side_effects=[bg_fse_boom],
+        ),
+        BackgroundTransition(
+            action_name='timeboxed',
+            sources=['draft'],
+            target='tb_done',
+            in_progress_state='tb_running',
+            failed_state='tb_failed',
+            queue='django_logic.slow',
+            side_effects=[bg_ok],
+            timeout=60,  # watchdog kicks in after 60s
         ),
         BackgroundAction(
             action_name='sync_inventory',

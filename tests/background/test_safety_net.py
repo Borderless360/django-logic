@@ -111,8 +111,11 @@ class CleanupTests(TestCase):
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class DetectStuckTests(TestCase):
-    def test_reports_messages_at_max_errors(self):
-        widget = Widget.objects.create()
+    def test_finalizes_message_at_max_errors(self):
+        """A row stuck at MAX_ERRORS is forcibly terminated: failed_state
+        is written (since 'fulfil' declares one) and the TM is marked
+        completed so the retry loop stops picking it up."""
+        widget = Widget.objects.create(status='fulfilling')
         TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
@@ -124,7 +127,42 @@ class DetectStuckTests(TestCase):
         )
         self.assertEqual(detect_stuck_transitions(), 1)
 
-    def test_does_not_report_completed(self):
+        tm = TransitionMessage.objects.get(instance_id=widget.pk)
+        self.assertTrue(tm.is_completed)
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'fulfilment_failed')
+
+    def test_no_failed_state_marks_completed_without_state_change(self):
+        """If the transition has no failed_state declared, the row is
+        marked completed but the model state is left at in_progress
+        for operator review."""
+        widget = Widget.objects.create(status='fulfilling')
+        # Create a stuck TM for a transition that has no failed_state.
+        # 'fulfil' has one; we need a different shape. Use a bespoke
+        # throwaway transition — easier: just patch transition lookup
+        # by picking an action_name that doesn't declare failed_state.
+        # WidgetProcess.sync_inventory is a BackgroundAction without
+        # failed_state.
+        widget.status = 'fulfilled'
+        widget.save(update_fields=['status'])
+        TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=widget.pk,
+            process_name='process',
+            transition_name='sync_inventory',
+            queue_name='q',
+            errors_count=3,
+        )
+        self.assertEqual(detect_stuck_transitions(), 1)
+
+        tm = TransitionMessage.objects.get(instance_id=widget.pk)
+        self.assertTrue(tm.is_completed)
+        widget.refresh_from_db()
+        # Unchanged — sync_inventory is an Action with no failed_state.
+        self.assertEqual(widget.status, 'fulfilled')
+
+    def test_idempotent_on_completed_rows(self):
         widget = Widget.objects.create()
         TransitionMessage.objects.create(
             app_label='bg_tests',
@@ -137,3 +175,20 @@ class DetectStuckTests(TestCase):
             is_completed=True,
         )
         self.assertEqual(detect_stuck_transitions(), 0)
+
+    def test_unrestorable_row_still_marked_completed(self):
+        """A stuck row pointing at a non-existent transition still gets
+        terminated so the retry loop stops."""
+        widget = Widget.objects.create(status='fulfilling')
+        TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=widget.pk,
+            process_name='process',
+            transition_name='nonexistent_transition',
+            queue_name='q',
+            errors_count=3,
+        )
+        self.assertEqual(detect_stuck_transitions(), 1)
+        tm = TransitionMessage.objects.get(instance_id=widget.pk)
+        self.assertTrue(tm.is_completed)

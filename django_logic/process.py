@@ -47,6 +47,7 @@ class Process:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         _validate_unique_in_progress_states(cls)
+        _validate_unique_background_action_names(cls)
 
     def __init__(self, field_name='', instance=None, state=None):
         """Construct either from ``(instance, field_name)`` (normal path
@@ -212,6 +213,56 @@ def _validate_unique_in_progress_states(process_cls):
                 f"be unique within a Process."
             )
         seen[in_progress] = transition.action_name
+
+
+def _validate_unique_background_action_names(process_cls):
+    """Background transitions must be uniquely identifiable by ``action_name``
+    within a Process.
+
+    Phase-2 restore looks a transition up by
+    ``TransitionMessage.transition_name`` (= the ``action_name``) alone —
+    it has no other discriminator. So:
+
+    - Two ``BackgroundTransition`` / ``BackgroundAction`` instances on the
+      same Process cannot share an ``action_name``.
+    - A background transition's ``action_name`` cannot also appear on a
+      plain synchronous ``Transition``; phase 2 would iterate
+      ``process.transitions`` and could grab the sync one.
+
+    Sync-only ``action_name`` duplication is still allowed (the sync call
+    path uses ``get_transition_by_action_name`` which disambiguates via
+    conditions/permissions and raises if more than one remains).
+    """
+    transitions = process_cls.transitions or []
+    background_names: dict[str, str] = {}
+
+    for transition in transitions:
+        if not getattr(transition, 'is_background', False):
+            continue
+        name = transition.action_name
+        if name in background_names:
+            raise ImproperlyConfigured(
+                f"Process {process_cls.__module__}.{process_cls.__name__} "
+                f"has two background transitions sharing action_name="
+                f"'{name}' ('{background_names[name]}' and "
+                f"'{type(transition).__name__}'). Phase-2 restore uses "
+                f"action_name as its only key — background action_names "
+                f"must be unique within a Process."
+            )
+        background_names[name] = type(transition).__name__
+
+    for transition in transitions:
+        if getattr(transition, 'is_background', False):
+            continue
+        if transition.action_name in background_names:
+            raise ImproperlyConfigured(
+                f"Process {process_cls.__module__}.{process_cls.__name__} "
+                f"has a synchronous Transition named "
+                f"'{transition.action_name}' that collides with a "
+                f"background transition of the same name. Phase-2 restore "
+                f"picks the first matching action_name on the Process and "
+                f"cannot distinguish them — rename one."
+            )
 
 
 class ProcessManager:

@@ -198,3 +198,24 @@ class CeleryModeWithoutCeleryTests(TestCase):
                 with self.assertRaises(ImproperlyConfigured) as ctx:
                     validate_on_ready()
                 self.assertIn('STARTER_QUEUE', str(ctx.exception))
+
+    def test_validate_on_ready_rejects_sqlite_in_celery_mode(self):
+        from unittest.mock import patch
+        from django_logic.background.settings import validate_on_ready
+
+        celery_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
+        sqlite_db = {
+            'default': {
+                'ENGINE': 'django.db.backends.sqlite3',
+                'NAME': ':memory:',
+            }
+        }
+        with override_settings(DJANGO_LOGIC=celery_cfg, DATABASES=sqlite_db):
+            with patch(
+                'django_logic.background.settings._celery_available',
+                return_value=True,
+            ):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    validate_on_ready()
+                self.assertIn('SQLite', str(ctx.exception))
+                self.assertIn('PostgreSQL', str(ctx.exception))

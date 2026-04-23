@@ -22,6 +22,12 @@ class TransitionMessage(TimeStampedModel):
     last_error_dt = models.DateTimeField(blank=True, null=True)
     last_error_message = models.TextField(blank=True)
 
+    # Records exceptions swallowed by ``FailureSideEffects`` so broken
+    # cleanup paths don't fail silently. Separate from ``last_error_*``
+    # which tracks the side-effect exception that triggered the failure
+    # branch in the first place.
+    failure_side_effect_error = models.TextField(blank=True)
+
     # Phase-2 timing. ``started_at`` is (re)written at the top of every
     # phase-2 attempt, so on retry it reflects the *current* attempt —
     # a watchdog can scan ``is_completed=False AND started_at < cutoff``
@@ -38,6 +44,13 @@ class TransitionMessage(TimeStampedModel):
     process_name = models.CharField(max_length=100)
     transition_name = models.CharField(max_length=100)
     queue_name = models.CharField(max_length=100)
+
+    # Per-attempt timeout configured on ``BackgroundTransition(timeout=N)``.
+    # Null = no watchdog for this row. Used by ``watchdog_stale_attempts``
+    # to find attempts whose current run has exceeded their declared
+    # wall-clock limit.
+    timeout_seconds = models.PositiveIntegerField(blank=True, null=True)
+
     kwargs = models.JSONField(blank=True, default=dict)
 
     class Meta:
@@ -106,3 +119,16 @@ class TransitionMessage(TimeStampedModel):
                 'modified',
             ]
         )
+
+    def record_failure_side_effect_error(self, exception: BaseException) -> None:
+        """Record an exception raised from ``failure_side_effects``.
+
+        Separate from ``record_error`` because the original side-effect
+        error (which triggered the failure branch) must stay visible in
+        ``last_error_message`` — we just annotate that the cleanup path
+        also broke.
+        """
+        self.failure_side_effect_error = (
+            f'{type(exception).__name__}: {exception}'
+        )[:10_000]
+        self.save(update_fields=['failure_side_effect_error', 'modified'])

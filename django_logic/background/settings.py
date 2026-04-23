@@ -83,3 +83,26 @@ def validate_on_ready() -> None:
     if mode == EXECUTION_CELERY:
         # Surface STARTER_QUEUE misconfig now rather than on first retry.
         starter_queue()
+        _reject_sqlite_in_celery_mode()
+
+
+def _reject_sqlite_in_celery_mode() -> None:
+    """SQLite doesn't support ``select_for_update(nowait=True)`` nor
+    partial unique indexes, so the phase-2 concurrency guard silently
+    degrades to "serialize everything" — which masks real bugs in dev
+    and fails in prod.
+
+    Read ``settings.DATABASES`` directly (not ``django.db.connections``)
+    so tests using ``override_settings(DATABASES=...)`` are reflected.
+    """
+    databases = getattr(settings, 'DATABASES', {}) or {}
+    for alias, cfg in databases.items():
+        engine = (cfg or {}).get('ENGINE', '')
+        if 'sqlite' in engine.lower():
+            raise ImproperlyConfigured(
+                f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' requires "
+                f"a database that supports select_for_update(nowait=True) "
+                f"and partial unique indexes. Database '{alias}' uses "
+                f"{engine!r} (SQLite). Switch to PostgreSQL or set "
+                f"BACKGROUND_EXECUTION='sync'."
+            )

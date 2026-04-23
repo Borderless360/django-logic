@@ -94,7 +94,9 @@ class FailureSideEffects(BaseCommand):
     """Runs inside ``fail_transition``, before state unlock.
 
     Exceptions here are logged and swallowed to avoid masking the original
-    failure that triggered ``fail_transition``.
+    failure that triggered ``fail_transition``, but the raised exception
+    is returned to the caller so background transitions can record it on
+    the ``TransitionMessage`` (otherwise broken cleanup is invisible).
     """
 
     def execute(self, state: State, **kwargs):
@@ -111,6 +113,8 @@ class FailureSideEffects(BaseCommand):
                 command(state.instance, **kwargs)
         except Exception as error:
             transition_logger.error(error)
+            return error
+        return None
 
 
 class NextTransition:

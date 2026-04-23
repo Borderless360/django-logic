@@ -432,6 +432,39 @@ REQUIREMENTS for users:
   - in_progress_state MUST be unique within a Process
 ```
 
+#### Known edge case — watchdog vs slow worker
+
+When a ``BackgroundTransition`` declares ``timeout=N`` and the watchdog
+task (``watchdog_stale_attempts``) runs:
+
+- **Normal case.** The original worker holds the row's
+  ``select_for_update`` lock. The watchdog's own
+  ``select_for_update(nowait=True)`` fails with ``OperationalError``;
+  it defers, and the running attempt finishes (success or terminal) on
+  its own.
+- **Race case.** The original worker has lost its DB connection (broker
+  blip, long Python-side work, GC pause > idle timeout, etc.) but is
+  still executing side-effects in-process. The row lock is released.
+  The watchdog acquires the row, records a synthetic
+  ``TimeoutError`` (``errors_count += 1``), re-dispatches, and either
+  terminates the row at ``MAX_ERRORS`` or leaves it for the periodic
+  starter.
+
+  Meanwhile the original worker may complete its side-effects
+  successfully. When it tries to ``set_state(target)`` /
+  ``mark_as_completed()``, its atomic block either rolls back (no
+  valid row lock) or hits a completed row and is a no-op. **The
+  side-effects will have run twice.** This is safe per the "side-effects
+  MUST be idempotent" requirement above; it is the price of catching
+  hung workers without a second heartbeat channel.
+
+The periodic starter (``retry_stale_transitions``) is subject to the
+same race, minus the timeout trigger — a row held only in Python by a
+worker with a dead DB connection looks identical to an abandoned row.
+``RETRY_MINUTES`` sets the minimum window before re-dispatch; pick it
+larger than your realistic worst-case side-effect duration plus one
+broker round-trip.
+
 ### 2.8 TransitionMessage model
 
 ```python
