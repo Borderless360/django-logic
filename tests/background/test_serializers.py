@@ -16,8 +16,10 @@ class SerializeKwargsTests(SimpleTestCase):
         self.assertEqual(out['x'], 1)
 
     def test_user_replaced_with_user_id(self):
+        # serialize reads .pk (matching the phase-2 get(pk=...) restore and
+        # custom-PK user models), not .id.
         user = Mock()
-        user.id = 42
+        user.pk = 42
         out = serialize_kwargs({'user': user})
         self.assertNotIn('user', out)
         self.assertEqual(out['user_id'], 42)

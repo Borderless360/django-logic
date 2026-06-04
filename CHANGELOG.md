@@ -23,6 +23,10 @@
 - **Primary-key-agnostic background path** — `TransitionMessage.instance_id` is stored as text (`str(instance.pk)`), so background transitions work with `UUIDField`, `CharField`, and `BigAutoField` primary keys beyond `2**31-1`, matching the synchronous core (migration `0005`).
 - **kwargs serialization** — built-in handling of `request`, `user` → `user_id`, `UUID` → `str`, `datetime`/`date` → `.isoformat()`; unserializable values are rejected at phase 1 rather than phase 2.
 
+### Privacy / logging controls
+
+- **Opt-in kwargs redaction.** Transition kwargs (which can carry `user`, `request`, and arbitrary business data) are attached to log records via `extra={'kwargs': ...}`. Two new `DJANGO_LOGIC` settings let PII/compliance-sensitive deployments control this: `LOG_KWARGS = False` omits kwargs from log records entirely, and `LOG_KWARGS_REDACTOR = <callable | 'dotted.path'>` runs a sanitiser over a copy of the kwargs before logging. Default behaviour is unchanged (kwargs logged as-is).
+
 ### Observability
 
 - **`TransitionMessage` timing fields** — `started_at`, `completed_at`, `duration_ms`. `started_at` is (re)written at the top of every phase-2 attempt so a watchdog can scan `is_completed=False AND started_at < cutoff` to find hung attempts. `completed_at` is set once when the row is marked completed (success or terminal failure); `duration_ms` measures the last attempt only. Backed by a new `dl_bg_started_idx` index on `(is_completed, started_at)`.
@@ -38,6 +42,10 @@
 - **Terminal background failures no longer re-raise out of the Celery task.** The phase-2 re-raise is now Sync-mode only — in Celery mode the outcome is fully recorded on the row, so re-raising only spammed task-failure alerts and risked `acks_late` redelivery.
 - **`duration_ms` is no longer inflated for safety-net-finalized rows** (it stays null when no real attempt ran), and `get_transition_by_action_name`'s not-found error now uses `instance.pk` (was `.id`, which raised `AttributeError` on custom-PK models).
 - **Celery mode warns when no broker is configured.** `validate_on_ready` now logs a loud warning if the resolved `broker_url` is empty or `memory://` (messages would otherwise vanish into an in-memory transport), and `_reject_sqlite_in_celery_mode` checks only the alias `TransitionMessage` is routed to (a secondary SQLite alias on a Postgres-default deployment is no longer rejected).
+- **`errors_count` increments atomically.** `TransitionMessage.record_error` now uses a DB-side `F('errors_count') + 1` update instead of a read-modify-write on a possibly-stale in-memory value, so a watchdog and a reconnected zombie worker racing on the same row can't lose an increment.
+- **`NextTransition` no longer guesses on ambiguity.** A `next_transition` whose name resolves to more than one available transition is now refused (logged, skipped) instead of silently running whichever was first in iteration order, and the follow-up is invoked through the normal `Process` entrypoint so it gets its own `tr_id` and `_transition_context` (parent chain) rather than inheriting the parent's.
+- **Removed a redundant lock check.** `Transition.change_state` relied on `state.is_locked() or not state.lock()`; the atomic `lock()` alone is sufficient, so the `is_locked()` pre-check (a TOCTOU window + extra round-trip) was dropped.
+- **User serialization reads `pk`, not `id`,** matching the phase-2 `get(pk=...)` restore and supporting custom user models whose primary key isn't named `id`.
 
 ### Internal cleanup
 

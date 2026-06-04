@@ -22,7 +22,11 @@ from django_logic.commands import (
     SideEffects,
 )
 from django_logic.exceptions import TransitionNotAllowed
-from django_logic.logger import transition_logger, TransitionEventType
+from django_logic.logger import (
+    redact_log_kwargs,
+    transition_logger,
+    TransitionEventType,
+)
 from django_logic.state import State
 
 
@@ -124,10 +128,15 @@ class Transition(BaseTransition):
             f'{kwargs.get("tr_id")} {TransitionEventType.START.value} '
             f'{process_class_name} {self.action_name} {state.instance_key} '
             f'{kwargs.get("root_id")} {kwargs.get("parent_id")}',
-            extra={'kwargs': kwargs, 'state_hash': state._get_hash()},
+            extra={'kwargs': redact_log_kwargs(kwargs), 'state_hash': state._get_hash()},
         )
 
-        if state.is_locked() or not state.lock():
+        # lock() is atomic (cache.add / Redis SET NX) and returns False if
+        # the state is already locked, so the acquire alone is sufficient.
+        # A separate is_locked() pre-check only adds a TOCTOU window and a
+        # redundant round-trip (a stale is_locked()==True could even reject
+        # a transition the atomic lock() would have granted).
+        if not state.lock():
             raise TransitionNotAllowed("State is locked")
 
         transition_logger.info(

@@ -26,6 +26,37 @@ LOGGING = {
 }
 ```
 
+## Logging transition kwargs (and redacting PII)
+
+The `Start` lifecycle line attaches the transition's kwargs to the log
+record's `extra` (`extra={'kwargs': ...}`), and the callback-failure log
+does too. Those kwargs can include a `user` object, the `request`, and
+arbitrary business data (amounts, emails, tokens). By default they are
+logged as-is. Two `DJANGO_LOGIC` settings control this for
+privacy/compliance-sensitive deployments:
+
+```python
+DJANGO_LOGIC = {
+    # Omit kwargs from log records entirely.
+    'LOG_KWARGS': False,
+
+    # ...or sanitise them. Callable or 'dotted.path'; receives a copy of
+    # the kwargs and returns the dict to log.
+    'LOG_KWARGS_REDACTOR': 'myapp.logging.redact',
+}
+
+# myapp/logging.py
+def redact(kwargs):
+    kwargs.pop('user', None)
+    kwargs.pop('request', None)
+    if 'email' in kwargs:
+        kwargs['email'] = '***'
+    return kwargs
+```
+
+A redactor that raises never breaks the transition or leaks the raw
+kwargs — the record falls back to `{'__redaction_error__': True}`.
+
 ## Event types
 
 Every transition-lifecycle line carries a `tr_id` in the message body so all

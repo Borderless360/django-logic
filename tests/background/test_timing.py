@@ -100,7 +100,7 @@ class RestoreFailedTimingTests(TestCase):
     def test_restore_failure_marks_completed_without_timing(self):
         widget = Widget.objects.create()
         # TM pointing at a transition that doesn't exist on the process —
-        # _restore raises _Restore_Failed before mark_as_started runs.
+        # _restore raises _RestoreError before mark_as_started runs.
         tm = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',

@@ -124,17 +124,22 @@ class TransitionMessage(TimeStampedModel):
         self.save(update_fields=update_fields)
 
     def record_error(self, exception: BaseException) -> None:
-        self.errors_count = (self.errors_count or 0) + 1
         self.last_error_message = str(exception)[:10_000]
         self.last_error_dt = timezone.now()
-        self.save(
-            update_fields=[
-                'errors_count',
-                'last_error_message',
-                'last_error_dt',
-                'modified',
-            ]
+        # Increment on the DB side (F expression) rather than a
+        # read-modify-write on a possibly-stale in-memory errors_count, so
+        # two writers racing on the same row — e.g. the watchdog and a
+        # reconnected zombie worker that lost its row lock — cannot lose an
+        # increment. .update() bypasses auto_now, so set ``modified`` here.
+        type(self).objects.filter(pk=self.pk).update(
+            errors_count=models.F('errors_count') + 1,
+            last_error_message=self.last_error_message,
+            last_error_dt=self.last_error_dt,
+            modified=self.last_error_dt,
         )
+        # Reflect the committed value in memory so the caller's MAX_ERRORS
+        # comparison sees the true count, not the stale snapshot.
+        self.refresh_from_db(fields=['errors_count', 'modified'])
 
     def record_failure_side_effect_error(self, exception: BaseException) -> None:
         """Record an exception raised from ``failure_side_effects``.

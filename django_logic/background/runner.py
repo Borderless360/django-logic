@@ -66,7 +66,7 @@ def run_background_transition(transition_message_id: int) -> None:
     """
     try:
         outcome = _run_atomic(transition_message_id)
-    except _RestoreFailed as exc:
+    except _StopRetry as exc:
         # The atomic block rolled back, so we couldn't mark_as_completed
         # from inside it. Do it here, in its own statement, to stop the
         # retry loop from picking the row up forever.
@@ -101,7 +101,7 @@ class _NothingToDo(Exception):
     by another worker. Caller should exit silently."""
 
 
-class _RestoreFailed(Exception):
+class _StopRetry(Exception):
     """Internal signal: the TM refers to a model/transition that no
     longer exists. The atomic block rolled back; the outer handler
     marks the TM completed in its own statement so retries stop."""
@@ -285,7 +285,7 @@ def _finalize_terminal_from_watchdog(
     """
     try:
         _, process, transition = _restore(tm)
-    except _Restore_Failed:
+    except _RestoreError:
         # No attempt ran here, so started_at (if any) belongs to an
         # abandoned attempt — don't record a misleading duration.
         tm.mark_as_completed(measure_duration=False)
@@ -346,7 +346,7 @@ def _run_atomic(tm_id: int) -> _Outcome:
     # mark_as_completed (on success / terminal failure) or errors_count
     # increment (on retryable failure). Moving any of them out, in
     # particular the mark_as_* calls, is what broke the unrestorable-row
-    # path (see _RestoreFailed). Don't do it.
+    # path (see _StopRetry). Don't do it.
     with transaction.atomic():
         try:
             tm = (
@@ -378,7 +378,7 @@ def _run_atomic(tm_id: int) -> _Outcome:
 
         try:
             instance, process, transition = _restore(tm)
-        except _Restore_Failed as exc:
+        except _RestoreError as exc:
             transition_logger.error(
                 f'TransitionMessage#{tm.pk} cannot be restored: {exc}. '
                 f'Marking completed to stop retries.'
@@ -387,7 +387,7 @@ def _run_atomic(tm_id: int) -> _Outcome:
             # block that will roll back when we exit. The outer handler
             # in run_background_transition() performs the mark in a
             # fresh statement so the stop-retry flag actually persists.
-            raise _RestoreFailed(tm.pk) from exc
+            raise _StopRetry(tm.pk) from exc
 
         # Record the start of this attempt. Overwritten on every retry so
         # the watchdog (uncompleted AND started_at < cutoff) tracks the
@@ -541,7 +541,7 @@ def _run_failure_hooks(outcome: _Outcome) -> None:
         )
 
 
-class _Restore_Failed(Exception):
+class _RestoreError(Exception):
     """The TransitionMessage refers to a model/instance/transition that
     no longer exists. The TM is marked completed to stop the retry loop.
     """
@@ -553,14 +553,14 @@ def _restore(tm: TransitionMessage):
         app = apps.get_app_config(tm.app_label)
         model = app.get_model(tm.model_name)
     except LookupError as exc:
-        raise _Restore_Failed(
+        raise _RestoreError(
             f'model {tm.app_label}.{tm.model_name} not installed'
         ) from exc
 
     try:
         instance = model.objects.get(pk=tm.instance_id)
     except model.DoesNotExist as exc:
-        raise _Restore_Failed(
+        raise _RestoreError(
             f'{tm.app_label}.{tm.model_name}#{tm.instance_id} not found'
         ) from exc
 
@@ -570,7 +570,7 @@ def _restore(tm: TransitionMessage):
         # Fall back to process_class stored in kwargs, if any.
         process_class_path = (tm.kwargs or {}).get('process_class')
         if not process_class_path:
-            raise _Restore_Failed(
+            raise _RestoreError(
                 f'instance has no process named {tm.process_name!r} and '
                 f'no process_class stored on the message'
             )
@@ -578,7 +578,7 @@ def _restore(tm: TransitionMessage):
 
     transition = _find_transition(process, tm)
     if transition is None:
-        raise _Restore_Failed(
+        raise _RestoreError(
             f'transition {tm.transition_name!r} not found on process '
             f'{type(process).__module__}.{type(process).__name__}'
         )

@@ -22,7 +22,11 @@ from django.db import IntegrityError, transaction
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import serialize_kwargs
-from django_logic.logger import transition_logger, TransitionEventType
+from django_logic.logger import (
+    redact_log_kwargs,
+    transition_logger,
+    TransitionEventType,
+)
 from django_logic.state import State
 from django_logic.transition import Transition
 
@@ -83,7 +87,7 @@ class BackgroundTransition(Transition):
             f'{process_class_name} {self.action_name} {state.instance_key} '
             f'{kwargs.get("root_id")} {kwargs.get("parent_id")} '
             f'[background queue={self.queue}]',
-            extra={'kwargs': kwargs, 'state_hash': state._get_hash()},
+            extra={'kwargs': redact_log_kwargs(kwargs), 'state_hash': state._get_hash()},
         )
 
         if not self.is_valid(state.instance, kwargs.get('user')):

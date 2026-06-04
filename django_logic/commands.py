@@ -5,7 +5,11 @@ side-effects, callbacks, failure side-effects, failure callbacks — is
 represented by a ``BaseCommand`` subclass that owns a list of callables
 and knows how to run them.
 """
-from django_logic.logger import transition_logger, TransitionEventType
+from django_logic.logger import (
+    redact_log_kwargs,
+    transition_logger,
+    TransitionEventType,
+)
 from django_logic.state import State
 
 
@@ -86,7 +90,7 @@ class Callbacks(BaseCommand):
                 f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
                 f'{command_name}: {error}',
                 exc_info=True,
-                extra={'kwargs': kwargs},
+                extra={'kwargs': redact_log_kwargs(kwargs)},
             )
 
 
@@ -141,11 +145,26 @@ class NextTransition:
             )
         )
         if not transitions:
+            # Not currently available (state/conditions) — skip silently,
+            # as a follow-up is best-effort.
+            return None
+        if len(transitions) > 1:
+            # Parity with Process.get_transition_by_action_name: refuse to
+            # guess between ambiguous matches rather than silently running
+            # whichever happens to be first in iteration order.
+            transition_logger.error(
+                f"{kwargs.get('tr_id')} {TransitionEventType.NEXT_TRANSITION.value} "
+                f"'{self._next_transition}' is ambiguous "
+                f"({len(transitions)} matches); not running any."
+            )
             return None
 
-        transition = transitions[0]
         try:
-            return transition.change_state(state, **kwargs)
+            # Invoke through the Process entrypoint so the follow-up mints
+            # its own tr_id and manages _transition_context (root_id chains,
+            # parent_id = this transition), instead of inheriting the
+            # parent's tr_id via a direct change_state call. Failures of the
+            # follow-up must not bubble into the current transition.
+            return getattr(process, self._next_transition)(**kwargs)
         except Exception as error:
-            # Follow-up transition failures must not bubble into the current one.
             transition_logger.error(error)

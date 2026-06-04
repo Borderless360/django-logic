@@ -54,6 +54,11 @@ dev = [
     "coverage>=7.0",
     "pytest>=8.0",
     "pytest-django>=4.8",
+    # Drivers for the PostgreSQL + Redis stability suite (make stability-*)
+    # and the Postgres concurrency tests. Without these, `uv sync --extra
+    # dev` runs the SQLite suite but not tests.stability.
+    "psycopg[binary]>=3.1",
+    "django-redis>=5.0.0",
 ]
 
 [project.urls]

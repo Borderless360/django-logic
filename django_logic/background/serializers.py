@@ -75,7 +75,10 @@ def serialize_kwargs(kwargs: dict) -> dict:
 
     user = out.pop('user', None)
     if user is not None and 'user_id' not in out:
-        user_id = getattr(user, 'id', None)
+        # Read .pk (not .id) to match the phase-2 restore (get(pk=user_id))
+        # and to support custom user models whose primary key isn't named
+        # 'id'. AnonymousUser (pk is None) is dropped, as before.
+        user_id = getattr(user, 'pk', None)
         if user_id is not None:
             out['user_id'] = user_id
 
