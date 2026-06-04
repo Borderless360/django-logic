@@ -15,6 +15,7 @@ Reference: docs/research/race-condition-issue
 """
 import threading
 import time
+from unittest.mock import patch
 
 from django.core.cache import cache
 from django.db import connections
@@ -32,104 +33,90 @@ from tests.stability.models import (
 )
 
 
-def _is_sqlite():
-    from django.conf import settings
-    engine = settings.DATABASES.get('default', {}).get('ENGINE', '')
-    return 'sqlite' in engine
-
-
 @tag('stability')
 class TestConcurrentTransitionRequests(StabilityTestCase):
     """
-    2.1 -- Two concurrent requests for the same BackgroundTransition.
+    2.1 -- N concurrent requests for the same transition on one instance.
 
-    Safety invariant: AT MOST one succeeds, no state corruption.
-    With Postgres: exactly 1 succeeds, the rest are rejected.
-    With SQLite: 0 or 1 may succeed (SQLite's DB-level write lock can
-    cause the lock winner to fail on DB write), but the state is still
-    consistent -- either the transition completed or nothing changed.
+    The synchronous lock guarantees *mutual exclusion*: while one thread
+    holds the state lock and runs the transition's side-effects, every
+    other request for the same instance is rejected ("State is locked").
+
+    An earlier version of this test let a fast winner acquire-run-release
+    the lock before the other threads even attempted it, so two threads
+    could win *sequentially* (each off a stale read) and the "exactly one
+    wins" assertion was flaky — the sync lock provides mutual exclusion,
+    not exactly-once. We now pin the winner inside its critical section
+    until every other thread has attempted and been rejected, so the
+    contention window provably covers all N threads. The lock must then
+    admit exactly one winner, reject the rest, and run the side-effects
+    exactly once.
     """
+
+    def _assert_one_winner_under_forced_contention(self, n_threads):
+        order = Order.objects.create(status='approved')
+        start = threading.Barrier(n_threads, timeout=10)
+
+        coordinator = threading.Lock()
+        rejected = {'count': 0}
+        all_others_rejected = threading.Event()
+
+        def hold_until_others_rejected(instance, **kwargs):
+            # Runs only in the winning thread, while it holds the lock.
+            # Block until the other N-1 threads have each attempted and
+            # been rejected, guaranteeing genuine contention rather than a
+            # fast unlock-before-the-others-try. Times out defensively so
+            # a stuck thread can never hang the suite.
+            all_others_rejected.wait(timeout=10)
+
+        def attempt():
+            try:
+                start.wait()
+                fresh = Order.objects.get(pk=order.pk)
+                process = OrderProcess(field_name='status', instance=fresh)
+                process.fulfill()
+                return 'success'
+            except TransitionNotAllowed:
+                with coordinator:
+                    rejected['count'] += 1
+                    if rejected['count'] >= n_threads - 1:
+                        all_others_rejected.set()
+                return 'rejected'
+            finally:
+                connections.close_all()
+
+        # Pin a blocking side-effect at the front of `fulfill` so the lock
+        # holder stays inside the critical section throughout the race.
+        fulfill = next(
+            t for t in OrderProcess.transitions if t.action_name == 'fulfill'
+        )
+        pinned = [hold_until_others_rejected, *fulfill.side_effects.commands]
+        with patch.object(fulfill.side_effects, '_commands', pinned):
+            outcomes = run_concurrent(attempt, n_threads=n_threads)
+
+        results = [r for r, err in outcomes if err is None]
+        errors = [(r, err) for r, err in outcomes if err is not None]
+        self.assertEqual(errors, [], f"No thread should error: {outcomes}")
+        self.assertEqual(
+            results.count('success'), 1,
+            f"Exactly one thread must win under contention: {outcomes}")
+        self.assertEqual(
+            results.count('rejected'), n_threads - 1,
+            f"The other {n_threads - 1} must be rejected: {outcomes}")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'fulfilled')
+        # Side-effects ran exactly once — the lock prevented any duplicate.
+        self.assertEqual(order.side_effect_log, 'se1,se2,se3,')
 
     @requires_real_redis
     def test_two_threads_same_transition_at_most_one_wins(self):
-        order = Order.objects.create(status='approved')
-        barrier = threading.Barrier(2, timeout=5)
-
-        def attempt():
-            try:
-                barrier.wait()
-                fresh = Order.objects.get(pk=order.pk)
-                process = OrderProcess(field_name='status', instance=fresh)
-                process.fulfill()
-                return 'success'
-            except TransitionNotAllowed:
-                return 'rejected'
-            except Exception as e:
-                return f'error:{e}'
-            finally:
-                connections.close_all()
-
-        outcomes = run_concurrent(attempt, n_threads=2)
-
-        successes = sum(
-            1 for result, err in outcomes
-            if err is None and result == 'success'
-        )
-
-        self.assertLessEqual(successes, 1,
-            f"At most one thread should succeed. Outcomes: {outcomes}")
-
-        order.refresh_from_db()
-        if successes == 1:
-            self.assertEqual(order.status, 'fulfilled')
-        else:
-            self.assertIn(order.status, ('approved', 'fulfillment_failed', 'fulfilling'),
-                f"State must be consistent after contention. Got: {order.status}")
-
-        if not _is_sqlite():
-            self.assertEqual(successes, 1,
-                f"With Postgres, exactly one thread must succeed. Outcomes: {outcomes}")
+        self._assert_one_winner_under_forced_contention(2)
 
     @requires_real_redis
     def test_ten_threads_same_transition_at_most_one_wins(self):
-        """Stress test: 10 concurrent requests, at most one succeeds."""
-        order = Order.objects.create(status='approved')
-        barrier = threading.Barrier(10, timeout=10)
-
-        def attempt():
-            try:
-                barrier.wait()
-                fresh = Order.objects.get(pk=order.pk)
-                process = OrderProcess(field_name='status', instance=fresh)
-                process.fulfill()
-                return 'success'
-            except TransitionNotAllowed:
-                return 'rejected'
-            except Exception as e:
-                return f'error:{e}'
-            finally:
-                connections.close_all()
-
-        outcomes = run_concurrent(attempt, n_threads=10)
-
-        successes = sum(
-            1 for result, err in outcomes
-            if err is None and result == 'success'
-        )
-
-        self.assertLessEqual(successes, 1,
-            f"At most one thread should succeed out of 10. Outcomes: {outcomes}")
-
-        order.refresh_from_db()
-        if successes == 1:
-            self.assertEqual(order.status, 'fulfilled')
-        else:
-            self.assertIn(order.status, ('approved', 'fulfillment_failed', 'fulfilling'),
-                f"State must be consistent after contention. Got: {order.status}")
-
-        if not _is_sqlite():
-            self.assertEqual(successes, 1,
-                f"With Postgres, exactly one thread must succeed. Outcomes: {outcomes}")
+        """Stress test: 10 concurrent requests, exactly one wins."""
+        self._assert_one_winner_under_forced_contention(10)
 
 
 @tag('stability')
