@@ -40,7 +40,13 @@ class TransitionMessage(TimeStampedModel):
 
     app_label = models.CharField(max_length=100)
     model_name = models.CharField(max_length=100)
-    instance_id = models.PositiveIntegerField()
+    # Stored as text (``str(instance.pk)``) rather than an integer so the
+    # background path supports every primary-key type the synchronous core
+    # already supports: BigAutoField PKs beyond 2**31-1, UUIDField, and
+    # CharField primary keys. ``_restore`` looks the instance up with
+    # ``model.objects.get(pk=instance_id)``, which coerces the string back
+    # to the model's real pk type.
+    instance_id = models.CharField(max_length=255)
     process_name = models.CharField(max_length=100)
     transition_name = models.CharField(max_length=100)
     queue_name = models.CharField(max_length=100)
@@ -94,12 +100,22 @@ class TransitionMessage(TimeStampedModel):
         self.started_at = timezone.now()
         self.save(update_fields=['started_at', 'modified'])
 
-    def mark_as_completed(self) -> None:
+    def mark_as_completed(self, measure_duration: bool = True) -> None:
+        """Mark the row completed and (optionally) record ``duration_ms``.
+
+        ``measure_duration`` must be ``False`` when the row is finalized by
+        a safety-net task (watchdog / detect_stuck) rather than by an actual
+        phase-2 attempt. In that case ``started_at`` belongs to an abandoned
+        attempt that may be minutes or hours old, so ``now - started_at`` is
+        the time-to-finalize, not an execution time — recording it as
+        ``duration_ms`` would grossly inflate latency metrics. Leaving
+        ``duration_ms`` null signals "no measured execution".
+        """
         now = timezone.now()
         self.is_completed = True
         self.completed_at = now
         update_fields = ['is_completed', 'completed_at', 'modified']
-        if self.started_at is not None:
+        if measure_duration and self.started_at is not None:
             delta = now - self.started_at
             # Clamp to 0 to absorb clock skew; cap into PositiveIntegerField.
             ms = max(int(delta.total_seconds() * 1000), 0)

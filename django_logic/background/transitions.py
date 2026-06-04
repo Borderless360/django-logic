@@ -110,7 +110,9 @@ class BackgroundTransition(Transition):
         instance_lookup = {
             'app_label': state.instance._meta.app_label,
             'model_name': state.instance._meta.model_name,
-            'instance_id': state.instance.pk,
+            # str() so UUID / CharField / big-int PKs all round-trip through
+            # the TextField; _restore coerces it back via get(pk=...).
+            'instance_id': str(state.instance.pk),
         }
         try:
             serialized = serialize_kwargs(kwargs)
@@ -122,15 +124,15 @@ class BackgroundTransition(Transition):
                 f"on the TransitionMessage row."
             ) from e
 
-        try:
-            with transaction.atomic():
-                if self.in_progress_state:
-                    state.set_state(self.in_progress_state)
-                    transition_logger.info(
-                        f'{kwargs.get("tr_id")} '
-                        f'{TransitionEventType.SET_STATE.value} '
-                        f'{self.in_progress_state}'
-                    )
+        with transaction.atomic():
+            # Create the TransitionMessage FIRST. It carries the partial
+            # unique constraint and has no other unique/FK constraints, so
+            # an IntegrityError from this create is unambiguously the
+            # concurrency guard firing. Writing in_progress_state first
+            # instead would let a model-level constraint on the state
+            # column (CHECK, NOT NULL, FK, trigger) surface as the
+            # misleading "another transition is already in progress".
+            try:
                 tm = TransitionMessage.objects.create(
                     process_name=state.process_name,
                     transition_name=self.action_name,
@@ -139,11 +141,22 @@ class BackgroundTransition(Transition):
                     kwargs=serialized,
                     **instance_lookup,
                 )
-        except IntegrityError as exc:
-            raise AlreadyInProgress(
-                f"{state.instance_key}: another transition is already "
-                f"in progress for this instance."
-            ) from exc
+            except IntegrityError as exc:
+                raise AlreadyInProgress(
+                    f"{state.instance_key}: another transition is already "
+                    f"in progress for this instance."
+                ) from exc
+
+            if self.in_progress_state:
+                # A constraint violation here propagates as a raw
+                # IntegrityError (not AlreadyInProgress) — it is the user's
+                # own model constraint, not our concurrency guard.
+                state.set_state(self.in_progress_state)
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} '
+                    f'{TransitionEventType.SET_STATE.value} '
+                    f'{self.in_progress_state}'
+                )
 
         transition_logger.info(
             f'{kwargs.get("tr_id")} TransitionMessage#{tm.pk} created '

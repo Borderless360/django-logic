@@ -209,3 +209,24 @@ class Action(Transition):
 
     def complete_transition(self, state: State, **kwargs):
         self.callbacks.execute(state, **kwargs)
+
+    def fail_transition(self, state: State, exception: Exception, **kwargs):
+        """Run the failure path WITHOUT unlocking.
+
+        An Action never acquires the state lock (``change_state`` skips
+        ``state.lock()``), so it must never release one either. Inheriting
+        ``Transition.fail_transition`` would call ``state.unlock()`` and,
+        because the lock key is derived only from instance+field, delete
+        the lock a concurrent ``Transition`` on the same instance/field
+        legitimately holds — and, for ``RedisState``, discard the cached
+        in-progress state stored under that same key. This mirrors the
+        lock/unlock asymmetry already present in ``complete_transition``.
+        """
+        if self.failed_state:
+            state.set_state(self.failed_state)
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                f'{self.failed_state}'
+            )
+        self.failure_side_effects.execute(state, exception=exception, **kwargs)
+        self.failure_callbacks.execute(state, exception=exception, **kwargs)

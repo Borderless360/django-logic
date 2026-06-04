@@ -16,7 +16,7 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - [Complete Example](#complete-example)
 - [Display Process](#display-process)
 - [Django-Logic vs Django FSM](#django-logic-vs-django-fsm)
-- [Background Mode & Celery Integration](#background-mode--celery-integration)
+- [Background Transitions](#background-transitions)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -27,13 +27,18 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - 📊 **Process Visualization** - Visualize your workflows
 - 🏗️ **Nested Processes** - Build complex workflows with sub-processes
 - ⚡ **Optimistic Locking** - Prevent race conditions
-- 🔍 **Comprehensive Logging** - Track all state changes
+- ⏳ **Durable Background Transitions** - Queue-routed, retryable side-effects via Celery (see [Background Transitions](#background-transitions))
+- 🔍 **Structured Logging** - State changes flow through the standard `django-logic` / `django-logic.transition` Python loggers, configured via Django `LOGGING` (see [docs/logger.md](docs/logger.md))
 
 ## Requirements
 - Python 3.11+
 - Django 4.0+
 - django-model-utils >= 4.5.1
-- djangorestframework >= 3.14.0
+
+Optional extras:
+- `pip install django-logic[celery]` — Celery, for `BackgroundTransition` in `'celery'` execution mode
+- `pip install django-logic[redis]` — `django-redis`, for the cross-process `RedisState` lock
+- `pip install django-logic[drf]` — Django REST Framework helpers (no longer a core dependency)
 
 ## Installation
 
@@ -526,7 +531,7 @@ Django-Logic was created to address limitations and add new features:
 - **Built-in Locking**: Prevents race conditions out of the box
 - **Failure Handling**: Dedicated failure side-effects, failure callbacks, and failed states
 - **Better Separation**: Clear separation between business logic and implementation
-- **Background Tasks**: Celery integration via [Django-Logic-Celery](https://github.com/Borderless360/django-logic-celery)
+- **Background Tasks**: Durable, queue-routed background execution built in via `django_logic.background` ([Background Transitions](#background-transitions)) — no external package required
 
 ### Migration from Django FSM:
 If you're migrating from Django FSM, the main changes are:
@@ -566,7 +571,7 @@ class AuditedState(State):
         # Log state changes
         audit_log.create(
             model=self.instance.__class__.__name__,
-            instance_id=self.instance.id,
+            instance_id=self.instance.pk,
             field=self.field_name,
             old_value=self.get_db_state(),
             new_value=state,
@@ -717,6 +722,38 @@ django_logic.starter    — the framework's periodic safety-net tasks
 ```
 
 The periodic starter re-dispatches stale transitions back to their own queue — retried slow jobs never jump to the critical queue.
+
+### Safety-net tasks
+
+Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
+
+- `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
+- `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
+- `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
+- `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
+
+### Per-attempt timeouts
+
+A `BackgroundTransition` (or `BackgroundAction`) may declare a per-attempt wall-clock budget with `timeout=<seconds>`:
+
+```python
+BackgroundTransition(
+    action_name='generate_export',
+    sources=['fulfilled'],
+    target='exported',
+    in_progress_state='exporting',
+    failed_state='export_failed',
+    queue='django_logic.slow',
+    timeout=600,                       # abandon an attempt after 10 minutes
+    side_effects=[build_csv, upload_to_s3],
+)
+```
+
+`watchdog_stale_attempts` scans in-flight rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. Because the watchdog cannot tell a crashed attempt from a merely slow one, **side-effects must be idempotent** (a re-dispatched attempt may run them again).
+
+### One in-flight transition per instance
+
+A partial unique constraint guarantees at most one *uncompleted* `TransitionMessage` per instance. Starting a second background transition on the same instance before the first completes raises `AlreadyInProgress`. This also means you **cannot** chain a background transition directly from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.

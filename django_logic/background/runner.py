@@ -82,7 +82,18 @@ def run_background_transition(transition_message_id: int) -> None:
         _run_failure_hooks(outcome)
 
     if outcome.exception is not None:
-        raise outcome.exception
+        # Sync mode propagates the exception so the inline caller / tests
+        # can react (assertRaises, surface the failure to the request).
+        # Celery mode must NOT re-raise: the outcome is already fully
+        # recorded on the row (errors_count + last_error for a retryable
+        # failure; failed_state + is_completed for a terminal one), the
+        # periodic starter owns retries, and re-raising out of an
+        # acks_late task would both spam task-failure alerts for an
+        # already-resolved row and risk broker redelivery on top of the
+        # periodic retry.
+        from django_logic.background.dispatch import _current_mode
+        if _current_mode() == bg_settings.EXECUTION_SYNC:
+            raise outcome.exception
 
 
 class _NothingToDo(Exception):
@@ -100,11 +111,22 @@ class _RestoreFailed(Exception):
 
 
 def _mark_unrestorable_completed(tm_id: int) -> None:
-    """Best-effort: mark an unrestorable TM completed outside any atomic
-    block the caller was in. Written as a single UPDATE so it survives
-    even if the caller is in a parent transaction that later rolls back
-    — the periodic starter still won't pick the row up because
-    ``is_completed=True`` is visible in the same transaction.
+    """Mark an unrestorable TM completed so the periodic starter stops
+    re-dispatching it forever.
+
+    Runs as a single UPDATE outside the (already-exited, rolled-back)
+    phase-2 atomic block. Durability depends on the execution mode:
+
+    * Celery mode — phase 2 runs as the top-level unit of work with no
+      surrounding transaction, so this UPDATE autocommits and is durable.
+      This is the path the original infinite-retry bug lived on.
+    * Sync mode — phase 1 (which created the row) and phase 2 run in the
+      same call stack and share the caller's transaction state. If the
+      caller wraps the whole call in ``atomic()`` and later rolls back,
+      this UPDATE rolls back too — but so does the phase-1 INSERT, so there
+      is no surviving row to re-dispatch and the stop-retry guarantee still
+      holds. It is NOT a write that survives an *independent* parent
+      rollback on its own; correcting an earlier docstring that claimed so.
     """
     from django.utils import timezone
 
@@ -145,6 +167,7 @@ def abandon_timed_out_attempt(tm_id: int) -> bool:
 
     Returns True if the row was touched, False if skipped.
     """
+    hooks = None
     with transaction.atomic():
         try:
             tm = (
@@ -178,8 +201,13 @@ def abandon_timed_out_attempt(tm_id: int) -> bool:
             # Terminal. Finalize inside this same atomic — we already
             # hold the row lock so we cannot recurse through
             # finalize_stuck_attempt (deadlock).
-            _finalize_terminal_from_watchdog(tm, err, source='watchdog')
-        return True
+            hooks = _finalize_terminal_from_watchdog(tm, err, source='watchdog')
+
+    # Run failure_callbacks after the atomic commits and the row lock is
+    # released (phase 3, best-effort) — see _run_failure_callbacks.
+    if hooks is not None:
+        _run_failure_callbacks(hooks)
+    return True
 
 
 def finalize_stuck_attempt(tm_id: int) -> bool:
@@ -194,6 +222,7 @@ def finalize_stuck_attempt(tm_id: int) -> bool:
 
     Returns True if the row was finalized, False if skipped.
     """
+    hooks = None
     with transaction.atomic():
         try:
             tm = (
@@ -223,15 +252,19 @@ def finalize_stuck_attempt(tm_id: int) -> bool:
         err = RuntimeError(
             f'[detect_stuck] {tm.last_error_message or "transition stuck"}'
         )
-        _finalize_terminal_from_watchdog(tm, err, source='detect_stuck')
-        return True
+        hooks = _finalize_terminal_from_watchdog(tm, err, source='detect_stuck')
+
+    # Run failure_callbacks after the atomic commits (phase 3, best-effort).
+    if hooks is not None:
+        _run_failure_callbacks(hooks)
+    return True
 
 
 def _finalize_terminal_from_watchdog(
     tm: TransitionMessage,
     exception: BaseException,
     source: str,
-) -> None:
+):
     """Shared terminal-failure path for the watchdog / detect-stuck tasks.
 
     Must run inside the caller's atomic block, with the TM row already
@@ -243,15 +276,25 @@ def _finalize_terminal_from_watchdog(
     renamed), we still mark_as_completed so the retry loop stops;
     failed_state and failure_side_effects are skipped — there's nothing
     to call them on.
+
+    Returns the ``(transition, state, kwargs, exception)`` tuple the caller
+    needs to run ``failure_callbacks`` *after* its atomic block commits
+    (so callbacks don't run while holding the row lock, matching the
+    in-task phase-3 timing), or ``None`` when the row was unrestorable
+    (nothing to run callbacks on).
     """
     try:
         _, process, transition = _restore(tm)
     except _Restore_Failed:
-        tm.mark_as_completed()
-        return
+        # No attempt ran here, so started_at (if any) belongs to an
+        # abandoned attempt — don't record a misleading duration.
+        tm.mark_as_completed(measure_duration=False)
+        return None
 
     kwargs = dict(tm.kwargs or {})
     restore_user(kwargs)
+    # Mirror the sync path: side-effects/callbacks may read ``context``.
+    kwargs.setdefault('context', {})
     state = process.state
 
     if transition.failed_state:
@@ -268,7 +311,33 @@ def _finalize_terminal_from_watchdog(
     )
     if fse_error is not None:
         tm.record_failure_side_effect_error(fse_error)
-    tm.mark_as_completed()
+    # A safety-net finalization is not a worker attempt; started_at points
+    # at the abandoned attempt, so don't let it inflate duration_ms.
+    tm.mark_as_completed(measure_duration=False)
+    return (transition, state, kwargs, exception)
+
+
+def _run_failure_callbacks(hooks) -> None:
+    """Run a terminal row's ``failure_callbacks`` best-effort, *after* the
+    finalizing atomic block has committed and released the row lock.
+
+    Mirrors ``_run_failure_hooks`` for rows finalized by the watchdog /
+    detect_stuck tasks, so ``failure_callbacks`` fire on terminal failure
+    regardless of whether the row hit MAX_ERRORS in-task or via a
+    safety-net task. ``Callbacks.execute`` already swallows exceptions; the
+    extra guard here is belt-and-suspenders against a malformed hook list.
+    """
+    transition, state, kwargs, exception = hooks
+    try:
+        transition.failure_callbacks.execute(
+            state, exception=exception, **(kwargs or {})
+        )
+    except Exception as e:
+        transition_logger.error(
+            f'{(kwargs or {}).get("tr_id")} failure_callbacks failed '
+            f'(best-effort, swallowed): {e}',
+            exc_info=True,
+        )
 
 
 def _run_atomic(tm_id: int) -> _Outcome:
@@ -300,6 +369,12 @@ def _run_atomic(tm_id: int) -> _Outcome:
 
         kwargs = dict(tm.kwargs or {})
         restore_user(kwargs)
+        # Mirror the synchronous path (Transition._init_transition_context):
+        # side-effects/callbacks may read a framework-provided ``context``
+        # dict. serialize_kwargs drops it at phase 1, so rebuild it here —
+        # otherwise a side-effect declared as ``def fn(instance, context,
+        # **kwargs)`` works synchronously but raises in background mode.
+        kwargs.setdefault('context', {})
 
         try:
             instance, process, transition = _restore(tm)

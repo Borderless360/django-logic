@@ -27,7 +27,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Min
+from django.db.models import Min, Q
 from django.utils import timezone
 
 from django_logic.background import settings as bg_settings
@@ -108,32 +108,63 @@ def retry_stale_transitions() -> int:
 
 
 def _retry_pending_inline() -> int:
+    # Mirror dispatch_transition's mode awareness: in Sync mode there is
+    # no Celery worker to consume an apply_async message (with no broker
+    # configured Celery silently publishes to an in-memory transport that
+    # nobody drains), so phase 2 must run inline. In Celery mode we
+    # re-dispatch to the row's own queue. The check also honours an
+    # active sync_execution() block.
+    from django_logic.background.dispatch import _current_mode
+
+    sync_mode = _current_mode() == bg_settings.EXECUTION_SYNC
+
     cutoff = timezone.now() - timedelta(minutes=bg_settings.retry_minutes())
     max_errors = bg_settings.max_errors()
 
-    queryset = (
+    # Materialise the candidate rows up front rather than streaming with
+    # iterator(): in Sync mode each row opens its own atomic block with
+    # select_for_update, and holding a server-side cursor open across
+    # those nested transactions is fragile across backends.
+    #
+    # Recency guard: skip rows whose *current* attempt started within
+    # RETRY_MINUTES. Without it, a row matches on created<cutoff every tick
+    # and gets re-dispatched repeatedly while an attempt is still in flight
+    # (the select_for_update guard prevents double-execution, but duplicate
+    # queue messages pile up and the redispatch keeps overwriting
+    # started_at, perpetually sliding the watchdog's timeout floor). Rows
+    # that never started (started_at IS NULL) are always eligible.
+    candidates = list(
         TransitionMessage.objects
         .filter(
             is_completed=False,
             errors_count__lt=max_errors,
             created__lt=cutoff,
         )
+        .filter(Q(started_at__isnull=True) | Q(started_at__lt=cutoff))
         .order_by('created')
+        .values_list('pk', 'queue_name')
     )
 
     dispatched = 0
-    for tm in queryset.iterator():
+    for pk, queue_name in candidates:
         try:
-            run_background_transition_task.apply_async(
-                args=[tm.pk], queue=tm.queue_name
-            )
+            if sync_mode:
+                # Run the attempt inline. Side-effect failures re-raise
+                # out of run_background_transition; we treat that like a
+                # dispatch failure for this row and keep scanning.
+                run_background_transition(pk)
+            else:
+                run_background_transition_task.apply_async(
+                    args=[pk], queue=queue_name
+                )
             dispatched += 1
         except Exception as e:
             # A dispatch-layer error (broker down, serialization, etc.)
-            # shouldn't stop us from trying the remaining rows.
+            # or an inline phase-2 failure shouldn't stop us from trying
+            # the remaining rows.
             logger.error(
                 'retry_stale_transitions: failed to dispatch '
-                f'TransitionMessage#{tm.pk}: {e}'
+                f'TransitionMessage#{pk}: {e}'
             )
     if dispatched:
         logger.info(

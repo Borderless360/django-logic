@@ -73,6 +73,10 @@ class BackgroundActionTests(TestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilled')  # unchanged
         self.assertIn('ok,', self.widget.se_log)
+        # Phase-3 success callbacks run for a BackgroundAction too (the
+        # action branch of _run_success_hooks, which only differs from a
+        # BackgroundTransition in skipping the state write).
+        self.assertIn('cb,', self.widget.cb_log)
 
     def test_action_records_transition_message(self):
         self.widget.process.sync_inventory()
@@ -152,6 +156,30 @@ class ConcurrencyTests(TestCase):
             fresh.status = 'draft'
             fresh.save()
             fresh.process.fulfil()
+
+    def test_non_guard_integrity_error_surfaces_raw(self):
+        # An IntegrityError from the user's own model write (here the
+        # in_progress_state set_state) must NOT be mislabelled as
+        # AlreadyInProgress — only the partial-unique constraint maps to
+        # that. The TransitionMessage is created first specifically so its
+        # own IntegrityError is the only one that means "already in
+        # progress".
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        widget = Widget.objects.create()
+        with patch(
+            'django_logic.state.State.set_state',
+            side_effect=IntegrityError('CHECK constraint failed: status'),
+        ):
+            with self.assertRaises(IntegrityError):
+                widget.process.fulfil()
+        # And the rolled-back atomic left no orphan TransitionMessage.
+        self.assertFalse(
+            TransitionMessage.objects.filter(
+                instance_id=str(widget.pk), is_completed=False
+            ).exists()
+        )
 
 
 class SyncExecutionContextManagerTests(TestCase):

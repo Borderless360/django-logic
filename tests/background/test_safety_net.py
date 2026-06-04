@@ -71,6 +71,27 @@ class RetryStaleTests(TestCase):
         _make_stale_tm(widget)
         self.assertEqual(retry_pending(), 1)
 
+    def test_skips_rows_with_a_recent_attempt(self):
+        # A row whose current attempt started within RETRY_MINUTES must be
+        # skipped this tick — no per-tick re-dispatch flood (and no sliding
+        # the watchdog's started_at floor) while an attempt is in flight.
+        with override_settings(
+            DJANGO_LOGIC=dict(_SYNC_SETTINGS, TRANSITION_MESSAGE_RETRY_MINUTES=5)
+        ):
+            widget = Widget.objects.create(status='fulfilling')
+            tm = _make_stale_tm(widget)
+            TransitionMessage.objects.filter(pk=tm.pk).update(
+                created=timezone.now() - timedelta(minutes=30),
+                started_at=timezone.now(),  # attempt started just now
+            )
+            self.assertEqual(_retry_pending_inline(), 0)
+
+            # Once the attempt is older than RETRY_MINUTES, it is eligible.
+            TransitionMessage.objects.filter(pk=tm.pk).update(
+                started_at=timezone.now() - timedelta(minutes=30),
+            )
+            self.assertEqual(_retry_pending_inline(), 1)
+
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class CleanupTests(TestCase):
@@ -192,3 +213,33 @@ class DetectStuckTests(TestCase):
         self.assertEqual(detect_stuck_transitions(), 1)
         tm = TransitionMessage.objects.get(instance_id=widget.pk)
         self.assertTrue(tm.is_completed)
+
+    def test_finalize_runs_failure_callbacks_and_nulls_duration(self):
+        """A row finalized by the safety net (not by an in-task attempt)
+        must still run failure_callbacks — parity with the in-task terminal
+        path — and must NOT record a duration_ms derived from the stale
+        started_at of the abandoned attempt."""
+        widget = Widget.objects.create(status='fulfilling')
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=str(widget.pk),
+            process_name='process',
+            transition_name='fulfil',  # declares failed_state + failure_callbacks
+            queue_name='q',
+            errors_count=3,
+        )
+        # Simulate an abandoned attempt that started 5 minutes ago.
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            started_at=timezone.now() - timedelta(minutes=5),
+        )
+
+        self.assertEqual(detect_stuck_transitions(), 1)
+
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'fulfilment_failed')
+        self.assertIn('fcb,', widget.cb_log)  # failure_callbacks fired
+
+        tm.refresh_from_db()
+        self.assertTrue(tm.is_completed)
+        self.assertIsNone(tm.duration_ms)  # no real attempt -> no duration

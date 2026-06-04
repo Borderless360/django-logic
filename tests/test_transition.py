@@ -349,6 +349,23 @@ class ActionSideEffectsTestCase(TestCase):
         self.assertFalse(self.invoice.customer_received)
         self.assertFalse(state.is_locked())
 
+    def test_failed_action_does_not_release_a_concurrent_lock(self):
+        # An Action never acquires the state lock (change_state skips
+        # state.lock()), so a *failing* Action must not release one either.
+        # Otherwise it would delete the lock a concurrent Transition on the
+        # same instance/field legitimately holds. Regression for Action
+        # inheriting Transition.fail_transition's unconditional unlock().
+        state = State(self.invoice, 'status')
+        self.assertTrue(state.lock())  # a concurrent transition holds it
+        action = Action('test', sources=['draft'], side_effects=[fail_invoice])
+        with self.assertRaises(Exception):
+            action.change_state(state)
+        self.assertTrue(
+            state.is_locked(),
+            'failing Action released a lock it never acquired',
+        )
+        state.unlock()  # cleanup
+
 
 class ActionCallbacksTestCase(TestCase):
     def setUp(self) -> None:

@@ -18,7 +18,9 @@
 - **`sync_execution()` context manager** — force Sync mode for a block of code regardless of the global setting.
 - **`retry_pending()`** — run the periodic safety-net task once inline, useful for tests that want to simulate "time passed".
 - **Explicit queue routing, no default.** Every `BackgroundTransition` must declare `queue='...'`. Missing `queue=` raises `ImproperlyConfigured`. The periodic safety-net tasks run on `DJANGO_LOGIC['STARTER_QUEUE']`.
-- **Periodic safety-net tasks** — `retry_stale_transitions`, `cleanup_completed_transitions`, `detect_stuck_transitions`.
+- **Periodic safety-net tasks** — `retry_stale_transitions`, `cleanup_completed_transitions`, `detect_stuck_transitions`, and `watchdog_stale_attempts`. `retry_stale_transitions` skips rows whose current attempt started within `RETRY_MINUTES` (no per-tick re-dispatch flood while an attempt is in flight).
+- **Per-attempt timeouts** — `BackgroundTransition(timeout=<seconds>)` declares a wall-clock budget per phase-2 attempt, persisted as `TransitionMessage.timeout_seconds`. The new `watchdog_stale_attempts` periodic task records a synthetic `TimeoutError` for attempts that exceed it and finalizes the row to `failed_state` once `errors_count` reaches `MAX_ERRORS`. Rows without `timeout` are not watched.
+- **Primary-key-agnostic background path** — `TransitionMessage.instance_id` is stored as text (`str(instance.pk)`), so background transitions work with `UUIDField`, `CharField`, and `BigAutoField` primary keys beyond `2**31-1`, matching the synchronous core (migration `0005`).
 - **kwargs serialization** — built-in handling of `request`, `user` → `user_id`, `UUID` → `str`, `datetime`/`date` → `.isoformat()`; unserializable values are rejected at phase 1 rather than phase 2.
 
 ### Observability
@@ -28,6 +30,14 @@
 ### Bug Fixes
 
 - **Unrestorable `TransitionMessage` rows now stop retrying.** If phase 2 can't restore the instance, process, or transition (e.g. the model was uninstalled, the transition renamed), the TM is now marked `is_completed=True` in its own statement, outside the failed atomic block. Previously the `mark_as_completed()` call was rolled back along with the atomic block, so the periodic starter would re-dispatch the same unrestorable row every `RETRY_MINUTES` forever.
+- **Retry safety-net now respects the execution mode.** `_retry_pending_inline` (`retry_stale_transitions` / `retry_pending()`) ran phase 2 inline only via the no-Celery shim; with Celery installed it always called `apply_async`, so in Sync mode a stale row was published to a broker nobody consumes and never retried. It now runs phase 2 inline in Sync mode and re-dispatches via `apply_async` (to the row's own queue) in Celery mode, mirroring `dispatch_transition`.
+- **`failure_callbacks` now fire for safety-net-finalized rows.** Rows finalized by `detect_stuck_transitions` / `watchdog_stale_attempts` previously ran `failed_state` + `failure_side_effects` but never `failure_callbacks`, unlike the in-task terminal path. They now run (best-effort, after the finalizing transaction commits) so terminal-failure semantics are identical regardless of which path finalizes the row.
+- **`Action.fail_transition` no longer unlocks a lock it never acquired.** A synchronous `Action` skips locking on success but inherited `Transition.fail_transition`'s unconditional `state.unlock()`; a failing `Action` could therefore release the lock a concurrent `Transition` on the same instance/field held (and discard `RedisState`'s cached state). `Action` now has a symmetric, non-unlocking failure path.
+- **Background `context` kwarg restored in phase 2.** Side-effects declared as `fn(instance, context, **kwargs)` (the documented signature) raised in background mode because `context` was dropped at phase 1 and never rebuilt. Phase 2 now rebuilds `context={}` like the synchronous path.
+- **Phase-1 `IntegrityError` no longer always reported as `AlreadyInProgress`.** The `TransitionMessage` is created before the `in_progress_state` write, so only its partial-unique violation maps to `AlreadyInProgress`; a constraint error from the user's own model write now surfaces as the real `IntegrityError`.
+- **Terminal background failures no longer re-raise out of the Celery task.** The phase-2 re-raise is now Sync-mode only — in Celery mode the outcome is fully recorded on the row, so re-raising only spammed task-failure alerts and risked `acks_late` redelivery.
+- **`duration_ms` is no longer inflated for safety-net-finalized rows** (it stays null when no real attempt ran), and `get_transition_by_action_name`'s not-found error now uses `instance.pk` (was `.id`, which raised `AttributeError` on custom-PK models).
+- **Celery mode warns when no broker is configured.** `validate_on_ready` now logs a loud warning if the resolved `broker_url` is empty or `memory://` (messages would otherwise vanish into an in-memory transport), and `_reject_sqlite_in_celery_mode` checks only the alias `TransitionMessage` is routed to (a secondary SQLite alias on a Postgres-default deployment is no longer rejected).
 
 ### Internal cleanup
 

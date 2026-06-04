@@ -8,6 +8,8 @@ from __future__ import annotations
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
+from django_logic.logger import logger
+
 
 EXECUTION_CELERY = 'celery'
 EXECUTION_SYNC = 'sync'
@@ -84,6 +86,7 @@ def validate_on_ready() -> None:
         # Surface STARTER_QUEUE misconfig now rather than on first retry.
         starter_queue()
         _reject_sqlite_in_celery_mode()
+        _warn_if_broker_missing()
 
 
 def _reject_sqlite_in_celery_mode() -> None:
@@ -92,17 +95,52 @@ def _reject_sqlite_in_celery_mode() -> None:
     degrades to "serialize everything" — which masks real bugs in dev
     and fails in prod.
 
-    Read ``settings.DATABASES`` directly (not ``django.db.connections``)
-    so tests using ``override_settings(DATABASES=...)`` are reflected.
+    Only the alias that actually stores ``TransitionMessage`` is checked:
+    a Postgres-default deployment with an unrelated secondary SQLite alias
+    (a legacy read-only DB, a fixture/import DB) is fine. Read
+    ``settings.DATABASES`` directly (not ``django.db.connections``) so
+    tests using ``override_settings(DATABASES=...)`` are reflected.
     """
+    from django.db import router
+
+    from django_logic.background.models import TransitionMessage
+
     databases = getattr(settings, 'DATABASES', {}) or {}
-    for alias, cfg in databases.items():
-        engine = (cfg or {}).get('ENGINE', '')
-        if 'sqlite' in engine.lower():
-            raise ImproperlyConfigured(
-                f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' requires "
-                f"a database that supports select_for_update(nowait=True) "
-                f"and partial unique indexes. Database '{alias}' uses "
-                f"{engine!r} (SQLite). Switch to PostgreSQL or set "
-                f"BACKGROUND_EXECUTION='sync'."
-            )
+    alias = router.db_for_write(TransitionMessage) or 'default'
+    engine = (databases.get(alias) or {}).get('ENGINE', '')
+    if 'sqlite' in engine.lower():
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' requires "
+            f"a database that supports select_for_update(nowait=True) "
+            f"and partial unique indexes. TransitionMessage is routed to "
+            f"alias '{alias}', which uses {engine!r} (SQLite). Switch that "
+            f"alias to PostgreSQL or set BACKGROUND_EXECUTION='sync'."
+        )
+
+
+def _warn_if_broker_missing() -> None:
+    """Warn loudly when celery mode is configured but no real broker is.
+
+    With Celery installed but ``broker_url`` unset, Celery silently falls
+    back to an in-memory transport that no worker drains, so every phase-2
+    message published via ``apply_async`` vanishes and the instance is left
+    stuck in ``in_progress_state`` (the periodic retry republishes to the
+    same dead transport). We *warn* rather than *raise* because the Celery
+    app may legitimately be configured after Django's app-ready (e.g. in
+    the worker bootstrap), and a hard failure would break those setups.
+    """
+    try:
+        from celery import current_app
+        broker = current_app.conf.broker_url
+    except Exception:
+        return
+    if not broker or str(broker).startswith('memory://'):
+        logger.warning(
+            "DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' but no Celery "
+            "broker is configured (broker_url=%r). apply_async will publish "
+            "to an in-memory transport that no worker consumes, so "
+            "background transitions will never run. Configure a durable "
+            "broker (Redis/RabbitMQ) on the project's Celery app, or set "
+            "BACKGROUND_EXECUTION='sync'.",
+            broker,
+        )

@@ -181,12 +181,12 @@ class Process:
 
         transition_logger.info(
             f"Process class {self.__class__} for object "
-            f"{self.state.instance.id} has no transition "
+            f"{self.state.instance.pk} has no transition "
             f"with action name {action_name}, user {user}"
         )
         raise TransitionNotAllowed(
             f"Process class {self.__class__} for object "
-            f"{self.state.instance.id} has no transition "
+            f"{self.state.instance.pk} has no transition "
             f"with action name {action_name}, user {user}"
         )
 

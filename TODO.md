@@ -17,6 +17,8 @@ Planned changes for upcoming versions of django-logic.
 - [x] Class-time validation: required `queue=`, unique `in_progress_state` within a Process
 - [x] Move in-tree demo to the `django-logic-demo` repo
 - [x] `TransitionMessage` timing fields (`started_at`, `completed_at`, `duration_ms`) + watchdog index
+- [x] Configurable per-transition timeouts (`BackgroundTransition(timeout=N)` + `watchdog_stale_attempts`)
+- [x] Primary-key-agnostic background path (`instance_id` stored as text; UUID/Char/big-int PKs)
 - [x] Bug fix: unrestorable TMs no longer retry forever (mark-complete hoisted out of the rolled-back atomic block)
 - [x] Remove PR #75 scaffolding: `Transition.get_task_kwargs`, `django_logic.utils`, `ProcessManager.bind_state_fields`, `ignore_sources`, `queryset_name`, `TransitionEventType.BACKGROUND_MODE`
 
@@ -24,7 +26,6 @@ Planned changes for upcoming versions of django-logic.
 
 - [ ] Scenario-based testing framework (`django_logic.testing`): `ProcessScenario`, snapshot/replay, AI-readable failure output
 - [ ] Admin + DRF integration modules
-- [ ] Configurable per-transition timeouts
 - [ ] `manage.py transition_status` management command
 - [ ] Better error messages (include current state + available transitions)
 - [ ] Automated PyPI publishing on tag push

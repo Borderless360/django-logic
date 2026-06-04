@@ -14,9 +14,17 @@ def bg_boom(instance, **kwargs):
     raise ValueError('boom')
 
 
+# Captures the exact kwargs (values + types) a phase-2 side-effect received,
+# so round-trip tests can assert on what crossed the phase-1/phase-2 boundary
+# (user restoration, datetime->str, context presence) without a DB column.
+LAST_KWARGS: dict = {}
+
+
 def bg_record_kwargs(instance, **kwargs):
     instance.kwargs_seen = sorted(kwargs.keys())
     instance.save(update_fields=['kwargs_seen'])
+    LAST_KWARGS.clear()
+    LAST_KWARGS.update(kwargs)
 
 
 def bg_callback(instance, **kwargs):

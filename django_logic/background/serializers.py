@@ -16,6 +16,26 @@ Deliberate handling:
 Any unrecognised type falls through to ``json.dumps`` which will raise
 ``TypeError`` — we surface that as an ``ImproperlyConfigured``-style
 error at phase-1 time rather than letting it fail at phase-2 fetch time.
+
+.. warning::
+
+    **The round-trip is lossy and types are NOT preserved.** A background
+    transition's side-effects receive a *different Python type* for some
+    kwargs than the identical synchronous transition would:
+
+    * ``datetime`` / ``date`` → ``str`` (ISO 8601)
+    * ``UUID`` → ``str``
+    * ``tuple`` → ``list``
+
+    Only ``user`` is rehydrated in phase 2 (``user_id`` → live ``User``).
+    There is no inverse for the rest, because the JSON column does not
+    record the original type. So a side-effect that does ``when.date()`` or
+    ``some_id.hex`` works synchronously and raises ``AttributeError`` in the
+    background path. Write background side-effects to accept the serialized
+    forms (parse the ISO string / re-wrap the UUID yourself), or pass an
+    already-stringified value. ``set``, ``Decimal``, and model instances are
+    rejected outright at phase 1 (see :func:`serialize_kwargs`) — pass a
+    list / str / pk instead.
 """
 from __future__ import annotations
 
