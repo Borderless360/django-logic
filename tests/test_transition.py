@@ -575,6 +575,80 @@ class TransitionNextTransitionTestCase(TestCase):
 
         next_transition_mock.assert_not_called()
 
+    def test_next_transition_runs_end_to_end_with_fresh_context(self):
+        # Unmocked: prove the follow-up actually runs through the Process
+        # entrypoint and gets its OWN tr_id while chaining root_id and
+        # linking parent_id to the parent's tr_id.
+        captured = {}
+
+        def capture(invoice, **kwargs):
+            captured.update(kwargs)
+
+        child = Transition(
+            self.NEXT_TRANSITION_NAME,
+            sources=[Invoice.STATUS_SUCCESS],
+            target=Invoice.STATUS_CANCELLED,
+            side_effects=[capture],
+        )
+        parent = Transition(
+            self.TRANSITION_NAME,
+            sources=[Invoice.STATUS_DRAFT],
+            target=Invoice.STATUS_SUCCESS,
+            next_transition=self.NEXT_TRANSITION_NAME,
+        )
+
+        class _P(Process):
+            transitions = [child, parent]
+
+        process = _P(instance=self.invoice, state=self.state)
+        self.invoice.process = process
+
+        parent.change_state(self.state, root_id='ROOT', tr_id='PARENT_TR')
+
+        self.invoice.refresh_from_db()
+        # The whole chain ran unmocked: parent -> success -> follow-up -> cancelled.
+        self.assertEqual(self.invoice.status, Invoice.STATUS_CANCELLED)
+        # Follow-up got a fresh tr_id, parent_id = parent's tr_id, root_id chained.
+        self.assertEqual(captured.get('root_id'), 'ROOT')
+        self.assertEqual(captured.get('parent_id'), 'PARENT_TR')
+        self.assertNotEqual(captured.get('tr_id'), 'PARENT_TR')
+        self.assertIsNotNone(captured.get('tr_id'))
+
+    def test_ambiguous_next_transition_is_refused(self):
+        # Two follow-ups share the action_name and are both available; the
+        # follow-up must be refused (logged + skipped), not run arbitrarily.
+        ran = []
+
+        def se(invoice, **kwargs):
+            ran.append(invoice.pk)
+
+        child_a = Transition(
+            self.NEXT_TRANSITION_NAME, sources=[Invoice.STATUS_SUCCESS],
+            target=Invoice.STATUS_CANCELLED, side_effects=[se],
+        )
+        child_b = Transition(
+            self.NEXT_TRANSITION_NAME, sources=[Invoice.STATUS_SUCCESS],
+            target=Invoice.STATUS_FAILED, side_effects=[se],
+        )
+        parent = Transition(
+            self.TRANSITION_NAME, sources=[Invoice.STATUS_DRAFT],
+            target=Invoice.STATUS_SUCCESS,
+            next_transition=self.NEXT_TRANSITION_NAME,
+        )
+
+        class _P(Process):
+            transitions = [child_a, child_b, parent]
+
+        process = _P(instance=self.invoice, state=self.state)
+        self.invoice.process = process
+
+        parent.change_state(self.state)
+
+        self.invoice.refresh_from_db()
+        # Parent completed; ambiguous follow-up was refused, so neither ran.
+        self.assertEqual(self.invoice.status, Invoice.STATUS_SUCCESS)
+        self.assertEqual(ran, [])
+
 
 class InitTransitionContextTestCase(TestCase):
     def test_init_transition_context_test(self):

@@ -64,12 +64,49 @@ def dispatch_transition(tm) -> None:
     # Celery mode — lazy import keeps Celery strictly optional.
     from django_logic.background.tasks import run_background_transition_task
 
+    _warn_once_if_no_broker(run_background_transition_task)
+
     def _enqueue():
         run_background_transition_task.apply_async(
             args=[tm.pk], queue=tm.queue_name
         )
 
     transaction.on_commit(_enqueue)
+
+
+_broker_warned = False
+
+
+def _warn_once_if_no_broker(task) -> None:
+    """Warn once, at the first celery-mode dispatch, if the Celery app has
+    no real broker.
+
+    With ``broker_url`` unset Celery silently falls back to an in-memory
+    transport that no worker drains: ``apply_async`` succeeds but the task
+    never runs, leaving the instance stuck in ``in_progress_state``. We
+    check here rather than at Django app-ready because app-ready runs
+    before the project's ``celery.py`` configures the app (so ``broker_url``
+    would still be ``None`` and we'd false-warn on every boot); by the
+    first dispatch the app is configured, making this reliable.
+    """
+    global _broker_warned
+    if _broker_warned:
+        return
+    _broker_warned = True
+    try:
+        broker = task.app.conf.broker_url
+    except Exception:
+        return
+    if not broker or str(broker).startswith('memory://'):
+        from django_logic.logger import logger
+        logger.warning(
+            "DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' but the Celery "
+            "app has no real broker (broker_url=%r). apply_async publishes "
+            "to an in-memory transport no worker consumes, so background "
+            "transitions will never run. Configure a durable broker "
+            "(Redis/RabbitMQ) or set BACKGROUND_EXECUTION='sync'.",
+            broker,
+        )
 
 
 def retry_pending() -> int:

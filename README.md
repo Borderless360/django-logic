@@ -755,6 +755,70 @@ BackgroundTransition(
 
 A partial unique constraint guarantees at most one *uncompleted* `TransitionMessage` per instance. Starting a second background transition on the same instance before the first completes raises `AlreadyInProgress`. This also means you **cannot** chain a background transition directly from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 
+### Production deployment
+
+Celery mode has two moving parts you **must** wire up, or the durability guarantees silently won't hold:
+
+**1. A real broker.** `BACKGROUND_EXECUTION='celery'` requires a durable broker (Redis/RabbitMQ). With no broker configured, Celery falls back to an in-memory transport that no worker drains — `apply_async` succeeds but the task never runs (django-logic logs a one-time warning on first dispatch).
+
+**2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, and the timeout watchdog never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
+
+```python
+# settings.py — run the safety net on the starter queue
+DJANGO_LOGIC = {
+    'BACKGROUND_EXECUTION': 'celery',
+    'STARTER_QUEUE': 'django_logic.starter',
+    # ... MAX_ERRORS / RETRY_MINUTES / CLEANUP_DAYS as above
+}
+
+from celery.schedules import crontab
+CELERY_BEAT_SCHEDULE = {
+    'dl-retry-stale': {
+        'task': 'django_logic.retry_stale_transitions',
+        'schedule': 60.0,                      # every minute
+        'options': {'queue': 'django_logic.starter'},
+    },
+    'dl-detect-stuck': {
+        'task': 'django_logic.detect_stuck_transitions',
+        'schedule': 300.0,                     # every 5 minutes
+        'options': {'queue': 'django_logic.starter'},
+    },
+    'dl-watchdog': {
+        'task': 'django_logic.watchdog_stale_attempts',
+        'schedule': 120.0,                     # every 2 minutes
+        'options': {'queue': 'django_logic.starter'},
+    },
+    'dl-cleanup': {
+        'task': 'django_logic.cleanup_completed_transitions',
+        'schedule': crontab(hour=3, minute=0),  # daily
+        'options': {'queue': 'django_logic.starter'},
+    },
+}
+```
+
+Run a worker that consumes both your transition queues **and** the starter queue, plus beat:
+
+```bash
+celery -A myproject worker -Q django_logic.critical,django_logic.slow,django_logic.fast,django_logic.starter
+celery -A myproject beat        # (or `worker -B` in dev; use a single beat in prod)
+```
+
+**Monitoring.** In Celery mode a failed attempt is **logged** (`django-logic.transition` at ERROR) and recorded on the row, but is **not** re-raised as a Celery task exception (re-raising would spam alerts and risk `acks_late` redelivery for an already-resolved row). So watch the `TransitionMessage` table, not Celery task failures:
+
+```sql
+-- rows stuck at the error ceiling (detect_stuck should be finalizing these)
+SELECT count(*) FROM django_logic_background_transitionmessage
+ WHERE is_completed = false AND errors_count >= 5;            -- = TRANSITION_MESSAGE_MAX_ERRORS
+
+-- attempts running far longer than expected (watchdog candidates)
+SELECT count(*) FROM django_logic_background_transitionmessage
+ WHERE is_completed = false AND started_at < now() - interval '15 minutes';
+```
+
+Also alert on beat liveness — if beat stops, the safety net stops.
+
+**Migrating an existing deployment.** Migration `0005` widens `instance_id` from integer to `varchar(255)` via `ALTER COLUMN ... TYPE` (Django emits the `USING ...::varchar` cast, so existing integer rows convert in place). On a very large `TransitionMessage` table this rewrites the column under a lock — run it in a maintenance window or with your usual online-migration tooling.
+
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 

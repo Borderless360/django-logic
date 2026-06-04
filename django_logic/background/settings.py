@@ -8,8 +8,6 @@ from __future__ import annotations
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_logic.logger import logger
-
 
 EXECUTION_CELERY = 'celery'
 EXECUTION_SYNC = 'sync'
@@ -86,7 +84,11 @@ def validate_on_ready() -> None:
         # Surface STARTER_QUEUE misconfig now rather than on first retry.
         starter_queue()
         _reject_sqlite_in_celery_mode()
-        _warn_if_broker_missing()
+        # NB: broker liveness is NOT checked here — validate_on_ready runs
+        # at Django app-ready, which in the standard celery.py pattern is
+        # *before* the project's Celery app sets broker_url, so it would
+        # false-warn on every boot. The check lives in dispatch (where the
+        # app is configured); see dispatch._warn_once_if_no_broker.
 
 
 def _reject_sqlite_in_celery_mode() -> None:
@@ -118,29 +120,3 @@ def _reject_sqlite_in_celery_mode() -> None:
         )
 
 
-def _warn_if_broker_missing() -> None:
-    """Warn loudly when celery mode is configured but no real broker is.
-
-    With Celery installed but ``broker_url`` unset, Celery silently falls
-    back to an in-memory transport that no worker drains, so every phase-2
-    message published via ``apply_async`` vanishes and the instance is left
-    stuck in ``in_progress_state`` (the periodic retry republishes to the
-    same dead transport). We *warn* rather than *raise* because the Celery
-    app may legitimately be configured after Django's app-ready (e.g. in
-    the worker bootstrap), and a hard failure would break those setups.
-    """
-    try:
-        from celery import current_app
-        broker = current_app.conf.broker_url
-    except Exception:
-        return
-    if not broker or str(broker).startswith('memory://'):
-        logger.warning(
-            "DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' but no Celery "
-            "broker is configured (broker_url=%r). apply_async will publish "
-            "to an in-memory transport that no worker consumes, so "
-            "background transitions will never run. Configure a durable "
-            "broker (Redis/RabbitMQ) on the project's Celery app, or set "
-            "BACKGROUND_EXECUTION='sync'.",
-            broker,
-        )

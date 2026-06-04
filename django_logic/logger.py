@@ -42,7 +42,12 @@ def redact_log_kwargs(kwargs: dict) -> dict:
         return {}
     redactor = conf.get('LOG_KWARGS_REDACTOR')
     if redactor is None:
-        return kwargs
+        # Return a shallow copy, not the live dict: log records are
+        # formatted lazily, and the caller keeps mutating kwargs after the
+        # log call (restore_user pops user_id, nested transitions rewrite
+        # tr_id/parent_id, etc.). Sharing the reference would let those
+        # later mutations leak into the already-emitted record.
+        return dict(kwargs)
     try:
         if isinstance(redactor, str):
             from django.utils.module_loading import import_string
