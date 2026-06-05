@@ -62,43 +62,56 @@ def dispatch_transition(tm) -> None:
         return
 
     # Celery mode — lazy import keeps Celery strictly optional.
+    from django_logic.background.observability import task_label
     from django_logic.background.tasks import run_background_transition_task
 
-    _warn_once_if_no_broker(run_background_transition_task)
+    _warn_once_about_celery_config(run_background_transition_task)
+
+    # `shadow` gives this dispatch a per-transition name in Celery events /
+    # Flower / RabbitMQ management, even though it's the one shared task.
+    shadow = task_label(tm)
 
     def _enqueue():
         run_background_transition_task.apply_async(
-            args=[tm.pk], queue=tm.queue_name
+            args=[tm.pk], queue=tm.queue_name, shadow=shadow
         )
 
     transaction.on_commit(_enqueue)
 
 
-_broker_warned = False
+_celery_config_warned = False
 
 
-def _warn_once_if_no_broker(task) -> None:
-    """Warn once, at the first celery-mode dispatch, if the Celery app has
-    no real broker.
+def _warn_once_about_celery_config(task) -> None:
+    """Warn once, at the first celery-mode dispatch, about Celery config that
+    silently breaks the durability contract.
 
-    With ``broker_url`` unset Celery silently falls back to an in-memory
-    transport that no worker drains: ``apply_async`` succeeds but the task
-    never runs, leaving the instance stuck in ``in_progress_state``. We
-    check here rather than at Django app-ready because app-ready runs
-    before the project's ``celery.py`` configures the app (so ``broker_url``
-    would still be ``None`` and we'd false-warn on every boot); by the
-    first dispatch the app is configured, making this reliable.
+    Checked here rather than at Django app-ready because app-ready runs before
+    the project's ``celery.py`` configures the app; by the first dispatch the
+    app is configured, making these checks reliable.
+
+    1. **No real broker.** With ``broker_url`` unset Celery falls back to an
+       in-memory transport no worker drains: ``apply_async`` succeeds but the
+       task never runs, leaving the instance stuck in ``in_progress_state``.
+    2. **acks_late without reject_on_worker_lost.** django-logic's task is
+       ``acks_late=True`` so a crash re-delivers it — but only if the project
+       also sets ``task_reject_on_worker_lost=True``. Without it, a task on a
+       worker killed mid-execution (SIGKILL / OOM / deploy) may be
+       acked-and-dropped instead of re-delivered; recovery then falls solely
+       to the periodic starter (slower). See README → Production deployment.
     """
-    global _broker_warned
-    if _broker_warned:
+    global _celery_config_warned
+    if _celery_config_warned:
         return
-    _broker_warned = True
+    _celery_config_warned = True
+    from django_logic.logger import logger
+
     try:
-        broker = task.app.conf.broker_url
+        conf = task.app.conf
     except Exception:
         return
+    broker = getattr(conf, 'broker_url', None)
     if not broker or str(broker).startswith('memory://'):
-        from django_logic.logger import logger
         logger.warning(
             "DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' but the Celery "
             "app has no real broker (broker_url=%r). apply_async publishes "
@@ -106,6 +119,20 @@ def _warn_once_if_no_broker(task) -> None:
             "transitions will never run. Configure a durable broker "
             "(Redis/RabbitMQ) or set BACKGROUND_EXECUTION='sync'.",
             broker,
+        )
+    try:
+        acks_late = bool(conf.task_acks_late)
+        reject = bool(conf.task_reject_on_worker_lost)
+    except Exception:
+        return
+    if acks_late and not reject:
+        logger.warning(
+            'django-logic background tasks are acks_late=True, but '
+            'CELERY_TASK_REJECT_ON_WORKER_LOST is not set. A worker killed '
+            'mid-execution (SIGKILL/OOM/deploy) may then drop the task instead '
+            'of re-delivering it; the instance stays in in_progress_state until '
+            'the periodic starter recovers it. Set '
+            'CELERY_TASK_REJECT_ON_WORKER_LOST=True for prompt crash recovery.'
         )
 
 

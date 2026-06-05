@@ -40,6 +40,7 @@ from django.db import OperationalError, transaction
 
 from django_logic.background import settings as bg_settings
 from django_logic.background.models import TransitionMessage
+from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import restore_user
 from django_logic.background.transitions import BackgroundAction, BackgroundTransition
 from django_logic.logger import TransitionEventType, transition_logger
@@ -366,6 +367,10 @@ def _run_atomic(tm_id: int) -> _Outcome:
                 f'skipping this attempt'
             )
             raise _NothingToDo() from exc
+
+        # Per-transition monitoring identity (Sentry transaction name + tags);
+        # best-effort, no-op without sentry-sdk. See observability.py / issue #78.
+        set_sentry_context(tm)
 
         kwargs = dict(tm.kwargs or {})
         restore_user(kwargs)
