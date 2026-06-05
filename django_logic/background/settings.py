@@ -62,6 +62,14 @@ def cleanup_days() -> int:
     return int(_conf().get('TRANSITION_MESSAGE_CLEANUP_DAYS', 7))
 
 
+def sentry_transaction_naming() -> bool:
+    """Whether the background runner names/tags the Sentry transaction per
+    transition (so each transition is its own issue). Default on; no-op when
+    sentry-sdk isn't installed. Set ``DJANGO_LOGIC['SENTRY_TRANSACTION_NAMING']
+    = False`` to leave Sentry's own (task-name-based) naming in place."""
+    return bool(_conf().get('SENTRY_TRANSACTION_NAMING', True))
+
+
 def _celery_available() -> bool:
     try:
         import celery  # noqa: F401

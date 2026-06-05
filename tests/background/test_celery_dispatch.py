@@ -51,9 +51,11 @@ class CeleryDispatchTests(TestCase):
         self.assertFalse(tm.is_completed)
 
         # The task is enqueued exactly once, routed to the transition's own
-        # declared queue — the "no default queue" guarantee.
+        # declared queue — the "no default queue" guarantee. `shadow` gives the
+        # dispatch a per-transition name in Celery events / Flower (issue #78).
         mock_async.assert_called_once_with(
-            args=[tm.pk], queue='django_logic.critical'
+            args=[tm.pk], queue='django_logic.critical',
+            shadow='django_logic.bg_tests.fulfil',
         )
 
     def test_no_dispatch_when_phase_one_transaction_rolls_back(self):

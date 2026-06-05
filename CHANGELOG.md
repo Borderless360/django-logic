@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Observability & DX (from Heroku validation; issues #78–#81)
+
+- **Per-transition monitoring identity.** Background dispatch now sets a Celery
+  `shadow` (`django_logic.<app>.<transition>`) so Flower / RabbitMQ management /
+  Celery events show a distinct name per transition instead of the one shared
+  `django_logic.run_background_transition` task. When `sentry-sdk` is installed,
+  the runner also names the Sentry transaction and tags it
+  (`dl.app`/`dl.model`/`dl.transition`/`dl.instance_id`/`dl.queue`) per
+  transition, so each transition is its own Sentry issue. Opt out with
+  `DJANGO_LOGIC['SENTRY_TRANSACTION_NAMING'] = False`. No new dependency.
+- **Startup warning for `task_reject_on_worker_lost`.** First celery-mode
+  dispatch warns if `task_acks_late` is on but `task_reject_on_worker_lost` is
+  off — the pair crash re-delivery depends on. Documented in the README.
+- **pgbouncer (transaction pooling) deployment guide** in the README
+  (`prepare_threshold=None`, `DISABLE_SERVER_SIDE_CURSORS`, no app→pgbouncer SSL).
+- **`django_logic.conditions`** — `all_related_in` / `any_related_in` guard
+  factories for parent/child completion checks, plus
+  `docs/recipes/nested-processes.md` (the clean alternative to nested
+  `process.xxx()` calls in side-effects).
+- **AI usage rules** — `.cursor/rules/django-logic.mdc` + `CLAUDE.md`.
+
 ## [0.3.0]
 
 ### Breaking Changes

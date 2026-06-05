@@ -142,11 +142,11 @@ def _retry_pending_inline() -> int:
         )
         .filter(Q(started_at__isnull=True) | Q(started_at__lt=cutoff))
         .order_by('created')
-        .values_list('pk', 'queue_name')
+        .values_list('pk', 'queue_name', 'app_label', 'transition_name')
     )
 
     dispatched = 0
-    for pk, queue_name in candidates:
+    for pk, queue_name, app_label, transition_name in candidates:
         try:
             if sync_mode:
                 # Run the attempt inline. Side-effect failures re-raise
@@ -154,8 +154,10 @@ def _retry_pending_inline() -> int:
                 # dispatch failure for this row and keep scanning.
                 run_background_transition(pk)
             else:
+                # Same per-transition shadow as the primary dispatch path.
                 run_background_transition_task.apply_async(
-                    args=[pk], queue=queue_name
+                    args=[pk], queue=queue_name,
+                    shadow=f'django_logic.{app_label}.{transition_name}',
                 )
             dispatched += 1
         except Exception as e:

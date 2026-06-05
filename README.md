@@ -757,7 +757,7 @@ A partial unique constraint guarantees at most one *uncompleted* `TransitionMess
 
 ### Production deployment
 
-Celery mode has two moving parts you **must** wire up, or the durability guarantees silently won't hold:
+Celery mode has three things you **must** wire up, or the durability guarantees silently won't hold:
 
 **1. A real broker.** `BACKGROUND_EXECUTION='celery'` requires a durable broker (Redis/RabbitMQ). With no broker configured, Celery falls back to an in-memory transport that no worker drains — `apply_async` succeeds but the task never runs (django-logic logs a one-time warning on first dispatch).
 
@@ -802,6 +802,35 @@ Run a worker that consumes both your transition queues **and** the starter queue
 celery -A myproject worker -Q django_logic.critical,django_logic.slow,django_logic.fast,django_logic.starter
 celery -A myproject beat        # (or `worker -B` in dev; use a single beat in prod)
 ```
+
+**3. `CELERY_TASK_REJECT_ON_WORKER_LOST = True`.** django-logic's task is
+`acks_late=True` so a transition re-delivers if its worker dies mid-execution
+(SIGKILL / OOM / deploy) — **but only if you also set
+`task_reject_on_worker_lost=True`**. Without it, Celery acks-and-drops the lost
+task instead of re-queuing it, and recovery falls solely to the periodic
+starter (a `RETRY_MINUTES`-delayed catch-up rather than prompt re-delivery).
+django-logic logs a one-time warning on first dispatch if this isn't set.
+
+```python
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+```
+
+**Running behind pgbouncer (transaction pooling).** The concurrency guard
+(`select_for_update(nowait)` + the partial-unique constraint) works under
+pgbouncer **transaction** pooling, but transaction mode is incompatible with a
+few PostgreSQL session features, so configure the consumer accordingly:
+
+```python
+DATABASES['default'].setdefault('OPTIONS', {})['prepare_threshold'] = None  # psycopg3: no server-side prepared stmts
+DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+```
+
+Also do **not** force `sslmode=require` on the app→pgbouncer connection (it's
+local/plaintext; pgbouncer terminates TLS upstream). If you skip
+`prepare_threshold=None`, phase 2 will intermittently fail/hang with
+prepared-statement errors. (Validated end-to-end on Heroku behind an in-dyno
+pgbouncer.)
 
 **Monitoring.** In Celery mode a failed attempt is **logged** (`django-logic.transition` at ERROR) and recorded on the row, but is **not** re-raised as a Celery task exception (re-raising would spam alerts and risk `acks_late` redelivery for an already-resolved row). So watch the `TransitionMessage` table, not Celery task failures:
 
