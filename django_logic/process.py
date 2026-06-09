@@ -215,53 +215,84 @@ def _validate_unique_in_progress_states(process_cls):
         seen[in_progress] = transition.action_name
 
 
+def _iter_process_tree(process_cls, _seen=None):
+    """Yield ``process_cls`` and every Process class reachable through
+    ``nested_processes`` (depth-first), guarding against cycles.
+
+    Reads only class-level attributes, so it is safe to call at
+    class-creation time: every class listed in ``nested_processes`` is
+    already defined by the time the parent class body runs.
+    """
+    if _seen is None:
+        _seen = set()
+    if id(process_cls) in _seen:
+        return
+    _seen.add(id(process_cls))
+    yield process_cls
+    for sub_process_cls in process_cls.nested_processes or []:
+        yield from _iter_process_tree(sub_process_cls, _seen)
+
+
 def _validate_unique_background_action_names(process_cls):
     """Background transitions must be uniquely identifiable by ``action_name``
-    within a Process.
+    across a Process *and its nested processes*.
 
-    Phase-2 restore looks a transition up by
-    ``TransitionMessage.transition_name`` (= the ``action_name``) alone —
-    it has no other discriminator. So:
+    Phase-2 restore (``runner._find_transition``) looks a transition up by
+    ``TransitionMessage.transition_name`` (= the ``action_name``) alone,
+    searching the bound process and descending into its ``nested_processes``
+    — it has no other discriminator. So, across the whole nested tree:
 
-    - Two ``BackgroundTransition`` / ``BackgroundAction`` instances on the
-      same Process cannot share an ``action_name``.
-    - A background transition's ``action_name`` cannot also appear on a
-      plain synchronous ``Transition``; phase 2 would iterate
-      ``process.transitions`` and could grab the sync one.
+    - No two ``BackgroundTransition`` / ``BackgroundAction`` instances may
+      share an ``action_name``.
+    - A background ``action_name`` may not also appear on a plain
+      synchronous ``Transition``; phase 2 would pick whichever it reached
+      first and could grab the sync one.
 
     Sync-only ``action_name`` duplication is still allowed (the sync call
     path uses ``get_transition_by_action_name`` which disambiguates via
-    conditions/permissions and raises if more than one remains).
+    conditions/permissions at runtime) — this is what lets nested processes
+    model courier-style polymorphism (many sub-processes, same action name,
+    different conditions).
     """
-    transitions = process_cls.transitions or []
+    def _where(proc_cls, transition):
+        return (
+            f"{proc_cls.__module__}.{proc_cls.__name__}."
+            f"{type(transition).__name__}"
+        )
+
     background_names: dict[str, str] = {}
+    sync_names: dict[str, str] = {}
 
-    for transition in transitions:
-        if not getattr(transition, 'is_background', False):
-            continue
-        name = transition.action_name
-        if name in background_names:
+    for proc_cls in _iter_process_tree(process_cls):
+        for transition in proc_cls.transitions or []:
+            name = transition.action_name
+            if getattr(transition, 'is_background', False):
+                if name in background_names:
+                    raise ImproperlyConfigured(
+                        f"Process {process_cls.__module__}."
+                        f"{process_cls.__name__} (or its nested processes) "
+                        f"has two background transitions sharing "
+                        f"action_name='{name}' ({background_names[name]} "
+                        f"and {_where(proc_cls, transition)}). Phase-2 "
+                        f"restore searches the process and its "
+                        f"nested_processes and uses action_name as its only "
+                        f"key — background action_names must be unique "
+                        f"across a Process and its nested processes."
+                    )
+                background_names[name] = _where(proc_cls, transition)
+            else:
+                sync_names.setdefault(name, _where(proc_cls, transition))
+
+    for name, bg_where in background_names.items():
+        if name in sync_names:
             raise ImproperlyConfigured(
                 f"Process {process_cls.__module__}.{process_cls.__name__} "
-                f"has two background transitions sharing action_name="
-                f"'{name}' ('{background_names[name]}' and "
-                f"'{type(transition).__name__}'). Phase-2 restore uses "
-                f"action_name as its only key — background action_names "
-                f"must be unique within a Process."
-            )
-        background_names[name] = type(transition).__name__
-
-    for transition in transitions:
-        if getattr(transition, 'is_background', False):
-            continue
-        if transition.action_name in background_names:
-            raise ImproperlyConfigured(
-                f"Process {process_cls.__module__}.{process_cls.__name__} "
-                f"has a synchronous Transition named "
-                f"'{transition.action_name}' that collides with a "
-                f"background transition of the same name. Phase-2 restore "
-                f"picks the first matching action_name on the Process and "
-                f"cannot distinguish them — rename one."
+                f"(or its nested processes) has a synchronous Transition "
+                f"named '{name}' ({sync_names[name]}) that collides with a "
+                f"background transition of the same name ({bg_where}). "
+                f"Phase-2 restore searches the process tree and picks the "
+                f"first matching action_name — it cannot distinguish them; "
+                f"rename one."
             )
 
 

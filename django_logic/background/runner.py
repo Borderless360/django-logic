@@ -609,16 +609,30 @@ def _infer_field_name(instance, tm: TransitionMessage) -> str:
 
 
 def _find_transition(process, tm: TransitionMessage):
-    # Match on action_name. The class-creation time validator
-    # ``_validate_unique_background_action_names`` guarantees that no
-    # two transitions on a Process — background or otherwise — can
-    # share an ``action_name`` with a background one, so the first
-    # match is unambiguous. A state-aware lookup would not work here:
-    # phase 2 runs while the instance sits in ``in_progress_state``
-    # (not in the transition's declared ``sources``), and the sync
-    # path's ``get_transition_by_action_name`` is gated on state
-    # membership. We bypass that gate deliberately.
+    # Match on action_name, descending into nested processes exactly the
+    # way ``Process.get_available_transitions`` does — each sub-process is
+    # constructed with the parent's shared ``state``. Phase 1 can enqueue a
+    # background transition declared on a nested process (the sync lookup
+    # ``get_transition_by_action_name`` recurses into ``nested_processes``),
+    # but the message records only the *bound* process_name, so phase 2
+    # restores the parent. Without this descent the nested transition is
+    # never found: the message is marked completed, the side-effects never
+    # run, and the instance is stranded in ``in_progress_state``.
+    #
+    # The class-creation validator ``_validate_unique_background_action_names``
+    # guarantees ``action_name`` uniquely identifies a background transition
+    # across the process AND its nested tree, so the first match is
+    # unambiguous. A state-aware lookup would not work here: phase 2 runs
+    # while the instance sits in ``in_progress_state`` (not in the
+    # transition's declared ``sources``), and the sync path's
+    # ``get_transition_by_action_name`` is gated on state membership. We
+    # bypass that gate deliberately.
     for transition in process.transitions:
         if transition.action_name == tm.transition_name:
             return transition
+    for sub_process_class in process.nested_processes:
+        sub_process = sub_process_class(state=process.state)
+        found = _find_transition(sub_process, tm)
+        if found is not None:
+            return found
     return None

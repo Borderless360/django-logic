@@ -130,3 +130,85 @@ class WidgetProcess(Process):
 
 
 ProcessManager.bind_model_process(Widget, WidgetProcess, state_field='status')
+
+
+# --- Nested-process background transitions ---------------------------------
+# Regression fixtures for the phase-2 restore of a BackgroundTransition that
+# lives on a *nested* process. Phase 1 reaches it through the parent's
+# get_available_transitions recursion; phase 2 must descend into
+# nested_processes (runner._find_transition) to restore it. These processes
+# operate on the same Widget.status field as WidgetProcess but are reached via
+# a separate bound property (`parent_process`), so no migration is needed.
+
+
+class NestedBgGrandchildProcess(Process):
+    """Two levels deep — proves _find_transition recurses, not just one hop."""
+
+    process_name = 'nested_grandchild'
+    transitions = [
+        BackgroundTransition(
+            action_name='deeply_nested_fulfil',
+            sources=['draft'],
+            target='deeply_nested_fulfilled',
+            in_progress_state='deeply_nested_fulfilling',
+            failed_state='deeply_nested_failed',
+            queue='django_logic.critical',
+            side_effects=[bg_ok],
+            callbacks=[bg_callback],
+        ),
+    ]
+
+
+class NestedBgMidProcess(Process):
+    """Middle layer: carries no transitions of its own, only a nested child."""
+
+    process_name = 'nested_mid'
+    nested_processes = [NestedBgGrandchildProcess]
+
+
+class NestedBgChildProcess(Process):
+    """A nested sub-process that owns durable background transitions. Reached
+    only through its parent's ``nested_processes`` — never bound directly."""
+
+    process_name = 'nested_child'
+    transitions = [
+        BackgroundTransition(
+            action_name='nested_fulfil',
+            sources=['draft'],
+            target='nested_fulfilled',
+            in_progress_state='nested_fulfilling',
+            failed_state='nested_failed',
+            queue='django_logic.critical',
+            side_effects=[bg_ok, bg_record_kwargs],
+            callbacks=[bg_callback],
+            failure_callbacks=[bg_failure_callback],
+        ),
+        BackgroundAction(
+            action_name='nested_sync_inventory',
+            sources=['nested_fulfilled'],
+            queue='django_logic.fast',
+            side_effects=[bg_ok],
+            callbacks=[bg_callback],
+        ),
+        BackgroundTransition(
+            action_name='nested_crash',
+            sources=['draft'],
+            target='nested_crash_target',
+            in_progress_state='nested_crashing',
+            failed_state='nested_crash_failed',
+            queue='django_logic.critical',
+            side_effects=[bg_boom],
+            failure_callbacks=[bg_failure_callback],
+        ),
+    ]
+
+
+class WidgetParentProcess(Process):
+    """Parent bound to Widget.status. Declares no background transitions of
+    its own — they live on the nested processes it delegates to."""
+
+    process_name = 'parent_process'
+    nested_processes = [NestedBgChildProcess, NestedBgMidProcess]
+
+
+ProcessManager.bind_model_process(Widget, WidgetParentProcess, state_field='status')
