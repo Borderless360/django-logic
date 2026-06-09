@@ -1,5 +1,7 @@
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
+[![CI](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml/badge.svg)](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master)
 [![License](https://img.shields.io/pypi/l/django-logic.svg)](https://github.com/Borderless360/django-logic/blob/master/LICENSE)
      
 Django Logic is a lightweight workflow framework for Django that makes it easy to implement complex business logic using finite-state machines (FSM). It provides a clean, declarative way to manage state transitions, permissions, and side effects in your Django applications.
@@ -14,6 +16,7 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - [Complete Example](#complete-example)
 - [Display Process](#display-process)
 - [Django-Logic vs Django FSM](#django-logic-vs-django-fsm)
+- [Background Transitions](#background-transitions)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -24,12 +27,18 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - 📊 **Process Visualization** - Visualize your workflows
 - 🏗️ **Nested Processes** - Build complex workflows with sub-processes
 - ⚡ **Optimistic Locking** - Prevent race conditions
-- 🔍 **Comprehensive Logging** - Track all state changes
+- ⏳ **Durable Background Transitions** - Queue-routed, retryable side-effects via Celery (see [Background Transitions](#background-transitions))
+- 🔍 **Structured Logging** - State changes flow through the standard `django-logic` / `django-logic.transition` Python loggers, configured via Django `LOGGING` (see [docs/logger.md](docs/logger.md))
 
 ## Requirements
-- Python 3.6+
-- Django 2.0+
-- django-model-utils 4.5.1
+- Python 3.11+
+- Django 4.0+
+- django-model-utils >= 4.5.1
+
+Optional extras:
+- `pip install django-logic[celery]` — Celery, for `BackgroundTransition` in `'celery'` execution mode
+- `pip install django-logic[redis]` — `django-redis`, for the cross-process `RedisState` lock
+- `pip install django-logic[drf]` — Django REST Framework helpers (no longer a core dependency)
 
 ## Installation
 
@@ -95,11 +104,12 @@ order.process.pay()  # Changes status from 'pending' to 'paid'
 ## Core Concepts
 
 ### Definitions 
-- **Transition** - Changes the state of an object from one to another. Contains conditions, permissions, side-effects, callbacks, and failure callbacks.
+- **Transition** - Changes the state of an object from one to another. Contains conditions, permissions, side-effects, callbacks, failure side-effects, and failure callbacks.
 - **Action** - Similar to transition but doesn't change the state. Useful for operations that need permissions and side effects without state change.
 - **Side-effects** - Functions executed during a transition before reaching the target state. If any fail, the transition is rolled back.
 - **Callbacks** - Functions executed after successfully reaching the target state.
-- **Failure callbacks** - Functions executed if side-effects fail.
+- **Failure side-effects** - Functions executed when side-effects fail, before the state is unlocked. Useful for cleanup or compensation that must run while the instance is still locked.
+- **Failure callbacks** - Functions executed after side-effects fail, after the state is unlocked.
 - **Conditions** - Functions that must return True for a transition to be allowed.
 - **Permissions** - Functions that check if a user can perform a transition.
 - **Process** - Groups related transitions with common conditions and permissions.
@@ -492,7 +502,7 @@ class MyProcess(Process):
 #### 4. Side Effects Not Rolling Back
 Side effects that modify external systems may not roll back automatically.
 
-**Solution**: Implement compensating transactions in failure callbacks:
+**Solution**: Implement compensating transactions using failure side-effects (run while locked) or failure callbacks (run after unlock):
 
 ```python
 def compensate_payment(instance, exception, **kwargs):
@@ -504,9 +514,12 @@ Transition(
     sources=['pending'],
     target='paid',
     side_effects=[process_payment, another_side_effect],
-    failure_callbacks=[compensate_payment],
+    failure_side_effects=[compensate_payment],  # runs before unlock (while instance is locked)
+    failure_callbacks=[notify_admin],            # runs after unlock
 )
 ```
+
+When a side-effect fails, execution order is: set `failed_state` (if configured) → **failure_side_effects** → unlock → **failure_callbacks**. Use failure_side_effects for cleanup that must run before other processes can access the instance.
 
 ## Django-Logic vs Django FSM 
 [Django FSM](https://github.com/viewflow/django-fsm) is a predecessor of Django-Logic. 
@@ -516,9 +529,9 @@ Django-Logic was created to address limitations and add new features:
 - **Processes**: Django-Logic supports grouping transitions into processes
 - **Nested Processes**: Build hierarchical workflows  
 - **Built-in Locking**: Prevents race conditions out of the box
-- **Failure Handling**: Dedicated failure callbacks and states
+- **Failure Handling**: Dedicated failure side-effects, failure callbacks, and failed states
 - **Better Separation**: Clear separation between business logic and implementation
-- **Background Tasks**: Celery integration via [Django-Logic-Celery](https://github.com/Borderless360/django-logic-celery)
+- **Background Tasks**: Durable, queue-routed background execution built in via `django_logic.background` ([Background Transitions](#background-transitions)) — no external package required
 
 ### Migration from Django FSM:
 If you're migrating from Django FSM, the main changes are:
@@ -558,7 +571,7 @@ class AuditedState(State):
         # Log state changes
         audit_log.create(
             model=self.instance.__class__.__name__,
-            instance_id=self.instance.id,
+            instance_id=self.instance.pk,
             field=self.field_name,
             old_value=self.get_db_state(),
             new_value=state,
@@ -587,14 +600,277 @@ Transition(
 )
 ```
 
+## Background Transitions
+
+For long-running side-effects (payment processing, PDF generation, external API calls), use `BackgroundTransition` / `BackgroundAction` from `django_logic.background`. They provide:
+
+- **Durable execution.** Every background transition is persisted as a `TransitionMessage` row inside the same atomic block that writes `in_progress_state`. Worker crashes, broker losses, and dropped `transaction.on_commit` hooks are all recovered by a periodic safety-net task.
+- **Per-transition queue routing — no default queue.** Every transition declares its own `queue='...'`. Missing the argument is a boot-time error, not a runtime surprise.
+- **Two execution modes.** `'celery'` dispatches to a Celery worker. `'sync'` runs phase 2 inline in the same process — ideal for unit tests, CI, management commands, and the Django shell. No Celery broker is needed to test business processes.
+- **Single-task execution.** All side-effects plus the target-state write happen inside **one** Celery task with `acks_late=True`, inside **one** atomic block. A worker crash re-delivers the whole task; the state never gets stuck mid-flight between side-effects.
+
+### Install
+
+```bash
+pip install django-logic[celery]   # production
+pip install django-logic            # tests / sync mode only
+```
+
+Add `'django_logic.background'` to `INSTALLED_APPS` and configure:
+
+```python
+DJANGO_LOGIC = {
+    'LOCK_TIMEOUT': 7200,
+    'BACKGROUND_EXECUTION': 'celery',   # or 'sync' for tests/CI
+    'STARTER_QUEUE': 'django_logic.starter',
+    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
+    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
+    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
+}
+```
+
+Run `manage.py migrate` to create the `TransitionMessage` table.
+
+### Declare a background transition
+
+```python
+from django_logic import Process, Transition, ProcessManager
+from django_logic.background import BackgroundTransition, BackgroundAction
+
+
+class OrderProcess(Process):
+    transitions = [
+        Transition(
+            action_name='approve',
+            sources=['draft'],
+            target='approved',
+            side_effects=[validate_order],
+        ),
+        BackgroundTransition(
+            action_name='fulfil',
+            sources=['approved'],
+            target='fulfilled',
+            in_progress_state='fulfilling',
+            failed_state='fulfilment_failed',
+            queue='django_logic.critical',
+            side_effects=[reserve_stock, generate_labels, call_courier],
+            callbacks=[send_confirmation_email],
+        ),
+        BackgroundTransition(
+            action_name='generate_export',
+            sources=['fulfilled'],
+            target='exported',
+            in_progress_state='exporting',
+            failed_state='export_failed',
+            queue='django_logic.slow',
+            side_effects=[build_csv, upload_to_s3],
+        ),
+        BackgroundAction(
+            action_name='sync_inventory',
+            sources=['fulfilled'],
+            queue='django_logic.fast',
+            side_effects=[push_to_erp],
+        ),
+    ]
+
+
+ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
+```
+
+### Call it
+
+```python
+# In a view — returns immediately (Celery mode) or after phase 2 completes (Sync mode).
+tr_id = order.process.fulfil(user=request.user)
+```
+
+### Testing your processes
+
+Set `BACKGROUND_EXECUTION='sync'` in test settings and every `instance.process.fulfil(...)` call runs phase 1 **and** phase 2 inline:
+
+```python
+class FulfilmentTests(TestCase):
+    def test_happy_path(self):
+        order = Order.objects.create(status='approved')
+        order.process.fulfil()
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'fulfilled')
+
+    def test_side_effect_failure_propagates(self):
+        order = Order.objects.create(status='approved')
+        with patch('myapp.services.call_courier', side_effect=CourierError):
+            with self.assertRaises(CourierError):
+                order.process.fulfil()
+```
+
+If the global setting is `'celery'` but you need Sync mode for a specific block, use the context manager:
+
+```python
+from django_logic.background import sync_execution
+
+with sync_execution():
+    order.process.fulfil()
+```
+
+### Suggested queue layout
+
+```
+django_logic.fast       — < 1s work (notifications, cache invalidations)
+django_logic.critical   — user-facing with SLA (fulfilment, payments)
+django_logic.slow       — > 30s work (exports, reports)
+django_logic.starter    — the framework's periodic safety-net tasks
+```
+
+The periodic starter re-dispatches stale transitions back to their own queue — retried slow jobs never jump to the critical queue.
+
+### Safety-net tasks
+
+Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
+
+- `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
+- `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
+- `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
+- `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
+
+### Per-attempt timeouts
+
+A `BackgroundTransition` (or `BackgroundAction`) may declare a per-attempt wall-clock budget with `timeout=<seconds>`:
+
+```python
+BackgroundTransition(
+    action_name='generate_export',
+    sources=['fulfilled'],
+    target='exported',
+    in_progress_state='exporting',
+    failed_state='export_failed',
+    queue='django_logic.slow',
+    timeout=600,                       # abandon an attempt after 10 minutes
+    side_effects=[build_csv, upload_to_s3],
+)
+```
+
+`watchdog_stale_attempts` scans in-flight rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. Because the watchdog cannot tell a crashed attempt from a merely slow one, **side-effects must be idempotent** (a re-dispatched attempt may run them again).
+
+### One in-flight transition per instance
+
+A partial unique constraint guarantees at most one *uncompleted* `TransitionMessage` per instance. Starting a second background transition on the same instance before the first completes raises `AlreadyInProgress`. This also means you **cannot** chain a background transition directly from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
+
+### Production deployment
+
+Celery mode has three things you **must** wire up, or the durability guarantees silently won't hold:
+
+**1. A real broker.** `BACKGROUND_EXECUTION='celery'` requires a durable broker (Redis/RabbitMQ). With no broker configured, Celery falls back to an in-memory transport that no worker drains — `apply_async` succeeds but the task never runs (django-logic logs a one-time warning on first dispatch).
+
+**2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, and the timeout watchdog never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
+
+```python
+# settings.py — run the safety net on the starter queue
+DJANGO_LOGIC = {
+    'BACKGROUND_EXECUTION': 'celery',
+    'STARTER_QUEUE': 'django_logic.starter',
+    # ... MAX_ERRORS / RETRY_MINUTES / CLEANUP_DAYS as above
+}
+
+from celery.schedules import crontab
+CELERY_BEAT_SCHEDULE = {
+    'dl-retry-stale': {
+        'task': 'django_logic.retry_stale_transitions',
+        'schedule': 60.0,                      # every minute
+        'options': {'queue': 'django_logic.starter'},
+    },
+    'dl-detect-stuck': {
+        'task': 'django_logic.detect_stuck_transitions',
+        'schedule': 300.0,                     # every 5 minutes
+        'options': {'queue': 'django_logic.starter'},
+    },
+    'dl-watchdog': {
+        'task': 'django_logic.watchdog_stale_attempts',
+        'schedule': 120.0,                     # every 2 minutes
+        'options': {'queue': 'django_logic.starter'},
+    },
+    'dl-cleanup': {
+        'task': 'django_logic.cleanup_completed_transitions',
+        'schedule': crontab(hour=3, minute=0),  # daily
+        'options': {'queue': 'django_logic.starter'},
+    },
+}
+```
+
+Run a worker that consumes both your transition queues **and** the starter queue, plus beat:
+
+```bash
+celery -A myproject worker -Q django_logic.critical,django_logic.slow,django_logic.fast,django_logic.starter
+celery -A myproject beat        # (or `worker -B` in dev; use a single beat in prod)
+```
+
+**3. `CELERY_TASK_REJECT_ON_WORKER_LOST = True`.** django-logic's task is
+`acks_late=True` so a transition re-delivers if its worker dies mid-execution
+(SIGKILL / OOM / deploy) — **but only if you also set
+`task_reject_on_worker_lost=True`**. Without it, Celery acks-and-drops the lost
+task instead of re-queuing it, and recovery falls solely to the periodic
+starter (a `RETRY_MINUTES`-delayed catch-up rather than prompt re-delivery).
+django-logic logs a one-time warning on first dispatch if this isn't set.
+
+```python
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+```
+
+**Running behind pgbouncer (transaction pooling).** The concurrency guard
+(`select_for_update(nowait)` + the partial-unique constraint) works under
+pgbouncer **transaction** pooling, but transaction mode is incompatible with a
+few PostgreSQL session features, so configure the consumer accordingly:
+
+```python
+DATABASES['default'].setdefault('OPTIONS', {})['prepare_threshold'] = None  # psycopg3: no server-side prepared stmts
+DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+```
+
+Also do **not** force `sslmode=require` on the app→pgbouncer connection (it's
+local/plaintext; pgbouncer terminates TLS upstream). If you skip
+`prepare_threshold=None`, phase 2 will intermittently fail/hang with
+prepared-statement errors. (Validated end-to-end on Heroku behind an in-dyno
+pgbouncer.)
+
+**Monitoring.** In Celery mode a failed attempt is **logged** (`django-logic.transition` at ERROR) and recorded on the row, but is **not** re-raised as a Celery task exception (re-raising would spam alerts and risk `acks_late` redelivery for an already-resolved row). So watch the `TransitionMessage` table, not Celery task failures:
+
+```sql
+-- rows stuck at the error ceiling (detect_stuck should be finalizing these)
+SELECT count(*) FROM django_logic_background_transitionmessage
+ WHERE is_completed = false AND errors_count >= 5;            -- = TRANSITION_MESSAGE_MAX_ERRORS
+
+-- attempts running far longer than expected (watchdog candidates)
+SELECT count(*) FROM django_logic_background_transitionmessage
+ WHERE is_completed = false AND started_at < now() - interval '15 minutes';
+```
+
+Also alert on beat liveness — if beat stops, the safety net stops.
+
+**Migrating an existing deployment.** Migration `0005` widens `instance_id` from integer to `varchar(255)` via `ALTER COLUMN ... TYPE` (Django emits the `USING ...::varchar` cast, so existing integer rows convert in place). On a very large `TransitionMessage` table this rewrites the column under a lock — run it in a maintenance window or with your usual online-migration tooling.
+
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
 ### Development Setup
+
+#### Option A: Local
+
 1. Clone the repository
 2. Create a virtual environment: `python -m venv venv`
-3. Install dependencies: `pip install -r requirements.txt`
+3. Install dependencies: `pip install -e .`
 4. Run tests: `python tests/manage.py test`
+
+#### Option B: Docker + Make
+
+The project includes a `Dockerfile` and a `makefile` so you can develop without installing anything locally.
+
+```bash
+make build          # build the Docker image
+make test           # run the full test suite
+make test t=tests.test_transition  # run a specific test module
+make coverage       # run tests with coverage report
+make sh             # open a Django shell inside the container
+```
 
 Please make sure to:
 - Add tests for new features

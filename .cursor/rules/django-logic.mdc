@@ -1,0 +1,108 @@
+---
+description: How to write django-logic Processes & background transitions correctly (for AI and humans)
+globs:
+  - "**/processes/**/*.py"
+  - "**/process.py"
+  - "**/processes.py"
+  - "**/actions.py"
+  - "**/transitions.py"
+alwaysApply: false
+---
+
+# Using django-logic correctly
+
+django-logic models business logic as declarative **Process** classes:
+transitions (state-machine edges) carry `conditions`, `permissions`,
+`side_effects`, `callbacks`, and (on failure) `failure_side_effects` /
+`failure_callbacks`. Background work uses `BackgroundTransition` /
+`BackgroundAction` (durable, queue-routed, retried).
+
+These rules are distilled from a full production-style validation on Heroku
+(RabbitMQ + PostgreSQL + multiple workers + induced crashes). Follow them.
+
+## Mental model
+
+- **`side_effects`** = the essential work. They run inside the transition; if
+  one raises, the transition fails. For background transitions they are
+  **retried from scratch**, so they **MUST be idempotent**.
+- **`callbacks` / `failure_callbacks`** = best-effort follow-ups. Exceptions
+  are logged and **swallowed**. Never put critical work here — it may be lost
+  on a worker crash.
+- **`conditions`** = `fn(instance, **kwargs) -> bool` guards. **`permissions`**
+  = `fn(instance, user, **kwargs) -> bool`.
+- A `BackgroundTransition` runs in two phases: phase 1 (sync, in the caller)
+  validates + atomically writes `in_progress_state` and a `TransitionMessage`
+  row + dispatches; phase 2 (worker) runs the side-effects and writes the
+  target/`failed_state`. The `TransitionMessage` row is the durable source of
+  truth; the periodic safety-net tasks recover crashes/lost messages.
+
+## The golden rules
+
+1. **Side-effects MUST be idempotent.** They re-run from scratch on every
+   retry. Use get-or-create, upserts, "already done?" guards. Put critical
+   work in side-effects, never in callbacks.
+2. **Every `BackgroundTransition`/`BackgroundAction` declares `queue=`.**
+   No default. Route by SLA: e.g. `…critical` (user-facing), `…slow`
+   (exports/reports), `…fast` (small/quick). Give each queue its own worker.
+3. **NEVER call a nested `other.process.xxx()` inside a `side_effect` and rely
+   on its exception.** That is the anti-pattern that cascades failures across
+   state machines. Instead:
+   - **Fan out**: start each child's *own* `BackgroundTransition` (phase 1
+     only) and return. A child failure is then contained in the child's own
+     `failed_state`.
+   - **Coordinate via callbacks**: the child reports completion in a
+     best-effort callback that runs an **idempotent, guarded** completion
+     check on the parent.
+   - **Aggregate errors by reading child rows**, never by catching exceptions.
+   - Give the parent an explicit partial-failure state (e.g. `action_required`).
+4. **`in_progress_state` must be unique within a Process** (enforced at import).
+5. **`failed_state`** on every background transition so failures are contained
+   and terminal, not propagated.
+6. **Test in sync mode** — `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` or
+   `with django_logic.background.sync_execution():`. Phase 2 runs inline, no
+   broker; exceptions propagate so you can `assertRaises`. Use
+   `django_logic.background.retry_pending()` to simulate the periodic starter.
+
+## Deployment requirements (don't skip — durability silently breaks otherwise)
+
+- A **real broker** (Redis/RabbitMQ). With none, `apply_async` succeeds into an
+  in-memory transport nobody drains.
+- Celery: `task_acks_late=True` **and** `task_reject_on_worker_lost=True` — the
+  pair that re-delivers a killed worker's task. Run a **single beat** scheduling
+  the four `django_logic.*` safety-net tasks (`retry_stale_transitions`,
+  `detect_stuck_transitions`, `watchdog_stale_attempts`,
+  `cleanup_completed_transitions`) on `STARTER_QUEUE`. Without beat, nothing
+  recovers.
+- A worker must consume **every** queue you route to (plus `STARTER_QUEUE`).
+- **Behind pgbouncer transaction pooling** (common on Heroku/GV): set
+  `DATABASES['default']['OPTIONS']['prepare_threshold'] = None` (psycopg3
+  prepared statements break in transaction mode), `DISABLE_SERVER_SIDE_CURSORS
+  = True`, and do **not** require SSL on the app→pgbouncer hop. The
+  `select_for_update(nowait)` + partial-unique concurrency guard then holds.
+
+## Minimal example
+
+```python
+from django_logic import Process, Transition, ProcessManager
+from django_logic.background import BackgroundTransition
+
+class OrderProcess(Process):
+    transitions = [
+        Transition('submit', sources=['draft'], target='submitted'),
+        BackgroundTransition(
+            action_name='fulfill',
+            sources=['submitted'], target='fulfilled',
+            in_progress_state='fulfilling',
+            failed_state='fulfillment_failed',   # contain failure here
+            queue='django_logic.critical',
+            side_effects=[reserve_stock, call_courier],  # idempotent!
+            callbacks=[notify_customer],                 # best-effort
+        ),
+    ]
+
+ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
+# drive it: order.process.fulfill(user=request.user)
+```
+
+For the parent/child (order → many fulfillments) pattern and full error
+handling, see the project's `NESTED_PROCESS_ERROR_HANDLING` recipe.

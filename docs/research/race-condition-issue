@@ -1,0 +1,146 @@
+# Django Logic Race Condition
+
+### Log from staging with race condition (2026-03-23)
+```log
+2026-03-23 15:57:24.551 0646bcd4-fa06-4cc3-8d32-296a655c070f fulfilment-manifest-state-26368, process process executes 'dispatch_manifest' transition from pending to dispatching
+2026-03-23 15:57:24.557 0646bcd4-fa06-4cc3-8d32-296a655c070f Start ManifestMainProcess dispatch_manifest fulfilment-manifest-state-26368 0646bcd4-fa06-4cc3-8d32-296a655c070f 0646bcd4-fa06-4cc3-8d32-296a655c070f
+2026-03-23 15:57:24.558 0646bcd4-fa06-4cc3-8d32-296a655c070f Lock
+2026-03-23 15:57:24.560 0646bcd4-fa06-4cc3-8d32-296a655c070f SideEffects 1
+2026-03-23 15:57:24.560 0646bcd4-fa06-4cc3-8d32-296a655c070f SideEffect manifest_set_dispatching_status
+2026-03-23 15:57:24.561 d056250e-ea57-4b98-98a3-18f82ade8ee7 │   fulfilment-manifest-status-26368, process status_process executes 'dispatching' transition from pending to dispatching
+2026-03-23 15:57:24.561 d056250e-ea57-4b98-98a3-18f82ade8ee7 │   Start ManifestStatusProcess dispatching fulfilment-manifest-status-26368 0646bcd4-fa06-4cc3-8d32-296a655c070f 0646bcd4-fa06-4cc3-8d32-296a655c070f
+2026-03-23 15:57:24.562 d056250e-ea57-4b98-98a3-18f82ade8ee7 │   Lock
+2026-03-23 15:57:24.564 d056250e-ea57-4b98-98a3-18f82ade8ee7 │   SideEffects 0
+2026-03-23 15:57:24.575 d056250e-ea57-4b98-98a3-18f82ade8ee7 │   Set State dispatching
+2026-03-23 15:57:24.577 d056250e-ea57-4b98-98a3-18f82ade8ee7 │   Unlock
+2026-03-23 15:57:24.577 d056250e-ea57-4b98-98a3-18f82ade8ee7 │   Callbacks 0
+2026-03-23 15:57:24.585 0646bcd4-fa06-4cc3-8d32-296a655c070f Set State dispatching
+2026-03-23 15:57:24.586 0646bcd4-fa06-4cc3-8d32-296a655c070f Unlock
+2026-03-23 15:57:24.586 0646bcd4-fa06-4cc3-8d32-296a655c070f Callbacks 4
+2026-03-23 15:57:24.586 0646bcd4-fa06-4cc3-8d32-296a655c070f Callback save_manifest_dispatch_start_date
+2026-03-23 15:57:24.588 0646bcd4-fa06-4cc3-8d32-296a655c070f Callback run_manifest_preprocessing
+2026-03-23 15:57:24.600 0646bcd4-fa06-4cc3-8d32-296a655c070f Callback cache_manifest_three_pl_integration
+2026-03-23 15:57:24.603 0646bcd4-fa06-4cc3-8d32-296a655c070f Callback start_manifest_3pl_processing
+2026-03-23 15:57:24.609 4d2d05b0-3926-453a-93f4-efc275c5c239 │   fulfilment-manifest-state_three_pl-26368, process three_pl_process executes 'process' transition from pending to processed
+2026-03-23 15:57:24.613 4d2d05b0-3926-453a-93f4-efc275c5c239 │   Start ManifestThreePLProcess process fulfilment-manifest-state_three_pl-26368 0646bcd4-fa06-4cc3-8d32-296a655c070f 0646bcd4-fa06-4cc3-8d32-296a655c070f
+2026-03-23 15:57:24.615 4d2d05b0-3926-453a-93f4-efc275c5c239 │   Lock
+2026-03-23 15:57:24.616 4d2d05b0-3926-453a-93f4-efc275c5c239 │   SideEffects 0
+2026-03-23 15:57:24.625 4d2d05b0-3926-453a-93f4-efc275c5c239 │   Set State processed
+2026-03-23 15:57:24.626 4d2d05b0-3926-453a-93f4-efc275c5c239 │   Unlock
+2026-03-23 15:57:24.626 4d2d05b0-3926-453a-93f4-efc275c5c239 │   Callbacks 2
+2026-03-23 15:57:24.627 4d2d05b0-3926-453a-93f4-efc275c5c239 │   Callback generate_manifest_summary
+2026-03-23 15:57:24.644 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   export_app-manifestsummaryreport-state-23201, process process executes 'quick_export' transition from new to ready
+2026-03-23 15:57:24.644 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   Start ExportDataProcess quick_export export_app-manifestsummaryreport-state-23201 0646bcd4-fa06-4cc3-8d32-296a655c070f 4d2d05b0-3926-453a-93f4-efc275c5c239
+2026-03-23 15:57:24.645 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   Lock
+2026-03-23 15:57:24.646 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   SideEffects 2
+2026-03-23 15:57:24.646 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   SideEffect basic_quick_export
+----------------------------------------------------------------------------------------------------
+2026-03-23 15:57:26.638 49cdcc23-6b05-49f8-86ee-ea30dd5993ee fulfilment-manifest-state-26368, process process executes 'dispatch_manifest' transition from pending to dispatching
+2026-03-23 15:57:26.652 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Start ManifestMainProcess dispatch_manifest fulfilment-manifest-state-26368 49cdcc23-6b05-49f8-86ee-ea30dd5993ee 49cdcc23-6b05-49f8-86ee-ea30dd5993ee
+2026-03-23 15:57:26.656 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Lock
+2026-03-23 15:57:26.658 49cdcc23-6b05-49f8-86ee-ea30dd5993ee SideEffects 1
+2026-03-23 15:57:26.658 49cdcc23-6b05-49f8-86ee-ea30dd5993ee SideEffect manifest_set_dispatching_status
+2026-03-23 15:57:26.661 7423d684-4f12-41db-b0c3-2ee1c06b2f3f │   fulfilment-manifest-status-26368, process status_process executes 'dispatching' transition from pending to dispatching
+2026-03-23 15:57:26.661 7423d684-4f12-41db-b0c3-2ee1c06b2f3f │   Start ManifestStatusProcess dispatching fulfilment-manifest-status-26368 49cdcc23-6b05-49f8-86ee-ea30dd5993ee 49cdcc23-6b05-49f8-86ee-ea30dd5993ee
+2026-03-23 15:57:26.662 7423d684-4f12-41db-b0c3-2ee1c06b2f3f │   Lock
+2026-03-23 15:57:26.664 7423d684-4f12-41db-b0c3-2ee1c06b2f3f │   SideEffects 0
+----------------------------------------------------------------------------------------------------
+2026-03-23 15:57:31.857 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   SideEffect save_report_as_file
+2026-03-23 15:57:32.254 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   Set State ready
+2026-03-23 15:57:32.255 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   Unlock
+2026-03-23 15:57:32.255 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   Callbacks 1
+2026-03-23 15:57:32.255 0817abff-1ff2-416c-806c-0e4a4494d622 │   │   Callback send_export_notification
+2026-03-23 15:57:32.265 4d2d05b0-3926-453a-93f4-efc275c5c239 │   Callback start_manifest_courier_processing
+2026-03-23 15:57:32.274 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   fulfilment-manifest-state_courier-26368, process courier_process executes 'process' transition from pending to processed
+2026-03-23 15:57:32.280 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   Start ManifestCourierProcess process fulfilment-manifest-state_courier-26368 0646bcd4-fa06-4cc3-8d32-296a655c070f 4d2d05b0-3926-453a-93f4-efc275c5c239
+2026-03-23 15:57:32.282 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   Lock
+2026-03-23 15:57:32.283 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   SideEffects 0
+2026-03-23 15:57:32.293 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   Set State processed
+2026-03-23 15:57:32.294 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   Unlock
+2026-03-23 15:57:32.294 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   Callbacks 1
+2026-03-23 15:57:32.294 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   Callback check_manifest_processing
+2026-03-23 15:57:32.296 c86aab66-027b-437e-ab55-2cbd96a0c5b4 │   │   │   fulfilment-manifest-state-26368, process process executes 'mark_as_dispatched' transition from dispatching to dispatched
+2026-03-23 15:57:32.296 c86aab66-027b-437e-ab55-2cbd96a0c5b4 │   │   │   Start ManifestMainProcess mark_as_dispatched fulfilment-manifest-state-26368 0646bcd4-fa06-4cc3-8d32-296a655c070f 50d39fc9-2813-4c72-8917-fd2e221ec5d1
+2026-03-23 15:57:32.298 50d39fc9-2813-4c72-8917-fd2e221ec5d1 │   │   Callback check_manifest_processing: State is locked
+Traceback (most recent call last):
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/commands.py", line 96, in execute
+    command(state.instance, **kwargs)
+  File "/app/fulfilment/business_logic/actions.py", line 496, in check_manifest_processing
+    mark_manifest_as_dispatched(manifest)
+  File "/app/fulfilment/business_logic/actions.py", line 500, in mark_manifest_as_dispatched
+    manifest.process.mark_as_dispatched()
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/process.py", line 66, in transition_method
+    return self._get_transition_method(item, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/process.py", line 124, in _get_transition_method
+    return transition.change_state(self.state, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/transition.py", line 131, in change_state
+    raise TransitionNotAllowed("State is locked")
+django_logic.exceptions.TransitionNotAllowed: State is locked
+----------------------------------------------------------------------------------------------------
+2026-03-23 15:57:32.333 7423d684-4f12-41db-b0c3-2ee1c06b2f3f │   Set State dispatching
+2026-03-23 15:57:32.335 7423d684-4f12-41db-b0c3-2ee1c06b2f3f │   Unlock
+2026-03-23 15:57:32.336 7423d684-4f12-41db-b0c3-2ee1c06b2f3f │   Callbacks 0
+2026-03-23 15:57:32.346 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Set State dispatching
+2026-03-23 15:57:32.348 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Unlock
+2026-03-23 15:57:32.348 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Callbacks 4
+2026-03-23 15:57:32.348 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Callback save_manifest_dispatch_start_date
+2026-03-23 15:57:32.350 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Callback run_manifest_preprocessing
+2026-03-23 15:57:32.362 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Callback cache_manifest_three_pl_integration
+2026-03-23 15:57:32.365 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Callback start_manifest_3pl_processing
+2026-03-23 15:57:32.370 49cdcc23-6b05-49f8-86ee-ea30dd5993ee Callback start_manifest_3pl_processing: Process class <class 'fulfilment.business_logic.processes.manifest.ManifestThreePLProcess'> for object 26368 has no transition with action name process, user None
+Traceback (most recent call last):
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/commands.py", line 96, in execute
+    command(state.instance, **kwargs)
+  File "/app/fulfilment/business_logic/actions.py", line 472, in start_manifest_3pl_processing
+    manifest.three_pl_process.process()
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/process.py", line 66, in transition_method
+    return self._get_transition_method(item, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/process.py", line 81, in _get_transition_method
+    transition = self.get_transition_by_action_name(action_name, user)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/.heroku/python/lib/python3.12/site-packages/django_logic/process.py", line 210, in get_transition_by_action_name
+    raise TransitionNotAllowed(f"Process class {self.__class__} for object {self.instance.id} has no transition "
+django_logic.exceptions.TransitionNotAllowed: Process class <class 'fulfilment.business_logic.processes.manifest.ManifestThreePLProcess'> for object 26368 has no transition with action name process, user None
+
+```
+
+## 
+
+The problem is a **race condition caused by a long-running database transaction**. Here's what happened according to the log:
+
+## **Timeline**
+
+**First call** (`0646bcd4`) at `15:57:24.551`:
+
+1. Reads state = `pending`, starts `dispatch_manifest`
+2. Lock → SideEffects → **Set State `dispatching`** (`15:57:24.585`) → **Unlock** (`15:57:24.586`)
+3. Callbacks trigger a chain: `start_manifest_3pl_processing` → `three_pl_process.process()` → `generate_manifest_summary` → `ExportDataProcess.quick_export` → **`basic_quick_export`** (starts at `15:57:24.646`)
+4. `basic_quick_export` runs for **~7 seconds** (until `15:57:31.857`)
+
+**Second call** (`49cdcc23`) at `15:57:26.638` — 2 seconds later:
+
+1. Reads state = **`pending`** (!) and successfully starts the same `dispatch_manifest`
+
+## **Why is the state still `pending`?**
+
+Because the `Set State dispatching` in the first call happened **inside an uncommitted DB transaction**. The entire `dispatch_manifest` along with its callbacks and nested transitions (including the heavy `basic_quick_export`) runs within a single transaction. Until it commits — **other DB connections cannot see the state change**.
+
+The same applies to Lock — it's also in the same transaction, so the second call doesn't see the lock and proceeds without issue.
+
+## **Consequences**
+
+Both calls break each other:
+
+1. **First call** — when `check_manifest_processing` tries to call `mark_as_dispatched`, it gets **"State is locked"** because the second call has already locked the main process (log lines 67-83)
+2. **Second call** — when `start_manifest_3pl_processing` tries to call `three_pl_process.process()`, it gets **"no transition with action name process"** because the first call has already moved `three_pl_process` to `processed` (log lines 95-109)
+
+## **Root Cause**
+
+The Lock/Unlock mechanism in `django-logic` operates within the same DB transaction as all the other logic. If a side effect runs for a long time (like `basic_quick_export` — 7 seconds), the transaction stays open, and the lock is invisible to other requests.
+
+## Solution
+Keep active state into redis, from lock to unlock moment.
+https://github.com/Andrey-Omelyanuk/django-logic/commit/be9d1018e5049b79d5c41eaa3a861d4e5f4ed716

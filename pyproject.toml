@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-logic"
+version = "0.3.0"
+description = "Declarative business logic & state machines for Django — sync and durable background transitions"
+readme = "README.md"
+license = { text = "MIT License" }
+authors = [
+    { name = "Emil Balashov", email = "emil@borderless360.com" },
+    { name = "Andrey Omelyanuk", email = "omelyanukandrey@gmail.com" }
+]
+keywords = ["django", "fsm", "state-machine", "workflow", "celery", "background", "business-logic"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Framework :: Django",
+    "Framework :: Django :: 4.0",
+    "Framework :: Django :: 5.0",
+    "Framework :: Django :: 5.1",
+    "Framework :: Django :: 5.2",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "django>=4.0",
+    "django-model-utils>=4.5.1",
+]
+
+[project.optional-dependencies]
+celery = [
+    "celery>=5.0",
+]
+redis = [
+    "django-redis>=5.0.0",
+]
+drf = [
+    "djangorestframework>=3.14.0",
+]
+dev = [
+    "djangorestframework>=3.14.0",
+    "celery>=5.0",
+    "coverage>=7.0",
+    "pytest>=8.0",
+    "pytest-django>=4.8",
+    # Drivers for the PostgreSQL + Redis stability suite (make stability-*)
+    # and the Postgres concurrency tests. Without these, `uv sync --extra
+    # dev` runs the SQLite suite but not tests.stability.
+    "psycopg[binary]>=3.1",
+    "django-redis>=5.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Borderless360/django-logic"
+Repository = "https://github.com/Borderless360/django-logic"
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "demo*"]
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.coverage.run]
+source = ["django_logic"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

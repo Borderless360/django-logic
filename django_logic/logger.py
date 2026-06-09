@@ -1,67 +1,70 @@
+"""Structured logging for django-logic.
+
+Two standard Python loggers are exposed:
+
+- ``django-logic`` — general library activity
+- ``django-logic.transition`` — per-transition lifecycle events; every
+  record includes ``tr_id`` in the message body so lines for one logical
+  transition can be grepped together.
+
+Configure both via ``LOGGING`` in Django settings.
+"""
 import logging
-from abc import ABC, abstractmethod
+from enum import Enum
 
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
-from django.utils.module_loading import import_string
-
-from django_logic.constants import LogType
-
-DISABLE_LOGGING = getattr(settings, 'DJANGO_LOGIC_DISABLE_LOGGING', False)
-CUSTOM_LOGGER = getattr(settings, 'DJANGO_LOGIC_CUSTOM_LOGGER', None)
 
 
-class AbstractLogger(ABC):
-    def __init__(self, **kwargs):
-        pass
-
-    @abstractmethod
-    def info(self, message: str, **kwargs) -> None:
-        pass
-
-    @abstractmethod
-    def error(self, exception: BaseException, **kwargs) -> None:
-        pass
+logger: logging.Logger = logging.getLogger('django-logic')
+transition_logger: logging.Logger = logging.getLogger('django-logic.transition')
 
 
-class DefaultLogger(AbstractLogger):
-    """ Logger that uses root logging settings """
-    logger = None
+def redact_log_kwargs(kwargs: dict) -> dict:
+    """Return the kwargs value to attach to a log record's ``extra``,
+    honouring the ``DJANGO_LOGIC`` logging-privacy settings.
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        module_name = kwargs.get('module_name', '')
-        self.logger = logging.getLogger(module_name)
+    Transition kwargs commonly carry a ``user`` object, the ``request``,
+    and arbitrary business data (amounts, emails, tokens). By default they
+    are logged as-is (backward compatible), but two opt-ins are available
+    for PII/compliance-sensitive deployments:
 
-    def info(self, message: str, **kwargs) -> None:
-        self.logger.info(message)
+    * ``DJANGO_LOGIC['LOG_KWARGS'] = False`` — never attach kwargs to log
+      records (returns ``{}``).
+    * ``DJANGO_LOGIC['LOG_KWARGS_REDACTOR'] = callable | 'dotted.path'`` —
+      a callable given a shallow copy of the kwargs that returns a
+      sanitised dict (e.g. drop ``user``/``request``, mask ``email``).
 
-    def error(self, exception: BaseException, **kwargs) -> None:
-        self.logger.exception(exception)
+    A broken/raising redactor must never break a transition or silently
+    leak the raw kwargs, so it degrades to a redaction marker.
+    """
+    conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
+    if conf.get('LOG_KWARGS', True) is False:
+        return {}
+    redactor = conf.get('LOG_KWARGS_REDACTOR')
+    if redactor is None:
+        # Return a shallow copy, not the live dict: log records are
+        # formatted lazily, and the caller keeps mutating kwargs after the
+        # log call (restore_user pops user_id, nested transitions rewrite
+        # tr_id/parent_id, etc.). Sharing the reference would let those
+        # later mutations leak into the already-emitted record.
+        return dict(kwargs)
+    try:
+        if isinstance(redactor, str):
+            from django.utils.module_loading import import_string
+            redactor = import_string(redactor)
+        return redactor(dict(kwargs))
+    except Exception:
+        return {'__redaction_error__': True}
 
 
-class NullLogger(AbstractLogger):
-    """ Logger that doesn't write messages """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def info(self, message: str, **kwargs) -> None:
-        pass
-
-    def error(self, exception: BaseException, **kwargs) -> None:
-        pass
-
-
-def get_logger(**kwargs) -> AbstractLogger:
-    if DISABLE_LOGGING:
-        return NullLogger()
-
-    if CUSTOM_LOGGER:
-        try:
-            custom_logger_class = import_string(CUSTOM_LOGGER)
-        except ImportError as e:
-            raise ImproperlyConfigured(f"Custom logger import error: {e}")
-        return custom_logger_class(**kwargs)
-
-    return DefaultLogger(**kwargs)
+class TransitionEventType(Enum):
+    START = 'Start'
+    COMPLETE = 'Complete'
+    FAIL = 'Fail'
+    SIDE_EFFECT = 'SideEffect'
+    CALLBACK = 'Callback'
+    FAILURE_SIDE_EFFECT = 'FailureSideEffect'
+    SET_STATE = 'Set State'
+    LOCK = 'Lock'
+    UNLOCK = 'Unlock'
+    NEXT_TRANSITION = 'Next Transition'
