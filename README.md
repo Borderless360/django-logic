@@ -14,7 +14,6 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - [Core Concepts](#core-concepts)
 - [Usage](#usage)
 - [Complete Example](#complete-example)
-- [Display Process](#display-process)
 - [Django-Logic vs Django FSM](#django-logic-vs-django-fsm)
 - [Background Transitions](#background-transitions)
 - [Contributing](#contributing)
@@ -24,9 +23,8 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - 🎯 **Clear Business Logic** - Separate business logic from views, models, and forms
 - 🔒 **Built-in Permissions** - Define who can perform which transitions
 - 🔄 **Side Effects** - Execute functions during state transitions
-- 📊 **Process Visualization** - Visualize your workflows
 - 🏗️ **Nested Processes** - Build complex workflows with sub-processes
-- ⚡ **Optimistic Locking** - Prevent race conditions
+- ⚡ **Built-in Locking** - Cache/Redis-based locking to prevent race conditions
 - ⏳ **Durable Background Transitions** - Queue-routed, retryable side-effects via Celery (see [Background Transitions](#background-transitions))
 - 🔍 **Structured Logging** - State changes flow through the standard `django-logic` / `django-logic.transition` Python loggers, configured via Django `LOGGING` (see [docs/logger.md](docs/logger.md))
 
@@ -38,13 +36,19 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 Optional extras:
 - `pip install django-logic[celery]` — Celery, for `BackgroundTransition` in `'celery'` execution mode
 - `pip install django-logic[redis]` — `django-redis`, for the cross-process `RedisState` lock
-- `pip install django-logic[drf]` — Django REST Framework helpers (no longer a core dependency)
+- `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; 0.3.x ships no DRF-specific code)
 
 ## Installation
 
-Use pip to install Django-Logic:
+> **Heads up — versions.** The PyPI release is still the legacy `0.1.x` line.
+> The 0.3.x API documented in this README ships from GitHub (`master` /
+> `release/0.3.0`); install it from a tag until 0.3.x is published to PyPI.
 
 ```bash
+# 0.3.x — the version this README documents (from GitHub)
+pip install "django-logic[celery,redis] @ git+https://github.com/Borderless360/django-logic.git@v0.3.1"
+
+# 0.1.x — legacy release on PyPI (different API)
 pip install django-logic
 ```
 
@@ -158,12 +162,13 @@ def update_data(instance, **kwargs):
     instance.save()
 
 class MyProcess(BaseProcess):
-    states = MY_STATE_CHOICES
     transitions = [
         Transition(action_name='approve', sources=['draft'], target='approved'),
         Transition(action_name='pay', sources=['approved'], target='paid'),
         Transition(action_name='void', sources=['draft', 'approved'], target='void'),
-        Action(action_name='update', side_effects=[update_data]),
+        # An Action runs side-effects without changing state. `sources` lists
+        # the states it's available from (required — there is no wildcard).
+        Action(action_name='update', sources=['draft', 'approved'], side_effects=[update_data]),
     ]
 ```
 
@@ -174,11 +179,10 @@ from .models import Invoice, MY_STATE_CHOICES
 
 
 class MyProcess(BaseProcess):
-    states = MY_STATE_CHOICES
     transitions = [
         Transition(action_name='approve', sources=['draft'], target='approved'),
         Transition(action_name='void', sources=['draft', 'approved'], target='void'),
-        Action(action_name='update', side_effects=[update_data]),
+        Action(action_name='update', sources=['draft', 'approved'], side_effects=[update_data]),
     ]
 
 ProcessManager.bind_model_process(Invoice, MyProcess, state_field='my_state')
@@ -215,7 +219,6 @@ class MyProcess(BaseProcess):
     permissions = [
         is_accountant, 
     ]
-    states = MY_STATE_CHOICES
     transitions = [
         Transition(
             action_name='approve',
@@ -250,6 +253,7 @@ class MyProcess(BaseProcess):
         ),
         Action(
             action_name='update', 
+            sources=['draft', 'approved'],
             side_effects=[
                 update_data
             ],
@@ -292,7 +296,7 @@ invoice = Invoice.objects.get(pk=pk)
 invoice.my_state = 'approved'
 invoice.save(update_fields=['my_state'])
 ```
-Save without `update_fields` won't update the value of the state field in order to protect the data from corrupting. 
+When changing the state field manually, always pass `update_fields=['my_state']` (as shown above). django-logic itself writes state via `update_fields` so a transition touches only the state column and never clobbers fields a side-effect changed — follow the same pattern in your own code. (Note: a plain `instance.save()` *will* persist the field like any other; django-logic does not intercept it.)
 
 ### 9. Error handling
 ```python 
@@ -449,22 +453,6 @@ def submit_order(request, order_id):
     return redirect('order_detail', order_id=order.id)
 ```
 
-## Display Process
-Drawing a process with the following elements:
-- Process - a transparent rectangle 
-- Transition - a grey rectangle 
-- State - a transparent ellipse 
-- Process' conditions and permissions are defined inside of related process as a transparent diamond
-- Transition' conditions and permissions are defined inside of related transition's process as a grey diamond
-   
-[![][diagram-img]][diagram-img]
-
-From this diagram you can visually check that the following the business requirements have been implemented properly:
-- Personnel involved: User and Staff
-- Lock has to be available before any actions taken. It's  defined by a condition  `is_lock_available`. 
-- User is able to lock and unlock an available locker. 
-- Staff is able to lock, unlock and put a locker under maintenance if such was planned.  
-
 ## Troubleshooting
 
 ### Common Issues
@@ -489,7 +477,7 @@ If the state field is not updating:
 #### 3. Race Conditions
 Multiple processes trying to transition the same object can cause race conditions.
 
-**Solution**: Django-Logic uses optimistic locking by default. For critical operations, consider using `RedisState` for better distributed locking.
+**Solution**: Django-Logic locks the instance during a transition using the Django cache (an atomic set-if-absent lock), so a second transition on the same instance is rejected while one is in flight. For cross-process/distributed locking, use `RedisState`.
 
 ```python
 from django_logic.state import RedisState
@@ -753,7 +741,7 @@ BackgroundTransition(
 
 ### One in-flight transition per instance
 
-A partial unique constraint guarantees at most one *uncompleted* `TransitionMessage` per instance. Starting a second background transition on the same instance before the first completes raises `AlreadyInProgress`. This also means you **cannot** chain a background transition directly from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
+A partial unique constraint guarantees at most one *uncompleted* `TransitionMessage` per instance. Starting a second background transition on the same instance before the first completes raises `AlreadyInProgress` (`from django_logic.background.exceptions import AlreadyInProgress`). This also means you **cannot** chain a background transition directly from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 
 ### Production deployment
 
@@ -867,7 +855,7 @@ The project includes a `Dockerfile` and a `makefile` so you can develop without 
 ```bash
 make build          # build the Docker image
 make test           # run the full test suite
-make test t=tests.test_transition  # run a specific test module
+make test-one t=tests.test_transition  # run a specific test module
 make coverage       # run tests with coverage report
 make sh             # open a Django shell inside the container
 ```
@@ -888,6 +876,3 @@ Under active development. See [GitHub Issues](https://github.com/Borderless360/d
 - 📖 [Documentation](https://github.com/Borderless360/django-logic/wiki)
 - 🐛 [Issue Tracker](https://github.com/Borderless360/django-logic/issues)
 - 💬 [Discussions](https://github.com/Borderless360/django-logic/discussions)
-
-
-[diagram-img]: https://user-images.githubusercontent.com/6745569/74101382-25c24680-4b74-11ea-8767-0eabd4f27ebc.png
