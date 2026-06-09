@@ -16,6 +16,7 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - [Complete Example](#complete-example)
 - [Django-Logic vs Django FSM](#django-logic-vs-django-fsm)
 - [Background Transitions](#background-transitions)
+- [Testing Your Processes](#testing-your-processes)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -26,6 +27,7 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - 🏗️ **Nested Processes** - Build complex workflows with sub-processes
 - ⚡ **Built-in Locking** - Cache/Redis-based locking to prevent race conditions
 - ⏳ **Durable Background Transitions** - Queue-routed, retryable side-effects via Celery (see [Background Transitions](#background-transitions))
+- 🧪 **Scenario-Based Testing** - Test whole workflows — including background jobs, failures, and retries — as ordinary unit tests via `django_logic.testing`, no Celery needed (see [Testing Your Processes](#testing-your-processes))
 - 🔍 **Structured Logging** - State changes flow through the standard `django-logic` / `django-logic.transition` Python loggers, configured via Django `LOGGING` (see [docs/logger.md](docs/logger.md))
 
 ## Requirements
@@ -835,6 +837,99 @@ SELECT count(*) FROM django_logic_background_transitionmessage
 Also alert on beat liveness — if beat stops, the safety net stops.
 
 **Migrating an existing deployment.** Migration `0005` widens `instance_id` from integer to `varchar(255)` via `ALTER COLUMN ... TYPE` (Django emits the `USING ...::varchar` cast, so existing integer rows convert in place). On a very large `TransitionMessage` table this rewrites the column under a lock — run it in a maintenance window or with your usual online-migration tooling.
+
+## Testing Your Processes
+
+FSM workflows are notoriously hard to test well — state transitions,
+conditions, permissions, side-effects, background jobs, failures, retries, and
+locking all interact. `django_logic.testing` gives you a **scenario-based** test
+base class that reads like the business process itself and runs everything —
+including background transitions — **inline, with no Celery broker**.
+
+```python
+from django_logic.testing import ProcessScenario
+
+
+class TestOrderFulfilment(ProcessScenario):
+    """Order lifecycle: draft -> approved -> fulfilling -> fulfilled."""
+    process_class = OrderProcess
+    model = Order
+    state_field = 'status'      # default: 'status'
+    process_name = 'process'    # default: 'process'
+
+    def test_happy_path(self):
+        order = self.create_instance(status='approved')
+        self.assert_available(order, ['fulfil', 'cancel'])
+
+        self.background_transition(order, 'fulfil')      # phase 1 + phase 2, no Celery
+        self.assert_state(order, 'fulfilled')
+        self.assert_side_effects_ran(['reserve_stock', 'call_courier'])
+        self.assert_callbacks_ran(['send_confirmation_email'])
+
+    def test_courier_failure_then_retry(self):
+        order = self.create_instance(status='approved')
+
+        # Make ONE named side-effect raise — the real failure path runs.
+        self.background_transition(
+            order, 'fulfil',
+            fail_side_effect='call_courier',
+            fail_with=ConnectionError('Aramex timeout'))
+
+        self.assert_state(order, 'fulfilling')           # left in-progress
+        self.assert_error_recorded(order, 'Aramex timeout')
+        self.assert_error_count(order, 1)
+        self.assert_side_effects_not_ran(['call_courier'])
+
+        self.retry_transition(order)                      # what the starter would do
+        self.assert_state(order, 'fulfilled')
+
+    def test_only_staff_can_approve(self):
+        order = self.create_instance(status='draft')
+        self.assert_available(order, ['approve'], user=self.staff)
+        self.assert_not_available(order, ['approve'], user=self.customer)
+```
+
+**Driving the process**
+
+| Method | What it does |
+|--------|--------------|
+| `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg) |
+| `transition(obj, action, **kwargs)` | Run a synchronous transition |
+| `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` phase 1 **and** phase 2 inline |
+| `retry_transition(obj)` | Re-run the instance's uncompleted transition — simulates the periodic starter |
+
+Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. The injected exception is absorbed so you can assert on the recorded error.
+
+**Assertions**
+
+`assert_state` · `assert_available` / `assert_not_available` (optional `user=`) · `assert_side_effects_ran` / `assert_side_effects_not_ran` · `assert_callbacks_ran` · `assert_error_recorded` · `assert_error_count`.
+
+Side-effects and callbacks are **tracked, not mocked** (identified by function `__name__`) — the real code runs; the framework just records what executed.
+
+**Snapshot & replay — turn a production bug into a test**
+
+```python
+from django_logic.testing import snapshot, from_snapshot
+
+data = snapshot(order)          # JSON-able: fields, state, TransitionMessage, process status
+```
+
+Capture it from a Django shell, admin action, Sentry, or a log, then reproduce:
+
+```python
+class TestStuckOrder(ProcessScenario):
+    process_class, model, state_field = OrderProcess, Order, 'status'
+
+    def test_reproduce_and_fix(self):
+        order = self.from_snapshot('fixtures/bug_12345.json')  # rebuilds instance + TransitionMessage
+        self.assert_state(order, 'fulfilling')
+        self.retry_transition(order)        # prove the fix
+        self.assert_state(order, 'fulfilled')
+```
+
+**AI-readable failure output.** When an assertion fails, the error includes a numbered timeline of every step, the relevant `TransitionMessage`, and (with `snapshot_on_failure = True` on the class) a reproducible snapshot — so a person or an AI agent can see exactly where the process diverged without reading stack traces.
+
+`ProcessScenario` extends `TransactionTestCase`, so it works with the durable `TransitionMessage` + atomic-block machinery. Full design: [docs/design/TESTING_SCENARIOS.md](docs/design/TESTING_SCENARIOS.md).
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
