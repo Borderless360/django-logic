@@ -202,10 +202,10 @@ class BackgroundTransition(Transition):
             # partial unique index the moment is_completed flips) — we are
             # then admitted seconds after our under-the-lock revalidation,
             # against an instance the finished flight has already moved to
-            # its target/failed state. Without this recheck the transition
-            # would silently re-run from a non-source state (observed on
-            # the Heroku harness: two concurrent phase 1s, both 200, the
-            # second re-running the work after the first completed).
+            # its target/failed state. Without this recheck, two concurrent
+            # phase 1s on one instance can BOTH be accepted and the
+            # transition silently re-runs from a non-source state
+            # (reproduced under real worker concurrency).
             current = state.get_persisted_state()
             if current not in self.sources:
                 # The atomic block rolls the TM row back.

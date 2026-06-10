@@ -2,13 +2,22 @@
 
 A ``Transition`` moves an instance from one of its source states to its
 target state, running side-effects on success and either callbacks or
-failure callbacks on completion.
+failure callbacks on completion. Everything happens synchronously, in
+the caller's call frame — validate, lock, run, write the target state.
 
 ``Action`` is a transition that does not change state on success but
 still runs side-effects and can set a ``failed_state`` on failure.
 
 For background-executed transitions, see
-``django_logic.background.BackgroundTransition``.
+``django_logic.background.BackgroundTransition``. Comments in this
+module that mention "phase 1" / "phase 2" refer to the two halves of a
+*background* transition (the transactional-outbox pattern): phase 1 is
+the synchronous part that durably records the intent (write
+``in_progress_state`` + a ``TransitionMessage`` row in one transaction,
+then enqueue the Celery task), phase 2 is the worker-side part that
+executes the side-effects and writes the final state. Definitions live
+in ``django_logic.background.transitions`` (phase 1) and
+``django_logic.background.runner`` (phase 2).
 """
 from abc import ABC
 from uuid import UUID
