@@ -7,8 +7,8 @@ the ``TransitionMessage`` — so a production bug can be reproduced in a test an
 kept as a regression guard.
 
 Scope: own concrete fields + the TransitionMessage are captured and restored.
-Arbitrary related graphs are not auto-created — pass them through the optional
-``related`` key yourself, or build them in the test, when a repro needs them.
+Arbitrary related graphs are not auto-created — build them in the test when a
+repro needs them.
 """
 from __future__ import annotations
 
@@ -19,15 +19,33 @@ import uuid
 
 
 def _jsonable(value):
+    """Convert a model-field value to a JSON-able equivalent that Django
+    coerces back to the right type on save.
+
+    Dicts/lists (JSONField values) pass through recursively — stringifying
+    them produced a Python repr that round-tripped as a corrupted string
+    column (issue #95). Anything unsupported fails loudly rather than being
+    silently captured as ``str(value)``.
+    """
     if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
         return value.isoformat()
     if isinstance(value, decimal.Decimal):
         return str(value)
     if isinstance(value, uuid.UUID):
         return str(value)
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
-    return str(value)
+    raise TypeError(
+        f'snapshot: unsupported field value type '
+        f'{type(value).__name__!r} ({value!r}). Supported: str/int/float/'
+        f'bool/None, datetime/date/time, Decimal, UUID, and JSON-able '
+        f'dict/list trees. Exclude the field or convert it yourself before '
+        f'snapshotting.'
+    )
 
 
 def snapshot(instance, *, state_field: str = 'status', process_name: str = 'process') -> dict:
@@ -53,6 +71,7 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
             data['transition_message'] = {
                 'transition_name': tm.transition_name,
                 'process_name': tm.process_name,
+                'field_name': tm.field_name,
                 'queue_name': tm.queue_name,
                 'is_completed': tm.is_completed,
                 'errors_count': tm.errors_count,
@@ -112,17 +131,28 @@ def from_snapshot(data_or_path, *, model=None):
     if data.get('pk') is not None:
         instance.pk = data['pk']
     instance.save(force_insert=True)
+    # The setattrs above wrote serialized forms (ISO strings, str Decimals);
+    # the save coerced them in the DATABASE, but the in-memory instance still
+    # carries the strings — a condition like ``if instance.band:`` would see
+    # ``bool('0.000') == True`` where production saw ``bool(Decimal('0.000'))
+    # == False`` (issue #95). Re-read so attributes are real field types.
+    instance.refresh_from_db()
 
     tm_data = data.get('transition_message')
     if tm_data:
         from django_logic.background.models import TransitionMessage
+        from django_logic.background import settings as bg_settings
         TransitionMessage.objects.create(
             app_label=instance._meta.app_label,
             model_name=instance._meta.model_name,
             instance_id=str(instance.pk),
             process_name=tm_data.get('process_name', 'process'),
+            # Restore the recorded field so phase 2 takes the same
+            # recorded-field path the production row would have used
+            # ('' = legacy pre-0.4 row, inference fallback).
+            field_name=tm_data.get('field_name', ''),
             transition_name=tm_data['transition_name'],
-            queue_name=tm_data.get('queue_name', 'django_logic.critical'),
+            queue_name=tm_data.get('queue_name') or bg_settings.default_queue(),
             is_completed=tm_data.get('is_completed', False),
             errors_count=tm_data.get('errors_count', 0),
             last_error_message=tm_data.get('last_error_message', ''),

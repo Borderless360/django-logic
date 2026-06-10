@@ -18,9 +18,22 @@ class State(object):
         """
         Fetches state directly from db instead of model instance.
         """
+        return self.get_persisted_state()
+
+    def get_persisted_state(self):
+        """Read the state column straight from the database row.
+
+        Unlike ``get_db_state``, subclasses must NOT override this with a
+        cached read — it is the authoritative source used by the
+        under-the-lock revalidation and the phase-2 state guard.
+
+        Uses ``_base_manager`` so a filtered default manager (archived /
+        soft-deleted rows hidden) cannot make a framework-level reload of
+        an existing row raise ``DoesNotExist`` mid-transition.
+        """
         model = type(self.instance)
         return (
-            model._default_manager
+            model._base_manager
             .values_list(self.field_name, flat=True)
             .get(pk=self.instance.pk)
         )
@@ -76,17 +89,25 @@ class RedisState(State):
     """
     RedisState uses a single Redis key for both locking and state storage.
 
-    Requires ``django-redis`` as the cache backend (``pip install django-logic[redis]``).
-    Django's built-in ``RedisCache`` does not support the ``nx=True`` parameter
-    used by ``lock()``.
+    Requires ``django-redis`` (installed as a core dependency) as the cache
+    backend. Django's built-in ``RedisCache`` does not support the
+    ``nx=True`` / ``xx=True`` parameters used by ``lock()`` / ``set_state()``.
 
     The key's existence means the state is locked; its value is the current
     state. This makes the state immediately visible to all processes
     regardless of DB transaction isolation.
 
     lock()      -> atomically creates the key with the current state (nx=True)
-    set_state() -> overwrites the key value with the new state + persists to DB
-                   (resets TTL so the lock stays alive while making progress)
+    set_state() -> updates the key value with the new state *only if the key
+                   already exists* (xx=True, resetting the TTL so the lock
+                   stays alive while making progress) + persists to DB.
+                   Writing state never CREATES a lock — only lock() does.
+                   Under the lock (sync transitions; background phase 1's
+                   in_progress write) the xx write refreshes the live key;
+                   outside any lock (background phase 2's target/failed
+                   writes, Action.failed_state) it is a cache no-op — which
+                   is what lets background transitions use RedisState
+                   without stranding the instance locked until TTL expiry.
     get_state() -> reads from the key (fallback to instance attr when unlocked)
     unlock()    -> deletes the key; DB is the source of truth again
 
@@ -117,7 +138,13 @@ class RedisState(State):
         return cache.get(self._get_hash()) is not None
 
     def set_state(self, state):
-        cache.set(self._get_hash(), self._store_value(state), self.lock_timeout)
+        # xx=True: refresh the key's value/TTL only when it exists (i.e. the
+        # state is locked). A state write outside a lock()/unlock() pair —
+        # background phase 2's target/failed writes, Action.failed_state —
+        # must not implicitly create a lock nobody will release. (Background
+        # phase 1's in_progress write happens UNDER its critical-section
+        # lock, so there the xx write refreshes the live key's value.)
+        cache.set(self._get_hash(), self._store_value(state), self.lock_timeout, xx=True)
         super().set_state(state)
 
     def get_state(self):

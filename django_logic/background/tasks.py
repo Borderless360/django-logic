@@ -1,9 +1,8 @@
 """Celery task wrappers + periodic safety-net tasks.
 
-This module is import-safe even when Celery is not installed — the
-``@shared_task`` decorator is a thin shim that, when Celery is absent,
-degrades to a plain function with a ``.apply_async`` method that
-executes inline. This is how Sync mode stays Celery-free.
+Celery is a core dependency of django-logic: background transitions are
+Celery tasks. (Sync execution mode never schedules these tasks — it runs
+phase 2 inline — but the tasks are always importable and registered.)
 
 Tasks defined here:
 
@@ -26,6 +25,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from celery import shared_task
 from django.db import transaction
 from django.db.models import Min, Q
 from django.utils import timezone
@@ -40,59 +40,32 @@ from django_logic.background.runner import (
 from django_logic.logger import logger
 
 
-try:
-    from celery import shared_task as _celery_shared_task
-    _CELERY_AVAILABLE = True
-except ImportError:
-    _CELERY_AVAILABLE = False
-
-    def _celery_shared_task(*task_args, **task_kwargs):
-        """Drop-in stand-in for ``celery.shared_task`` when Celery isn't installed.
-
-        The returned object behaves like a function but also exposes
-        ``.apply_async`` and ``.delay``. Both run the task inline — in
-        Sync mode, that's exactly what we want; in Celery mode, this
-        path is not reachable because ``validate_on_ready`` would have
-        raised.
-        """
-        def decorator(func):
-            class _InlineTask:
-                name = f'{func.__module__}.{func.__name__}'
-
-                def __call__(self, *args, **kwargs):
-                    return func(*args, **kwargs)
-
-                def apply_async(self, args=None, kwargs=None, queue=None, **_ignored):
-                    return func(*(args or ()), **(kwargs or {}))
-
-                def delay(self, *args, **kwargs):
-                    return func(*args, **kwargs)
-
-            return _InlineTask()
-
-        # ``@shared_task`` can be used bare or with args; handle both.
-        if task_args and callable(task_args[0]) and not task_kwargs:
-            return decorator(task_args[0])
-        return decorator
-
-
-@_celery_shared_task(
+@shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.run_background_transition',
     bind=False,
 )
 def run_background_transition_task(transition_message_id: int) -> None:
     """Phase-2 entrypoint for one transition.
 
-    Exceptions are re-raised so Celery's own retry / alerting machinery
-    can react. The periodic starter is the primary retry path though;
-    Celery-level retries are not configured here by design.
+    ``acks_late=True`` + ``reject_on_worker_lost=True`` are set per-task so
+    a worker killed mid-execution (SIGKILL / OOM / deploy) re-delivers the
+    message regardless of the project's global Celery configuration — the
+    pair is what the crash-redelivery guarantee depends on, so it is not
+    left to consumer settings (issue #91).
+
+    Side-effect failures are recorded on the TransitionMessage row and NOT
+    re-raised in celery mode (monitor the row, not Celery task failures —
+    see README → Monitoring); the periodic starter owns retries. Only
+    unexpected infrastructure errors propagate to Celery.
     """
     run_background_transition(transition_message_id)
 
 
-@_celery_shared_task(
+@shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.retry_stale_transitions',
     bind=False,
 )
@@ -176,8 +149,9 @@ def _retry_pending_inline() -> int:
     return dispatched
 
 
-@_celery_shared_task(
+@shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.cleanup_completed_transitions',
     bind=False,
 )
@@ -195,8 +169,9 @@ def cleanup_completed_transitions() -> int:
     return deleted
 
 
-@_celery_shared_task(
+@shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.detect_stuck_transitions',
     bind=False,
 )
@@ -236,8 +211,9 @@ def detect_stuck_transitions() -> int:
     return finalized
 
 
-@_celery_shared_task(
+@shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.watchdog_stale_attempts',
     bind=False,
 )

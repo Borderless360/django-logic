@@ -76,7 +76,11 @@ class KwargsRoundTripTests(TestCase):
     def test_deleted_user_degrades_to_none(self):
         # A user that vanished between phase 1 and phase 2 restores to None
         # (the work becomes "system-initiated"). Drive phase 2 directly with
-        # a user_id that does not resolve.
+        # a user_id that does not resolve. The widget must sit in the
+        # transition's in_progress_state, exactly as phase 1 leaves it —
+        # otherwise the phase-2 state guard marks the row superseded.
+        self.widget.status = 'fulfilling'
+        self.widget.save(update_fields=['status'])
         tm = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',

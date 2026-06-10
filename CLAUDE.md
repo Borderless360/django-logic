@@ -23,11 +23,16 @@ change on success) for anything slow, external, or retriable.
 
 ## Non-negotiable rules
 
-1. **Side-effects must be idempotent.** Background side-effects re-run from
-   scratch on every retry. Critical work goes in `side_effects`; `callbacks`
-   are best-effort (exceptions swallowed, lost on crash).
-2. **Every background transition declares `queue=`** (no default). Route by
-   SLA and give each queue its own worker (e.g. `critical`/`slow`/`fast`).
+1. **Side-effects must be idempotent against external systems.** Background
+   side-effects re-run from scratch on every retry. Since 0.4 each attempt's
+   *database* writes run in a savepoint and roll back on failure
+   (all-or-nothing per attempt), so the idempotency you owe is for external
+   calls (APIs, emails, payments). Critical work goes in `side_effects`;
+   `callbacks` are best-effort (exceptions swallowed, lost on crash).
+2. **Route by SLA with named queues.** `queue=` is optional — transitions
+   without it go to `DJANGO_LOGIC['DEFAULT_QUEUE']` (`'django_logic'`).
+   Give heavy or SLA-sensitive transitions their own queue (e.g.
+   `critical`/`slow`/`fast`) and a dedicated worker per queue.
 3. **Never call a nested `x.process.foo()` inside a `side_effect` expecting its
    exception to propagate** — it cascades failures across state machines (the
    "fundamental problem"). For parent→children (e.g. an order with many
@@ -42,14 +47,32 @@ change on success) for anything slow, external, or retriable.
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
    `sync_execution()` context manager) runs phase 2 inline with no broker and
    propagates exceptions; `retry_pending()` simulates the periodic starter.
+   The global default is `'celery'`, so test settings must opt into sync.
+   See `docs/TESTING_GUIDE.md` for the full scenario catalog.
+6. **One in-flight background transition per instance per process.** While an
+   uncompleted `TransitionMessage` exists, a second background transition
+   raises `AlreadyInProgress` and a *synchronous* transition on the same
+   instance+process raises `TransitionNotAllowed` — design flows so follow-up
+   work chains from terminal hooks, not mid-flight.
+7. **Manual state fixes win.** If an instance is moved externally while a
+   background row is pending, phase 2 completes the row as *superseded*
+   (`'[superseded]'` in `last_error_message`) and skips side-effects
+   (`DJANGO_LOGIC['PHASE2_STATE_GUARD']`, default `'enforce'`).
 
 ## Deployment the durability contract depends on
 
-- A real broker (Redis/RabbitMQ).
-- Celery `task_acks_late=True` **and** `task_reject_on_worker_lost=True` (re-
-  deliver a killed worker's task), plus a **single beat** scheduling the four
-  `django_logic.*` safety-net tasks on `STARTER_QUEUE`. A worker for every
-  queue you use.
+- A real broker (Redis/RabbitMQ). Celery and django-redis are core
+  dependencies of django-logic (installed automatically);
+  `BACKGROUND_EXECUTION` defaults to `'celery'`.
+- A cross-process `default` cache (django-redis) for the state lock —
+  celery mode refuses to boot with a locmem/dummy cache when `DEBUG=False`.
+- Crash re-delivery is built in (every django-logic task sets
+  `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
+  pair only for your *own* tasks. You still need a **single beat**
+  scheduling the four `django_logic.*` safety-net tasks —
+  `app.conf.beat_schedule = beat_schedule()` (from
+  `django_logic.background`) routes them to `STARTER_QUEUE` — and a worker
+  for every queue you use.
 - Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
   None}`, `DISABLE_SERVER_SIDE_CURSORS=True`, and no SSL on the app→pgbouncer
   hop. The concurrency guard (`select_for_update(nowait)` + partial-unique)
@@ -62,8 +85,10 @@ change on success) for anything slow, external, or retriable.
 - `django_logic/background/` is the durable engine: `transitions.py`,
   `dispatch.py`, `runner.py` (phase 2), `tasks.py` (Celery + periodic),
   `models.py` (`TransitionMessage`), `settings.py`.
-- Read `docs/PLAN.md`, `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, and the
-  root `fundamental problem.md` before changing the background engine.
+- Read `docs/PLAN.md`, `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, and
+  `docs/recipes/nested-processes.md` (the fan-out pattern and the
+  cascading-failure anti-pattern it replaces) before changing the
+  background engine.
 
 See `docs/IMPROVEMENTS_FROM_HEROKU_VALIDATION.md` for validated-behavior notes
 and open improvement ideas.

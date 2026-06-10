@@ -25,6 +25,7 @@ from django.test import TransactionTestCase
 from django_logic.testing.assertions import ScenarioAssertions
 from django_logic.testing.output import format_failure
 from django_logic.testing.runner import (
+    all_transitions,
     rerun_message,
     run_background_sync,
     transitions_for,
@@ -129,9 +130,18 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
             self._fail('retry_transition(): no uncompleted TransitionMessage for '
                        'this instance — nothing to retry.', instance=instance)
-        transitions = transitions_for(self.process_class, tm.transition_name)
+        if not transitions_for(self.process_class, tm.transition_name):
+            self._record('retry_transition', 'FAILED',
+                         f'no transition named {tm.transition_name!r}')
+            self._fail(f'retry_transition(): the uncompleted TransitionMessage '
+                       f'names {tm.transition_name!r}, which does not exist on '
+                       f'{self.process_class.__name__}.', instance=instance)
         before = self._state(instance)
-        with track(transitions, fail_side_effect=fail_side_effect,
+        # Track the WHOLE process tree, not just the retried action — the
+        # retry can run follow-up transitions (next_transition, callbacks)
+        # whose hooks the assertions must see (issue #96).
+        with track(all_transitions(self.process_class),
+                   fail_side_effect=fail_side_effect,
                    fail_with=fail_with) as tracker:
             raised = self._call(lambda: rerun_message(tm.pk))
         self._finish('retry_transition', instance, tracker, raised, before)
@@ -140,15 +150,19 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
     # --- shared execution path ------------------------------------------
 
     def _drive(self, instance, action, *, background, fail_side_effect, fail_with, kwargs):
-        transitions = transitions_for(self.process_class, action)
-        if not transitions:
+        if not transitions_for(self.process_class, action):
             self._record(f'{"background_" if background else ""}transition({action!r})',
                          'FAILED', 'no such transition')
             self._fail(f'No transition named {action!r} on '
                        f'{self.process_class.__name__} (or its nested processes).',
                        instance=instance)
         before = self._state(instance)
-        with track(transitions, fail_side_effect=fail_side_effect,
+        # Track the WHOLE process tree, not just the named action — one drive
+        # can also execute next_transition follow-ups and callback-triggered
+        # transitions, and their hooks must be visible to the side-effect
+        # assertions (issue #96).
+        with track(all_transitions(self.process_class),
+                   fail_side_effect=fail_side_effect,
                    fail_with=fail_with) as tracker:
             if background:
                 raised = self._call(
@@ -183,4 +197,19 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
             self._record(label, 'FAILED', f'{type(raised).__name__}: {raised}')
             self._fail(f'{label} raised unexpectedly: '
                        f'{type(raised).__name__}: {raised}', instance=instance)
+        # A requested injection that never fired silently turns a failure
+        # test into a happy-path run (issue #94). track() already rejects
+        # names that exist nowhere; this catches a hook that exists but did
+        # not execute during this drive (e.g. wrong action, gated earlier).
+        if (tracker.requested_fail_side_effect is not None
+                and tracker.failed_side_effect is None and raised is None):
+            self._record(label, 'FAILED',
+                         f'fail_side_effect={tracker.requested_fail_side_effect!r} '
+                         f'never fired')
+            self._fail(
+                f'{label}: fail_side_effect='
+                f'{tracker.requested_fail_side_effect!r} never fired — no '
+                f'side-effect with that name executed during this drive, so '
+                f'the transition completed as a happy path instead of the '
+                f'failure scenario this test intends.', instance=instance)
         self._record(label, 'OK' if raised is None else 'FAILED(injected)', detail)

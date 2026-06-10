@@ -14,7 +14,14 @@ Structure:
      (another worker already holds it → raise ``OperationalError`` →
      caller exits silently),
    * restores the instance + transition,
-   * runs each side-effect in order,
+   * verifies the instance is still in the state phase 1 left behind
+     (the *state guard* — on mismatch the row completes as superseded
+     and side-effects are skipped, so a manual ops fix is never
+     overwritten),
+   * runs each side-effect in order **inside a savepoint** — a failed
+     attempt rolls back every side-effect write (and keeps the outer
+     transaction healthy even when the side-effect raised a genuine
+     ``DatabaseError``, so the error bookkeeping below always works),
    * on success, writes ``target`` state (for ``BackgroundTransition``)
      and marks the TM completed,
    * on failure, records the error and either leaves the TM for retry
@@ -25,9 +32,13 @@ Structure:
    * success callbacks + ``next_transition`` (success path), or
    * failure callbacks (terminal-failure path).
 
-Exceptions from side-effects propagate out of ``run_background_transition``
-so the Celery task can decide to retry. In sync mode, they also
-propagate to the original caller — tests can ``assertRaises`` directly.
+Side-effect exceptions re-raise out of ``run_background_transition``
+only in **sync mode**, so inline callers and tests can ``assertRaises``
+directly. In **Celery mode** they are swallowed after being fully
+recorded on the row (``errors_count`` + ``last_error``, or terminal
+``failed_state`` + completion) — the periodic starter owns retries, and
+re-raising out of an ``acks_late`` task would spam task-failure alerts
+and risk broker redelivery on top of the periodic retry.
 """
 from __future__ import annotations
 
@@ -299,16 +310,31 @@ def _finalize_terminal_from_watchdog(
     state = process.state
 
     if transition.failed_state:
-        state.set_state(transition.failed_state)
-        transition_logger.info(
-            f'{source}: set failed_state={transition.failed_state} '
-            f'on {state.instance_key}'
-        )
+        # Same state guard as the phase-2 attempt path: a safety-net task
+        # finalizing a long-stranded row must not clobber a state change
+        # made in the meantime (manual ops fix, external write).
+        matches, expected, current = _state_guard_matches(transition, state)
+        if matches or (
+            bg_settings.phase2_state_guard() == bg_settings.STATE_GUARD_WARN
+        ):
+            state.set_state(transition.failed_state)
+            transition_logger.info(
+                f'{source}: set failed_state={transition.failed_state} '
+                f'on {state.instance_key}'
+            )
+        else:
+            transition_logger.error(
+                f'{source}: NOT writing failed_state='
+                f'{transition.failed_state!r} on {state.instance_key} — '
+                f'expected {expected}, found {current!r}; the external '
+                f'state change wins.'
+            )
 
     # Symmetric with _handle_failure: run failure_side_effects inside
-    # the atomic block, capture any swallowed exception on the TM.
-    fse_error = transition.failure_side_effects.execute(
-        state, exception=exception, **kwargs
+    # the atomic block (own savepoint), capture any swallowed exception
+    # on the TM.
+    fse_error = _run_failure_side_effects_isolated(
+        transition, state, exception, kwargs
     )
     if fse_error is not None:
         tm.record_failure_side_effect_error(fse_error)
@@ -394,12 +420,39 @@ def _run_atomic(tm_id: int) -> _Outcome:
             # fresh statement so the stop-retry flag actually persists.
             raise _StopRetry(tm.pk) from exc
 
+        state = process.state
+
+        # State guard: phase 2 restores by name and deliberately bypasses
+        # the source-state gate, so without this check it would overwrite
+        # any state change made while the row was pending — including a
+        # manual ops fix. With retries spanning RETRY_MINUTES × MAX_ERRORS
+        # that collision is a realistic production event.
+        matches, expected, current = _state_guard_matches(transition, state)
+        if not matches:
+            note = (
+                f'[superseded] phase-2 state guard: expected {expected}, '
+                f'found {current!r} — the instance was moved by something '
+                f'else while this transition was pending. Side-effects '
+                f'skipped; the external state change wins.'
+            )
+            if bg_settings.phase2_state_guard() == bg_settings.STATE_GUARD_ENFORCE:
+                transition_logger.error(
+                    f'{kwargs.get("tr_id")} TransitionMessage#{tm.pk} '
+                    f'{transition.action_name} {state.instance_key}: {note}'
+                )
+                tm.mark_as_superseded(note)
+                return _Outcome(terminal=True, succeeded=False)
+            transition_logger.warning(
+                f'{kwargs.get("tr_id")} TransitionMessage#{tm.pk} '
+                f'{transition.action_name} {state.instance_key}: state '
+                f'guard mismatch (expected {expected}, found {current!r}) '
+                f"— PHASE2_STATE_GUARD='warn', running anyway."
+            )
+
         # Record the start of this attempt. Overwritten on every retry so
         # the watchdog (uncompleted AND started_at < cutoff) tracks the
         # current attempt, not the first one.
         tm.mark_as_started()
-
-        state = process.state
         token = _transition_context.set(
             {
                 'root_id': kwargs.get('root_id'),
@@ -413,13 +466,24 @@ def _run_atomic(tm_id: int) -> _Outcome:
                 f'queue={tm.queue_name}'
             )
             try:
-                for command in transition.side_effects.commands:
-                    transition_logger.info(
-                        f'{kwargs.get("tr_id")} '
-                        f'{TransitionEventType.SIDE_EFFECT.value} '
-                        f'{getattr(command, "__name__", repr(command))}'
-                    )
-                    command(instance, **kwargs)
+                # Savepoint: a failed attempt rolls back every side-effect
+                # write (all-or-nothing per attempt), and a genuine
+                # DatabaseError raised by a side-effect poisons only the
+                # savepoint — the outer transaction stays healthy so
+                # record_error / mark_as_completed below always work.
+                # Without it, a DB error here made record_error itself
+                # raise TransactionManagementError: the error was never
+                # recorded, errors_count never reached MAX_ERRORS, and the
+                # row was re-dispatched forever while blocking every
+                # future background transition on the instance.
+                with transaction.atomic():
+                    for command in transition.side_effects.commands:
+                        transition_logger.info(
+                            f'{kwargs.get("tr_id")} '
+                            f'{TransitionEventType.SIDE_EFFECT.value} '
+                            f'{getattr(command, "__name__", repr(command))}'
+                        )
+                        command(instance, **kwargs)
             except Exception as error:
                 return _handle_failure(tm, transition, state, kwargs, error)
             else:
@@ -486,12 +550,13 @@ def _handle_failure(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
             f'{transition.failed_state}'
         )
-    # failure_side_effects run inside the atomic block, before unlock —
-    # idempotent per the reliability contract. Swallowed exceptions are
-    # returned so we can surface them on the TM (otherwise cleanup bugs
-    # are invisible).
-    fse_error = transition.failure_side_effects.execute(
-        state, exception=error, **kwargs
+    # failure_side_effects run inside the atomic block, in their own
+    # savepoint — idempotent per the reliability contract. A broken
+    # cleanup path rolls back its own writes and cannot poison the outer
+    # transaction; the swallowed exception is surfaced on the TM
+    # (otherwise cleanup bugs are invisible).
+    fse_error = _run_failure_side_effects_isolated(
+        transition, state, error, kwargs
     )
     if fse_error is not None:
         tm.record_failure_side_effect_error(fse_error)
@@ -552,6 +617,65 @@ class _RestoreError(Exception):
     """
 
 
+class _FailureSideEffectsRollback(Exception):
+    """Internal: forces the failure_side_effects savepoint to roll back.
+
+    ``FailureSideEffects.execute`` swallows the exception and *returns*
+    it, so the savepoint context manager would otherwise commit the
+    partial writes of a broken cleanup path — and, worse, a genuine
+    ``DatabaseError`` raised inside a failure side-effect would leave
+    the outer transaction poisoned. Raising this wrapper inside the
+    savepoint rolls both problems back.
+    """
+
+    def __init__(self, error: BaseException):
+        self.error = error
+
+
+def _run_failure_side_effects_isolated(transition, state, exception, kwargs):
+    """Run ``failure_side_effects`` inside a savepoint.
+
+    Returns the swallowed exception (as ``FailureSideEffects.execute``
+    does) or ``None``. On error, every write the failure side-effects
+    made is rolled back and the outer transaction stays healthy, so the
+    caller can still record the error and mark the row completed.
+    """
+    try:
+        with transaction.atomic():
+            error = transition.failure_side_effects.execute(
+                state, exception=exception, **kwargs
+            )
+            if error is not None:
+                raise _FailureSideEffectsRollback(error)
+    except _FailureSideEffectsRollback as rollback:
+        return rollback.error
+    return None
+
+
+def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
+    """Does the persisted state still match what phase 1 left behind?
+
+    * Transition with ``in_progress_state`` — phase 1 wrote it, so the
+      instance must still be exactly there.
+    * Transition without ``in_progress_state`` / BackgroundAction — the
+      instance must still be in one of the declared sources.
+
+    Returns ``(matches, expected_description, current_state)``.
+    """
+    current = state.get_persisted_state()
+    if transition.in_progress_state:
+        return (
+            current == transition.in_progress_state,
+            f'in_progress_state {transition.in_progress_state!r}',
+            current,
+        )
+    return (
+        current in transition.sources,
+        f'one of sources {transition.sources!r}',
+        current,
+    )
+
+
 def _restore(tm: TransitionMessage):
     """Resolve ``(instance, process, transition)`` from a TM row."""
     try:
@@ -563,23 +687,57 @@ def _restore(tm: TransitionMessage):
         ) from exc
 
     try:
-        instance = model.objects.get(pk=tm.instance_id)
+        # _base_manager, not objects: a filtered default manager (e.g. one
+        # that hides archived/soft-deleted rows) would raise DoesNotExist
+        # for an instance that still exists, and the restore-error path
+        # would mark the message completed — stranding the instance in
+        # in_progress_state with no failed_state and no retries. Framework
+        # code reloading by pk must be immune to default-manager filtering
+        # (Django's own convention for related-object loading).
+        instance = model._base_manager.get(pk=tm.instance_id)
     except model.DoesNotExist as exc:
         raise _RestoreError(
             f'{tm.app_label}.{tm.model_name}#{tm.instance_id} not found'
         ) from exc
 
+    recorded_path = (tm.kwargs or {}).get('process_class')
     try:
         process = getattr(instance, tm.process_name)
     except AttributeError:
         # Fall back to process_class stored in kwargs, if any.
-        process_class_path = (tm.kwargs or {}).get('process_class')
-        if not process_class_path:
+        if not recorded_path:
             raise _RestoreError(
                 f'instance has no process named {tm.process_name!r} and '
                 f'no process_class stored on the message'
             )
-        process = _load_process_from_path(instance, process_class_path, tm)
+        process = _load_process_from_path(instance, recorded_path, tm)
+    else:
+        # Verify the attribute resolved the same class phase 1 enqueued.
+        # Every Process defaults to process_name='process', so a name
+        # collision (directly-instantiated process vs the bound one, or a
+        # rebind between deploy of phase 1 and phase 2) silently restores
+        # the WRONG class — phase 2 would run side-effects the caller
+        # never asked for. Prefer the recorded class on mismatch.
+        if recorded_path:
+            resolved_path = f'{type(process).__module__}.{type(process).__name__}'
+            if resolved_path != recorded_path:
+                transition_logger.warning(
+                    f'TransitionMessage#{tm.pk}: process_name '
+                    f'{tm.process_name!r} resolved to {resolved_path}, but '
+                    f'the message was enqueued by {recorded_path}; using '
+                    f'the recorded class.'
+                )
+                try:
+                    process = _load_process_from_path(
+                        instance, recorded_path, tm
+                    )
+                except Exception as exc:
+                    transition_logger.error(
+                        f'TransitionMessage#{tm.pk}: recorded process_class '
+                        f'{recorded_path!r} could not be loaded ({exc}); '
+                        f'falling back to the bound process '
+                        f'{resolved_path}.'
+                    )
 
     transition = _find_transition(process, tm)
     if transition is None:
@@ -594,13 +752,16 @@ def _load_process_from_path(instance, dotted: str, tm: TransitionMessage):
     module_path, class_name = dotted.rsplit('.', 1)
     module = importlib.import_module(module_path)
     process_class = getattr(module, class_name)
-    field_name = _infer_field_name(instance, tm)
+    # Phase 1 records the bound field on the message (0.4+). Rows created
+    # before that fall back to inferring it from the bound process.
+    field_name = tm.field_name or _infer_field_name(instance, tm)
     return process_class(field_name=field_name, instance=instance)
 
 
 def _infer_field_name(instance, tm: TransitionMessage) -> str:
-    # Best effort: if the model exposes a property with process_name,
-    # pull the field name from its State. Otherwise default to 'state'.
+    # Legacy best effort for pre-0.4 rows (no recorded field_name): if the
+    # model exposes a property with process_name, pull the field name from
+    # its State. Otherwise default to 'state'.
     try:
         process = getattr(instance, tm.process_name)
         return process.field_name

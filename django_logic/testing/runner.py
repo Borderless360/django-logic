@@ -11,6 +11,18 @@ from __future__ import annotations
 def transitions_for(process_class, action_name) -> list:
     """All class-level ``Transition`` objects named ``action_name`` reachable
     from ``process_class`` (including nested processes). Usually one."""
+    return [
+        t for t in all_transitions(process_class)
+        if t.action_name == action_name
+    ]
+
+
+def all_transitions(process_class) -> list:
+    """Every class-level ``Transition`` reachable from ``process_class``
+    (including nested processes) — the full instrumentation surface for one
+    drive. A drive can execute more than the named action (``next_transition``
+    follow-ups, callback-triggered transitions), so tracking must cover the
+    whole tree for the side-effect assertions to be truthful."""
     found = []
     seen = set()
 
@@ -18,20 +30,12 @@ def transitions_for(process_class, action_name) -> list:
         if id(cls) in seen:
             return
         seen.add(id(cls))
-        for t in getattr(cls, 'transitions', None) or []:
-            if t.action_name == action_name:
-                found.append(t)
+        found.extend(getattr(cls, 'transitions', None) or [])
         for sub in getattr(cls, 'nested_processes', None) or []:
             walk(sub)
 
     walk(process_class)
     return found
-
-
-def run_sync(instance, process_name, action_name, kwargs):
-    """Drive a (synchronous) transition through the normal process entrypoint."""
-    process = getattr(instance, process_name)
-    return getattr(process, action_name)(**kwargs)
 
 
 def run_background_sync(instance, process_name, action_name, kwargs):

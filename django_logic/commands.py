@@ -58,7 +58,7 @@ class SideEffects(BaseCommand):
             for command in self._commands:
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
-                    f'{command.__name__}'
+                    f'{getattr(command, "__name__", repr(command))}'
                 )
                 command(state.instance, **kwargs)
         except Exception as error:
@@ -79,7 +79,7 @@ class Callbacks(BaseCommand):
         command_name = None
         try:
             for command in self.commands:
-                command_name = command.__name__
+                command_name = getattr(command, '__name__', repr(command))
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
                     f'{command_name}'
@@ -112,7 +112,7 @@ class FailureSideEffects(BaseCommand):
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} '
                     f'{TransitionEventType.FAILURE_SIDE_EFFECT.value} '
-                    f'{command.__name__}'
+                    f'{getattr(command, "__name__", repr(command))}'
                 )
                 command(state.instance, **kwargs)
         except Exception as error:
@@ -124,10 +124,11 @@ class FailureSideEffects(BaseCommand):
 class NextTransition:
     """Run a follow-up transition after the current one unlocks.
 
-    Side-effects and callbacks cannot be used for this because the
-    follow-up must run after state unlock in the same thread;
-    callbacks may run in another thread depending on the transition
-    class.
+    A dedicated slot because the follow-up must run in the same call
+    frame, after the state unlock: side-effects run before unlock (the
+    follow-up would deadlock on its own lock acquisition), and callbacks
+    execute in phase 2 on a Celery worker for background transitions —
+    only for synchronous transitions do they run inline.
     """
 
     def __init__(self, next_transition: str | None = None):

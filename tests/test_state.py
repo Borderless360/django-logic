@@ -1,6 +1,5 @@
 from unittest.mock import patch
 
-from django.core.cache import cache
 from django.test import TestCase
 
 from django_logic.state import State, RedisState
@@ -16,8 +15,10 @@ class FakeRedisCache:
     def get(self, key):
         return self._store.get(key)
 
-    def set(self, key, value, timeout=None, nx=False):
+    def set(self, key, value, timeout=None, nx=False, xx=False):
         if nx and key in self._store:
+            return False
+        if xx and key not in self._store:
             return False
         self._store[key] = value
         return True
@@ -146,3 +147,53 @@ class RedisStateTestCase(TestCase):
         self.state.unlock()
         self.assertFalse(self.state.is_locked())
         self.assertEqual(self.state.get_state(), 'completed')
+
+
+@patch('django_logic.state.cache', new_callable=FakeRedisCache)
+class RedisStateSetStateXXTestCase(TestCase):
+    """R3 — RedisState.set_state passes xx=True: a state write must never
+    CREATE the lock key. Only lock() (nx=True) creates it; set_state only
+    refreshes an existing key."""
+
+    def setUp(self) -> None:
+        self.instance = Invoice.objects.create(status='draft')
+        self.state = RedisState(self.instance, 'status')
+
+    def test_set_state_unlocked_does_not_create_lock_key_but_persists(self, mock_cache):
+        # R3: a state write outside a lock()/unlock() pair (background
+        # phase 1/2, Action.failed_state) must not implicitly create a lock
+        # that nobody will ever release.
+        self.state.set_state('approved')
+
+        self.assertIsNone(mock_cache.get(self.state._get_hash()))
+        self.assertFalse(self.state.is_locked())
+        # ...but the DB write still happens.
+        self.instance.refresh_from_db()
+        self.assertEqual(self.instance.status, 'approved')
+
+    def test_set_state_locked_updates_key_value(self, mock_cache):
+        # R3 sanity: when the key exists (state is locked), set_state still
+        # updates the cached value — the existing behavior is preserved.
+        self.state.lock()
+        self.state.set_state('approved')
+
+        self.assertEqual(mock_cache.get(self.state._get_hash()), 'approved')
+        self.instance.refresh_from_db()
+        self.assertEqual(self.instance.status, 'approved')
+
+    def test_background_write_pattern_leaves_no_stray_lock(self, mock_cache):
+        # R3 regression: the background phase-1/phase-2 write shape —
+        # lock() -> set_state(in_progress) -> unlock() -> set_state(target),
+        # where the final target write happens OUTSIDE the lock — used to
+        # re-create the lock key on that final write (cache.set without
+        # xx=True), stranding the instance locked until the TTL expired.
+        # With xx=True it must end unlocked with the target persisted.
+        self.assertTrue(self.state.lock())
+        self.state.set_state('fulfilling')
+        self.state.unlock()
+        self.state.set_state('fulfilled')
+
+        self.assertFalse(self.state.is_locked())
+        self.assertIsNone(mock_cache.get(self.state._get_hash()))
+        self.instance.refresh_from_db()
+        self.assertEqual(self.instance.status, 'fulfilled')

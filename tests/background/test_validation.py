@@ -1,14 +1,16 @@
-"""Class-time validation: queue required, in_progress_state unique,
-background action_names unique within a Process."""
+"""Class-time validation: queue optional but non-empty when given,
+in_progress_state unique, background action_names unique within a Process."""
 from django.core.exceptions import ImproperlyConfigured
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from django_logic import Process, Transition
 from django_logic.background import BackgroundAction, BackgroundTransition
 
 
-class QueueRequiredTests(SimpleTestCase):
-    def test_background_transition_requires_queue(self):
+class QueueValidationTests(SimpleTestCase):
+    def test_empty_queue_string_rejected(self):
+        # queue is optional (DEFAULT_QUEUE applies), but an explicit empty
+        # string is a typo, not a request for the default.
         with self.assertRaises(ImproperlyConfigured) as ctx:
             BackgroundTransition(
                 action_name='x',
@@ -16,11 +18,26 @@ class QueueRequiredTests(SimpleTestCase):
                 target='b',
                 queue='',
             )
-        self.assertIn("non-empty 'queue'", str(ctx.exception))
+        self.assertIn('non-empty string', str(ctx.exception))
 
-    def test_background_action_requires_queue(self):
+    def test_background_action_rejects_empty_queue_string(self):
         with self.assertRaises(ImproperlyConfigured):
             BackgroundAction(action_name='x', sources=['a'], queue='')
+
+    def test_queue_defaults_to_default_queue_setting(self):
+        transition = BackgroundTransition(
+            action_name='x', sources=['a'], target='b'
+        )
+        self.assertIsNone(transition.queue)
+        self.assertEqual(transition.get_queue_name(), 'django_logic')
+        with override_settings(DJANGO_LOGIC={'DEFAULT_QUEUE': 'my.queue'}):
+            self.assertEqual(transition.get_queue_name(), 'my.queue')
+
+    def test_declared_queue_wins_over_default(self):
+        transition = BackgroundTransition(
+            action_name='x', sources=['a'], target='b', queue='critical'
+        )
+        self.assertEqual(transition.get_queue_name(), 'critical')
 
     def test_background_action_rejects_in_progress_state(self):
         with self.assertRaises(ImproperlyConfigured) as ctx:
@@ -56,8 +73,42 @@ class UniqueInProgressStateTests(SimpleTestCase):
                 ]
         msg = str(ctx.exception)
         self.assertIn("in_progress_state='processing'", msg)
-        self.assertIn("'a'", msg)
-        self.assertIn("'b'", msg)
+        self.assertIn('_BadProcess.a', msg)
+        self.assertIn('_BadProcess.b', msg)
+
+    def test_duplicate_in_progress_state_across_nested_tree_rejected(self):
+        # Issue #88: nested processes share the parent's state field, so the
+        # uniqueness guarantee must hold across the whole tree — previously
+        # only the class's own transitions were checked.
+        class _NestedChild(Process):
+            process_name = 'child'
+            transitions = [
+                BackgroundTransition(
+                    action_name='child_act',
+                    sources=['s'],
+                    target='t1',
+                    in_progress_state='processing',
+                    queue='q',
+                ),
+            ]
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            class _BadParent(Process):
+                process_name = 'bad_parent'
+                nested_processes = [_NestedChild]
+                transitions = [
+                    BackgroundTransition(
+                        action_name='parent_act',
+                        sources=['s'],
+                        target='t2',
+                        in_progress_state='processing',
+                        queue='q',
+                    ),
+                ]
+        msg = str(ctx.exception)
+        self.assertIn("in_progress_state='processing'", msg)
+        self.assertIn('parent_act', msg)
+        self.assertIn('child_act', msg)
 
     def test_unique_in_progress_states_accepted(self):
         class _GoodProcess(Process):

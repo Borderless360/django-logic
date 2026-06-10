@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "0.3.0"
+version = "0.4.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -36,29 +36,31 @@ requires-python = ">=3.11"
 dependencies = [
     "django>=4.0",
     "django-model-utils>=4.5.1",
+    # Celery and Redis are core dependencies, not extras. Background
+    # transitions always execute through Celery in production ('sync'
+    # execution exists only for tests/CI), and django-redis provides the
+    # cross-process state lock (RedisState / the lock cache).
+    "celery>=5.0",
+    "django-redis>=5.0.0",
 ]
 
 [project.optional-dependencies]
-celery = [
-    "celery>=5.0",
-]
-redis = [
-    "django-redis>=5.0.0",
-]
+# Kept as empty aliases so existing `pip install django-logic[celery,redis]`
+# pins keep resolving; both packages are core dependencies as of 0.4.0.
+celery = []
+redis = []
 drf = [
     "djangorestframework>=3.14.0",
 ]
 dev = [
     "djangorestframework>=3.14.0",
-    "celery>=5.0",
     "coverage>=7.0",
     "pytest>=8.0",
     "pytest-django>=4.8",
-    # Drivers for the PostgreSQL + Redis stability suite (make stability-*)
-    # and the Postgres concurrency tests. Without these, `uv sync --extra
-    # dev` runs the SQLite suite but not tests.stability.
+    # Driver for the PostgreSQL stability suite (make stability-*) and the
+    # Postgres concurrency tests. Without it, `uv sync --extra dev` runs the
+    # SQLite suite but not tests.stability.
     "psycopg[binary]>=3.1",
-    "django-redis>=5.0.0",
 ]
 
 [project.urls]

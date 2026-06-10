@@ -37,6 +37,10 @@ class ExecutionTracker:
         # The exception raised by an injected side-effect, if any.
         self.injected_exception: BaseException | None = None
         self.failed_side_effect: str | None = None
+        # What the caller ASKED to fail — so the scenario can detect an
+        # injection that never fired (issue #94: a silent no-op would turn
+        # a failure test into a happy-path run).
+        self.requested_fail_side_effect: str | None = None
 
 
 def _name(fn) -> str:
@@ -76,11 +80,36 @@ def _make_wrapper(fn, tracker, sink_attr, fail_side_effect, fail_with):
 def track(transitions, *, fail_side_effect=None, fail_with=None):
     """Instrument the given transition objects for the duration of the block.
 
-    ``transitions`` is the list of class-level ``Transition`` objects matching
-    the action under test (usually one). Yields an :class:`ExecutionTracker`.
-    Injection only targets ``side_effects`` hooks.
+    ``transitions`` is the list of class-level ``Transition`` objects to
+    instrument — the scenario passes every transition reachable from the
+    process class (issue #96: a single drive can execute more than the named
+    action via ``next_transition`` and callback-triggered transitions, and
+    those hooks must be visible to the assertions too). Yields an
+    :class:`ExecutionTracker`. Injection only targets ``side_effects`` hooks.
+
+    When ``fail_side_effect`` names a hook that exists on none of the
+    instrumented transitions, ``ValueError`` is raised immediately — a typo
+    or a renamed hook must not silently turn a failure test into a
+    happy-path run (issue #94).
     """
     tracker = ExecutionTracker()
+    tracker.requested_fail_side_effect = fail_side_effect
+
+    if fail_side_effect is not None:
+        known = {
+            _name(fn)
+            for transition in transitions
+            for fn in getattr(getattr(transition, 'side_effects', None),
+                              '_commands', None) or []
+        }
+        if fail_side_effect not in known:
+            raise ValueError(
+                f'fail_side_effect={fail_side_effect!r} does not match any '
+                f'side-effect on the tracked transitions '
+                f'(known side-effects: {sorted(known)}). Was the hook '
+                f'renamed?'
+            )
+
     saved: list[tuple] = []
     for transition in transitions:
         for slot, sink_attr in _HOOK_SLOTS:

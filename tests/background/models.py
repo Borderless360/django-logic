@@ -45,6 +45,10 @@ def bg_fse_boom(instance, **kwargs):
 
 class Widget(models.Model):
     status = models.CharField(max_length=32, default='draft')
+    # R5: a SECOND state field driven by an independent process
+    # (WidgetAuditProcess below). Two state machines on the same row must
+    # be able to have background work in flight at the same time.
+    audit_status = models.CharField(max_length=32, default='clean')
     se_log = models.TextField(default='', blank=True)
     cb_log = models.TextField(default='', blank=True)
     kwargs_seen = models.JSONField(default=list, blank=True)
@@ -130,6 +134,82 @@ class WidgetProcess(Process):
 
 
 ProcessManager.bind_model_process(Widget, WidgetProcess, state_field='status')
+
+
+def bg_audit_ok(instance, **kwargs):
+    """Harmless side-effect for the audit process (R5 fixtures)."""
+    instance.se_log = (instance.se_log or '') + 'audit_ok,'
+    instance.save(update_fields=['se_log'])
+
+
+# R5: an INDEPENDENT process bound to a different state field
+# (Widget.audit_status). The per-process partial unique constraint on
+# TransitionMessage means in-flight work here must not conflict with
+# in-flight work on WidgetProcess ('process') for the same instance.
+# Deliberately declares NO queue= so it exercises the
+# DJANGO_LOGIC['DEFAULT_QUEUE'] fallback ('django_logic').
+class WidgetAuditProcess(Process):
+    process_name = 'audit_process'
+    transitions = [
+        BackgroundTransition(
+            action_name='audit',
+            sources=['clean'],
+            target='audited',
+            in_progress_state='auditing',
+            failed_state='audit_failed',
+            side_effects=[bg_audit_ok],
+        ),
+    ]
+
+
+ProcessManager.bind_model_process(Widget, WidgetAuditProcess, state_field='audit_status')
+
+
+# --- Filtered-default-manager fixtures (issue #90) -------------------------
+# A model whose default manager hides archived rows. The background runner
+# must reload instances via _base_manager, or archiving an instance between
+# phase 1 and phase 2 makes the restore raise DoesNotExist and the message
+# is marked completed with the instance stranded in in_progress_state.
+
+
+class ActiveOnlyManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(archived=False)
+
+
+class ArchivableWidget(models.Model):
+    status = models.CharField(max_length=32, default='draft')
+    archived = models.BooleanField(default=False)
+
+    # Filtered manager first = _default_manager. Django's _base_manager
+    # stays a plain unfiltered Manager (no base_manager_name declared).
+    objects = ActiveOnlyManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        app_label = 'bg_tests'
+
+
+def bg_noop(instance, **kwargs):
+    pass
+
+
+class ArchivableProcess(Process):
+    process_name = 'process'
+    transitions = [
+        BackgroundTransition(
+            action_name='finish',
+            sources=['draft'],
+            target='done',
+            in_progress_state='finishing',
+            failed_state='finish_failed',
+            queue='django_logic.critical',
+            side_effects=[bg_noop],
+        ),
+    ]
+
+
+ProcessManager.bind_model_process(ArchivableWidget, ArchivableProcess, state_field='status')
 
 
 # --- Nested-process background transitions ---------------------------------
