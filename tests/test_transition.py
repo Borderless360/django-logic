@@ -41,7 +41,7 @@ class TransitionSideEffectsTestCase(TestCase):
         self.invoice = Invoice.objects.create(status='draft')
 
     def test_one_side_effect(self):
-        transition = Transition('test', sources=[], target='cancelled', side_effects=[disable_invoice])
+        transition = Transition('test', sources=['draft'], target='cancelled', side_effects=[disable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
         transition.change_state(state)
@@ -50,7 +50,7 @@ class TransitionSideEffectsTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_many_side_effects(self):
-        transition = Transition('test', sources=[], target='cancelled',
+        transition = Transition('test', sources=['draft'], target='cancelled',
                                 side_effects=[disable_invoice, enable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -60,7 +60,7 @@ class TransitionSideEffectsTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_failure_during_side_effect(self):
-        transition = Transition('test', sources=[], target='cancelled',
+        transition = Transition('test', sources=['draft'], target='cancelled',
                                 side_effects=[disable_invoice, fail_invoice, enable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -71,7 +71,7 @@ class TransitionSideEffectsTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_failure_during_side_effect_with_failed_state(self):
-        transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='cancelled', failed_state='failed',
                                 side_effects=[disable_invoice, fail_invoice, enable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -83,7 +83,7 @@ class TransitionSideEffectsTestCase(TestCase):
 
     def test_side_effect_with_parameters(self):
         update_invoice(self.invoice, is_available=True, customer_received=True)
-        transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='cancelled', failed_state='failed',
                                 side_effects=[update_invoice])
         self.invoice.refresh_from_db()
         self.assertTrue(self.invoice.is_available)
@@ -101,7 +101,7 @@ class TransitionCallbacksTestCase(TestCase):
         self.invoice = Invoice.objects.create(status='draft')
 
     def test_one_callback(self):
-        transition = Transition('test', sources=[], target='cancelled', callbacks=[disable_invoice])
+        transition = Transition('test', sources=['draft'], target='cancelled', callbacks=[disable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
         transition.change_state(state)
@@ -110,7 +110,7 @@ class TransitionCallbacksTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_many_callbacks(self):
-        transition = Transition('test', sources=[], target='cancelled',
+        transition = Transition('test', sources=['draft'], target='cancelled',
                                 callbacks=[disable_invoice, enable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -120,7 +120,7 @@ class TransitionCallbacksTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_failure_during_callbacks(self):
-        transition = Transition('test', sources=[], target='cancelled',
+        transition = Transition('test', sources=['draft'], target='cancelled',
                                 callbacks=[disable_invoice, fail_invoice, enable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -130,7 +130,7 @@ class TransitionCallbacksTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_failure_during_callbacks_with_failed_state(self):
-        transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='cancelled', failed_state='failed',
                                 side_effects=[disable_invoice, fail_invoice, enable_invoice])
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -142,7 +142,7 @@ class TransitionCallbacksTestCase(TestCase):
 
     def test_callbacks_with_parameters(self):
         update_invoice(self.invoice, is_available=True, customer_received=True)
-        transition = Transition('test', sources=[], target='cancelled', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='cancelled', failed_state='failed',
                                 callbacks=[update_invoice])
         self.invoice.refresh_from_db()
         self.assertTrue(self.invoice.is_available)
@@ -160,7 +160,7 @@ class TransitionFailureCallbacksTestCase(TestCase):
         self.invoice = Invoice.objects.create(status='draft')
 
     def test_one_callback(self):
-        transition = Transition('test', sources=[], target='success', side_effects=[fail_invoice],
+        transition = Transition('test', sources=['draft'], target='success', side_effects=[fail_invoice],
                                 failure_callbacks=[disable_invoice], failed_state='failed')
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -171,7 +171,7 @@ class TransitionFailureCallbacksTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_many_callback(self):
-        transition = Transition('test', sources=[], target='success', side_effects=[fail_invoice],
+        transition = Transition('test', sources=['draft'], target='success', side_effects=[fail_invoice],
                                 failure_callbacks=[disable_invoice, receive_invoice], failed_state='failed')
         self.assertTrue(self.invoice.is_available)
         self.assertFalse(self.invoice.customer_received)
@@ -185,7 +185,7 @@ class TransitionFailureCallbacksTestCase(TestCase):
 
     def test_callbacks_with_parameters(self):
         update_invoice(self.invoice, is_available=True, customer_received=True)
-        transition = Transition('test', sources=[], target='success', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='success', failed_state='failed',
                                 side_effects=[fail_invoice], failure_callbacks=[update_invoice])
         self.invoice.refresh_from_db()
         self.assertTrue(self.invoice.is_available)
@@ -201,7 +201,7 @@ class TransitionFailureCallbacksTestCase(TestCase):
 
     def test_failure_callback_exception_passed(self):
         failure_callback_mock = Mock(__name__='test_failure_callback')
-        transition = Transition('test', sources=[], target='success', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='success', failed_state='failed',
                                 side_effects=[fail_invoice], failure_callbacks=[failure_callback_mock])
         self.invoice.refresh_from_db()
         state = State(self.invoice, 'status')
@@ -221,7 +221,7 @@ class TransitionFailureSideEffectsTestCase(TestCase):
         self.invoice = Invoice.objects.create(status='draft')
 
     def test_one_failure_side_effect(self):
-        transition = Transition('test', sources=[], target='success', side_effects=[fail_invoice],
+        transition = Transition('test', sources=['draft'], target='success', side_effects=[fail_invoice],
                                 failure_side_effects=[disable_invoice], failed_state='failed')
         self.assertTrue(self.invoice.is_available)
         state = State(self.invoice, 'status')
@@ -232,7 +232,7 @@ class TransitionFailureSideEffectsTestCase(TestCase):
         self.assertFalse(state.is_locked())
 
     def test_many_failure_side_effects(self):
-        transition = Transition('test', sources=[], target='success', side_effects=[fail_invoice],
+        transition = Transition('test', sources=['draft'], target='success', side_effects=[fail_invoice],
                                 failure_side_effects=[disable_invoice, receive_invoice], failed_state='failed')
         self.assertTrue(self.invoice.is_available)
         self.assertFalse(self.invoice.customer_received)
@@ -246,7 +246,7 @@ class TransitionFailureSideEffectsTestCase(TestCase):
 
     def test_failure_side_effect_with_parameters(self):
         update_invoice(self.invoice, is_available=True, customer_received=True)
-        transition = Transition('test', sources=[], target='success', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='success', failed_state='failed',
                                 side_effects=[fail_invoice], failure_side_effects=[update_invoice])
         self.invoice.refresh_from_db()
         self.assertTrue(self.invoice.is_available)
@@ -262,7 +262,7 @@ class TransitionFailureSideEffectsTestCase(TestCase):
 
     def test_failure_side_effect_exception_passed(self):
         failure_side_effect_mock = Mock(__name__='test_failure_side_effect')
-        transition = Transition('test', sources=[], target='success', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='success', failed_state='failed',
                                 side_effects=[fail_invoice], failure_side_effects=[failure_side_effect_mock])
         state = State(self.invoice, 'status')
         with self.assertRaises(Exception):
@@ -284,7 +284,7 @@ class TransitionFailureSideEffectsTestCase(TestCase):
         def failure_callback(invoice, *args, **kwargs):
             order.append('failure_callback')
 
-        transition = Transition('test', sources=[], target='success', failed_state='failed',
+        transition = Transition('test', sources=['draft'], target='success', failed_state='failed',
                                 side_effects=[fail_invoice],
                                 failure_side_effects=[failure_side_effect],
                                 failure_callbacks=[failure_callback])

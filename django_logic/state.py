@@ -18,6 +18,15 @@ class State(object):
         """
         Fetches state directly from db instead of model instance.
         """
+        return self.get_persisted_state()
+
+    def get_persisted_state(self):
+        """Read the state column straight from the database row.
+
+        Unlike ``get_db_state``, subclasses must NOT override this with a
+        cached read — it is the authoritative source used by the
+        under-the-lock revalidation and the phase-2 state guard.
+        """
         model = type(self.instance)
         return (
             model._default_manager
@@ -85,8 +94,14 @@ class RedisState(State):
     regardless of DB transaction isolation.
 
     lock()      -> atomically creates the key with the current state (nx=True)
-    set_state() -> overwrites the key value with the new state + persists to DB
-                   (resets TTL so the lock stays alive while making progress)
+    set_state() -> updates the key value with the new state *only if the key
+                   already exists* (xx=True, resetting the TTL so the lock
+                   stays alive while making progress) + persists to DB.
+                   Writing state never CREATES a lock — only lock() does.
+                   This is what lets background transitions (which write
+                   in_progress/target/failed states outside a lock()/unlock()
+                   pair) use RedisState without stranding the instance
+                   locked until the TTL expires.
     get_state() -> reads from the key (fallback to instance attr when unlocked)
     unlock()    -> deletes the key; DB is the source of truth again
 
@@ -117,7 +132,11 @@ class RedisState(State):
         return cache.get(self._get_hash()) is not None
 
     def set_state(self, state):
-        cache.set(self._get_hash(), self._store_value(state), self.lock_timeout)
+        # xx=True: refresh the key's value/TTL only when it exists (i.e. the
+        # state is locked). A state write outside a lock()/unlock() pair —
+        # background phase 1/2, Action.failed_state — must not implicitly
+        # create a lock nobody will release.
+        cache.set(self._get_hash(), self._store_value(state), self.lock_timeout, xx=True)
         super().set_state(state)
 
     def get_state(self):

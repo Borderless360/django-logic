@@ -61,7 +61,8 @@ def dispatch_transition(tm) -> None:
         run_background_transition(tm.pk)
         return
 
-    # Celery mode — lazy import keeps Celery strictly optional.
+    # Celery mode — deferred import avoids loading the task module (and
+    # the app registry work it triggers) on the sync fast path.
     from django_logic.background.observability import task_label
     from django_logic.background.tasks import run_background_transition_task
 

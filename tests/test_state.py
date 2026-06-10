@@ -16,8 +16,10 @@ class FakeRedisCache:
     def get(self, key):
         return self._store.get(key)
 
-    def set(self, key, value, timeout=None, nx=False):
+    def set(self, key, value, timeout=None, nx=False, xx=False):
         if nx and key in self._store:
+            return False
+        if xx and key not in self._store:
             return False
         self._store[key] = value
         return True

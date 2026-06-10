@@ -195,40 +195,30 @@ class SyncExecutionContextManagerTests(TestCase):
             self.assertEqual(widget.status, 'fulfilled')
 
 
-class CeleryModeWithoutCeleryTests(TestCase):
-    """BACKGROUND_EXECUTION='celery' without celery installed raises at validate time."""
+class ValidateOnReadyTests(TestCase):
+    """Boot-time validation of the celery-mode deployment contract."""
 
-    def test_validate_on_ready_raises(self):
-        from unittest.mock import patch
-        from django_logic.background.settings import validate_on_ready
+    def test_execution_mode_defaults_to_celery(self):
+        # Celery is a core dependency; background transitions are Celery
+        # tasks unless the project explicitly opts into sync (tests/CI).
+        from django_logic.background import settings as bg_settings
 
-        celery_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
-        with override_settings(DJANGO_LOGIC=celery_cfg):
-            with patch(
-                'django_logic.background.settings._celery_available',
-                return_value=False,
-            ):
-                with self.assertRaises(ImproperlyConfigured) as ctx:
-                    validate_on_ready()
-                self.assertIn("'celery' package is not installed", str(ctx.exception))
+        cfg = {k: v for k, v in _SYNC_SETTINGS.items()
+               if k != 'BACKGROUND_EXECUTION'}
+        with override_settings(DJANGO_LOGIC=cfg):
+            self.assertEqual(
+                bg_settings.background_execution(),
+                bg_settings.EXECUTION_CELERY,
+            )
 
-    def test_validate_on_ready_requires_starter_queue(self):
-        bad_cfg = {k: v for k, v in _SYNC_SETTINGS.items() if k != 'STARTER_QUEUE'}
-        bad_cfg['BACKGROUND_EXECUTION'] = 'celery'
-        with override_settings(DJANGO_LOGIC=bad_cfg):
-            # Simulate "celery installed" so the other branch is taken.
-            from unittest.mock import patch
-            from django_logic.background.settings import validate_on_ready
-            with patch(
-                'django_logic.background.settings._celery_available',
-                return_value=True,
-            ):
-                with self.assertRaises(ImproperlyConfigured) as ctx:
-                    validate_on_ready()
-                self.assertIn('STARTER_QUEUE', str(ctx.exception))
+    def test_starter_queue_has_a_default(self):
+        from django_logic.background import settings as bg_settings
+
+        cfg = {k: v for k, v in _SYNC_SETTINGS.items() if k != 'STARTER_QUEUE'}
+        with override_settings(DJANGO_LOGIC=cfg):
+            self.assertEqual(bg_settings.starter_queue(), 'django_logic.starter')
 
     def test_validate_on_ready_rejects_sqlite_in_celery_mode(self):
-        from unittest.mock import patch
         from django_logic.background.settings import validate_on_ready
 
         celery_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
@@ -239,11 +229,55 @@ class CeleryModeWithoutCeleryTests(TestCase):
             }
         }
         with override_settings(DJANGO_LOGIC=celery_cfg, DATABASES=sqlite_db):
-            with patch(
-                'django_logic.background.settings._celery_available',
-                return_value=True,
-            ):
-                with self.assertRaises(ImproperlyConfigured) as ctx:
-                    validate_on_ready()
-                self.assertIn('SQLite', str(ctx.exception))
-                self.assertIn('PostgreSQL', str(ctx.exception))
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                validate_on_ready()
+            self.assertIn('SQLite', str(ctx.exception))
+            self.assertIn('PostgreSQL', str(ctx.exception))
+
+    def test_validate_on_ready_rejects_locmem_cache_in_celery_mode(self):
+        # D5: with a per-process cache the state lock does not lock anything
+        # across web processes and workers. Fail fast in production.
+        from django_logic.background.settings import validate_on_ready
+
+        celery_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
+        pg_db = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': 'x',
+            }
+        }
+        locmem = {
+            'default': {
+                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            }
+        }
+        with override_settings(
+            DJANGO_LOGIC=celery_cfg, DATABASES=pg_db, CACHES=locmem, DEBUG=False
+        ):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                validate_on_ready()
+            self.assertIn('per-process', str(ctx.exception))
+
+    def test_locmem_cache_in_celery_mode_only_warns_with_debug(self):
+        from django_logic.background.settings import validate_on_ready
+
+        celery_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
+        pg_db = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': 'x',
+            }
+        }
+        locmem = {
+            'default': {
+                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            }
+        }
+        with override_settings(
+            DJANGO_LOGIC=celery_cfg, DATABASES=pg_db, CACHES=locmem, DEBUG=True
+        ):
+            with self.assertLogs('django-logic', level='WARNING') as logs:
+                validate_on_ready()  # must not raise
+            self.assertTrue(
+                any('per-process' in line for line in logs.output)
+            )

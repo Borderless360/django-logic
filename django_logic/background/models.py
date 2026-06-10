@@ -5,9 +5,12 @@ phase 1, atomically with the ``in_progress_state`` write on the target
 instance. Phase 2 reads the row under ``select_for_update(nowait=True)``
 and marks it completed at the end of a successful execution.
 
-The partial unique constraint ``(app_label, model_name, instance_id)``
-where ``is_completed=False`` is the concurrency guard — only one
-uncompleted message can exist per instance at a time.
+The partial unique constraint ``(app_label, model_name, instance_id,
+process_name)`` where ``is_completed=False`` is the concurrency guard —
+only one uncompleted message can exist per instance *per process* at a
+time. Two processes bound to different state fields of the same model
+are independent state machines and may both have background work in
+flight.
 """
 from __future__ import annotations
 
@@ -48,6 +51,11 @@ class TransitionMessage(TimeStampedModel):
     # to the model's real pk type.
     instance_id = models.CharField(max_length=255)
     process_name = models.CharField(max_length=100)
+    # The model field the process is bound to. Lets phase 2 reconstruct
+    # the process from the recorded ``process_class`` without guessing
+    # the field name when the model property has been renamed/rebound
+    # between phases. Blank on rows created before 0.4.0.
+    field_name = models.CharField(max_length=100, blank=True, default='')
     transition_name = models.CharField(max_length=100)
     queue_name = models.CharField(max_length=100)
 
@@ -76,10 +84,14 @@ class TransitionMessage(TimeStampedModel):
             ),
         ]
         constraints = [
+            # One in-flight background transition per instance PER PROCESS.
+            # Without process_name in the constraint, two independent state
+            # machines on the same model (e.g. ``status`` and
+            # ``payment_status``) would falsely conflict.
             models.UniqueConstraint(
-                fields=['app_label', 'model_name', 'instance_id'],
+                fields=['app_label', 'model_name', 'instance_id', 'process_name'],
                 condition=models.Q(is_completed=False),
-                name='dl_bg_only_one_uncompleted_per_instance',
+                name='dl_bg_one_uncompleted_per_process',
             ),
         ]
 
@@ -122,6 +134,20 @@ class TransitionMessage(TimeStampedModel):
             self.duration_ms = ms
             update_fields.append('duration_ms')
         self.save(update_fields=update_fields)
+
+    def mark_as_superseded(self, note: str) -> None:
+        """Terminal outcome for a row whose instance was moved by something
+        else (manual ops fix, external write) while the row was pending.
+
+        The phase-2 state guard calls this instead of running side-effects:
+        the row completes (so retries stop), the external state wins, and
+        the reason is recorded on ``last_error_message`` for the audit
+        trail. ``errors_count`` is NOT incremented — nothing failed.
+        """
+        self.last_error_message = note[:10_000]
+        self.last_error_dt = timezone.now()
+        self.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
+        self.mark_as_completed(measure_duration=False)
 
     def record_error(self, exception: BaseException) -> None:
         self.last_error_message = str(exception)[:10_000]
