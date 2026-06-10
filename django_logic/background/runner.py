@@ -683,7 +683,14 @@ def _restore(tm: TransitionMessage):
         ) from exc
 
     try:
-        instance = model.objects.get(pk=tm.instance_id)
+        # _base_manager, not objects: a filtered default manager (e.g. one
+        # that hides archived/soft-deleted rows) would raise DoesNotExist
+        # for an instance that still exists, and the restore-error path
+        # would mark the message completed — stranding the instance in
+        # in_progress_state with no failed_state and no retries. Framework
+        # code reloading by pk must be immune to default-manager filtering
+        # (Django's own convention for related-object loading).
+        instance = model._base_manager.get(pk=tm.instance_id)
     except model.DoesNotExist as exc:
         raise _RestoreError(
             f'{tm.app_label}.{tm.model_name}#{tm.instance_id} not found'

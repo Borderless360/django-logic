@@ -777,6 +777,19 @@ Because the in-flight marker is a database row rather than a held lock, nothing 
 
 Practical consequence: you **cannot** chain a background transition from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 
+> ⚠️ **Swallow-dedup loses mid-execution updates.** Catching `AlreadyInProgress` as "already queued — the running job will pick up my changes" is only safe while the existing attempt has **not started**. If phase 2 is already executing, it has already read its inputs: your update lands after the read, the in-flight run commits a result computed from pre-update data, and nothing ever re-runs. For recompute-style transitions, persist a dirty flag (or version) *before* dispatching, clear it inside the side-effect, and re-dispatch from a success callback if it is set again:
+>
+> ```python
+> def recompute(instance, **kwargs):
+>     Order.objects.filter(pk=instance.pk).update(recompute_requested=False)
+>     ...  # compute from current rows
+>
+> def redispatch_if_dirty(instance, **kwargs):   # success callback (terminal hook)
+>     instance.refresh_from_db()
+>     if instance.recompute_requested:
+>         instance.process.recompute_rates()
+> ```
+
 ### The phase-2 state guard
 
 Phase 2 restores the transition by name and deliberately bypasses the source-state gate — so what happens if the instance was moved by something *else* while the row was pending (a manual ops fix in the admin, a data migration, a support script)? With retries spanning `RETRY_MINUTES × MAX_ERRORS`, that collision is a realistic production event.
@@ -836,13 +849,12 @@ celery -A myproject worker -Q django_logic.critical,django_logic.slow,django_log
 celery -A myproject beat        # (or `worker -B` in dev; use a single beat in prod)
 ```
 
-**3. `CELERY_TASK_REJECT_ON_WORKER_LOST = True`.** django-logic's task is
-`acks_late=True` so a transition re-delivers if its worker dies mid-execution
-(SIGKILL / OOM / deploy) — **but only if you also set
-`task_reject_on_worker_lost=True`**. Without it, Celery acks-and-drops the lost
-task instead of re-queuing it, and recovery falls solely to the periodic
-starter (a `RETRY_MINUTES`-delayed catch-up rather than prompt re-delivery).
-django-logic logs a one-time warning on first dispatch if this isn't set.
+**3. Crash re-delivery is built in.** Every django-logic task sets
+`acks_late=True` **and** `reject_on_worker_lost=True` at the task level, so a
+transition re-delivers if its worker dies mid-execution (SIGKILL / OOM /
+deploy / `--max-memory-per-child` kills) regardless of your global Celery
+configuration — nothing to wire up. Setting the global pair is still a good
+idea for your *own* tasks:
 
 ```python
 CELERY_TASK_ACKS_LATE = True

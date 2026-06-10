@@ -26,10 +26,14 @@ class State(object):
         Unlike ``get_db_state``, subclasses must NOT override this with a
         cached read — it is the authoritative source used by the
         under-the-lock revalidation and the phase-2 state guard.
+
+        Uses ``_base_manager`` so a filtered default manager (archived /
+        soft-deleted rows hidden) cannot make a framework-level reload of
+        an existing row raise ``DoesNotExist`` mid-transition.
         """
         model = type(self.instance)
         return (
-            model._default_manager
+            model._base_manager
             .values_list(self.field_name, flat=True)
             .get(pk=self.instance.pk)
         )

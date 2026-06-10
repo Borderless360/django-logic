@@ -42,11 +42,18 @@ from django_logic.logger import logger
 
 @shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.run_background_transition',
     bind=False,
 )
 def run_background_transition_task(transition_message_id: int) -> None:
     """Phase-2 entrypoint for one transition.
+
+    ``acks_late=True`` + ``reject_on_worker_lost=True`` are set per-task so
+    a worker killed mid-execution (SIGKILL / OOM / deploy) re-delivers the
+    message regardless of the project's global Celery configuration — the
+    pair is what the crash-redelivery guarantee depends on, so it is not
+    left to consumer settings (issue #91).
 
     Exceptions are re-raised so Celery's own retry / alerting machinery
     can react. The periodic starter is the primary retry path though;
@@ -57,6 +64,7 @@ def run_background_transition_task(transition_message_id: int) -> None:
 
 @shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.retry_stale_transitions',
     bind=False,
 )
@@ -142,6 +150,7 @@ def _retry_pending_inline() -> int:
 
 @shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.cleanup_completed_transitions',
     bind=False,
 )
@@ -161,6 +170,7 @@ def cleanup_completed_transitions() -> int:
 
 @shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.detect_stuck_transitions',
     bind=False,
 )
@@ -202,6 +212,7 @@ def detect_stuck_transitions() -> int:
 
 @shared_task(
     acks_late=True,
+    reject_on_worker_lost=True,
     name='django_logic.watchdog_stale_attempts',
     bind=False,
 )

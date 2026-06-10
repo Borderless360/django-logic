@@ -89,17 +89,17 @@ def _warn_once_about_celery_config(task) -> None:
 
     Checked here rather than at Django app-ready because app-ready runs before
     the project's ``celery.py`` configures the app; by the first dispatch the
-    app is configured, making these checks reliable.
+    app is configured, making the check reliable.
 
-    1. **No real broker.** With ``broker_url`` unset Celery falls back to an
-       in-memory transport no worker drains: ``apply_async`` succeeds but the
-       task never runs, leaving the instance stuck in ``in_progress_state``.
-    2. **acks_late without reject_on_worker_lost.** django-logic's task is
-       ``acks_late=True`` so a crash re-delivers it — but only if the project
-       also sets ``task_reject_on_worker_lost=True``. Without it, a task on a
-       worker killed mid-execution (SIGKILL / OOM / deploy) may be
-       acked-and-dropped instead of re-delivered; recovery then falls solely
-       to the periodic starter (slower). See README → Production deployment.
+    **No real broker.** With ``broker_url`` unset Celery falls back to an
+    in-memory transport no worker drains: ``apply_async`` succeeds but the
+    task never runs, leaving the instance stuck in ``in_progress_state``.
+
+    (The old acks_late/reject_on_worker_lost warning is gone: it read the
+    *global* ``conf.task_acks_late`` and so never fired for the per-task
+    ``acks_late=True`` that actually creates the hazard — issue #91. The
+    hazard itself is now eliminated at the source: every django-logic task
+    sets ``reject_on_worker_lost=True`` alongside ``acks_late=True``.)
     """
     global _celery_config_warned
     if _celery_config_warned:
@@ -120,20 +120,6 @@ def _warn_once_about_celery_config(task) -> None:
             "transitions will never run. Configure a durable broker "
             "(Redis/RabbitMQ) or set BACKGROUND_EXECUTION='sync'.",
             broker,
-        )
-    try:
-        acks_late = bool(conf.task_acks_late)
-        reject = bool(conf.task_reject_on_worker_lost)
-    except Exception:
-        return
-    if acks_late and not reject:
-        logger.warning(
-            'django-logic background tasks are acks_late=True, but '
-            'CELERY_TASK_REJECT_ON_WORKER_LOST is not set. A worker killed '
-            'mid-execution (SIGKILL/OOM/deploy) may then drop the task instead '
-            'of re-delivering it; the instance stays in in_progress_state until '
-            'the periodic starter recovers it. Set '
-            'CELERY_TASK_REJECT_ON_WORKER_LOST=True for prompt crash recovery.'
         )
 
 

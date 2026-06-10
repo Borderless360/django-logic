@@ -19,15 +19,33 @@ import uuid
 
 
 def _jsonable(value):
+    """Convert a model-field value to a JSON-able equivalent that Django
+    coerces back to the right type on save.
+
+    Dicts/lists (JSONField values) pass through recursively — stringifying
+    them produced a Python repr that round-tripped as a corrupted string
+    column (issue #95). Anything unsupported fails loudly rather than being
+    silently captured as ``str(value)``.
+    """
     if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
         return value.isoformat()
     if isinstance(value, decimal.Decimal):
         return str(value)
     if isinstance(value, uuid.UUID):
         return str(value)
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
-    return str(value)
+    raise TypeError(
+        f'snapshot: unsupported field value type '
+        f'{type(value).__name__!r} ({value!r}). Supported: str/int/float/'
+        f'bool/None, datetime/date/time, Decimal, UUID, and JSON-able '
+        f'dict/list trees. Exclude the field or convert it yourself before '
+        f'snapshotting.'
+    )
 
 
 def snapshot(instance, *, state_field: str = 'status', process_name: str = 'process') -> dict:
@@ -112,6 +130,12 @@ def from_snapshot(data_or_path, *, model=None):
     if data.get('pk') is not None:
         instance.pk = data['pk']
     instance.save(force_insert=True)
+    # The setattrs above wrote serialized forms (ISO strings, str Decimals);
+    # the save coerced them in the DATABASE, but the in-memory instance still
+    # carries the strings — a condition like ``if instance.band:`` would see
+    # ``bool('0.000') == True`` where production saw ``bool(Decimal('0.000'))
+    # == False`` (issue #95). Re-read so attributes are real field types.
+    instance.refresh_from_db()
 
     tm_data = data.get('transition_message')
     if tm_data:

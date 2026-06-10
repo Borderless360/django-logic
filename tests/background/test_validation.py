@@ -73,8 +73,42 @@ class UniqueInProgressStateTests(SimpleTestCase):
                 ]
         msg = str(ctx.exception)
         self.assertIn("in_progress_state='processing'", msg)
-        self.assertIn("'a'", msg)
-        self.assertIn("'b'", msg)
+        self.assertIn('_BadProcess.a', msg)
+        self.assertIn('_BadProcess.b', msg)
+
+    def test_duplicate_in_progress_state_across_nested_tree_rejected(self):
+        # Issue #88: nested processes share the parent's state field, so the
+        # uniqueness guarantee must hold across the whole tree — previously
+        # only the class's own transitions were checked.
+        class _NestedChild(Process):
+            process_name = 'child'
+            transitions = [
+                BackgroundTransition(
+                    action_name='child_act',
+                    sources=['s'],
+                    target='t1',
+                    in_progress_state='processing',
+                    queue='q',
+                ),
+            ]
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            class _BadParent(Process):
+                process_name = 'bad_parent'
+                nested_processes = [_NestedChild]
+                transitions = [
+                    BackgroundTransition(
+                        action_name='parent_act',
+                        sources=['s'],
+                        target='t2',
+                        in_progress_state='processing',
+                        queue='q',
+                    ),
+                ]
+        msg = str(ctx.exception)
+        self.assertIn("in_progress_state='processing'", msg)
+        self.assertIn('parent_act', msg)
+        self.assertIn('child_act', msg)
 
     def test_unique_in_progress_states_accepted(self):
         class _GoodProcess(Process):

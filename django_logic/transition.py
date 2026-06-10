@@ -150,21 +150,22 @@ class Transition(BaseTransition):
         # get_transition_by_action_name ran before the lock was acquired;
         # by now a concurrent transition may have won the race and moved
         # the state (validate-then-lock TOCTOU). One cheap query closes it.
-        # Any failure here (including an unexpected one, e.g. the row was
-        # deleted concurrently) must release the lock or it leaks until TTL.
+        # Any failure between acquisition and the side-effect machinery —
+        # including the in_progress_state write itself (connection drop,
+        # statement timeout, broken outer atomic) — must release the lock
+        # or the instance's FSM freezes until the lock TTL expires.
         try:
             self._ensure_db_state_in_sources(state)
             self._ensure_no_background_in_flight(state)
+            if self.in_progress_state:
+                state.set_state(self.in_progress_state)
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                    f'{self.in_progress_state}'
+                )
         except Exception:
             state.unlock()
             raise
-
-        if self.in_progress_state:
-            state.set_state(self.in_progress_state)
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                f'{self.in_progress_state}'
-            )
 
         self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
@@ -177,8 +178,21 @@ class Transition(BaseTransition):
         safely trigger another transition on the same instance. If the
         worker crashes during callbacks they are lost — callbacks are
         best-effort.
+
+        A failed target write must still release the lock (otherwise the
+        instance's FSM freezes until the lock TTL): the transition fails
+        loudly either way, but a leaked lock turns one failed request into
+        hours of rejected transitions.
         """
-        state.set_state(self.target)
+        try:
+            state.set_state(self.target)
+        except Exception:
+            transition_logger.error(
+                f'{kwargs.get("tr_id")} target-state write failed for '
+                f'{state.instance_key}; releasing the lock before re-raising.'
+            )
+            state.unlock()
+            raise
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
             f'{self.target}'
@@ -193,19 +207,24 @@ class Transition(BaseTransition):
         self.next_transition.execute(state, **kwargs)
 
     def fail_transition(self, state: State, exception: Exception, **kwargs):
-        if self.failed_state:
-            state.set_state(self.failed_state)
+        # try/finally: a failed failed_state write (or a malformed
+        # failure_side_effects bundle) must still release the lock; the
+        # original side-effect exception keeps propagating out of
+        # SideEffects.execute either way.
+        try:
+            if self.failed_state:
+                state.set_state(self.failed_state)
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                    f'{self.failed_state}'
+                )
+
+            self.failure_side_effects.execute(state, exception=exception, **kwargs)
+        finally:
+            state.unlock()
             transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                f'{self.failed_state}'
+                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
             )
-
-        self.failure_side_effects.execute(state, exception=exception, **kwargs)
-
-        state.unlock()
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
-        )
 
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 

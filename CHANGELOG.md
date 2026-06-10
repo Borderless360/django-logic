@@ -79,6 +79,46 @@ full findings and resolution mapping.
   otherwise the write is skipped with an ERROR log (the exception still
   propagates and failure hooks still run).
 
+### Fixed (GitHub issues #85–#96)
+
+- **#85 — the state lock is released on every failure path after
+  acquisition**: a failed `in_progress_state` write, a failed target write
+  in `complete_transition`, and a failed `failed_state` write in
+  `fail_transition` all unlock before re-raising. Previously any of these
+  froze the instance's FSM for the full `LOCK_TIMEOUT`.
+- **#87 — positional arguments to transition methods raise `TypeError`.**
+  `instance.process.verify(user)` used to silently drop the positional
+  user and run with **no permission checks**.
+- **#88 — `in_progress_state` uniqueness is validated across a Process AND
+  its nested processes** (matching the documented invariant), not just the
+  class's own transitions.
+- **#90 — the background runner reloads instances via `_base_manager`**
+  (and `State.get_persisted_state` does the same), so a filtered default
+  manager (archived/soft-deleted rows hidden) can no longer strand an
+  in-flight transition as "unrestorable".
+- **#91 — crash re-delivery no longer depends on consumer settings**: every
+  django-logic task sets `reject_on_worker_lost=True` alongside
+  `acks_late=True` at the task level. The old dispatch-time warning (which
+  read the *global* `task_acks_late` and could never fire for the per-task
+  setting) is removed.
+- **#92 — documented loudly** (README + `AlreadyInProgress` docstring) that
+  swallowing `AlreadyInProgress` loses updates that arrive while phase 2 is
+  mid-flight, with the dirty-flag/re-dispatch pattern consumers need.
+- **#94 — a requested `fail_side_effect` that never fires now fails the
+  test loudly**: unknown hook names are rejected eagerly by `track()`, and
+  a hook that exists but never executes fails the drive — a silent no-op
+  used to turn failure tests into happy-path runs.
+- **#95 — snapshot fidelity**: `snapshot()` captures JSONField dict/list
+  values as real JSON trees (previously a corrupting Python-repr string)
+  and fails loudly on unsupported types; `from_snapshot()` refreshes from
+  the DB so the returned instance carries real field types, not strings.
+- **#96 — scenario tracking instruments the whole process tree**, so hooks
+  executed via `next_transition` follow-ups and callback-triggered
+  transitions are visible to `assert_side_effects_ran` /
+  `assert_side_effects_not_ran`.
+- (#86 validate-then-lock TOCTOU, #89 Action `failed_state` guard, and #93
+  sync/background interleaving were fixed by the D1/D3/D2 work above.)
+
 ### Added
 
 - **`queue=` is optional.** Transitions without it route to

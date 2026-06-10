@@ -71,6 +71,18 @@ class Process:
 
     def __getattr__(self, item):
         def transition_method(*args, **kwargs):
+            if args:
+                # Positional arguments used to be silently discarded — so
+                # ``instance.process.verify(user)`` ran with user=None,
+                # which BYPASSES all permission checks (and loses audit
+                # attribution) without any error. Fail loudly instead.
+                raise TypeError(
+                    f"{item}() accepts keyword arguments only (got "
+                    f"{len(args)} positional). Pass user and other values "
+                    f"by keyword, e.g. {item}(user=request.user) — a "
+                    f"positional user would be dropped and permission "
+                    f"checks skipped."
+                )
             # Strip action_name from kwargs in case it was forwarded from a
             # parent invocation (Celery restore, nested call); otherwise we'd
             # get "multiple values for argument 'action_name'" below.
@@ -192,27 +204,36 @@ class Process:
 
 
 def _validate_unique_in_progress_states(process_cls):
-    """Reject duplicate in_progress_state values within a single Process.
+    """Reject duplicate in_progress_state values across a Process AND its
+    nested processes.
 
     Unique ``in_progress_state`` is what lets the phase-2 background
     transition lookup work unambiguously — the in-progress state alone
     identifies the transition that's mid-flight, without any source-state
-    search.
+    search. Nested processes share the parent's state field, so the
+    uniqueness guarantee must hold across the whole tree (mirroring
+    ``_validate_unique_background_action_names``), not just the class's
+    own ``transitions``.
     """
     seen: dict[str, str] = {}
-    for transition in process_cls.transitions or []:
-        in_progress = getattr(transition, 'in_progress_state', None)
-        if not in_progress:
-            continue
-        if in_progress in seen:
-            raise ImproperlyConfigured(
-                f"Process {process_cls.__module__}.{process_cls.__name__} "
-                f"has two transitions sharing in_progress_state="
-                f"'{in_progress}': '{seen[in_progress]}' and "
-                f"'{transition.action_name}'. Every in_progress_state must "
-                f"be unique within a Process."
+    for proc_cls in _iter_process_tree(process_cls):
+        for transition in proc_cls.transitions or []:
+            in_progress = getattr(transition, 'in_progress_state', None)
+            if not in_progress:
+                continue
+            where = (
+                f'{proc_cls.__module__}.{proc_cls.__name__}.'
+                f'{transition.action_name}'
             )
-        seen[in_progress] = transition.action_name
+            if in_progress in seen:
+                raise ImproperlyConfigured(
+                    f"Process {process_cls.__module__}.{process_cls.__name__} "
+                    f"(or its nested processes) has two transitions sharing "
+                    f"in_progress_state='{in_progress}': {seen[in_progress]} "
+                    f"and {where}. Every in_progress_state must be unique "
+                    f"across a Process and its nested processes."
+                )
+            seen[in_progress] = where
 
 
 def _iter_process_tree(process_cls, _seen=None):

@@ -165,6 +165,53 @@ class WidgetAuditProcess(Process):
 ProcessManager.bind_model_process(Widget, WidgetAuditProcess, state_field='audit_status')
 
 
+# --- Filtered-default-manager fixtures (issue #90) -------------------------
+# A model whose default manager hides archived rows. The background runner
+# must reload instances via _base_manager, or archiving an instance between
+# phase 1 and phase 2 makes the restore raise DoesNotExist and the message
+# is marked completed with the instance stranded in in_progress_state.
+
+
+class ActiveOnlyManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(archived=False)
+
+
+class ArchivableWidget(models.Model):
+    status = models.CharField(max_length=32, default='draft')
+    archived = models.BooleanField(default=False)
+
+    # Filtered manager first = _default_manager. Django's _base_manager
+    # stays a plain unfiltered Manager (no base_manager_name declared).
+    objects = ActiveOnlyManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        app_label = 'bg_tests'
+
+
+def bg_noop(instance, **kwargs):
+    pass
+
+
+class ArchivableProcess(Process):
+    process_name = 'process'
+    transitions = [
+        BackgroundTransition(
+            action_name='finish',
+            sources=['draft'],
+            target='done',
+            in_progress_state='finishing',
+            failed_state='finish_failed',
+            queue='django_logic.critical',
+            side_effects=[bg_noop],
+        ),
+    ]
+
+
+ProcessManager.bind_model_process(ArchivableWidget, ArchivableProcess, state_field='status')
+
+
 # --- Nested-process background transitions ---------------------------------
 # Regression fixtures for the phase-2 restore of a BackgroundTransition that
 # lives on a *nested* process. Phase 1 reaches it through the parent's
