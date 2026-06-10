@@ -70,6 +70,15 @@ class Process:
             )
 
     def __getattr__(self, item):
+        # Underscore/dunder names are never action names — refusing them
+        # keeps introspection sane (copy/pickle/mock/IPython probe dunders
+        # via getattr and must see a normal AttributeError, and
+        # hasattr(process, '_x') must not be True for everything). Any
+        # other missing attribute is assumed to be an action name and
+        # resolved lazily at call time.
+        if item.startswith('_'):
+            raise AttributeError(item)
+
         def transition_method(*args, **kwargs):
             if args:
                 # Positional arguments used to be silently discarded — so
@@ -83,9 +92,10 @@ class Process:
                     f"positional user would be dropped and permission "
                     f"checks skipped."
                 )
-            # Strip action_name from kwargs in case it was forwarded from a
-            # parent invocation (Celery restore, nested call); otherwise we'd
-            # get "multiple values for argument 'action_name'" below.
+            # Defensive: drop a caller-supplied 'action_name' key, which
+            # would otherwise collide with _get_transition_method's first
+            # parameter ("multiple values for argument 'action_name'").
+            # No engine path forwards it; only hand-built kwargs dicts do.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 

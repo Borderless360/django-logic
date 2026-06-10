@@ -7,6 +7,8 @@ Public API:
 * :func:`sync_execution` — context manager that forces the current block
   to run phase 2 inline (for tests, management commands, the shell).
 * :func:`retry_pending` — run the periodic safety-net task once inline.
+* :func:`beat_schedule` — ready-made Celery beat entries for the four
+  safety-net tasks, routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
 All symbols are importable after Django's app registry is ready
 (i.e. inside views, management commands, tests, signal handlers).
@@ -22,6 +24,7 @@ _PUBLIC = {
     'BackgroundAction': ('django_logic.background.transitions', 'BackgroundAction'),
     'sync_execution': ('django_logic.background.dispatch', 'sync_execution'),
     'retry_pending': ('django_logic.background.dispatch', 'retry_pending'),
+    'beat_schedule': ('django_logic.background.settings', 'beat_schedule'),
 }
 
 __all__ = list(_PUBLIC.keys())

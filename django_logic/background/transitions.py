@@ -249,5 +249,9 @@ class BackgroundAction(BackgroundTransition):
         return f"BackgroundAction: {self.action_name}"
 
     def complete_transition(self, state: State, **kwargs):
-        # No state change. Callbacks run best-effort (see runner).
+        # Defensive no-op for direct/manual invocation only — the engine
+        # never calls this: phase 1 stops at the TransitionMessage row and
+        # phase 2 writes state / runs hooks itself (_handle_success /
+        # _run_success_hooks). The inherited implementation would write an
+        # empty target state; an action must not change state on success.
         pass

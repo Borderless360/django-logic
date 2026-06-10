@@ -23,7 +23,6 @@ from unittest.mock import patch
 from django.test import TestCase, override_settings
 
 from django_logic import Transition
-from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 from tests.background.models import ArchivableWidget, Widget
 from tests.models import Invoice

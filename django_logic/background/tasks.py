@@ -55,9 +55,10 @@ def run_background_transition_task(transition_message_id: int) -> None:
     pair is what the crash-redelivery guarantee depends on, so it is not
     left to consumer settings (issue #91).
 
-    Exceptions are re-raised so Celery's own retry / alerting machinery
-    can react. The periodic starter is the primary retry path though;
-    Celery-level retries are not configured here by design.
+    Side-effect failures are recorded on the TransitionMessage row and NOT
+    re-raised in celery mode (monitor the row, not Celery task failures —
+    see README → Monitoring); the periodic starter owns retries. Only
+    unexpected infrastructure errors propagate to Celery.
     """
     run_background_transition(transition_message_id)
 

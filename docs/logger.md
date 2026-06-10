@@ -83,18 +83,23 @@ tr_id SideEffect generate_labels           (a new SideEffect line means the prev
 tr_id Set State target
 tr_id Unlock
 tr_id Callback send_confirmation_email
-tr_id Complete
 ```
 
-On failure the side-effect raises, `Fail` is logged, then `failure_side_effects`
-run (before unlock), the state is set to `failed_state` (if declared), the lock
-is released, and `failure_callbacks` run.
+(`Complete` is a background-only event — the synchronous path ends with the
+`Unlock` + `Callback` lines.)
+
+On failure the side-effect raises, `Fail` is logged, the state is set to
+`failed_state` (if declared), `failure_side_effects` run, the lock is
+released, and `failure_callbacks` run.
 
 ## Background transitions
 
 A `BackgroundTransition` runs in two phases. Phase 1 (the synchronous call)
-logs the `Start [background queue=...]` line, optionally `Set State
-in_progress_state`, and the `TransitionMessage#<pk> created` line. Phase 2 (the
+logs the `Start [background queue=...]` line, then its critical section:
+`Lock`, optionally `Set State in_progress_state`, the
+`TransitionMessage#<pk> created` line, and `Unlock` (since 0.4 phase 1 holds
+the state lock only for this section — the uncompleted row is the in-flight
+marker afterwards). Phase 2 (the
 worker, or inline in Sync mode) logs `Phase2 Start`, the `SideEffect` lines,
 `Set State target`, and `Complete`.
 
@@ -104,8 +109,10 @@ All side-effects **and** the target-state write run inside a single Celery task
 
 ```
 tr_id Start ProcessName fulfil instance_key root_id parent_id [background queue=django_logic.critical]
+tr_id Lock
 tr_id Set State fulfilling
 tr_id TransitionMessage#42 created (queue=django_logic.critical)
+tr_id Unlock
 ... worker picks up the task ...
 tr_id Phase2 Start fulfil instance_key queue=django_logic.critical
 tr_id SideEffect reserve_stock

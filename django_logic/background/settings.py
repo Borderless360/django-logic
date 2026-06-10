@@ -22,10 +22,6 @@ def _conf() -> dict:
     return getattr(settings, 'DJANGO_LOGIC', {}) or {}
 
 
-def lock_timeout() -> int:
-    return int(_conf().get('LOCK_TIMEOUT', 7200))
-
-
 def background_execution() -> str:
     """Return the configured execution mode.
 
@@ -60,7 +56,13 @@ def default_queue() -> str:
 
 
 def starter_queue() -> str:
-    """Celery queue for the periodic retry/cleanup safety-net tasks."""
+    """Celery queue for the periodic retry/cleanup safety-net tasks.
+
+    Consumed by :func:`beat_schedule`, which routes the four periodic
+    tasks here. A hand-written ``CELERY_BEAT_SCHEDULE`` must set
+    ``options={'queue': ...}`` itself — the framework does not intercept
+    task routing.
+    """
     queue = _conf().get('STARTER_QUEUE', 'django_logic.starter')
     if not queue or not isinstance(queue, str):
         raise ImproperlyConfigured(
@@ -68,6 +70,42 @@ def starter_queue() -> str:
             "(the Celery queue where the periodic retry/cleanup tasks run)."
         )
     return queue
+
+
+def beat_schedule(
+    *,
+    retry_seconds: float = 60.0,
+    detect_stuck_seconds: float = 300.0,
+    watchdog_seconds: float = 120.0,
+    cleanup_seconds: float = 86_400.0,
+) -> dict:
+    """Ready-made Celery beat entries for the four safety-net tasks,
+    routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
+
+    Use it from your project's ``celery.py`` (after the app is configured)
+    so the safety net cannot be forgotten or routed to the wrong queue::
+
+        from django_logic.background import beat_schedule
+        app.conf.beat_schedule = {**app.conf.beat_schedule, **beat_schedule()}
+
+    The intervals are overridable per task; the defaults match the
+    README's recommended schedule.
+    """
+    queue = starter_queue()
+
+    def entry(task: str, seconds: float) -> dict:
+        return {'task': task, 'schedule': seconds, 'options': {'queue': queue}}
+
+    return {
+        'django-logic-retry-stale': entry(
+            'django_logic.retry_stale_transitions', retry_seconds),
+        'django-logic-detect-stuck': entry(
+            'django_logic.detect_stuck_transitions', detect_stuck_seconds),
+        'django-logic-watchdog': entry(
+            'django_logic.watchdog_stale_attempts', watchdog_seconds),
+        'django-logic-cleanup': entry(
+            'django_logic.cleanup_completed_transitions', cleanup_seconds),
+    }
 
 
 def max_errors() -> int:
@@ -123,7 +161,7 @@ def validate_on_ready() -> None:
         # at Django app-ready, which in the standard celery.py pattern is
         # *before* the project's Celery app sets broker_url, so it would
         # false-warn on every boot. The check lives in dispatch (where the
-        # app is configured); see dispatch._warn_once_if_no_broker.
+        # app is configured); see dispatch._warn_once_about_celery_config.
 
 
 def _reject_sqlite_in_celery_mode() -> None:

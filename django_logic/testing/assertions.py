@@ -96,6 +96,24 @@ class ScenarioAssertions:
                        f'callbacks that ran: {ran}.')
         self._record_assert(f'assert_callbacks_ran({names})', ok=True)
 
+    def assert_failure_side_effects_ran(self, names):
+        ran = self._tracker().failure_side_effects_ran
+        missing = [n for n in names if n not in ran]
+        if missing:
+            self._record_assert(f'assert_failure_side_effects_ran({names})', ok=False)
+            self._fail(f'Expected failure side-effects {missing} to have run; '
+                       f'failure side-effects that ran: {ran}.')
+        self._record_assert(f'assert_failure_side_effects_ran({names})', ok=True)
+
+    def assert_failure_callbacks_ran(self, names):
+        ran = self._tracker().failure_callbacks_ran
+        missing = [n for n in names if n not in ran]
+        if missing:
+            self._record_assert(f'assert_failure_callbacks_ran({names})', ok=False)
+            self._fail(f'Expected failure callbacks {missing} to have run; '
+                       f'failure callbacks that ran: {ran}.')
+        self._record_assert(f'assert_failure_callbacks_ran({names})', ok=True)
+
     # --- background error state ------------------------------------------
 
     def assert_error_recorded(self, instance, contains):

@@ -89,9 +89,9 @@ class RedisState(State):
     """
     RedisState uses a single Redis key for both locking and state storage.
 
-    Requires ``django-redis`` as the cache backend (``pip install django-logic[redis]``).
-    Django's built-in ``RedisCache`` does not support the ``nx=True`` parameter
-    used by ``lock()``.
+    Requires ``django-redis`` (installed as a core dependency) as the cache
+    backend. Django's built-in ``RedisCache`` does not support the
+    ``nx=True`` / ``xx=True`` parameters used by ``lock()`` / ``set_state()``.
 
     The key's existence means the state is locked; its value is the current
     state. This makes the state immediately visible to all processes
@@ -102,10 +102,12 @@ class RedisState(State):
                    already exists* (xx=True, resetting the TTL so the lock
                    stays alive while making progress) + persists to DB.
                    Writing state never CREATES a lock — only lock() does.
-                   This is what lets background transitions (which write
-                   in_progress/target/failed states outside a lock()/unlock()
-                   pair) use RedisState without stranding the instance
-                   locked until the TTL expires.
+                   Under the lock (sync transitions; background phase 1's
+                   in_progress write) the xx write refreshes the live key;
+                   outside any lock (background phase 2's target/failed
+                   writes, Action.failed_state) it is a cache no-op — which
+                   is what lets background transitions use RedisState
+                   without stranding the instance locked until TTL expiry.
     get_state() -> reads from the key (fallback to instance attr when unlocked)
     unlock()    -> deletes the key; DB is the source of truth again
 
@@ -138,8 +140,10 @@ class RedisState(State):
     def set_state(self, state):
         # xx=True: refresh the key's value/TTL only when it exists (i.e. the
         # state is locked). A state write outside a lock()/unlock() pair —
-        # background phase 1/2, Action.failed_state — must not implicitly
-        # create a lock nobody will release.
+        # background phase 2's target/failed writes, Action.failed_state —
+        # must not implicitly create a lock nobody will release. (Background
+        # phase 1's in_progress write happens UNDER its critical-section
+        # lock, so there the xx write refreshes the live key's value.)
         cache.set(self._get_hash(), self._store_value(state), self.lock_timeout, xx=True)
         super().set_state(state)
 

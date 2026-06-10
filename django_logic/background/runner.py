@@ -32,9 +32,13 @@ Structure:
    * success callbacks + ``next_transition`` (success path), or
    * failure callbacks (terminal-failure path).
 
-Exceptions from side-effects propagate out of ``run_background_transition``
-so the Celery task can decide to retry. In sync mode, they also
-propagate to the original caller — tests can ``assertRaises`` directly.
+Side-effect exceptions re-raise out of ``run_background_transition``
+only in **sync mode**, so inline callers and tests can ``assertRaises``
+directly. In **Celery mode** they are swallowed after being fully
+recorded on the row (``errors_count`` + ``last_error``, or terminal
+``failed_state`` + completion) — the periodic starter owns retries, and
+re-raising out of an ``acks_late`` task would spam task-failure alerts
+and risk broker redelivery on top of the periodic retry.
 """
 from __future__ import annotations
 

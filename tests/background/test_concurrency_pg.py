@@ -9,7 +9,8 @@ and skip otherwise.
 Covers the two flagship reliability claims that previously had zero
 real-concurrency coverage:
   * "No two workers run the same transition at once" (phase-2 row lock)
-  * "Only one uncompleted message per instance" (partial unique constraint)
+  * "Only one uncompleted message per instance per process" (partial
+    unique constraint)
 """
 import threading
 

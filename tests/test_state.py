@@ -1,6 +1,5 @@
 from unittest.mock import patch
 
-from django.core.cache import cache
 from django.test import TestCase
 
 from django_logic.state import State, RedisState

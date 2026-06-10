@@ -135,6 +135,15 @@ full findings and resolution mapping.
 - **`docs/TESTING_GUIDE.md`** — the full scenario catalog for testing
   processes (happy paths, gating, failures, retries, terminal failures,
   one-in-flight conflicts, superseded rows, snapshot replay) without Celery.
+- **`beat_schedule()`** (`django_logic.background`) — ready-made Celery
+  beat entries for the four safety-net tasks, routed to
+  `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals
+  (overridable per task): `app.conf.beat_schedule = beat_schedule()`.
+- **`assert_failure_side_effects_ran` / `assert_failure_callbacks_ran`** on
+  `ProcessScenario` — the tracker already recorded failure-hook executions;
+  now they are assertable. Snapshots also capture/restore the
+  `TransitionMessage.field_name` column so restored rows take the same
+  phase-2 path as the production row.
 
 ### Observability & DX (from Heroku validation; issues #78–#81)
 
@@ -146,9 +155,11 @@ full findings and resolution mapping.
   (`dl.app`/`dl.model`/`dl.transition`/`dl.instance_id`/`dl.queue`) per
   transition, so each transition is its own Sentry issue. Opt out with
   `DJANGO_LOGIC['SENTRY_TRANSACTION_NAMING'] = False`. No new dependency.
-- **Startup warning for `task_reject_on_worker_lost`.** First celery-mode
-  dispatch warns if `task_acks_late` is on but `task_reject_on_worker_lost` is
-  off — the pair crash re-delivery depends on. Documented in the README.
+- **Crash re-delivery configured per task.** Every django-logic task sets
+  `acks_late=True` + `reject_on_worker_lost=True` on the decorator (see
+  issue #91 above), so the pair crash re-delivery depends on no longer
+  hinges on consumer Celery settings. A one-time warning on first
+  celery-mode dispatch still flags a missing/in-memory broker.
 - **pgbouncer (transaction pooling) deployment guide** in the README
   (`prepare_threshold=None`, `DISABLE_SERVER_SIDE_CURSORS`, no app→pgbouncer SSL).
 - **`django_logic.conditions`** — `all_related_in` / `any_related_in` guard

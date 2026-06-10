@@ -5,7 +5,7 @@
 > without failing the whole order.
 
 This is the supported alternative to the anti-pattern that motivated the
-durable model (see `fundamental problem.md`): **do not** call a child's
+durable model: **do not** call a child's
 transition inside the parent transition's side-effect and let its exception
 propagate. That couples the parent's success to every child and cascades
 failures across state machines.

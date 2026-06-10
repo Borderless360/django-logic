@@ -66,10 +66,13 @@ change on success) for anything slow, external, or retriable.
   `BACKGROUND_EXECUTION` defaults to `'celery'`.
 - A cross-process `default` cache (django-redis) for the state lock —
   celery mode refuses to boot with a locmem/dummy cache when `DEBUG=False`.
-- Celery `task_acks_late=True` **and** `task_reject_on_worker_lost=True` (re-
-  deliver a killed worker's task), plus a **single beat** scheduling the four
-  `django_logic.*` safety-net tasks on `STARTER_QUEUE`. A worker for every
-  queue you use.
+- Crash re-delivery is built in (every django-logic task sets
+  `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
+  pair only for your *own* tasks. You still need a **single beat**
+  scheduling the four `django_logic.*` safety-net tasks —
+  `app.conf.beat_schedule = beat_schedule()` (from
+  `django_logic.background`) routes them to `STARTER_QUEUE` — and a worker
+  for every queue you use.
 - Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
   None}`, `DISABLE_SERVER_SIDE_CURSORS=True`, and no SSL on the app→pgbouncer
   hop. The concurrency guard (`select_for_update(nowait)` + partial-unique)
@@ -82,8 +85,10 @@ change on success) for anything slow, external, or retriable.
 - `django_logic/background/` is the durable engine: `transitions.py`,
   `dispatch.py`, `runner.py` (phase 2), `tasks.py` (Celery + periodic),
   `models.py` (`TransitionMessage`), `settings.py`.
-- Read `docs/PLAN.md`, `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, and the
-  root `fundamental problem.md` before changing the background engine.
+- Read `docs/PLAN.md`, `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, and
+  `docs/recipes/nested-processes.md` (the fan-out pattern and the
+  cascading-failure anti-pattern it replaces) before changing the
+  background engine.
 
 See `docs/IMPROVEMENTS_FROM_HEROKU_VALIDATION.md` for validated-behavior notes
 and open improvement ideas.

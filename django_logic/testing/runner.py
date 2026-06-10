@@ -38,12 +38,6 @@ def all_transitions(process_class) -> list:
     return found
 
 
-def run_sync(instance, process_name, action_name, kwargs):
-    """Drive a (synchronous) transition through the normal process entrypoint."""
-    process = getattr(instance, process_name)
-    return getattr(process, action_name)(**kwargs)
-
-
 def run_background_sync(instance, process_name, action_name, kwargs):
     """Run a BackgroundTransition's phase 1 + phase 2 inline (no broker)."""
     from django_logic.background import sync_execution

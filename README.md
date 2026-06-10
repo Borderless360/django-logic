@@ -114,7 +114,7 @@ order.process.pay()  # Changes status from 'pending' to 'paid'
 ### Definitions 
 - **Transition** - Changes the state of an object from one to another. Contains conditions, permissions, side-effects, callbacks, failure side-effects, and failure callbacks.
 - **Action** - Similar to transition but doesn't change the state. Useful for operations that need permissions and side effects without state change.
-- **Side-effects** - Functions executed during a transition before reaching the target state. If any fail, the transition is rolled back.
+- **Side-effects** - Functions executed during a transition before reaching the target state. If any fail, the state does not advance (`failed_state` is applied if declared). Background transitions additionally roll back the failed attempt's database writes (savepoint); synchronous side-effect writes are **not** rolled back automatically.
 - **Callbacks** - Functions executed after successfully reaching the target state.
 - **Failure side-effects** - Functions executed when side-effects fail, before the state is unlocked. Useful for cleanup or compensation that must run while the instance is still locked.
 - **Failure callbacks** - Functions executed after side-effects fail, after the state is unlocked.
@@ -707,8 +707,13 @@ class FulfilmentTests(TestCase):
         self.assertEqual(order.status, 'fulfilled')
 
     def test_side_effect_failure_propagates(self):
+        # NB: patch what the side-effect CALLS, not the side-effect itself —
+        # the Transition captured the function object at class-definition
+        # time, so patching its module attribute would not replace it.
+        # (django_logic.testing's fail_side_effect= injection avoids this
+        # footgun entirely.)
         order = Order.objects.create(status='approved')
-        with patch('myapp.services.call_courier', side_effect=CourierError):
+        with patch('myapp.services.courier_client.book', side_effect=CourierError):
             with self.assertRaises(CourierError):
                 order.process.fulfil()
 ```
@@ -809,38 +814,16 @@ Celery mode has three things you **must** wire up, or the durability guarantees 
 
 **2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, and the timeout watchdog never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
 
-```python
-# settings.py — run the safety net on the starter queue
-DJANGO_LOGIC = {
-    'BACKGROUND_EXECUTION': 'celery',
-    'STARTER_QUEUE': 'django_logic.starter',
-    # ... MAX_ERRORS / RETRY_MINUTES / CLEANUP_DAYS as above
-}
+Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, cleanup daily), each overridable by keyword:
 
-from celery.schedules import crontab
-CELERY_BEAT_SCHEDULE = {
-    'dl-retry-stale': {
-        'task': 'django_logic.retry_stale_transitions',
-        'schedule': 60.0,                      # every minute
-        'options': {'queue': 'django_logic.starter'},
-    },
-    'dl-detect-stuck': {
-        'task': 'django_logic.detect_stuck_transitions',
-        'schedule': 300.0,                     # every 5 minutes
-        'options': {'queue': 'django_logic.starter'},
-    },
-    'dl-watchdog': {
-        'task': 'django_logic.watchdog_stale_attempts',
-        'schedule': 120.0,                     # every 2 minutes
-        'options': {'queue': 'django_logic.starter'},
-    },
-    'dl-cleanup': {
-        'task': 'django_logic.cleanup_completed_transitions',
-        'schedule': crontab(hour=3, minute=0),  # daily
-        'options': {'queue': 'django_logic.starter'},
-    },
-}
+```python
+# celery.py — after the app is configured
+from django_logic.background import beat_schedule
+
+app.conf.beat_schedule = {**app.conf.beat_schedule, **beat_schedule()}
 ```
+
+(A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)
 
 Run a worker that consumes both your transition queues **and** the starter queue, plus beat:
 
@@ -944,6 +927,8 @@ class TestOrderFulfilment(ProcessScenario):
         self.assert_state(order, 'fulfilled')
 
     def test_only_staff_can_approve(self):
+        # self.staff / self.customer are your own setUp fixtures —
+        # ProcessScenario does not create users.
         order = self.create_instance(status='draft')
         self.assert_available(order, ['approve'], user=self.staff)
         self.assert_not_available(order, ['approve'], user=self.customer)

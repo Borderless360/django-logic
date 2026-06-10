@@ -87,7 +87,12 @@ class Transition(BaseTransition):
         if self.in_progress_state and self.in_progress_state not in self.sources:
             # Treat the in-progress state as a valid source of the same
             # transition so phase 2 / retry paths can look the transition
-            # up from an already-in-flight instance.
+            # up from an already-in-flight instance. Visible consequence:
+            # while a background transition is in flight (instance in
+            # in_progress_state, phase-1 lock already released), the action
+            # still shows up in get_available_actions() — the one-in-flight
+            # gate is enforced at invocation time (AlreadyInProgress), not
+            # at listing time.
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
         self.failure_callbacks = self.failure_callbacks_class(
@@ -279,7 +284,19 @@ class Action(Transition):
     """Transition that does not change state on success.
 
     Still runs side-effects and callbacks. ``failed_state`` (if set)
-    is applied on failure.
+    is applied on failure — but only when the state is not locked by an
+    in-flight transition (see ``fail_transition``).
+
+    Deliberate asymmetries vs :class:`Transition` — an Action does not
+    change state, so it skips the state-change machinery entirely:
+
+    * no cache lock, no under-the-lock source revalidation, and no
+      background-in-flight gate (Actions may run while a background
+      transition is in flight);
+    * ``next_transition`` is NOT executed on success (note the divergence:
+      a *BackgroundAction*'s phase 2 does run ``next_transition``);
+    * ``in_progress_state`` is accepted but never written (it is only
+      added to ``sources``); ``BackgroundAction`` rejects it outright.
     """
 
     def __init__(self, action_name: str, sources: list, **kwargs):

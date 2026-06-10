@@ -7,8 +7,8 @@ the ``TransitionMessage`` — so a production bug can be reproduced in a test an
 kept as a regression guard.
 
 Scope: own concrete fields + the TransitionMessage are captured and restored.
-Arbitrary related graphs are not auto-created — pass them through the optional
-``related`` key yourself, or build them in the test, when a repro needs them.
+Arbitrary related graphs are not auto-created — build them in the test when a
+repro needs them.
 """
 from __future__ import annotations
 
@@ -71,6 +71,7 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
             data['transition_message'] = {
                 'transition_name': tm.transition_name,
                 'process_name': tm.process_name,
+                'field_name': tm.field_name,
                 'queue_name': tm.queue_name,
                 'is_completed': tm.is_completed,
                 'errors_count': tm.errors_count,
@@ -140,13 +141,18 @@ def from_snapshot(data_or_path, *, model=None):
     tm_data = data.get('transition_message')
     if tm_data:
         from django_logic.background.models import TransitionMessage
+        from django_logic.background import settings as bg_settings
         TransitionMessage.objects.create(
             app_label=instance._meta.app_label,
             model_name=instance._meta.model_name,
             instance_id=str(instance.pk),
             process_name=tm_data.get('process_name', 'process'),
+            # Restore the recorded field so phase 2 takes the same
+            # recorded-field path the production row would have used
+            # ('' = legacy pre-0.4 row, inference fallback).
+            field_name=tm_data.get('field_name', ''),
             transition_name=tm_data['transition_name'],
-            queue_name=tm_data.get('queue_name', 'django_logic.critical'),
+            queue_name=tm_data.get('queue_name') or bg_settings.default_queue(),
             is_completed=tm_data.get('is_completed', False),
             errors_count=tm_data.get('errors_count', 0),
             last_error_message=tm_data.get('last_error_message', ''),

@@ -170,3 +170,80 @@ class SnapshotFidelityTests(ProcessScenario):
         with self.assertRaises(TypeError) as ctx:
             _jsonable(object())
         self.assertIn('unsupported field value type', str(ctx.exception))
+
+    def test_snapshot_round_trips_transition_message_field_name(self):
+        # A restored row must take the same phase-2 path as the production
+        # row — field_name='' would route it down the legacy inference
+        # fallback instead of the recorded-field path.
+        from django_logic.background import sync_execution
+        from django_logic.background.models import TransitionMessage
+
+        widget = self.create_instance()
+        with sync_execution():
+            widget.process.fulfil()
+        data = snapshot(widget, state_field='status')
+        self.assertEqual(data['transition_message']['field_name'], 'status')
+
+        TransitionMessage.objects.all().delete()
+        widget.delete()
+        restored = from_snapshot(data, model=Widget)
+        tm = TransitionMessage.objects.get(instance_id=str(restored.pk))
+        self.assertEqual(tm.field_name, 'status')
+
+
+@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
+class FailureHookAssertionsTests(ProcessScenario):
+    """The failure-hook tracker sinks are assertable (review follow-up)."""
+
+    process_class = WidgetProcess
+    model = Widget
+    state_field = 'status'
+    process_name = 'process'
+
+    @override_settings(DJANGO_LOGIC=dict(_SYNC_SETTINGS,
+                                         TRANSITION_MESSAGE_MAX_ERRORS=1))
+    def test_failure_hooks_are_assertable(self):
+        # crash_with_bad_cleanup: side-effect raises; terminal at
+        # MAX_ERRORS=1; its failure_side_effect (bg_fse_boom) raises too —
+        # so only failure_callbacks complete. Use 'crash' which declares
+        # failure_callbacks=[bg_failure_callback].
+        widget = self.create_instance()
+        self.background_transition(widget, 'crash',
+                                   fail_side_effect='bg_boom',
+                                   fail_with=ValueError('kaput'))
+        self.assert_state(widget, 'crash_failed')
+        self.assert_failure_callbacks_ran(['bg_failure_callback'])
+
+
+class BeatScheduleTests(ProcessScenario):
+    """beat_schedule() consumes STARTER_QUEUE and names the real tasks."""
+
+    process_class = WidgetProcess
+    model = Widget
+
+    def test_routes_all_four_tasks_to_the_starter_queue(self):
+        from django_logic.background import beat_schedule
+
+        with override_settings(DJANGO_LOGIC={'STARTER_QUEUE': 'my.starter'}):
+            schedule = beat_schedule(retry_seconds=30.0)
+        self.assertEqual(len(schedule), 4)
+        self.assertEqual(
+            {entry['options']['queue'] for entry in schedule.values()},
+            {'my.starter'},
+        )
+        self.assertEqual(
+            schedule['django-logic-retry-stale'],
+            {'task': 'django_logic.retry_stale_transitions',
+             'schedule': 30.0, 'options': {'queue': 'my.starter'}},
+        )
+        # Every entry names a task that actually exists in the registry.
+        from django_logic.background import tasks
+        registered = {
+            tasks.run_background_transition_task.name,
+            tasks.retry_stale_transitions.name,
+            tasks.cleanup_completed_transitions.name,
+            tasks.detect_stuck_transitions.name,
+            tasks.watchdog_stale_attempts.name,
+        }
+        for entry in schedule.values():
+            self.assertIn(entry['task'], registered)

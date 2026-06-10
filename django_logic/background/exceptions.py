@@ -1,8 +1,4 @@
-from django_logic.exceptions import DjangoLogicException, TransitionNotAllowed
-
-
-class BackgroundTransitionError(DjangoLogicException):
-    """Base for background-transition-specific errors."""
+from django_logic.exceptions import TransitionNotAllowed
 
 
 class AlreadyInProgress(TransitionNotAllowed):

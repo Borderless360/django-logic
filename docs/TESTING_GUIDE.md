@@ -131,6 +131,13 @@ def test_can_approve_with_stock(self):
 ### 3. Permission gating
 
 ```python
+def setUp(self):
+    super().setUp()
+    # User fixtures are the test author's responsibility — ProcessScenario
+    # does not create any.
+    self.staff = User.objects.create(username='staff', is_staff=True)
+    self.customer = User.objects.create(username='customer')
+
 def test_only_staff_can_approve(self):
     order = self.create_instance(status='draft')
     self.assert_available(order, ['approve'], user=self.staff)
@@ -289,12 +296,17 @@ def test_ops_fix_is_not_clobbered_by_a_late_retry(self):
 
 ### 11. next_transition chains
 
+(Assumes a process with `Transition('pay', sources=['pending'], target='paid', next_transition='process')` and `Transition('process', sources=['paid'], target='processing')` — chains aren't part of the running example above.)
+
 ```python
 def test_pay_chains_into_processing(self):
     order = self.create_instance(status='pending')
     self.transition(order, 'pay')
     self.assert_state(order, 'processing')        # follow-up ran after unlock
 ```
+
+Tracking covers the whole process tree, so the follow-up's side-effects are
+visible to `assert_side_effects_ran` even though you only drove `'pay'`.
 
 ### 12. Nested processes
 
@@ -364,8 +376,9 @@ Any *other* (unexpected) exception fails the test loudly.
 | `assert_state(obj, expected)` | The persisted state field. |
 | `assert_available(obj, actions, user=None)` | Actions currently offered by `get_available_actions`. |
 | `assert_not_available(obj, actions, user=None)` | Actions not offered. |
-| `assert_side_effects_ran(names)` / `assert_side_effects_not_ran(names)` | Which side-effects executed in the last tracked transition (by function `__name__` — tracked, not mocked: the real code ran). |
+| `assert_side_effects_ran(names)` / `assert_side_effects_not_ran(names)` | Which side-effects executed in the last tracked drive (by function `__name__` — tracked, not mocked: the real code ran). Tracking covers the whole process tree, including `next_transition` follow-ups. |
 | `assert_callbacks_ran(names)` | Which callbacks executed. |
+| `assert_failure_side_effects_ran(names)` / `assert_failure_callbacks_ran(names)` | Which failure hooks executed (for failure-path scenarios). |
 | `assert_error_recorded(obj, contains)` | Substring of `last_error_message` on the latest `TransitionMessage`. |
 | `assert_error_count(obj, expected)` | `errors_count` on the latest `TransitionMessage`. |
 
@@ -391,8 +404,14 @@ class FulfilmentTests(TestCase):     # DJANGO_LOGIC['BACKGROUND_EXECUTION']='syn
     def test_side_effect_failure_propagates(self):
         # In sync mode the side-effect exception re-raises to the caller
         # AFTER being recorded on the TransitionMessage.
+        #
+        # NB: patch what the side-effect CALLS, never the side-effect
+        # itself — the Transition captured the function object at
+        # class-definition time, so patching its module attribute does NOT
+        # replace it and the injection would silently never fire.
+        # ProcessScenario's fail_side_effect= avoids this footgun entirely.
         order = Order.objects.create(status='approved')
-        with patch('myapp.services.call_courier', side_effect=CourierError):
+        with patch('myapp.services.courier_client.book', side_effect=CourierError):
             with self.assertRaises(CourierError):
                 order.process.fulfil()
         tm = TransitionMessage.objects.get(instance_id=str(order.pk))

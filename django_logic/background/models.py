@@ -47,7 +47,8 @@ class TransitionMessage(TimeStampedModel):
     # background path supports every primary-key type the synchronous core
     # already supports: BigAutoField PKs beyond 2**31-1, UUIDField, and
     # CharField primary keys. ``_restore`` looks the instance up with
-    # ``model.objects.get(pk=instance_id)``, which coerces the string back
+    # ``model._base_manager.get(pk=instance_id)`` (immune to filtered
+    # default managers — issue #90), which coerces the string back
     # to the model's real pk type.
     instance_id = models.CharField(max_length=255)
     process_name = models.CharField(max_length=100)
