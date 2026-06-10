@@ -73,7 +73,12 @@ full findings and resolution mapping.
 - **D2 — sync/background mutual exclusion.** Background phase 1 acquires the
   state lock for its critical section (released in a `finally`, so nothing
   leaks on `AlreadyInProgress` or a caller-transaction rollback); sync
-  transitions check the uncompleted-row gate (see above).
+  transitions check the uncompleted-row gate (see above). Phase 1 also
+  re-verifies the persisted state **after** the `TransitionMessage` insert:
+  on PostgreSQL the insert can block in a speculative-insert wait while a
+  concurrent flight's phase 2 finishes, admitting the request against an
+  instance that already reached its target — without the recheck the
+  transition silently ran twice (observed live on the Heroku harness).
 - **D3 — a failing `Action` no longer clobbers an in-flight transition's
   state.** `failed_state` is written only when the state is not locked;
   otherwise the write is skipped with an ERROR log (the exception still

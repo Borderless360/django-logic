@@ -185,3 +185,63 @@ class BackgroundPhaseOneMutexTests(TransactionTestCase):
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
         tm = TransitionMessage.objects.get()
         self.assertTrue(tm.is_completed)
+
+
+class PhaseOnePostInsertRecheckTests(TransactionTestCase):
+    """Phase 1 re-verifies the persisted state after the TM insert.
+
+    On PostgreSQL the insert can block in a speculative-insert wait while a
+    concurrent flight's phase 2 finishes (its row leaves the partial unique
+    index when is_completed flips). Phase 1 is then admitted seconds after
+    its under-the-lock revalidation, against an instance the finished
+    flight already moved to its target state — without the recheck it
+    silently re-ran the transition (observed live on the Heroku harness:
+    two concurrent phase 1s, both HTTP 200, the work executed twice).
+    """
+
+    def setUp(self):
+        self.widget = Widget.objects.create()  # draft
+
+    def test_state_moved_during_insert_is_rejected_and_rolled_back(self):
+        from unittest.mock import patch
+
+        real_create = TransitionMessage.objects.create
+
+        def create_then_state_moves(**kwargs):
+            # Simulate the speculative-insert wait: by the time the insert
+            # returns, the concurrent flight has completed and moved the
+            # instance to its target state.
+            tm = real_create(**kwargs)
+            Widget.objects.filter(pk=self.widget.pk).update(status='fulfilled')
+            return tm
+
+        with patch.object(TransitionMessage.objects, 'create',
+                          side_effect=create_then_state_moves):
+            with sync_execution():
+                with self.assertRaises(TransitionNotAllowed) as ctx:
+                    self.widget.process.fulfil()
+
+        self.assertIn('persisted state moved', str(ctx.exception))
+        # The admitted-then-rejected attempt rolled back its row and never
+        # wrote in_progress_state; the lock is released. (The simulated
+        # external write happened inside phase 1's atomic block, so the
+        # rollback reverts it to 'draft' here — in the real cross-connection
+        # race the other flight's 'fulfilled' write survives untouched.)
+        self.assertEqual(TransitionMessage.objects.count(), 0)
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'draft')
+        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
+
+    def test_retry_from_in_progress_still_admitted(self):
+        # The legitimate recovery path must keep working: instance stranded
+        # in in_progress_state with NO uncompleted row (e.g. after an
+        # unrestorable-row finalization) — re-triggering the transition from
+        # in_progress_state is allowed and completes.
+        self.widget.status = 'fulfilling'
+        self.widget.save(update_fields=['status'])
+
+        with sync_execution():
+            self.widget.process.fulfil()
+
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'fulfilled')

@@ -196,6 +196,26 @@ class BackgroundTransition(Transition):
                     f"'{state.process_name}'."
                 ) from exc
 
+            # Recheck the persisted state AFTER the create. On PostgreSQL
+            # the insert can block in a speculative-insert wait while a
+            # concurrent flight's phase 2 finishes (its row leaves the
+            # partial unique index the moment is_completed flips) — we are
+            # then admitted seconds after our under-the-lock revalidation,
+            # against an instance the finished flight has already moved to
+            # its target/failed state. Without this recheck the transition
+            # would silently re-run from a non-source state (observed on
+            # the Heroku harness: two concurrent phase 1s, both 200, the
+            # second re-running the work after the first completed).
+            current = state.get_persisted_state()
+            if current not in self.sources:
+                # The atomic block rolls the TM row back.
+                raise TransitionNotAllowed(
+                    f"BackgroundTransition '{self.action_name}' is not "
+                    f"allowed: the persisted state moved to {current!r} "
+                    f"while phase 1 waited on a finishing flight — it is "
+                    f"no longer one of the source states."
+                )
+
             if self.in_progress_state:
                 # A constraint violation here propagates as a raw
                 # IntegrityError (not AlreadyInProgress) — it is the user's
