@@ -2,6 +2,100 @@
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-10
+
+Stability hardening: every defect from the 0.3.x stability review (R1–R6
+reproduced defects, D1–D5 design races) is fixed with a permanent regression
+test. See `docs/STABILITY_REVIEW_AND_V1_PLAN.md` in the planning repo for the
+full findings and resolution mapping.
+
+### Breaking Changes
+
+- **Celery and django-redis are core dependencies.** Background transitions
+  are Celery tasks — `celery>=5.0` and `django-redis>=5.0.0` install
+  automatically. The `[celery]` / `[redis]` extras remain as empty aliases so
+  existing pins keep resolving. The no-Celery `@shared_task` shim is removed.
+- **`BACKGROUND_EXECUTION` defaults to `'celery'`** (previously: `'celery'`
+  only when Celery was importable, else `'sync'`). Test settings must opt in
+  with `DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'sync'`.
+- **Celery mode rejects a per-process lock cache at boot.** With
+  `DEBUG=False`, a locmem/dummy `default` cache raises `ImproperlyConfigured`
+  (the state lock must be shared between web processes and workers); with
+  `DEBUG=True` it logs a warning.
+- **The in-flight constraint is scoped per process** (migration `0006`,
+  constraint renamed `dl_bg_only_one_uncompleted_per_instance` →
+  `dl_bg_one_uncompleted_per_process`). Two processes bound to different
+  state fields of one model no longer falsely conflict; a duplicate within
+  one process still raises `AlreadyInProgress`.
+- **Synchronous transitions are gated on in-flight background work.** While
+  an uncompleted `TransitionMessage` exists for an instance + process, a
+  synchronous `Transition` on it raises `TransitionNotAllowed` (synchronous
+  `Action`s are unaffected). Previously sync and background work could
+  interleave and overwrite each other's state writes.
+- **Phase-2 side-effects run in a savepoint — failed attempts roll back
+  their database writes** (all-or-nothing per attempt). The idempotency
+  contract shrinks to external calls only. `failure_side_effects` get the
+  same isolation; a broken cleanup path rolls back its partial writes.
+- **The phase-2 state guard supersedes externally-moved instances.** If the
+  instance no longer sits in the state phase 1 left behind (manual ops fix,
+  external write), phase 2 completes the row as superseded (`[superseded]`
+  in `last_error_message`), skips side-effects, and the external change
+  wins. Configure with `DJANGO_LOGIC['PHASE2_STATE_GUARD'] = 'enforce'`
+  (default) or `'warn'` (pre-0.4 behaviour). The same guard protects
+  `failed_state` writes by the safety-net tasks.
+
+### Fixed (stability review defects)
+
+- **R1 — a `DatabaseError` raised by a side-effect no longer poisons phase 2.**
+  Previously the aborted connection made `record_error` itself raise
+  `TransactionManagementError`: the error was never recorded, `errors_count`
+  never reached `MAX_ERRORS`, the starter re-dispatched the row forever, and
+  the constraint blocked every future background transition on the instance.
+  Now it is recorded like any failure and the row reaches its terminal state.
+- **R2 — partial side-effect writes from a failed attempt no longer commit**
+  (rolled back with the attempt's savepoint).
+- **R3 — `RedisState` no longer strands instances locked after background
+  transitions.** `RedisState.set_state` writes the cache key with `xx=True`:
+  writing state never *creates* a lock key — only `lock()` does. RedisState
+  is now fully supported with background transitions.
+- **R4 — phase 2 no longer overwrites external state changes** (see the
+  state guard above).
+- **R5 — false cross-process conflicts removed** (see the per-process
+  constraint above).
+- **R6 — phase 2 restores the process class that enqueued the transition.**
+  `_restore` verifies the attribute-resolved class against the recorded
+  `process_class` and prefers the recorded one on mismatch (name collision /
+  rename between deploys), using the new `TransitionMessage.field_name`
+  instead of guessing the state field.
+- **D1 — validate-then-lock TOCTOU closed.** Both sync and background
+  phase 1 re-read the persisted state under the lock and reject the
+  transition if it is no longer a valid source.
+- **D2 — sync/background mutual exclusion.** Background phase 1 acquires the
+  state lock for its critical section (released in a `finally`, so nothing
+  leaks on `AlreadyInProgress` or a caller-transaction rollback); sync
+  transitions check the uncompleted-row gate (see above).
+- **D3 — a failing `Action` no longer clobbers an in-flight transition's
+  state.** `failed_state` is written only when the state is not locked;
+  otherwise the write is skipped with an ERROR log (the exception still
+  propagates and failure hooks still run).
+
+### Added
+
+- **`queue=` is optional.** Transitions without it route to
+  `DJANGO_LOGIC['DEFAULT_QUEUE']` (default `'django_logic'`), resolved at
+  dispatch time. An explicit empty string is still rejected. `STARTER_QUEUE`
+  now defaults to `'django_logic.starter'`.
+- **`TransitionMessage.field_name`** — phase 1 records the bound state
+  field; phase 2 uses it when reconstructing a process from `process_class`
+  (legacy rows fall back to the old inference).
+- **`TransitionMessage.mark_as_superseded(note)`** — terminal completion for
+  rows superseded by external state changes (no `errors_count` increment).
+- **`State.get_persisted_state()`** — always reads the database row,
+  bypassing any cache layer; used by the revalidation and the state guard.
+- **`docs/TESTING_GUIDE.md`** — the full scenario catalog for testing
+  processes (happy paths, gating, failures, retries, terminal failures,
+  one-in-flight conflicts, superseded rows, snapshot replay) without Celery.
+
 ### Observability & DX (from Heroku validation; issues #78–#81)
 
 - **Per-transition monitoring identity.** Background dispatch now sets a Celery

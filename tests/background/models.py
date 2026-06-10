@@ -45,6 +45,10 @@ def bg_fse_boom(instance, **kwargs):
 
 class Widget(models.Model):
     status = models.CharField(max_length=32, default='draft')
+    # R5: a SECOND state field driven by an independent process
+    # (WidgetAuditProcess below). Two state machines on the same row must
+    # be able to have background work in flight at the same time.
+    audit_status = models.CharField(max_length=32, default='clean')
     se_log = models.TextField(default='', blank=True)
     cb_log = models.TextField(default='', blank=True)
     kwargs_seen = models.JSONField(default=list, blank=True)
@@ -130,6 +134,35 @@ class WidgetProcess(Process):
 
 
 ProcessManager.bind_model_process(Widget, WidgetProcess, state_field='status')
+
+
+def bg_audit_ok(instance, **kwargs):
+    """Harmless side-effect for the audit process (R5 fixtures)."""
+    instance.se_log = (instance.se_log or '') + 'audit_ok,'
+    instance.save(update_fields=['se_log'])
+
+
+# R5: an INDEPENDENT process bound to a different state field
+# (Widget.audit_status). The per-process partial unique constraint on
+# TransitionMessage means in-flight work here must not conflict with
+# in-flight work on WidgetProcess ('process') for the same instance.
+# Deliberately declares NO queue= so it exercises the
+# DJANGO_LOGIC['DEFAULT_QUEUE'] fallback ('django_logic').
+class WidgetAuditProcess(Process):
+    process_name = 'audit_process'
+    transitions = [
+        BackgroundTransition(
+            action_name='audit',
+            sources=['clean'],
+            target='audited',
+            in_progress_state='auditing',
+            failed_state='audit_failed',
+            side_effects=[bg_audit_ok],
+        ),
+    ]
+
+
+ProcessManager.bind_model_process(Widget, WidgetAuditProcess, state_field='audit_status')
 
 
 # --- Nested-process background transitions ---------------------------------

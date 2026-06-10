@@ -309,7 +309,7 @@ def _finalize_terminal_from_watchdog(
         # Same state guard as the phase-2 attempt path: a safety-net task
         # finalizing a long-stranded row must not clobber a state change
         # made in the meantime (manual ops fix, external write).
-        matches, expected = _state_guard_matches(transition, state)
+        matches, expected, current = _state_guard_matches(transition, state)
         if matches or (
             bg_settings.phase2_state_guard() == bg_settings.STATE_GUARD_WARN
         ):
@@ -322,9 +322,8 @@ def _finalize_terminal_from_watchdog(
             transition_logger.error(
                 f'{source}: NOT writing failed_state='
                 f'{transition.failed_state!r} on {state.instance_key} — '
-                f'expected {expected}, found '
-                f'{state.get_persisted_state()!r}; the external state '
-                f'change wins.'
+                f'expected {expected}, found {current!r}; the external '
+                f'state change wins.'
             )
 
     # Symmetric with _handle_failure: run failure_side_effects inside
@@ -424,9 +423,8 @@ def _run_atomic(tm_id: int) -> _Outcome:
         # any state change made while the row was pending — including a
         # manual ops fix. With retries spanning RETRY_MINUTES × MAX_ERRORS
         # that collision is a realistic production event.
-        matches, expected = _state_guard_matches(transition, state)
+        matches, expected, current = _state_guard_matches(transition, state)
         if not matches:
-            current = state.get_persisted_state()
             note = (
                 f'[superseded] phase-2 state guard: expected {expected}, '
                 f'found {current!r} — the instance was moved by something '
@@ -650,7 +648,7 @@ def _run_failure_side_effects_isolated(transition, state, exception, kwargs):
     return None
 
 
-def _state_guard_matches(transition, state) -> tuple[bool, str]:
+def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
     """Does the persisted state still match what phase 1 left behind?
 
     * Transition with ``in_progress_state`` — phase 1 wrote it, so the
@@ -658,17 +656,19 @@ def _state_guard_matches(transition, state) -> tuple[bool, str]:
     * Transition without ``in_progress_state`` / BackgroundAction — the
       instance must still be in one of the declared sources.
 
-    Returns ``(matches, expected_description)``.
+    Returns ``(matches, expected_description, current_state)``.
     """
     current = state.get_persisted_state()
     if transition.in_progress_state:
         return (
             current == transition.in_progress_state,
             f'in_progress_state {transition.in_progress_state!r}',
+            current,
         )
     return (
         current in transition.sources,
         f'one of sources {transition.sources!r}',
+        current,
     )
 
 

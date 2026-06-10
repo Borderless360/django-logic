@@ -16,9 +16,9 @@ import threading
 from django.db import connections, transaction
 from django.test import TransactionTestCase, override_settings
 
-from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
+from django_logic.exceptions import TransitionNotAllowed
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres, run_concurrent
 
@@ -87,8 +87,14 @@ class PhaseTwoRowLockTests(TransactionTestCase):
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 @requires_postgres
 class ConcurrentPhaseOneTests(TransactionTestCase):
-    """Two phase-1 calls racing on the same instance: exactly one wins, the
-    other hits the partial unique constraint -> AlreadyInProgress."""
+    """Two phase-1 calls racing on the same instance: exactly one wins.
+
+    Since 0.4 the loser is rejected by whichever guard it reaches first:
+    the phase-1 cache lock (``TransitionNotAllowed: State is locked``) or
+    the partial unique constraint (``AlreadyInProgress``, a
+    ``TransitionNotAllowed`` subclass). Both are correct rejections; the
+    invariants are exactly one winner and exactly one TransitionMessage.
+    """
 
     databases = '__all__'
 
@@ -105,7 +111,7 @@ class ConcurrentPhaseOneTests(TransactionTestCase):
 
         self.assertEqual(len(wins), 1, results)
         self.assertEqual(len(errors), 1, results)
-        self.assertIsInstance(errors[0], AlreadyInProgress)
+        self.assertIsInstance(errors[0], TransitionNotAllowed)
 
         # Exactly one TransitionMessage exists for the instance.
         self.assertEqual(

@@ -150,10 +150,12 @@ class Transition(BaseTransition):
         # get_transition_by_action_name ran before the lock was acquired;
         # by now a concurrent transition may have won the race and moved
         # the state (validate-then-lock TOCTOU). One cheap query closes it.
+        # Any failure here (including an unexpected one, e.g. the row was
+        # deleted concurrently) must release the lock or it leaks until TTL.
         try:
             self._ensure_db_state_in_sources(state)
             self._ensure_no_background_in_flight(state)
-        except TransitionNotAllowed:
+        except Exception:
             state.unlock()
             raise
 
