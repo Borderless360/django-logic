@@ -108,7 +108,9 @@ class Process:
             kwargs.setdefault('tr_id', parent_ctx['tr_id'])
 
         user = kwargs['user'] if 'user' in kwargs else None
-        transition = self.get_transition_by_action_name(action_name, user)
+        transition, owning_process = self._resolve_transition_with_owner(
+            action_name, user
+        )
 
         tr_id = uuid.uuid4()
         transition_logger.info(
@@ -122,6 +124,19 @@ class Process:
         if 'process_class' not in kwargs:
             kwargs['process_class'] = (
                 f"{self.__class__.__module__}.{self.__class__.__name__}"
+            )
+        if getattr(transition, 'is_background', False):
+            # Record the (possibly nested) process class that DECLARES this
+            # transition — distinct from ``process_class`` (the bound process
+            # this call entered through). Phase-2 restore (runner._find_transition)
+            # uses it to pick the exact background transition when an
+            # ``action_name`` is shared across condition-disambiguated nested
+            # processes. Overwrite, never setdefault: a chained next_transition
+            # forwards the previous transition's kwargs, and that owner is not
+            # this transition's.
+            kwargs['owning_process_class'] = (
+                f"{type(owning_process).__module__}."
+                f"{type(owning_process).__name__}"
             )
 
         token = _transition_context.set(
@@ -158,6 +173,29 @@ class Process:
         :param ignore_state: skip the ``is_locked`` check (internal use by
             ``get_transition_by_action_name``).
         """
+        for transition, _owner in self._iter_available_with_owner(
+            user=user,
+            action_name=action_name,
+            ignore_state=ignore_state,
+        ):
+            yield transition
+
+    def _iter_available_with_owner(
+        self,
+        user=None,
+        action_name=None,
+        ignore_state=False,
+    ):
+        """Like :meth:`get_available_transitions`, but yield
+        ``(transition, owning_process)`` pairs.
+
+        ``owning_process`` is the (possibly nested) ``Process`` instance that
+        declared the transition — what phase 1 records so phase-2 restore can
+        identify the exact background transition among condition-disambiguated
+        siblings sharing an ``action_name``. Iteration order and filtering are
+        identical to ``get_available_transitions``; that method is a thin
+        wrapper that drops the owner.
+        """
         if not self.is_valid(user):
             return
 
@@ -172,28 +210,39 @@ class Process:
                 self.state.get_state() in transition.sources
                 and transition.is_valid(self.state.instance, user)
             ):
-                yield transition
+                yield transition, self
 
         for sub_process_class in self.nested_processes:
             sub_process = sub_process_class(state=self.state)
-            yield from sub_process.get_available_transitions(
+            yield from sub_process._iter_available_with_owner(
                 user=user,
                 action_name=action_name,
                 ignore_state=ignore_state,
             )
 
     def get_transition_by_action_name(self, action_name: str, user=None):
-        transitions = list(
-            self.get_available_transitions(
+        transition, _owner = self._resolve_transition_with_owner(action_name, user)
+        return transition
+
+    def _resolve_transition_with_owner(self, action_name: str, user=None):
+        """Resolve ``action_name`` to ``(transition, owning_process)``.
+
+        Same disambiguation contract as ``get_transition_by_action_name``
+        (exactly one match required, after conditions/permissions filtering
+        with ``ignore_state=True``) — it just also returns the declaring
+        process so the caller can record the owner for phase-2 restore.
+        """
+        matches = list(
+            self._iter_available_with_owner(
                 action_name=action_name,
                 user=user,
                 ignore_state=True,
             )
         )
-        if len(transitions) == 1:
-            return transitions[0]
+        if len(matches) == 1:
+            return matches[0]
 
-        if len(transitions) > 1:
+        if len(matches) > 1:
             transition_logger.info(
                 f"Runtime error: {self.state.instance_key} has several "
                 f"transitions with action name '{action_name}'. "
@@ -265,25 +314,35 @@ def _iter_process_tree(process_cls, _seen=None):
 
 
 def _validate_unique_background_action_names(process_cls):
-    """Background transitions must be uniquely identifiable by ``action_name``
-    across a Process *and its nested processes*.
+    """A background transition must be uniquely identifiable by
+    ``(owning process class, action_name)`` across a Process *and its nested
+    processes*.
 
-    Phase-2 restore (``runner._find_transition``) looks a transition up by
-    ``TransitionMessage.transition_name`` (= the ``action_name``) alone,
-    searching the bound process and descending into its ``nested_processes``
-    — it has no other discriminator. So, across the whole nested tree:
+    Phase 1 records the owning (possibly nested) process class on the
+    ``TransitionMessage`` (``owning_process_class``); phase-2 restore
+    (``runner._find_transition``) uses it to select the exact background
+    transition. So the only configuration phase 2 genuinely cannot resolve —
+    and the only one rejected here — is **two background transitions sharing
+    an ``action_name`` within a single process class**: the owner + name pair
+    no longer identifies one transition.
 
-    - No two ``BackgroundTransition`` / ``BackgroundAction`` instances may
-      share an ``action_name``.
-    - A background ``action_name`` may not also appear on a plain
-      synchronous ``Transition``; phase 2 would pick whichever it reached
-      first and could grab the sync one.
+    What is now ALLOWED (this is the fix for the condition-disambiguated
+    nested-process pattern): a background ``action_name`` may be reused across
+    *distinct* nested process classes — e.g. per-integration ``Gmail`` /
+    ``Dummy`` sub-processes each declaring a background
+    ``send_message_via_integration`` selected by a condition on the instance.
+    Phase 1's ``get_transition_by_action_name`` resolves exactly one (the
+    conditions are mutually exclusive); phase 2 restores that exact one via
+    the recorded owner.
 
-    Sync-only ``action_name`` duplication is still allowed (the sync call
-    path uses ``get_transition_by_action_name`` which disambiguates via
-    conditions/permissions at runtime) — this is what lets nested processes
-    model courier-style polymorphism (many sub-processes, same action name,
-    different conditions).
+    Still rejected: a background ``action_name`` colliding with a synchronous
+    ``Transition`` of the same name anywhere in the tree. Phase 1's
+    action-name resolution cannot tell a synchronous and a background
+    transition of the same name apart structurally (only conditions can), so
+    the collision is a footgun; keeping it an error preserves the pre-existing
+    contract. Sync-only ``action_name`` duplication remains allowed (the sync
+    path disambiguates via conditions/permissions at runtime) — courier-style
+    polymorphism.
     """
     def _where(proc_cls, transition):
         return (
@@ -291,26 +350,39 @@ def _validate_unique_background_action_names(process_cls):
             f"{type(transition).__name__}"
         )
 
+    # name -> first declaring location, recorded once per name across the tree
+    # (a name may legitimately appear on several nested classes now).
     background_names: dict[str, str] = {}
     sync_names: dict[str, str] = {}
 
     for proc_cls in _iter_process_tree(process_cls):
+        # Within ONE process class a background action_name must be unique —
+        # (owning class, action_name) is phase 2's whole key, so two in the
+        # same class are indistinguishable. Across classes, duplicates are
+        # fine (disambiguated by conditions at phase 1, by the owner at
+        # phase 2).
+        local_background: dict[str, str] = {}
         for transition in proc_cls.transitions or []:
             name = transition.action_name
             if getattr(transition, 'is_background', False):
-                if name in background_names:
+                if name in local_background:
                     raise ImproperlyConfigured(
                         f"Process {process_cls.__module__}."
                         f"{process_cls.__name__} (or its nested processes) "
                         f"has two background transitions sharing "
-                        f"action_name='{name}' ({background_names[name]} "
-                        f"and {_where(proc_cls, transition)}). Phase-2 "
-                        f"restore searches the process and its "
-                        f"nested_processes and uses action_name as its only "
-                        f"key — background action_names must be unique "
-                        f"across a Process and its nested processes."
+                        f"action_name='{name}' within a single process class "
+                        f"({local_background[name]} and "
+                        f"{_where(proc_cls, transition)}). Phase-2 restore "
+                        f"identifies a background transition by (owning "
+                        f"process class, action_name) — two in the same class "
+                        f"are indistinguishable, so background action_names "
+                        f"must be unique within a process class. Move one to "
+                        f"a separate nested process (duplicates across "
+                        f"distinct nested processes are allowed, disambiguated "
+                        f"by conditions) or rename it."
                     )
-                background_names[name] = _where(proc_cls, transition)
+                local_background[name] = _where(proc_cls, transition)
+                background_names.setdefault(name, _where(proc_cls, transition))
             else:
                 sync_names.setdefault(name, _where(proc_cls, transition))
 
@@ -320,10 +392,10 @@ def _validate_unique_background_action_names(process_cls):
                 f"Process {process_cls.__module__}.{process_cls.__name__} "
                 f"(or its nested processes) has a synchronous Transition "
                 f"named '{name}' ({sync_names[name]}) that collides with a "
-                f"background transition of the same name ({bg_where}). "
-                f"Phase-2 restore searches the process tree and picks the "
-                f"first matching action_name — it cannot distinguish them; "
-                f"rename one."
+                f"background transition of the same name ({bg_where}). Phase 1 "
+                f"resolves an action_name to a single transition and cannot "
+                f"tell a synchronous and a background transition of the same "
+                f"name apart by name alone; rename one."
             )
 
 

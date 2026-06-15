@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Condition-disambiguated background transitions across nested processes**
+  (issue #98). Two nested processes may now declare background transitions
+  that **share an `action_name`**, selected by a condition on the instance —
+  the polymorphic-routing pattern the synchronous path already supported
+  (e.g. per-integration `Gmail` / `Dummy` sub-processes each owning a
+  background `send_message_via_integration`). Phase 1 records the owning
+  (nested) process class on the `TransitionMessage`
+  (`owning_process_class`, migration `0007`); phase 2 restores that **exact**
+  transition from it, without re-evaluating the condition. Generic callers
+  keep calling `instance.process.send_message_via_integration(...)`.
+
+### Changed
+
+- **`_validate_unique_background_action_names` is relaxed.** It previously
+  rejected *any* two background transitions sharing an `action_name` across a
+  process and its nested tree. It now rejects only the genuinely ambiguous
+  case — two background transitions sharing an `action_name` **within a single
+  process class** (where `(owning class, action_name)` no longer identifies
+  one transition). Duplicates across **distinct** nested process classes are
+  allowed. The synchronous-vs-background name-collision check is unchanged.
+- **Phase-2 restore (`runner._find_transition`) prefers the recorded owner**
+  and considers only `is_background` transitions. Rows with a blank
+  `owning_process_class` (created before this release, or whose transition
+  lives on the bound process itself) fall back to the previous first-match-by-
+  `action_name` behaviour — fully backward compatible. A recorded owner no
+  longer present in the tree (renamed/removed between deploys) logs a warning
+  and degrades to first-match rather than stranding the instance.
+
 ## [0.4.0] — 2026-06-10
 
 Stability hardening: every defect from the 0.3.x stability review (R1–R6

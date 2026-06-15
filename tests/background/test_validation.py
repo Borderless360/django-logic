@@ -149,9 +149,11 @@ class UniqueInProgressStateTests(SimpleTestCase):
 
 
 class UniqueBackgroundActionNameTests(SimpleTestCase):
-    """Phase-2 restore keys on ``action_name`` alone, so a Process must
-    not contain two background transitions with the same name, nor a
-    background transition colliding with a sync one.
+    """Phase-2 restore identifies a background transition by ``(owning process
+    class, action_name)``, so within a single Process two background
+    transitions may not share a name, and a background name may not collide
+    with a synchronous one. (Duplicate background names across *distinct*
+    nested processes ARE allowed — see ``NestedTreeBackgroundActionNameTests``.)
     """
 
     def test_two_background_transitions_same_name_rejected(self):
@@ -250,12 +252,19 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
 
 
 class NestedTreeBackgroundActionNameTests(SimpleTestCase):
-    """Phase-2 ``_find_transition`` descends into ``nested_processes``, so the
-    background ``action_name`` uniqueness guarantee must hold across the whole
-    nested tree — not just within a single Process.
+    """Phase-2 ``_find_transition`` descends into ``nested_processes`` and
+    selects the transition by ``(owning process class, action_name)``. So a
+    background ``action_name`` may be reused across *distinct* nested processes
+    (the condition-disambiguated pattern), but must stay unique *within* any
+    single process class, and must not collide with a synchronous transition.
     """
 
-    def test_background_name_collision_across_nested_processes_rejected(self):
+    def test_background_name_duplication_across_nested_processes_allowed(self):
+        # Issue #98: the condition-disambiguated nested-process pattern. Two
+        # nested processes each declare a background transition with the SAME
+        # action_name, selected by a condition on the instance. Phase 1
+        # resolves exactly one; phase 2 restores it via the recorded owning
+        # process class. This must no longer raise at class creation.
         class _ChildA(Process):
             process_name = 'child_a'
             transitions = [
@@ -271,16 +280,69 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         class _ChildB(Process):
             process_name = 'child_b'
             transitions = [
+                BackgroundTransition(
+                    action_name='dup',
+                    sources=['s'],
+                    target='t',
+                    in_progress_state='b_running',
+                    queue='q',
+                ),
+            ]
+
+        class _Parent(Process):
+            process_name = 'parent_dup_bg'
+            nested_processes = [_ChildA, _ChildB]
+
+        self.assertEqual(_Parent.nested_processes, [_ChildA, _ChildB])
+
+    def test_background_action_duplication_across_nested_processes_allowed(self):
+        # Same as above but with BackgroundAction (no in_progress_state), so
+        # the only discriminator is the owning process class.
+        class _ChildA(Process):
+            process_name = 'act_child_a'
+            transitions = [
                 BackgroundAction(action_name='dup', sources=['s'], queue='q'),
             ]
 
+        class _ChildB(Process):
+            process_name = 'act_child_b'
+            transitions = [
+                BackgroundAction(action_name='dup', sources=['s'], queue='q'),
+            ]
+
+        class _Parent(Process):
+            process_name = 'parent_dup_bg_action'
+            nested_processes = [_ChildA, _ChildB]
+
+        self.assertEqual(_Parent.nested_processes, [_ChildA, _ChildB])
+
+    def test_two_background_transitions_same_name_within_a_class_rejected(self):
+        # Within-class duplication is still genuinely ambiguous: (owning class,
+        # action_name) no longer identifies one transition. Each Process
+        # validates itself at creation, so a process that nests such a child
+        # raises when the CHILD class is defined.
         with self.assertRaises(ImproperlyConfigured) as ctx:
-            class _Parent(Process):
-                process_name = 'parent_dup_bg'
-                nested_processes = [_ChildA, _ChildB]
+            class _Child(Process):
+                process_name = 'dup_within_child'
+                transitions = [
+                    BackgroundTransition(
+                        action_name='dup',
+                        sources=['s'],
+                        target='t1',
+                        in_progress_state='one',
+                        queue='q',
+                    ),
+                    BackgroundTransition(
+                        action_name='dup',
+                        sources=['s'],
+                        target='t2',
+                        in_progress_state='two',
+                        queue='q',
+                    ),
+                ]
         msg = str(ctx.exception)
         self.assertIn("action_name='dup'", msg)
-        self.assertIn('background action_names must be unique', msg)
+        self.assertIn('within a single process class', msg)
 
     def test_parent_background_collides_with_nested_sync_rejected(self):
         class _Child(Process):

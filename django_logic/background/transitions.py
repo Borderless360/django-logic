@@ -184,6 +184,14 @@ class BackgroundTransition(Transition):
                     # was renamed/rebound between phases.
                     field_name=state.field_name,
                     transition_name=self.action_name,
+                    # The (possibly nested) process class that declares this
+                    # transition, resolved by Process._get_transition_method.
+                    # Lets phase 2 pick the exact transition when an
+                    # action_name is shared across condition-disambiguated
+                    # nested processes. Empty when invoked outside that path
+                    # (e.g. a directly-constructed transition) — phase 2 then
+                    # falls back to first-match by transition_name.
+                    owning_process_class=kwargs.get('owning_process_class', ''),
                     queue_name=queue_name,
                     timeout_seconds=self.timeout,
                     kwargs=serialized,
