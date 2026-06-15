@@ -62,6 +62,33 @@ class KwargsRoundTripTests(TestCase):
         self.assertIn('context', seen)
         self.assertEqual(seen['context'], {})
 
+        # owning_process_class is engine bookkeeping persisted on the
+        # TransitionMessage column (issue #98), NOT caller data — it is popped
+        # by serialize_kwargs and must never reach side-effect kwargs. Pinning
+        # this guards sync/background parity: a side-effect declared as
+        # fn(instance, owning_process_class, **kwargs) must not start behaving
+        # differently in the background path. It IS recorded on the column.
+        self.assertNotIn('owning_process_class', seen)
+        tm = TransitionMessage.objects.get(transition_name='fulfil')
+        self.assertEqual(
+            tm.owning_process_class, 'tests.background.models.WidgetProcess'
+        )
+
+    def test_owning_process_class_kept_out_of_nested_side_effect_kwargs(self):
+        # Same contract for a NESTED owner: nested_fulfil is declared on
+        # NestedBgChildProcess and reached through the bound parent_process.
+        # The discriminator (the nested class) lands on the column, never in
+        # the side-effect kwargs. nested_fulfil's side-effects include
+        # bg_record_kwargs.
+        self.widget.parent_process.nested_fulfil()
+        seen = bg_models.LAST_KWARGS
+        self.assertNotIn('owning_process_class', seen)
+        tm = TransitionMessage.objects.get(transition_name='nested_fulfil')
+        self.assertEqual(
+            tm.owning_process_class,
+            'tests.background.models.NestedBgChildProcess',
+        )
+
     def test_datetime_and_uuid_arrive_as_strings_documented_contract(self):
         # The serialization round-trip is lossy by design: types are not
         # preserved. This test pins that contract so a future "fix" that

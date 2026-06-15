@@ -72,6 +72,7 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
                 'transition_name': tm.transition_name,
                 'process_name': tm.process_name,
                 'field_name': tm.field_name,
+                'owning_process_class': tm.owning_process_class,
                 'queue_name': tm.queue_name,
                 'is_completed': tm.is_completed,
                 'errors_count': tm.errors_count,
@@ -152,6 +153,10 @@ def from_snapshot(data_or_path, *, model=None):
             # ('' = legacy pre-0.4 row, inference fallback).
             field_name=tm_data.get('field_name', ''),
             transition_name=tm_data['transition_name'],
+            # Restore the owning-process discriminator so phase-2 replay
+            # resolves the exact transition (blank on legacy snapshots →
+            # first-match fallback, unchanged behaviour).
+            owning_process_class=tm_data.get('owning_process_class', ''),
             queue_name=tm_data.get('queue_name') or bg_settings.default_queue(),
             is_completed=tm_data.get('is_completed', False),
             errors_count=tm_data.get('errors_count', 0),

@@ -701,6 +701,71 @@ ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
 tr_id = order.process.fulfil(user=request.user)
 ```
 
+### Polymorphic routing with nested processes
+
+Nested processes let several sub-processes share an `action_name` and be
+selected at runtime by a **condition on the instance** — so a generic caller
+invokes one method and the right implementation runs. This works for background
+transitions too: each integration's durable work lives on its own nested
+process, but callers never have to know which one.
+
+```python
+def is_gmail(conversation, **kw):  return conversation.source_integration == 'gmail'
+def is_dummy(conversation, **kw):  return conversation.source_integration == 'dummy'
+
+class GmailConversationProcess(Process):
+    process_name = 'gmail_conversation'
+    transitions = [
+        BackgroundTransition(
+            action_name='send_message_via_integration',
+            sources=['open'], target='open',
+            in_progress_state='gmail_sending',     # must be unique across the tree
+            conditions=[is_gmail],
+            side_effects=[send_via_gmail],
+        ),
+    ]
+
+class DummyConversationProcess(Process):
+    process_name = 'dummy_conversation'
+    transitions = [
+        BackgroundTransition(
+            action_name='send_message_via_integration',   # same name, different owner
+            sources=['open'], target='open',
+            in_progress_state='dummy_sending',
+            conditions=[is_dummy],
+            side_effects=[send_via_dummy],
+        ),
+    ]
+
+class ConversationProcess(Process):
+    nested_processes = [GmailConversationProcess, DummyConversationProcess]
+
+ProcessManager.bind_model_process(Conversation, ConversationProcess, state_field='status')
+
+# Generic caller — routes by source_integration, no integration knowledge here:
+conversation.process.send_message_via_integration(user=request.user)
+```
+
+Phase 1 resolves exactly one transition (the conditions are mutually exclusive)
+and records the **owning nested process class** on the `TransitionMessage`;
+phase 2 restores that exact transition from the recorded owner — it does not
+re-evaluate the condition, so routing is deterministic even if the instance
+changes mid-flight. Constraints: a background `action_name` must only be
+**unique within a single process class** (two in one class are
+indistinguishable at restore), and every `in_progress_state` must be unique
+across the whole tree. A background `action_name` *may* coincide with a
+synchronous transition of the same name (phase 2 restores only background
+transitions; phase 1 routes the call by condition) — so a synchronous fast-path
+and a durable background slow-path can share one `action_name`.
+
+> **Upgrade note.** When you turn an existing, uniquely-named background
+> transition into this shared-name nested pattern, deploy it with no in-flight
+> rows for that action (or split it across two deploys). Rows enqueued by older
+> code don't carry the owning-process discriminator; once the name becomes
+> shared, phase 2 can't tell which nested sibling such a row meant and finalizes
+> it without running its side-effects (safe, but the work won't run). Rows
+> enqueued after the upgrade always record their owner.
+
 ### Testing your processes
 
 Set `BACKGROUND_EXECUTION='sync'` in your test settings — the global default is `'celery'`, so this opt-in is required — and every `instance.process.fulfil(...)` call runs phase 1 **and** phase 2 inline, no broker involved:

@@ -292,3 +292,260 @@ class WidgetParentProcess(Process):
 
 
 ProcessManager.bind_model_process(Widget, WidgetParentProcess, state_field='status')
+
+
+# --- Condition-disambiguated nested background transitions (issue #98) ------
+# A ConversationProcess routes per messaging integration via two nested
+# processes (Gmail/Dummy), each declaring background transitions that SHARE an
+# action_name, selected by a condition on the instance (source_integration).
+# This is exactly the polymorphism the synchronous path always supported;
+# issue #98 makes it work for durable background transitions too: phase 1
+# records the owning nested process class on the TransitionMessage, and phase 2
+# restores that exact transition without re-evaluating the condition.
+
+
+class Conversation(models.Model):
+    status = models.CharField(max_length=32, default='open')
+    # The discriminator the nested processes' conditions key on.
+    source_integration = models.CharField(max_length=32, default='gmail')
+    se_log = models.TextField(default='', blank=True)
+    cb_log = models.TextField(default='', blank=True)
+
+    class Meta:
+        app_label = 'bg_tests'
+
+
+def conv_is_gmail(instance, **kwargs):
+    return instance.source_integration == 'gmail'
+
+
+def conv_is_dummy(instance, **kwargs):
+    return instance.source_integration == 'dummy'
+
+
+def conv_send_gmail(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'gmail_send,'
+    instance.save(update_fields=['se_log'])
+
+
+def conv_send_dummy(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'dummy_send,'
+    instance.save(update_fields=['se_log'])
+
+
+class GmailConversationProcess(Process):
+    """Per-integration nested process; its transitions are selected when the
+    instance's ``source_integration == 'gmail'``."""
+
+    process_name = 'gmail_conversation'
+    transitions = [
+        BackgroundTransition(
+            action_name='send_message_via_integration',
+            sources=['open'],
+            target='open',
+            in_progress_state='gmail_sending',
+            failed_state='gmail_send_failed',
+            conditions=[conv_is_gmail],
+            queue='django_logic.critical',
+            side_effects=[conv_send_gmail],
+            callbacks=[bg_callback],
+        ),
+        BackgroundTransition(
+            action_name='close',
+            sources=['open'],
+            target='closed',
+            in_progress_state='gmail_closing',
+            failed_state='gmail_close_failed',
+            conditions=[conv_is_gmail],
+            queue='django_logic.critical',
+            side_effects=[bg_noop],
+        ),
+    ]
+
+
+class DummyConversationProcess(Process):
+    process_name = 'dummy_conversation'
+    transitions = [
+        BackgroundTransition(
+            action_name='send_message_via_integration',
+            sources=['open'],
+            target='open',
+            in_progress_state='dummy_sending',
+            failed_state='dummy_send_failed',
+            conditions=[conv_is_dummy],
+            queue='django_logic.critical',
+            side_effects=[conv_send_dummy],
+            callbacks=[bg_callback],
+        ),
+        BackgroundTransition(
+            action_name='close',
+            sources=['open'],
+            target='closed',
+            in_progress_state='dummy_closing',
+            failed_state='dummy_close_failed',
+            conditions=[conv_is_dummy],
+            queue='django_logic.critical',
+            side_effects=[bg_noop],
+        ),
+    ]
+
+
+class ConversationProcess(Process):
+    """Bound parent. Declares no transitions of its own — generic callers just
+    invoke ``conversation.process.send_message_via_integration(...)`` and the
+    nested processes' conditions route to the right integration."""
+
+    process_name = 'process'
+    nested_processes = [GmailConversationProcess, DummyConversationProcess]
+
+
+ProcessManager.bind_model_process(Conversation, ConversationProcess, state_field='status')
+
+
+# Overlapping-condition sibling background transitions (issue #98). The relaxed
+# validator allows a shared background action_name across distinct nested
+# classes regardless of whether the conditions are mutually exclusive — so a
+# misconfiguration with overlapping conditions is caught at RUNTIME (phase 1),
+# not at class creation, exactly like duplicate synchronous action_names. These
+# fixtures let a test pin that the phase-1 ambiguity raises cleanly, before any
+# in_progress_state write or TransitionMessage row.
+
+
+def conv_always(instance, **kwargs):
+    return True
+
+
+class AmbiguousAProcess(Process):
+    process_name = 'ambig_a'
+    transitions = [
+        BackgroundTransition(
+            action_name='ambiguous_send',
+            sources=['open'],
+            target='open',
+            in_progress_state='ambig_a_sending',
+            conditions=[conv_always],
+            queue='django_logic.critical',
+            side_effects=[bg_noop],
+        ),
+    ]
+
+
+class AmbiguousBProcess(Process):
+    process_name = 'ambig_b'
+    transitions = [
+        BackgroundTransition(
+            action_name='ambiguous_send',
+            sources=['open'],
+            target='open',
+            in_progress_state='ambig_b_sending',
+            conditions=[conv_always],
+            queue='django_logic.critical',
+            side_effects=[bg_noop],
+        ),
+    ]
+
+
+class AmbiguousConversationProcess(Process):
+    process_name = 'ambiguous_process'
+    nested_processes = [AmbiguousAProcess, AmbiguousBProcess]
+
+
+ProcessManager.bind_model_process(
+    Conversation, AmbiguousConversationProcess, state_field='status'
+)
+
+
+# Two nested BackgroundActions that SHARE an action_name with IDENTICAL sources
+# and no in_progress_state — the worst-case for an owner-less restore (issue #98
+# review finding): the phase-2 state guard checks only ``current in sources`` and
+# so cannot tell the siblings apart. A row that lost its owner must NOT be
+# resolved by first-match here, or the wrong integration's side-effects fire.
+
+
+def conv_act_a(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'act_a,'
+    instance.save(update_fields=['se_log'])
+
+
+def conv_act_b(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'act_b,'
+    instance.save(update_fields=['se_log'])
+
+
+class SharedActionAProcess(Process):
+    process_name = 'shared_act_a'
+    transitions = [
+        BackgroundAction(
+            action_name='shared_sync',
+            sources=['open'],
+            conditions=[conv_is_gmail],
+            queue='django_logic.fast',
+            side_effects=[conv_act_a],
+        ),
+    ]
+
+
+class SharedActionBProcess(Process):
+    process_name = 'shared_act_b'
+    transitions = [
+        BackgroundAction(
+            action_name='shared_sync',
+            sources=['open'],
+            conditions=[conv_is_dummy],
+            queue='django_logic.fast',
+            side_effects=[conv_act_b],
+        ),
+    ]
+
+
+class SharedActionConversationProcess(Process):
+    process_name = 'shared_action_process'
+    nested_processes = [SharedActionAProcess, SharedActionBProcess]
+
+
+ProcessManager.bind_model_process(
+    Conversation, SharedActionConversationProcess, state_field='status'
+)
+
+
+# A synchronous transition and a background transition SHARING an action_name in
+# one process, routed by a condition on the instance (issue #98: this is allowed
+# now that phase 2 filters to is_background — the sync namesake is invisible to
+# restore). 'archive' runs inline for gmail and durably for dummy.
+
+
+def conv_sync_archive(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'sync_archive,'
+    instance.save(update_fields=['se_log'])
+
+
+def conv_bg_archive(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'bg_archive,'
+    instance.save(update_fields=['se_log'])
+
+
+class MixedSyncBgProcess(Process):
+    process_name = 'mixed_process'
+    transitions = [
+        Transition(
+            action_name='archive',
+            sources=['open'],
+            target='archived_sync',
+            conditions=[conv_is_gmail],
+            side_effects=[conv_sync_archive],
+        ),
+        BackgroundTransition(
+            action_name='archive',
+            sources=['open'],
+            target='archived_bg',
+            in_progress_state='archiving_bg',
+            conditions=[conv_is_dummy],
+            queue='django_logic.fast',
+            side_effects=[conv_bg_archive],
+        ),
+    ]
+
+
+ProcessManager.bind_model_process(
+    Conversation, MixedSyncBgProcess, state_field='status'
+)

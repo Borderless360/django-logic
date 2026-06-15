@@ -72,6 +72,10 @@ def serialize_kwargs(kwargs: dict) -> dict:
     out = dict(kwargs)
     out.pop('request', None)
     out.pop('context', None)  # rebuilt in phase 2
+    # Persisted on its own TransitionMessage column, not in the kwargs JSON:
+    # phase 2 reads it from the column, and it must not leak into the kwargs
+    # passed to side-effects (it is engine bookkeeping, not caller data).
+    out.pop('owning_process_class', None)
 
     user = out.pop('user', None)
     if user is not None and 'user_id' not in out:

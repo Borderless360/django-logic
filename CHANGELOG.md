@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Condition-disambiguated background transitions across nested processes**
+  (issue #98). Two nested processes may now declare background transitions
+  that **share an `action_name`**, selected by a condition on the instance —
+  the polymorphic-routing pattern the synchronous path already supported
+  (e.g. per-integration `Gmail` / `Dummy` sub-processes each owning a
+  background `send_message_via_integration`). Phase 1 records the owning
+  (nested) process class on the `TransitionMessage`
+  (`owning_process_class`, migration `0007`); phase 2 restores that **exact**
+  transition from it, without re-evaluating the condition. Generic callers
+  keep calling `instance.process.send_message_via_integration(...)`.
+
+### Changed
+
+- **`_validate_unique_background_action_names` is relaxed to a single
+  invariant.** It previously rejected *any* two background transitions sharing
+  an `action_name` across a process and its nested tree, and any background
+  name that collided with a synchronous one. It now rejects only the genuinely
+  ambiguous case — two **background** transitions sharing an `action_name`
+  **within a single process class** (where `(owning class, action_name)` no
+  longer identifies one transition). Both a shared background name across
+  **distinct** nested process classes, and a background name that **coincides
+  with a synchronous** transition, are now allowed: phase 2 only ever restores
+  background transitions (`_find_transition` filters to `is_background`), so a
+  synchronous namesake is invisible to restore, and phase 1 resolves the call
+  by conditions/permissions exactly as it already does for duplicate
+  synchronous names (an ambiguous call raises `TransitionNotAllowed` at
+  runtime). This enables, e.g., a synchronous fast-path and a durable
+  background slow-path under one `action_name`, routed by a condition.
+- **Phase-2 restore (`runner._find_transition`) prefers the recorded owner**
+  and considers only `is_background` transitions. The owner is recorded for
+  every background transition started through the Process entrypoint (for a
+  transition on the bound process it equals the bound class). Rows with a blank
+  `owning_process_class` — created before this release, or enqueued outside the
+  Process entrypoint — fall back to matching by `action_name`, but **only when
+  that name is unambiguous across the tree**. If an owner-less (or
+  renamed-owner) row's name is shared by several nested background transitions,
+  restore **refuses to guess** and finalizes the row without running any
+  side-effects (it raises internally and stops retrying) rather than risk
+  running the wrong condition-disambiguated sibling. Unique-name legacy rows are
+  unaffected.
+
+### Upgrade notes
+
+- **Migration `0007` takes a brief `ACCESS EXCLUSIVE` lock** on
+  `transitionmessage` (an additive, non-rewriting `ADD COLUMN` on PostgreSQL
+  11+). That table is the engine's hottest, so on a busy system run `migrate`
+  with a short `lock_timeout` (e.g. `SET lock_timeout = '2s'`) and retry,
+  ideally during a low-throughput window. `owning_process_class` is a
+  `TextField` (unbounded, never indexed) so deeply-namespaced process paths
+  cannot overflow it.
+- **Drain before refactoring a background `action_name` into shared nested
+  processes.** If you turn a single, uniquely-named background transition into
+  the condition-disambiguated nested pattern (same `action_name` on two nested
+  processes), do it in a deploy with **no in-flight rows for that action**
+  (or split it across two deploys). A row enqueued by the old code carries a
+  blank `owning_process_class`; once the name becomes ambiguous, phase 2 cannot
+  determine which sibling it meant and will finalize it without side-effects
+  (safe, but the work does not run). Rows enqueued after this release always
+  record their owner and are immune.
+
 ## [0.4.0] — 2026-06-10
 
 Stability hardening: every defect from the 0.3.x stability review (R1–R6
