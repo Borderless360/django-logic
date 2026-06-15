@@ -150,10 +150,12 @@ class UniqueInProgressStateTests(SimpleTestCase):
 
 class UniqueBackgroundActionNameTests(SimpleTestCase):
     """Phase-2 restore identifies a background transition by ``(owning process
-    class, action_name)``, so within a single Process two background
-    transitions may not share a name, and a background name may not collide
-    with a synchronous one. (Duplicate background names across *distinct*
-    nested processes ARE allowed — see ``NestedTreeBackgroundActionNameTests``.)
+    class, action_name)`` and filters to ``is_background``, so the ONLY rejected
+    configuration is two background transitions sharing a name within a single
+    Process. Duplicate background names across *distinct* nested processes, and
+    a background name coinciding with a synchronous one, are both allowed —
+    resolved by conditions at phase 1, by the owner + is_background filter at
+    phase 2.
     """
 
     def test_two_background_transitions_same_name_rejected(self):
@@ -198,25 +200,31 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
                 ]
         self.assertIn("action_name='dup'", str(ctx.exception))
 
-    def test_sync_transition_collides_with_background_rejected(self):
-        with self.assertRaises(ImproperlyConfigured) as ctx:
-            class _BadProcess(Process):
-                process_name = 'bad_sync_bg'
-                transitions = [
-                    Transition(
-                        action_name='fulfil', sources=['a'], target='b',
-                    ),
-                    BackgroundTransition(
-                        action_name='fulfil',
-                        sources=['a'],
-                        target='b',
-                        in_progress_state='fulfilling',
-                        queue='q',
-                    ),
-                ]
-        msg = str(ctx.exception)
-        self.assertIn('synchronous Transition', msg)
-        self.assertIn("'fulfil'", msg)
+    def test_sync_transition_sharing_name_with_background_allowed(self):
+        # A synchronous transition may share an action_name with a background
+        # one: phase 2 only restores background transitions (is_background
+        # filter), so the synchronous namesake is invisible to restore; phase 1
+        # resolves the call by conditions/permissions like any duplicate name.
+        class _MixedProcess(Process):
+            process_name = 'sync_bg_share'
+            transitions = [
+                Transition(
+                    action_name='fulfil',
+                    sources=['a'],
+                    target='b',
+                    conditions=[lambda i, **k: False],
+                ),
+                BackgroundTransition(
+                    action_name='fulfil',
+                    sources=['a'],
+                    target='b',
+                    in_progress_state='fulfilling',
+                    conditions=[lambda i, **k: True],
+                    queue='q',
+                ),
+            ]
+
+        self.assertEqual(len(_MixedProcess.transitions), 2)
 
     def test_sync_transitions_same_name_still_allowed(self):
         """Duplicate sync action_names remain legal — the sync call
@@ -255,8 +263,8 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
     """Phase-2 ``_find_transition`` descends into ``nested_processes`` and
     selects the transition by ``(owning process class, action_name)``. So a
     background ``action_name`` may be reused across *distinct* nested processes
-    (the condition-disambiguated pattern), but must stay unique *within* any
-    single process class, and must not collide with a synchronous transition.
+    (the condition-disambiguated pattern) and may coincide with a synchronous
+    transition; it must only stay unique *within* any single process class.
     """
 
     def test_background_name_duplication_across_nested_processes_allowed(self):
@@ -344,29 +352,36 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         self.assertIn("action_name='dup'", msg)
         self.assertIn('within a single process class', msg)
 
-    def test_parent_background_collides_with_nested_sync_rejected(self):
+    def test_parent_background_sharing_name_with_nested_sync_allowed(self):
+        # A parent background transition may share an action_name with a nested
+        # synchronous one: phase 2 (is_background filter) never restores the
+        # synchronous transition, and phase 1 resolves the call by conditions.
         class _Child(Process):
             process_name = 'sync_child'
             transitions = [
-                Transition(action_name='fulfil', sources=['a'], target='b'),
+                Transition(
+                    action_name='fulfil',
+                    sources=['a'],
+                    target='b',
+                    conditions=[lambda i, **k: False],
+                ),
             ]
 
-        with self.assertRaises(ImproperlyConfigured) as ctx:
-            class _Parent(Process):
-                process_name = 'parent_bg_vs_nested_sync'
-                nested_processes = [_Child]
-                transitions = [
-                    BackgroundTransition(
-                        action_name='fulfil',
-                        sources=['a'],
-                        target='b',
-                        in_progress_state='fulfilling',
-                        queue='q',
-                    ),
-                ]
-        msg = str(ctx.exception)
-        self.assertIn('synchronous Transition', msg)
-        self.assertIn("'fulfil'", msg)
+        class _Parent(Process):
+            process_name = 'parent_bg_vs_nested_sync'
+            nested_processes = [_Child]
+            transitions = [
+                BackgroundTransition(
+                    action_name='fulfil',
+                    sources=['a'],
+                    target='b',
+                    in_progress_state='fulfilling',
+                    conditions=[lambda i, **k: True],
+                    queue='q',
+                ),
+            ]
+
+        self.assertEqual(_Parent.nested_processes, [_Child])
 
     def test_distinct_background_names_across_nested_accepted(self):
         class _Child(Process):

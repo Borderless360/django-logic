@@ -453,3 +453,43 @@ class OwnerlessAmbiguousContainmentTests(TestCase):
         self.assertIn('ok,', widget.se_log)
         tm.refresh_from_db()
         self.assertTrue(tm.is_completed)
+
+
+@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
+class SyncBackgroundSharedNameTests(TestCase):
+    """A synchronous and a background transition may now share an action_name
+    in one process, routed by a condition. Phase 1 resolves the call by
+    conditions; phase 2 (is_background filter) only ever restores the background
+    one, so the synchronous namesake never interferes."""
+
+    def test_condition_routes_to_synchronous_variant(self):
+        conv = Conversation.objects.create(
+            status='open', source_integration='gmail'
+        )
+        conv.mixed_process.archive()
+
+        conv.refresh_from_db()
+        self.assertEqual(conv.status, 'archived_sync')   # ran inline
+        self.assertIn('sync_archive,', conv.se_log)
+        self.assertNotIn('bg_archive,', conv.se_log)
+        # Synchronous path creates no durable row.
+        self.assertFalse(
+            TransitionMessage.objects.filter(instance_id=str(conv.pk)).exists()
+        )
+
+    def test_condition_routes_to_background_variant(self):
+        conv = Conversation.objects.create(
+            status='open', source_integration='dummy'
+        )
+        conv.mixed_process.archive()
+
+        conv.refresh_from_db()
+        self.assertEqual(conv.status, 'archived_bg')     # durable, completed
+        self.assertIn('bg_archive,', conv.se_log)
+        self.assertNotIn('sync_archive,', conv.se_log)
+        tm = TransitionMessage.objects.get(instance_id=str(conv.pk))
+        self.assertTrue(tm.is_completed)
+        self.assertEqual(tm.transition_name, 'archive')
+        self.assertEqual(
+            tm.owning_process_class, 'tests.background.models.MixedSyncBgProcess'
+        )

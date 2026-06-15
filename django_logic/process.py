@@ -327,23 +327,27 @@ def _validate_unique_background_action_names(process_cls):
     an ``action_name`` within a single process class**: the owner + name pair
     no longer identifies one transition.
 
-    What is now ALLOWED (this is the fix for the condition-disambiguated
-    nested-process pattern): a background ``action_name`` may be reused across
-    *distinct* nested process classes — e.g. per-integration ``Gmail`` /
-    ``Dummy`` sub-processes each declaring a background
-    ``send_message_via_integration`` selected by a condition on the instance.
-    Phase 1's ``get_transition_by_action_name`` resolves exactly one (the
-    conditions are mutually exclusive); phase 2 restores that exact one via
-    the recorded owner.
+    Everything else is allowed, because phase 2 can always resolve it:
 
-    Still rejected: a background ``action_name`` colliding with a synchronous
-    ``Transition`` of the same name anywhere in the tree. Phase 1's
-    action-name resolution cannot tell a synchronous and a background
-    transition of the same name apart structurally (only conditions can), so
-    the collision is a footgun; keeping it an error preserves the pre-existing
-    contract. Sync-only ``action_name`` duplication remains allowed (the sync
-    path disambiguates via conditions/permissions at runtime) — courier-style
-    polymorphism.
+    * The same background ``action_name`` on **distinct** nested process classes
+      — the condition-disambiguated pattern (e.g. per-integration ``Gmail`` /
+      ``Dummy`` sub-processes each declaring a background
+      ``send_message_via_integration`` selected by a condition on the instance).
+      Phase 1's ``get_transition_by_action_name`` resolves exactly one (the
+      conditions are mutually exclusive); phase 2 restores that exact one via
+      the recorded owner.
+    * A background ``action_name`` that **coincides with a synchronous
+      ``Transition``** of the same name. Phase 2 only ever restores background
+      transitions and ``runner._find_transition`` filters to ``is_background``,
+      so a synchronous namesake is invisible to restore. Phase 1 resolves the
+      *call* by conditions/permissions exactly as it does for duplicate
+      synchronous names — a genuinely ambiguous call raises
+      ``TransitionNotAllowed`` at runtime, the same runtime-validated contract
+      that already governs duplicate synchronous ``action_name``s (courier-style
+      polymorphism).
+
+    So the single structural invariant phase 2 needs — and all this validator
+    enforces — is background-``action_name`` uniqueness *within one class*.
     """
     def _where(proc_cls, transition):
         return (
@@ -351,53 +355,34 @@ def _validate_unique_background_action_names(process_cls):
             f"{type(transition).__name__}"
         )
 
-    # name -> first declaring location, recorded once per name across the tree
-    # (a name may legitimately appear on several nested classes now).
-    background_names: dict[str, str] = {}
-    sync_names: dict[str, str] = {}
-
     for proc_cls in _iter_process_tree(process_cls):
         # Within ONE process class a background action_name must be unique —
         # (owning class, action_name) is phase 2's whole key, so two in the
-        # same class are indistinguishable. Across classes, duplicates are
-        # fine (disambiguated by conditions at phase 1, by the owner at
-        # phase 2).
+        # same class are indistinguishable. Across classes, and against
+        # synchronous transitions, duplicates are fine (resolved by conditions
+        # at phase 1, by the owner + is_background filter at phase 2).
         local_background: dict[str, str] = {}
         for transition in proc_cls.transitions or []:
+            if not getattr(transition, 'is_background', False):
+                continue
             name = transition.action_name
-            if getattr(transition, 'is_background', False):
-                if name in local_background:
-                    raise ImproperlyConfigured(
-                        f"Process {process_cls.__module__}."
-                        f"{process_cls.__name__} (or its nested processes) "
-                        f"has two background transitions sharing "
-                        f"action_name='{name}' within a single process class "
-                        f"({local_background[name]} and "
-                        f"{_where(proc_cls, transition)}). Phase-2 restore "
-                        f"identifies a background transition by (owning "
-                        f"process class, action_name) — two in the same class "
-                        f"are indistinguishable, so background action_names "
-                        f"must be unique within a process class. Move one to "
-                        f"a separate nested process (duplicates across "
-                        f"distinct nested processes are allowed, disambiguated "
-                        f"by conditions) or rename it."
-                    )
-                local_background[name] = _where(proc_cls, transition)
-                background_names.setdefault(name, _where(proc_cls, transition))
-            else:
-                sync_names.setdefault(name, _where(proc_cls, transition))
-
-    for name, bg_where in background_names.items():
-        if name in sync_names:
-            raise ImproperlyConfigured(
-                f"Process {process_cls.__module__}.{process_cls.__name__} "
-                f"(or its nested processes) has a synchronous Transition "
-                f"named '{name}' ({sync_names[name]}) that collides with a "
-                f"background transition of the same name ({bg_where}). Phase 1 "
-                f"resolves an action_name to a single transition and cannot "
-                f"tell a synchronous and a background transition of the same "
-                f"name apart by name alone; rename one."
-            )
+            if name in local_background:
+                raise ImproperlyConfigured(
+                    f"Process {process_cls.__module__}."
+                    f"{process_cls.__name__} (or its nested processes) "
+                    f"has two background transitions sharing "
+                    f"action_name='{name}' within a single process class "
+                    f"({local_background[name]} and "
+                    f"{_where(proc_cls, transition)}). Phase-2 restore "
+                    f"identifies a background transition by (owning "
+                    f"process class, action_name) — two in the same class "
+                    f"are indistinguishable, so background action_names "
+                    f"must be unique within a process class. Move one to "
+                    f"a separate nested process (duplicates across "
+                    f"distinct nested processes are allowed, disambiguated "
+                    f"by conditions) or rename it."
+                )
+            local_background[name] = _where(proc_cls, transition)
 
 
 class ProcessManager:

@@ -750,11 +750,13 @@ Phase 1 resolves exactly one transition (the conditions are mutually exclusive)
 and records the **owning nested process class** on the `TransitionMessage`;
 phase 2 restores that exact transition from the recorded owner — it does not
 re-evaluate the condition, so routing is deterministic even if the instance
-changes mid-flight. Constraints: a background `action_name` must still be
+changes mid-flight. Constraints: a background `action_name` must only be
 **unique within a single process class** (two in one class are
-indistinguishable at restore), every `in_progress_state` must be unique across
-the whole tree, and a background `action_name` may not collide with a
-synchronous transition of the same name.
+indistinguishable at restore), and every `in_progress_state` must be unique
+across the whole tree. A background `action_name` *may* coincide with a
+synchronous transition of the same name (phase 2 restores only background
+transitions; phase 1 routes the call by condition) — so a synchronous fast-path
+and a durable background slow-path can share one `action_name`.
 
 > **Upgrade note.** When you turn an existing, uniquely-named background
 > transition into this shared-name nested pattern, deploy it with no in-flight

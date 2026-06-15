@@ -17,13 +17,21 @@
 
 ### Changed
 
-- **`_validate_unique_background_action_names` is relaxed.** It previously
-  rejected *any* two background transitions sharing an `action_name` across a
-  process and its nested tree. It now rejects only the genuinely ambiguous
-  case — two background transitions sharing an `action_name` **within a single
-  process class** (where `(owning class, action_name)` no longer identifies
-  one transition). Duplicates across **distinct** nested process classes are
-  allowed. The synchronous-vs-background name-collision check is unchanged.
+- **`_validate_unique_background_action_names` is relaxed to a single
+  invariant.** It previously rejected *any* two background transitions sharing
+  an `action_name` across a process and its nested tree, and any background
+  name that collided with a synchronous one. It now rejects only the genuinely
+  ambiguous case — two **background** transitions sharing an `action_name`
+  **within a single process class** (where `(owning class, action_name)` no
+  longer identifies one transition). Both a shared background name across
+  **distinct** nested process classes, and a background name that **coincides
+  with a synchronous** transition, are now allowed: phase 2 only ever restores
+  background transitions (`_find_transition` filters to `is_background`), so a
+  synchronous namesake is invisible to restore, and phase 1 resolves the call
+  by conditions/permissions exactly as it already does for duplicate
+  synchronous names (an ambiguous call raises `TransitionNotAllowed` at
+  runtime). This enables, e.g., a synchronous fast-path and a durable
+  background slow-path under one `action_name`, routed by a condition.
 - **Phase-2 restore (`runner._find_transition`) prefers the recorded owner**
   and considers only `is_background` transitions. The owner is recorded for
   every background transition started through the Process entrypoint (for a

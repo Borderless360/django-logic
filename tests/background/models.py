@@ -506,3 +506,46 @@ class SharedActionConversationProcess(Process):
 ProcessManager.bind_model_process(
     Conversation, SharedActionConversationProcess, state_field='status'
 )
+
+
+# A synchronous transition and a background transition SHARING an action_name in
+# one process, routed by a condition on the instance (issue #98: this is allowed
+# now that phase 2 filters to is_background — the sync namesake is invisible to
+# restore). 'archive' runs inline for gmail and durably for dummy.
+
+
+def conv_sync_archive(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'sync_archive,'
+    instance.save(update_fields=['se_log'])
+
+
+def conv_bg_archive(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'bg_archive,'
+    instance.save(update_fields=['se_log'])
+
+
+class MixedSyncBgProcess(Process):
+    process_name = 'mixed_process'
+    transitions = [
+        Transition(
+            action_name='archive',
+            sources=['open'],
+            target='archived_sync',
+            conditions=[conv_is_gmail],
+            side_effects=[conv_sync_archive],
+        ),
+        BackgroundTransition(
+            action_name='archive',
+            sources=['open'],
+            target='archived_bg',
+            in_progress_state='archiving_bg',
+            conditions=[conv_is_dummy],
+            queue='django_logic.fast',
+            side_effects=[conv_bg_archive],
+        ),
+    ]
+
+
+ProcessManager.bind_model_process(
+    Conversation, MixedSyncBgProcess, state_field='status'
+)
