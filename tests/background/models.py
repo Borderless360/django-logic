@@ -453,3 +453,56 @@ class AmbiguousConversationProcess(Process):
 ProcessManager.bind_model_process(
     Conversation, AmbiguousConversationProcess, state_field='status'
 )
+
+
+# Two nested BackgroundActions that SHARE an action_name with IDENTICAL sources
+# and no in_progress_state — the worst-case for an owner-less restore (issue #98
+# review finding): the phase-2 state guard checks only ``current in sources`` and
+# so cannot tell the siblings apart. A row that lost its owner must NOT be
+# resolved by first-match here, or the wrong integration's side-effects fire.
+
+
+def conv_act_a(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'act_a,'
+    instance.save(update_fields=['se_log'])
+
+
+def conv_act_b(instance, **kwargs):
+    instance.se_log = (instance.se_log or '') + 'act_b,'
+    instance.save(update_fields=['se_log'])
+
+
+class SharedActionAProcess(Process):
+    process_name = 'shared_act_a'
+    transitions = [
+        BackgroundAction(
+            action_name='shared_sync',
+            sources=['open'],
+            conditions=[conv_is_gmail],
+            queue='django_logic.fast',
+            side_effects=[conv_act_a],
+        ),
+    ]
+
+
+class SharedActionBProcess(Process):
+    process_name = 'shared_act_b'
+    transitions = [
+        BackgroundAction(
+            action_name='shared_sync',
+            sources=['open'],
+            conditions=[conv_is_dummy],
+            queue='django_logic.fast',
+            side_effects=[conv_act_b],
+        ),
+    ]
+
+
+class SharedActionConversationProcess(Process):
+    process_name = 'shared_action_process'
+    nested_processes = [SharedActionAProcess, SharedActionBProcess]
+
+
+ProcessManager.bind_model_process(
+    Conversation, SharedActionConversationProcess, state_field='status'
+)

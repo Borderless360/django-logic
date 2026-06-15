@@ -59,14 +59,21 @@ class TransitionMessage(TimeStampedModel):
     field_name = models.CharField(max_length=100, blank=True, default='')
     transition_name = models.CharField(max_length=100)
     # Dotted path of the (possibly nested) Process class that DECLARES the
-    # transition — distinct from the bound ``process_class`` stored in
-    # ``kwargs`` (the process this call entered through). Phase 2 uses it to
-    # restore the EXACT background transition when an ``action_name`` is shared
-    # across condition-disambiguated nested processes (e.g. per-integration
-    # Gmail/Dummy sub-processes). Blank on rows created before this discriminator
-    # existed and whenever the transition lives on the bound process itself
-    # (no nesting); phase 2 then falls back to first-match by ``transition_name``.
-    owning_process_class = models.CharField(max_length=255, blank=True, default='')
+    # transition. Phase 2 uses it to restore the EXACT background transition when
+    # an ``action_name`` is shared across condition-disambiguated nested
+    # processes (e.g. per-integration Gmail/Dummy sub-processes). It is recorded
+    # for EVERY background transition started through the Process entrypoint —
+    # for a transition on the bound process itself it equals the bound class
+    # path; for a nested one it is the nested class path. Blank only on rows
+    # created before this discriminator existed (pre-0.4.x) or, rarely, ones
+    # enqueued outside the Process entrypoint; phase 2 then resolves by
+    # ``transition_name`` (only when that name is unambiguous across the tree).
+    #
+    # TextField (not a length-capped CharField) to mirror the unbounded
+    # ``process_class`` stored in ``kwargs``: a deeply-namespaced dotted path
+    # must never overflow and abort phase 1. Never indexed — only read by pk in
+    # phase-2 restore and compared for equality.
+    owning_process_class = models.TextField(blank=True, default='')
     queue_name = models.CharField(max_length=100)
 
     # Per-attempt timeout configured on ``BackgroundTransition(timeout=N)``.

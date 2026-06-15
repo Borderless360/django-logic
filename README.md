@@ -756,6 +756,14 @@ indistinguishable at restore), every `in_progress_state` must be unique across
 the whole tree, and a background `action_name` may not collide with a
 synchronous transition of the same name.
 
+> **Upgrade note.** When you turn an existing, uniquely-named background
+> transition into this shared-name nested pattern, deploy it with no in-flight
+> rows for that action (or split it across two deploys). Rows enqueued by older
+> code don't carry the owning-process discriminator; once the name becomes
+> shared, phase 2 can't tell which nested sibling such a row meant and finalizes
+> it without running its side-effects (safe, but the work won't run). Rows
+> enqueued after the upgrade always record their owner.
+
 ### Testing your processes
 
 Set `BACKGROUND_EXECUTION='sync'` in your test settings — the global default is `'celery'`, so this opt-in is required — and every `instance.process.fulfil(...)` call runs phase 1 **and** phase 2 inline, no broker involved:

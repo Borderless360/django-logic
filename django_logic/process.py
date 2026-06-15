@@ -126,14 +126,15 @@ class Process:
                 f"{self.__class__.__module__}.{self.__class__.__name__}"
             )
         if getattr(transition, 'is_background', False):
-            # Record the (possibly nested) process class that DECLARES this
-            # transition — distinct from ``process_class`` (the bound process
-            # this call entered through). Phase-2 restore (runner._find_transition)
-            # uses it to pick the exact background transition when an
-            # ``action_name`` is shared across condition-disambiguated nested
-            # processes. Overwrite, never setdefault: a chained next_transition
-            # forwards the previous transition's kwargs, and that owner is not
-            # this transition's.
+            # Record the process class that DECLARES this transition. For a
+            # nested transition this differs from ``process_class`` (the bound
+            # process this call entered through); for a transition on the bound
+            # process itself the two coincide. Phase-2 restore
+            # (runner._find_transition) uses it to pick the exact background
+            # transition when an ``action_name`` is shared across
+            # condition-disambiguated nested processes. Overwrite, never
+            # setdefault: a chained next_transition forwards the previous
+            # transition's kwargs, and that owner is not this transition's.
             kwargs['owning_process_class'] = (
                 f"{type(owning_process).__module__}."
                 f"{type(owning_process).__name__}"
