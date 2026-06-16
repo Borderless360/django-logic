@@ -1,7 +1,14 @@
-"""Models + processes for background-transition tests."""
+"""Models + processes for background-transition tests.
+
+Process↔model binding for this app happens in one place only —
+``tests/background/apps.py`` (``BackgroundTestsConfig.ready()``). Binding at
+module import time here would re-create the model→process→actions→model
+circular import (issue #100); ``ready()`` runs after every app's models are
+loaded, so it is the single supported binding site.
+"""
 from django.db import models
 
-from django_logic import Process, ProcessManager, Transition
+from django_logic import Process, Transition
 from django_logic.background import BackgroundAction, BackgroundTransition
 
 
@@ -133,9 +140,6 @@ class WidgetProcess(Process):
     ]
 
 
-ProcessManager.bind_model_process(Widget, WidgetProcess, state_field='status')
-
-
 def bg_audit_ok(instance, **kwargs):
     """Harmless side-effect for the audit process (R5 fixtures)."""
     instance.se_log = (instance.se_log or '') + 'audit_ok,'
@@ -160,9 +164,6 @@ class WidgetAuditProcess(Process):
             side_effects=[bg_audit_ok],
         ),
     ]
-
-
-ProcessManager.bind_model_process(Widget, WidgetAuditProcess, state_field='audit_status')
 
 
 # --- Filtered-default-manager fixtures (issue #90) -------------------------
@@ -207,9 +208,6 @@ class ArchivableProcess(Process):
             side_effects=[bg_noop],
         ),
     ]
-
-
-ProcessManager.bind_model_process(ArchivableWidget, ArchivableProcess, state_field='status')
 
 
 # --- Nested-process background transitions ---------------------------------
@@ -289,9 +287,6 @@ class WidgetParentProcess(Process):
 
     process_name = 'parent_process'
     nested_processes = [NestedBgChildProcess, NestedBgMidProcess]
-
-
-ProcessManager.bind_model_process(Widget, WidgetParentProcess, state_field='status')
 
 
 # --- Condition-disambiguated nested background transitions (issue #98) ------
@@ -399,9 +394,6 @@ class ConversationProcess(Process):
     nested_processes = [GmailConversationProcess, DummyConversationProcess]
 
 
-ProcessManager.bind_model_process(Conversation, ConversationProcess, state_field='status')
-
-
 # Overlapping-condition sibling background transitions (issue #98). The relaxed
 # validator allows a shared background action_name across distinct nested
 # classes regardless of whether the conditions are mutually exclusive — so a
@@ -448,11 +440,6 @@ class AmbiguousBProcess(Process):
 class AmbiguousConversationProcess(Process):
     process_name = 'ambiguous_process'
     nested_processes = [AmbiguousAProcess, AmbiguousBProcess]
-
-
-ProcessManager.bind_model_process(
-    Conversation, AmbiguousConversationProcess, state_field='status'
-)
 
 
 # Two nested BackgroundActions that SHARE an action_name with IDENTICAL sources
@@ -503,11 +490,6 @@ class SharedActionConversationProcess(Process):
     nested_processes = [SharedActionAProcess, SharedActionBProcess]
 
 
-ProcessManager.bind_model_process(
-    Conversation, SharedActionConversationProcess, state_field='status'
-)
-
-
 # A synchronous transition and a background transition SHARING an action_name in
 # one process, routed by a condition on the instance (issue #98: this is allowed
 # now that phase 2 filters to is_background — the sync namesake is invisible to
@@ -546,6 +528,66 @@ class MixedSyncBgProcess(Process):
     ]
 
 
-ProcessManager.bind_model_process(
-    Conversation, MixedSyncBgProcess, state_field='status'
-)
+# --- Test-local processes attached to Widget -------------------------------
+# These were previously defined and bound inside their test modules. They live
+# here so that every bind_model_process call for this app is centralised in
+# apps.py (the single binding site); the tests import these symbols.
+
+
+# Used by tests/test_scenario.py::GuardedApprovalScenario — a minimal process
+# with a condition + permission, bound under the `guard` process name.
+
+def _stock_ok(instance):
+    return getattr(instance, '_stock_available', True)
+
+
+def _is_staff(instance, user):
+    return bool(user and getattr(user, 'is_staff', False))
+
+
+class ScenarioGuardProcess(Process):
+    process_name = 'guard'
+    transitions = [
+        Transition(
+            action_name='approve',
+            sources=['draft'],
+            target='approved',
+            conditions=[_stock_ok],
+            permissions=[_is_staff],
+        ),
+    ]
+
+
+# Used by tests/test_issue_fixes_testing.py (#96) — `approve` chains into
+# `notify` via next_transition; the follow-up's side-effect must be tracked
+# even though only `approve` was driven. ``RAN`` records call order for the
+# test's assertions.
+
+RAN: list = []
+
+
+def chain_first(instance, **kwargs):
+    RAN.append('chain_first')
+
+
+def chain_followup(instance, **kwargs):
+    RAN.append('chain_followup')
+
+
+class WidgetChainProcess(Process):
+    process_name = 'chain_process'
+    transitions = [
+        Transition(
+            action_name='approve',
+            sources=['draft'],
+            target='approved',
+            side_effects=[chain_first],
+            next_transition='notify',
+        ),
+        Transition(
+            action_name='notify',
+            sources=['approved'],
+            target='notified',
+            side_effects=[chain_followup],
+        ),
+    ]

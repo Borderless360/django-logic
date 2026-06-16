@@ -19,7 +19,7 @@ from unittest.mock import patch
 from django.core.cache import cache
 from django.test import override_settings, tag
 
-from django_logic import Transition, Process, ProcessManager
+from django_logic import Transition
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State, RedisState
 
@@ -58,23 +58,21 @@ class TestNestedTransitionLockContention(StabilityTestCase):
         state = State(order, 'status', process_name='process')
         self.track_lock(state)
 
-        ProcessManager.bind_model_process(
-            Order, OrderProcessWithNestedCallback, state_field='status'
+        # OrderProcessWithNestedCallback shares the 'process' name with the
+        # app-bound OrderProcess, so we drive it directly without rebinding the
+        # model. Its fulfill callback (trigger_nested_transition) calls
+        # order.process.complete(), which resolves to the OrderProcess bound in
+        # tests/stability/apps.py — the single binding site — and succeeds
+        # because the lock is already released before callbacks run.
+        process = OrderProcessWithNestedCallback(
+            field_name='status', instance=order
         )
-        try:
-            process = OrderProcessWithNestedCallback(
-                field_name='status', instance=order
-            )
-            process.fulfill()
+        process.fulfill()
 
-            order.refresh_from_db()
-            # Callback triggers complete() which succeeds because lock is released
-            self.assertEqual(order.status, 'completed')
-            self.assert_unlocked(state)
-        finally:
-            ProcessManager.bind_model_process(
-                Order, OrderProcess, state_field='status'
-            )
+        order.refresh_from_db()
+        # Callback triggers complete() which succeeds because lock is released
+        self.assertEqual(order.status, 'completed')
+        self.assert_unlocked(state)
 
     def test_side_effect_nested_same_instance_rejected(self):
         """

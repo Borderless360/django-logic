@@ -11,36 +11,12 @@ process bound under `guard` (no new migrations).
 from django.conf import settings
 from django.contrib.auth import get_user_model
 
-from django_logic import Process, ProcessManager, Transition
 from django_logic.background.models import TransitionMessage
 from django_logic.testing import ProcessScenario
-from tests.background.models import Widget, WidgetProcess
-
-
-# --- a minimal process with a condition + permission, bound under `guard` ---
-
-def _stock_ok(instance):
-    return getattr(instance, '_stock_available', True)
-
-
-def _is_staff(instance, user):
-    return bool(user and getattr(user, 'is_staff', False))
-
-
-class ScenarioGuardProcess(Process):
-    process_name = 'guard'
-    transitions = [
-        Transition(
-            action_name='approve',
-            sources=['draft'],
-            target='approved',
-            conditions=[_stock_ok],
-            permissions=[_is_staff],
-        ),
-    ]
-
-
-ProcessManager.bind_model_process(Widget, ScenarioGuardProcess, state_field='status')
+# ScenarioGuardProcess (a minimal process with a condition + permission, bound
+# under the `guard` process name) lives in tests.background.models and is bound
+# in tests/background/apps.py — the single binding site for the app.
+from tests.background.models import ScenarioGuardProcess, Widget, WidgetProcess
 
 
 class WidgetFulfilmentScenario(ProcessScenario):
