@@ -12,10 +12,14 @@ attributes are DB-coerced field types.
 """
 from django.test import override_settings
 
-from django_logic import Process, ProcessManager, Transition
 from django_logic.testing import ProcessScenario
 from django_logic.testing.snapshot import _jsonable, from_snapshot, snapshot
-from tests.background.models import Widget, WidgetProcess
+# WidgetChainProcess (approve chains into notify via next_transition) and its
+# RAN call-order log live in tests.background.models and are bound in
+# tests/background/apps.py — the single binding site for the app.
+from tests.background.models import (
+    RAN, Widget, WidgetChainProcess, WidgetProcess,
+)
 
 
 _SYNC_SETTINGS = {
@@ -26,42 +30,6 @@ _SYNC_SETTINGS = {
     'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
     'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
 }
-
-
-RAN: list = []
-
-
-def chain_first(instance, **kwargs):
-    RAN.append('chain_first')
-
-
-def chain_followup(instance, **kwargs):
-    RAN.append('chain_followup')
-
-
-class WidgetChainProcess(Process):
-    """approve chains into notify via next_transition — the follow-up's
-    side-effect must be tracked even though only 'approve' was driven."""
-
-    process_name = 'chain_process'
-    transitions = [
-        Transition(
-            action_name='approve',
-            sources=['draft'],
-            target='approved',
-            side_effects=[chain_first],
-            next_transition='notify',
-        ),
-        Transition(
-            action_name='notify',
-            sources=['approved'],
-            target='notified',
-            side_effects=[chain_followup],
-        ),
-    ]
-
-
-ProcessManager.bind_model_process(Widget, WidgetChainProcess, state_field='status')
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

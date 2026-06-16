@@ -189,7 +189,8 @@ workspace). The single-task model below replaces both.
 ### 2.2 API
 
 ```python
-from django_logic import Process, Transition, ProcessManager
+# process.py
+from django_logic import Process, Transition
 from django_logic.background import BackgroundTransition, BackgroundAction
 
 class OrderProcess(Process):
@@ -235,7 +236,19 @@ class OrderProcess(Process):
         ),
     ]
 
-ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
+# apps.py — bind in AppConfig.ready() (the single supported binding site;
+# binding at module import time creates a model→process→actions→model cycle,
+# issue #100).
+from django.apps import AppConfig
+from django_logic import ProcessManager
+
+class OrdersConfig(AppConfig):
+    name = 'orders'
+
+    def ready(self):
+        from .models import Order
+        from .process import OrderProcess
+        ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
 ```
 
 Omitting `queue=` raises `ImproperlyConfigured` at import time.

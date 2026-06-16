@@ -6,7 +6,10 @@ concurrency, crash recovery, and locking behavior, not business logic.
 """
 from django.db import models
 
-from django_logic import Process, Transition, Action, ProcessManager
+from django_logic import Process, Transition, Action
+
+# Process↔model binding for this app happens only in tests/stability/apps.py
+# (StabilityConfig.ready()) — the single binding site. See issue #100.
 
 
 # ---------------------------------------------------------------------------
@@ -181,12 +184,3 @@ class PaymentProcess(Process):
             side_effects=[side_effect_two],
         ),
     ]
-
-
-ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
-ProcessManager.bind_model_process(
-    MultiProcessOrder, FulfillmentProcess, state_field='fulfillment_status'
-)
-ProcessManager.bind_model_process(
-    MultiProcessOrder, PaymentProcess, state_field='payment_status'
-)

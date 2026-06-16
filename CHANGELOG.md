@@ -17,6 +17,18 @@
 
 ### Changed
 
+- **Standardised process↔model binding on `AppConfig.ready()` (issue #100).**
+  `ProcessManager.bind_model_process(...)` is now documented and practised in
+  exactly one place — the app's `AppConfig.ready()` — instead of at module
+  import time in `models.py`/`process.py`. Binding at import time forced a
+  `model → process → actions → model` circular import (the process and its
+  side-effect/condition/permission functions both reference the model), whose
+  only workaround was scattering `from .models import X` calls inside every
+  action function. Binding in `ready()` (which runs after every app's models are
+  loaded) removes the cycle, so action modules import their model at the top
+  level normally. No library API change — `bind_model_process` is unchanged;
+  the README, `CLAUDE.md`, the Cursor rule, and the bundled test apps
+  (`tests/background`, `tests/stability`) now bind in `ready()` only.
 - **`_validate_unique_background_action_names` is relaxed to a single
   invariant.** It previously rejected *any* two background transitions sharing
   an `action_name` across a process and its nested tree, and any background

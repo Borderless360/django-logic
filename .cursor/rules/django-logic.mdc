@@ -83,7 +83,8 @@ These rules are distilled from a full production-style validation on Heroku
 ## Minimal example
 
 ```python
-from django_logic import Process, Transition, ProcessManager
+# process.py
+from django_logic import Process, Transition
 from django_logic.background import BackgroundTransition
 
 class OrderProcess(Process):
@@ -99,9 +100,28 @@ class OrderProcess(Process):
             callbacks=[notify_customer],                 # best-effort
         ),
     ]
+```
 
-ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
-# drive it: order.process.fulfill(user=request.user)
+**Bind in exactly one place — the app's `AppConfig.ready()`** — never at module
+import time in `models.py`/`process.py` (that forces a
+`model → process → actions → model` circular import; issue #100). `ready()`
+runs after all models are loaded, so the cycle never forms and actions can
+import the model at the top level.
+
+```python
+# apps.py
+from django.apps import AppConfig
+from django_logic import ProcessManager
+
+class OrdersConfig(AppConfig):
+    name = 'orders'
+
+    def ready(self):
+        from .models import Order
+        from .process import OrderProcess
+        ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
+
+# drive it from a view/task/method: order.process.fulfill(user=request.user)
 ```
 
 For the parent/child (order → many fulfillments) pattern and full error

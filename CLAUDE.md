@@ -13,9 +13,17 @@ workers + induced worker crashes, deploys, broker loss, and pgbouncer).
 Model a workflow as a `Process` subclass: a list of `transitions` (edges).
 Each transition has `sources`, `target`, and optional `conditions`,
 `permissions`, `side_effects`, `callbacks`, `failure_side_effects`,
-`failure_callbacks`. Bind it with
-`ProcessManager.bind_model_process(Model, MyProcess, state_field='status')`,
-then drive it via `instance.process.<action>(...)`.
+`failure_callbacks`. **Bind the model to its process in exactly one place — the
+app's `AppConfig.ready()`** — with
+`ProcessManager.bind_model_process(Model, MyProcess, state_field='status')`
+(import the model and process *inside* `ready()`). Never bind at module import
+time in `models.py`/`process.py`: that forces a
+`model → process → actions → model` circular import (issue #100), because the
+process and its action functions both reference the model. `ready()` runs after
+every app's models are loaded, so the cycle never forms and action modules can
+import the model at the top level. Then drive it via
+`instance.process.<action>(...)` from request/task/method bodies (never at
+module top or in another app's `ready()`).
 
 Use `BackgroundTransition` (durable, runs side-effects on a Celery worker,
 writes target/`failed_state`) or `BackgroundAction` (same durability, no state

@@ -76,7 +76,7 @@ class Order(models.Model):
     # ... other fields
 
 # process.py
-from django_logic import Process, Transition, ProcessManager
+from django_logic import Process, Transition
 
 class OrderProcess(Process):
     transitions = [
@@ -102,7 +102,21 @@ class OrderProcess(Process):
         ),
     ]
 
-ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
+# apps.py — bind the process in your app's AppConfig.ready(). This is the one
+# supported place to bind: ready() runs after every app's models are loaded, so
+# it avoids the model→process→actions→model circular import that binding at
+# module import time (in models.py or process.py) creates. See "Bind the
+# process" below.
+from django.apps import AppConfig
+from django_logic import ProcessManager
+
+class OrdersConfig(AppConfig):
+    name = 'orders'
+
+    def ready(self):
+        from .models import Order
+        from .process import OrderProcess
+        ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
 
 # Usage
 order = Order.objects.create()
@@ -176,21 +190,42 @@ class MyProcess(BaseProcess):
     ]
 ```
 
-### 4. Bind the process with a model
+### 4. Bind the process in your app's `AppConfig.ready()`
+
+**Binding happens in exactly one place: your app's `AppConfig.ready()`.** Do
+**not** bind at module import time (in `models.py` or `process.py`).
+
+A process references its model (and its side-effect/condition/permission
+functions reference it too), so binding `Model ⇄ Process` at import time forces
+`models.py → process.py → actions.py → models.py` — a circular import
+(issue #100). The only escape is scattering `from .models import X` calls inside
+every action function. `ready()` removes the cycle entirely: Django imports
+**all** apps' models before running **any** `ready()`, so by the time you bind,
+every model already exists and your action modules can import the model at the
+top level like normal code.
+
 ```python
-from django_logic import Process as BaseProcess, Transition, ProcessManager, Action
-from .models import Invoice, MY_STATE_CHOICES
+# apps.py
+from django.apps import AppConfig
+from django_logic import ProcessManager
 
 
-class MyProcess(BaseProcess):
-    transitions = [
-        Transition(action_name='approve', sources=['draft'], target='approved'),
-        Transition(action_name='void', sources=['draft', 'approved'], target='void'),
-        Action(action_name='update', sources=['draft', 'approved'], side_effects=[update_data]),
-    ]
+class InvoicingConfig(AppConfig):
+    name = 'invoicing'
 
-ProcessManager.bind_model_process(Invoice, MyProcess, state_field='my_state')
-``` 
+    def ready(self):
+        # Import inside ready() — never at module top in apps.py.
+        from .models import Invoice
+        from .process import MyProcess
+        ProcessManager.bind_model_process(Invoice, MyProcess, state_field='my_state')
+```
+
+Then drive it from request/task/method bodies via `invoice.process.<action>(...)`
+— never at module-import time or in another app's `ready()`.
+
+> Make sure the app is wired so `ready()` runs — list it in `INSTALLED_APPS`
+> (Django auto-discovers the single `AppConfig` in `apps.py`).
+
 
 ### 5. Advance your process with conditions, side-effects, and callbacks
 Use next_transition to automatically continue the process. 
@@ -390,7 +425,7 @@ def send_shipping_notification(instance, **kwargs):
     pass
 
 # process.py
-from django_logic import Process, Transition, ProcessManager
+from django_logic import Process, Transition
 
 class OrderProcess(Process):
     process_name = 'order_process'
@@ -444,7 +479,18 @@ class OrderProcess(Process):
         ),
     ]
 
-ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
+# apps.py — bind in AppConfig.ready() (the one supported place; see "Bind the
+# process"). Never bind at module import time.
+from django.apps import AppConfig
+from django_logic import ProcessManager
+
+class ShopConfig(AppConfig):
+    name = 'shop'
+
+    def ready(self):
+        from .models import Order
+        from .process import OrderProcess
+        ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
 
 # views.py
 from django.shortcuts import render, redirect
@@ -540,7 +586,7 @@ If you're migrating from Django FSM, the main changes are:
 1. Replace `@transition` decorator with `Transition` class
 2. Move transition logic to side effects and callbacks
 3. Group related transitions into Process classes
-4. Update state field management to use ProcessManager
+4. Bind each model to its process with `ProcessManager.bind_model_process(...)` in your app's `AppConfig.ready()` (see [Bind the process](#4-bind-the-process-in-your-apps-appconfigready))
 
 ## Advanced Features
 
@@ -651,7 +697,7 @@ CACHES = {
 ### Declare a background transition
 
 ```python
-from django_logic import Process, Transition, ProcessManager
+from django_logic import Process, Transition
 from django_logic.background import BackgroundTransition, BackgroundAction
 
 
@@ -691,7 +737,17 @@ class OrderProcess(Process):
     ]
 
 
-ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
+# apps.py — bind in AppConfig.ready() (the one supported place; see "Bind the process").
+from django.apps import AppConfig
+from django_logic import ProcessManager
+
+class ShopConfig(AppConfig):
+    name = 'shop'
+
+    def ready(self):
+        from .models import Order
+        from .process import OrderProcess
+        ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')
 ```
 
 ### Call it
@@ -740,7 +796,17 @@ class DummyConversationProcess(Process):
 class ConversationProcess(Process):
     nested_processes = [GmailConversationProcess, DummyConversationProcess]
 
-ProcessManager.bind_model_process(Conversation, ConversationProcess, state_field='status')
+# apps.py — bind in AppConfig.ready() (the one supported place; see "Bind the process").
+from django.apps import AppConfig
+from django_logic import ProcessManager
+
+class MessagingConfig(AppConfig):
+    name = 'messaging'
+
+    def ready(self):
+        from .models import Conversation
+        from .process import ConversationProcess
+        ProcessManager.bind_model_process(Conversation, ConversationProcess, state_field='status')
 
 # Generic caller — routes by source_integration, no integration knowledge here:
 conversation.process.send_message_via_integration(user=request.user)
