@@ -14,6 +14,8 @@ dl/
 └── docs/
     ├── INDEX.md                      ← you are here
     ├── PLAN.md                       ← master execution plan (stages 1–5)
+    ├── TESTING_GUIDE.md              ← how to test your processes:
+    │                                   journeys-not-mirrors + scenario catalog
     │
     ├── design/                       ← active design decisions
     │   ├── BACKGROUND_TRANSITION_ANALYSIS.md   ← chosen design, crash
@@ -51,7 +53,13 @@ For someone new to this project, read in this order:
    `ProcessScenario` API, AI-readable output, state snapshots.
    Primary input for Stage 3.
 
-5. **[research/](research/)** — Historical notes: PR #75 review
+5. **[TESTING_GUIDE.md](TESTING_GUIDE.md)** — The practical how-to for
+   testing your own processes: the *journeys, not mirrors* principle and
+   guardrails, the full scenario catalog (gating, failure paths, the
+   re-raise/swallow contract, domain-outcome assertions, the cross-machine
+   cascade), and the `ProcessScenario` API reference.
+
+6. **[research/](research/)** — Historical notes: PR #75 review
    (Stage 1 complete), race-condition investigation, monitoring ideas.
 
 ---

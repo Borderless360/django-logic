@@ -1027,6 +1027,19 @@ locking all interact. `django_logic.testing` gives you a **scenario-based** test
 base class that reads like the business process itself and runs everything —
 including background transitions — **inline, with no Celery broker**.
 
+Two principles keep these tests worth writing (full rationale in
+[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md#journeys-not-mirrors)):
+
+- **Test your process, not the machinery.** Delivery, retries and durability
+  are the library's guarantees (its own regression + stability + Heroku
+  suites), so your tests never need a broker.
+- **Test the object's journey, not the wiring.** Assert what the object
+  *became* — its state trajectory, the fields the side-effects changed, and
+  what reaches the caller on failure — not merely that a hook you declared got
+  called. A test that only checks "the side-effect ran" passes even when the
+  side-effect does the wrong thing (and an AI regenerating the code regenerates
+  that test too). Journey assertions fail when behaviour regresses.
+
 ```python
 from django_logic.testing import ProcessScenario
 
@@ -1070,6 +1083,27 @@ class TestOrderFulfilment(ProcessScenario):
         order = self.create_instance(status='draft')
         self.assert_available(order, ['approve'], user=self.staff)
         self.assert_not_available(order, ['approve'], user=self.customer)
+
+    def test_approve_produces_the_right_outcome(self):
+        # Assert what the object BECAME, not just that a hook ran.
+        order = self.create_instance(status='draft')
+        before = self.capture(order, ['status', 'approved_at'])
+        self.transition(order, 'approve', user=self.staff)
+        self.assert_side_effects_ran(['validate_order'])        # wiring
+        self.assert_changed(order, before, {                    # outcome
+            'status': ('draft', 'approved'),
+            'approved_at': (None, order.approved_at),
+        })
+
+    def test_fulfil_failure_reaches_the_caller(self):
+        order = self.create_instance(status='approved')
+        # A failing side-effect runs the failure path AND re-raises — pin both.
+        self.background_transition(order, 'fulfil',
+                                   fail_side_effect='call_courier',
+                                   fail_with=ConnectionError('down'),
+                                   expect_raises=ConnectionError)
+        self.assert_state(order, 'fulfilling')                  # left in-progress
+        self.assert_raised(ConnectionError, match='down')
 ```
 
 **Driving the process**
@@ -1081,13 +1115,17 @@ class TestOrderFulfilment(ProcessScenario):
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` phase 1 **and** phase 2 inline |
 | `retry_transition(obj)` | Re-run the instance's uncompleted transition — simulates the periodic starter |
 
-Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. The injected exception is absorbed so you can assert on the recorded error.
+Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. Add `expect_raises=SomeError` to assert the failure **propagated to the caller** (the `side_effects` re-raise contract), or `expect_raises=False` to assert it was **swallowed** (`callbacks` / `next_transition` / `failure_side_effects`); omit it to absorb the injected exception and assert on the recorded error instead.
 
 **Assertions**
 
-`assert_state` · `assert_available` / `assert_not_available` (optional `user=`) · `assert_side_effects_ran` / `assert_side_effects_not_ran` · `assert_callbacks_ran` · `assert_error_recorded` · `assert_error_count`.
+- *State & availability:* `assert_state` · `assert_state_trace` · `assert_available` / `assert_not_available` (optional `user=`).
+- *Domain outcome* — what the object *became*: `capture` → `assert_changed` / `assert_unchanged` · `assert_related_count`.
+- *Wiring* — that a hook ran (pair with an outcome assertion): `assert_side_effects_ran` / `assert_side_effects_not_ran` · `assert_callbacks_ran` · `assert_failure_side_effects_ran` / `assert_failure_callbacks_ran`.
+- *Caller boundary & durable row:* `assert_raised` / `assert_not_raised` · `assert_error_recorded` · `assert_error_count` · `assert_transition_owner`.
+- *The whole journey:* `assert_journey([JourneyStep(...)])`.
 
-Side-effects and callbacks are **tracked, not mocked** (identified by function `__name__`) — the real code runs; the framework just records what executed.
+Side-effects and callbacks are **tracked, not mocked** (identified by function `__name__`) — the real code runs; the framework just records what executed. `assert_side_effects_ran` / `assert_callbacks_ran` are *wiring* checks (a hook ran, not that it did the right thing) — pair them with `assert_changed` / `assert_related_count` / `assert_state`.
 
 **Snapshot & replay — turn a production bug into a test**
 
