@@ -1,7 +1,7 @@
 PROJECT_NAME = django-logic
 DOCKER_RUN = docker run --rm -v $(CURDIR):/app $(PROJECT_NAME)
 
-.PHONY: info build test test-one coverage sh stability-up stability-test stability-redis stability-down
+.PHONY: info build test test-one coverage sh stability-up stability-test stability-redis stability-down dist publish
 
 info:
 	@echo "Usage: make <target>"
@@ -15,6 +15,8 @@ info:
 	@echo "  stability-up     - Start Postgres + Redis via Docker Compose"
 	@echo "  stability-test   - Run stability tests (Postgres + Redis)"
 	@echo "  stability-down   - Stop Postgres + Redis"
+	@echo "  dist             - Build + twine-check sdist & wheel (see RELEASING.md)"
+	@echo "  publish          - Upload dist/* to PyPI via .pypirc (RUNS 'dist' first)"
 
 build:
 	docker build -t $(PROJECT_NAME) .
@@ -50,3 +52,12 @@ stability-test:
 
 stability-down:
 	docker compose -f docker-compose.test.yml down -v
+
+# --- Release (local, via uv + twine). See RELEASING.md for the full checklist. ---
+dist:
+	rm -rf dist/ build/ django_logic.egg-info/
+	uv build
+	uvx twine check dist/*
+
+publish: dist
+	uvx twine upload --config-file .pypirc dist/*
