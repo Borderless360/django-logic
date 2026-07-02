@@ -280,16 +280,25 @@ class NextTransitionFailureScenario(ProcessScenario):
         # Landed back in the source state (no failed_state, no state write).
         self.assert_state(widget, 'draft')
         self.assert_state_trace([])
-        # se_a raised, so it never "ran"; se_b (approve's own) and se_c
-        # (notify's) never ran either — the whole chain stopped.
-        self.assert_side_effects_not_ran(['se_a', 'se_b', 'se_c'])
+        # se_b (approve's own, after the failed se_a) and se_c (notify's
+        # follow-up) never ran — the whole chain stopped at the failure. (se_a
+        # is the injected target and never records regardless, so it carries
+        # no signal here and is deliberately not asserted.)
+        self.assert_side_effects_not_ran(['se_b', 'se_c'])
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class AmbiguousNextTransitionScenario(ProcessScenario):
     """An ambiguous ``next_transition`` (two same-name follow-ups both
     available, no disambiguating condition) is refused — neither runs —
-    rather than picking arbitrarily. The parent still completes."""
+    rather than picking arbitrarily. The parent still completes.
+
+    Note: this pins the observable BEHAVIOUR ('runs neither'), which is
+    enforced by two independent layers — ``NextTransition.execute``'s own
+    ambiguity guard and the entrypoint's ``_resolve_transition_with_owner``
+    refusal (whose exception NextTransition swallows). It therefore does not
+    isolate either guard on its own; removing just one still leaves the object
+    in ``started``. That defence-in-depth is intended."""
 
     process_class = WidgetAmbiguousNextProcess
     model = Widget

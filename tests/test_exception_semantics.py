@@ -122,9 +122,13 @@ class SwallowContract(ProcessScenario):
             expect_raises=False,
         )
         self.assert_not_raised()
-        self.assert_state(widget, 'approved')          # parent target kept
+        # The parent kept its target — the load-bearing proof the follow-up's
+        # failure was swallowed (a re-raise would have failed the whole drive).
+        self.assert_state(widget, 'approved')
         self.assert_side_effects_ran(['se_a', 'se_b'])  # approve's own ran
-        self.assert_side_effects_not_ran(['se_c'])      # notify's failed, never ran
+        # (se_c is the injected target, so it never records as "ran"
+        # regardless of engine behaviour — not asserted; the kept 'approved'
+        # state above is what proves notify failed and was swallowed.)
 
     def test_failure_hooks_run_in_order_across_the_boundary(self):
         # Independent of the caller boundary: failure_side_effects run before

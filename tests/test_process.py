@@ -263,3 +263,47 @@ class AmbiguousConditionScenario(ProcessScenario):
         self.assert_side_effects_not_ran(['se_clash_a', 'se_clash_b'])
         widget.refresh_from_db()
         self.assertEqual(widget.se_log, '')
+
+
+class DomainOutcomeScenario(ProcessScenario):
+    """Assert what the object BECAME, not just that a hook ran (issue #103).
+    ``assert_side_effects_ran`` is a wiring check; ``capture`` +
+    ``assert_changed`` / ``assert_unchanged`` pin the before/after delta."""
+
+    process_class = WidgetSyncProcess
+    model = Widget
+    state_field = 'status'
+    process_name = 'sync_proc'
+
+    def test_capture_and_assert_the_domain_delta(self):
+        widget = self.create_instance(status='draft')
+        before = self.capture(widget, ['status', 'se_log', 'audit_status'])
+
+        self.transition(widget, 'approve')
+
+        # The side-effect ran (wiring) AND produced the exact domain change:
+        # status moved and se_log gained the ordered markers.
+        self.assert_side_effects_ran(['se_a', 'se_b', 'se_c'])
+        self.assert_changed(widget, before, {
+            'status': ('draft', 'notified'),
+            'se_log': ('', 'a,b,c,'),
+        })
+        # approve drives the 'sync_proc' machine; it must NOT touch the
+        # sibling audit machine's field. assert_unchanged catches a hook that
+        # wrote where it shouldn't.
+        self.assert_unchanged(widget, before, ['audit_status'])
+
+    def test_refused_transition_leaves_business_fields_unchanged(self):
+        User = get_user_model()
+        customer = User.objects.create(username='do_customer', is_staff=False)
+        widget = self.create_instance(status='draft')
+        before = self.capture(widget, ['status', 'se_log'])
+
+        # A permission-denied transition is refused at resolve time. The
+        # business field must be untouched — this would FAIL if the engine ran
+        # the side-effect (se_staff) before denying, which is the real regression
+        # assert_unchanged guards against here.
+        self.transition(widget, 'staff_only', user=customer,
+                        expect_raises=TransitionNotAllowed)
+        self.assert_unchanged(widget, before, ['status', 'se_log'])
+        self.assert_side_effects_not_ran(['se_staff'])

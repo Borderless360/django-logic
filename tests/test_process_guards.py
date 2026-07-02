@@ -41,7 +41,8 @@ class ProcessLevelGuardScenario(ProcessScenario):
         self.assert_available(widget, ['go', 'inner_go'], user=self.staff)
         self.transition(widget, 'go', user=self.staff)
         self.assert_state(widget, 'gone')
-        self.assertIn('go,', widget.se_log)
+        # Exact match: 'go,' is a substring of 'inner_go,', so pin the whole log.
+        self.assertEqual(widget.se_log, 'go,')
 
     def test_open_gate_and_staff_allows_nested_transition(self):
         # inner_go is declared on the nested GuardedInnerProcess; it is only
@@ -49,7 +50,7 @@ class ProcessLevelGuardScenario(ProcessScenario):
         widget = self.create_instance(status='draft', kwargs_seen=['gate_open'])
         self.transition(widget, 'inner_go', user=self.staff)
         self.assert_state(widget, 'inner_gone')
-        self.assertIn('inner_go,', widget.se_log)
+        self.assertEqual(widget.se_log, 'inner_go,')
 
     # --- blocked by process-level CONDITION -------------------------------
 

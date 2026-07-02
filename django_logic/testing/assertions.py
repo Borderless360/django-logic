@@ -70,6 +70,11 @@ class ScenarioAssertions:
         return self._last_tracker
 
     def assert_side_effects_ran(self, names):
+        """WIRING check: assert the named side-effects executed. This proves
+        the hook is listed and got called — NOT that it produced the right
+        domain change. Pair it with assert_changed / assert_unchanged /
+        assert_related_count (or a direct DB assertion) to pin the OUTCOME the
+        side-effect is supposed to produce (issue #103)."""
         ran = self._tracker().side_effects_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -88,6 +93,10 @@ class ScenarioAssertions:
         self._record_assert(f'assert_side_effects_not_ran({names})', ok=True)
 
     def assert_callbacks_ran(self, names):
+        """WIRING check: assert the named callbacks executed — not that they
+        did the right thing. For a callback whose whole purpose is a domain
+        effect (e.g. deleting related rows), also assert the effect with
+        assert_related_count / assert_changed (issue #103)."""
         ran = self._tracker().callbacks_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -139,6 +148,89 @@ class ScenarioAssertions:
                 instance=instance,
             )
         self._record_assert(f'assert_error_count({expected})', ok=True)
+
+    # --- domain outcome (before/after delta, issue #103) -----------------
+
+    def capture(self, instance, fields):
+        """Snapshot the named fields of ``instance`` NOW, as a baseline for a
+        later ``assert_changed`` / ``assert_unchanged``. Reads a fresh row
+        from the DB (via ``_base_manager`` so a filtered default manager can't
+        hide it) and does NOT mutate the instance you pass in.
+
+        The point (issue #103): a scenario should assert what the object
+        *became*, not merely that a hook ran. ``capture`` records the "before"
+        so the "after" delta is checkable.
+        """
+        fields = list(fields)
+        fresh = type(instance)._base_manager.get(pk=instance.pk)
+        snap = {f: getattr(fresh, f) for f in fields}
+        self._record('capture', 'OK', f'{fields} = {snap}')
+        return snap
+
+    def assert_changed(self, instance, before, expected):
+        """Assert the domain OUTCOME of the drive: each field in ``expected``
+        (``{field: (old, new)}``) held ``old`` in the ``before`` snapshot and
+        holds ``new`` now. Refreshes ``instance`` from the DB first.
+
+        Unlike ``assert_side_effects_ran`` (a wiring check), this fails if the
+        hook was called but produced the wrong change — the gap issue #103
+        describes.
+        """
+        instance.refresh_from_db()
+        problems = []
+        for field, pair in expected.items():
+            old, new = pair
+            was = before.get(field)
+            now = getattr(instance, field)
+            if was != old:
+                problems.append(
+                    f'{field}: baseline was {was!r}, test expected {old!r}')
+            if now != new:
+                problems.append(f'{field}: is now {now!r}, expected {new!r}')
+        if problems:
+            self._record_assert(f'assert_changed({sorted(expected)})',
+                                ok=False, detail='; '.join(problems))
+            self._fail('Domain outcome did not match:\n  ' +
+                       '\n  '.join(problems), instance=instance)
+        self._record_assert(f'assert_changed({sorted(expected)})', ok=True)
+
+    def assert_unchanged(self, instance, before, fields):
+        """Assert the named fields still hold their ``before`` values — the
+        drive must NOT have touched them (e.g. a failed transition must leave
+        business fields intact). Refreshes ``instance`` from the DB first."""
+        instance.refresh_from_db()
+        problems = []
+        for field in fields:
+            was = before.get(field)
+            now = getattr(instance, field)
+            if was != now:
+                problems.append(f'{field}: {was!r} -> {now!r}')
+        if problems:
+            self._record_assert(f'assert_unchanged({list(fields)})',
+                                ok=False, detail='; '.join(problems))
+            self._fail('Expected these fields to be unchanged, but:\n  ' +
+                       '\n  '.join(problems), instance=instance)
+        self._record_assert(f'assert_unchanged({list(fields)})', ok=True)
+
+    def assert_related_count(self, queryset, expected):
+        """Assert a queryset / related manager currently has ``expected`` rows.
+
+        For a hook whose whole effect is on related tables — a ``delete_*``
+        callback that must drop child rows, a side-effect that must generate
+        N records — this pins the related-row delta the wiring check can't see
+        (issue #103). Pass the queryset AFTER the drive; capture the
+        before-count with ``queryset.count()`` yourself if you need the delta.
+        """
+        actual = queryset.count()
+        if actual != expected:
+            self._record_assert(f'assert_related_count({expected})', ok=False,
+                                detail=f'got {actual}')
+            self._fail(
+                f'Expected {expected} related row(s) for '
+                f'{getattr(queryset, "model", queryset)!r}, but found '
+                f'{actual}.')
+        self._record_assert(f'assert_related_count({expected})', ok=True,
+                            detail=f'count={actual}')
 
     # --- caller-boundary exception (re-raise / swallow contract) ---------
 

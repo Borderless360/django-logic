@@ -82,6 +82,7 @@ class BgToBgChainScenario(ProcessScenario):
 
         # Two separate durable rows were created, one per background
         # transition — and each records its OWN owner, not the predecessor's.
+        self.assert_related_count(TransitionMessage.objects.all(), 2)
         tms = list(TransitionMessage.objects.order_by('id'))
         self.assertEqual([t.transition_name for t in tms], ['bg_fulfil', 'bg_export'])
         self.assertTrue(all(t.is_completed for t in tms))
