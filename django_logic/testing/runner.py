@@ -78,6 +78,27 @@ def latest_message(instance):
     )
 
 
+def message_for(instance, transition_name):
+    """The instance's most recent ``TransitionMessage`` for a given action.
+
+    Used by ``assert_transition_owner`` to pin the recorded
+    ``owning_process_class`` of a specific transition in a chained/next-
+    transition workflow, where several TMs exist for one instance.
+    """
+    from django_logic.background.models import TransitionMessage
+    return (
+        TransitionMessage.objects
+        .filter(
+            app_label=instance._meta.app_label,
+            model_name=instance._meta.model_name,
+            instance_id=str(instance.pk),
+            transition_name=transition_name,
+        )
+        .order_by('-id')
+        .first()
+    )
+
+
 def rerun_message(message_id):
     """Re-run a specific TransitionMessage inline — what the periodic starter
     does, but synchronous and immediate (ignores the recency guard)."""
