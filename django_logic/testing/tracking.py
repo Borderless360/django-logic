@@ -41,6 +41,12 @@ class ExecutionTracker:
         # injection that never fired (issue #94: a silent no-op would turn
         # a failure test into a happy-path run).
         self.requested_fail_side_effect: str | None = None
+        # Ordered sequence of states written to the instance during this
+        # drive (in_progress -> target, plus any next_transition follow-ups
+        # and failed_state writes). Captured by wrapping State.set_state in
+        # track(); lets a test assert HOW the object changed as the workflow
+        # progressed, not just its final state.
+        self.state_trace: list = []
 
 
 def _name(fn) -> str:
@@ -123,8 +129,28 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
                 _make_wrapper(fn, tracker, sink_attr, inject_here, fail_with)
                 for fn in original
             ]
+
+    # Record every persisted state write during the drive — the ordered
+    # sequence of states the object passed through (in_progress -> target,
+    # and any next_transition follow-ups, and failed_state on failure).
+    # RedisState.set_state delegates to super(), so wrapping the base
+    # State.set_state captures exactly one append per write for both. The
+    # wrap is restored on exit alongside the hook bundles. Patching the
+    # class method is safe because tests are single-threaded and the patch
+    # is scoped to this contextmanager.
+    from django_logic.state import State as _State
+    original_set_state = _State.set_state
+
+    def _recording_set_state(self, state):
+        result = original_set_state(self, state)
+        tracker.state_trace.append(state)
+        return result
+    _recording_set_state.__name__ = 'set_state'
+    _State.set_state = _recording_set_state
+
     try:
         yield tracker
     finally:
+        _State.set_state = original_set_state
         for bundle, original in saved:
             bundle._commands = original

@@ -7,7 +7,7 @@ Mixed into ``ProcessScenario``; relies on the host providing ``state_field``,
 """
 from __future__ import annotations
 
-from django_logic.testing.runner import latest_message
+from django_logic.testing.runner import latest_message, message_for
 
 
 class ScenarioAssertions:
@@ -70,6 +70,11 @@ class ScenarioAssertions:
         return self._last_tracker
 
     def assert_side_effects_ran(self, names):
+        """WIRING check: assert the named side-effects executed. This proves
+        the hook is listed and got called — NOT that it produced the right
+        domain change. Pair it with assert_changed / assert_unchanged /
+        assert_related_count (or a direct DB assertion) to pin the OUTCOME the
+        side-effect is supposed to produce (issue #103)."""
         ran = self._tracker().side_effects_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -88,6 +93,10 @@ class ScenarioAssertions:
         self._record_assert(f'assert_side_effects_not_ran({names})', ok=True)
 
     def assert_callbacks_ran(self, names):
+        """WIRING check: assert the named callbacks executed — not that they
+        did the right thing. For a callback whose whole purpose is a domain
+        effect (e.g. deleting related rows), also assert the effect with
+        assert_related_count / assert_changed (issue #103)."""
         ran = self._tracker().callbacks_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -139,3 +148,231 @@ class ScenarioAssertions:
                 instance=instance,
             )
         self._record_assert(f'assert_error_count({expected})', ok=True)
+
+    # --- domain outcome (before/after delta, issue #103) -----------------
+
+    def capture(self, instance, fields):
+        """Snapshot the named fields of ``instance`` NOW, as a baseline for a
+        later ``assert_changed`` / ``assert_unchanged``. Reads a fresh row
+        from the DB (via ``_base_manager`` so a filtered default manager can't
+        hide it) and does NOT mutate the instance you pass in.
+
+        The point (issue #103): a scenario should assert what the object
+        *became*, not merely that a hook ran. ``capture`` records the "before"
+        so the "after" delta is checkable.
+        """
+        fields = list(fields)
+        fresh = type(instance)._base_manager.get(pk=instance.pk)
+        snap = {f: getattr(fresh, f) for f in fields}
+        self._record('capture', 'OK', f'{fields} = {snap}')
+        return snap
+
+    def assert_changed(self, instance, before, expected):
+        """Assert the domain OUTCOME of the drive: each field in ``expected``
+        (``{field: (old, new)}``) held ``old`` in the ``before`` snapshot and
+        holds ``new`` now. Refreshes ``instance`` from the DB first.
+
+        Unlike ``assert_side_effects_ran`` (a wiring check), this fails if the
+        hook was called but produced the wrong change — the gap issue #103
+        describes.
+        """
+        instance.refresh_from_db()
+        problems = []
+        for field, pair in expected.items():
+            old, new = pair
+            was = before.get(field)
+            now = getattr(instance, field)
+            if was != old:
+                problems.append(
+                    f'{field}: baseline was {was!r}, test expected {old!r}')
+            if now != new:
+                problems.append(f'{field}: is now {now!r}, expected {new!r}')
+        if problems:
+            self._record_assert(f'assert_changed({sorted(expected)})',
+                                ok=False, detail='; '.join(problems))
+            self._fail('Domain outcome did not match:\n  ' +
+                       '\n  '.join(problems), instance=instance)
+        self._record_assert(f'assert_changed({sorted(expected)})', ok=True)
+
+    def assert_unchanged(self, instance, before, fields):
+        """Assert the named fields still hold their ``before`` values — the
+        drive must NOT have touched them (e.g. a failed transition must leave
+        business fields intact). Refreshes ``instance`` from the DB first."""
+        instance.refresh_from_db()
+        problems = []
+        for field in fields:
+            was = before.get(field)
+            now = getattr(instance, field)
+            if was != now:
+                problems.append(f'{field}: {was!r} -> {now!r}')
+        if problems:
+            self._record_assert(f'assert_unchanged({list(fields)})',
+                                ok=False, detail='; '.join(problems))
+            self._fail('Expected these fields to be unchanged, but:\n  ' +
+                       '\n  '.join(problems), instance=instance)
+        self._record_assert(f'assert_unchanged({list(fields)})', ok=True)
+
+    def assert_related_count(self, queryset, expected):
+        """Assert a queryset / related manager currently has ``expected`` rows.
+
+        For a hook whose whole effect is on related tables — a ``delete_*``
+        callback that must drop child rows, a side-effect that must generate
+        N records — this pins the related-row delta the wiring check can't see
+        (issue #103). Pass the queryset AFTER the drive; capture the
+        before-count with ``queryset.count()`` yourself if you need the delta.
+        """
+        actual = queryset.count()
+        if actual != expected:
+            self._record_assert(f'assert_related_count({expected})', ok=False,
+                                detail=f'got {actual}')
+            self._fail(
+                f'Expected {expected} related row(s) for '
+                f'{getattr(queryset, "model", queryset)!r}, but found '
+                f'{actual}.')
+        self._record_assert(f'assert_related_count({expected})', ok=True,
+                            detail=f'count={actual}')
+
+    # --- caller-boundary exception (re-raise / swallow contract) ---------
+
+    def assert_raised(self, exc_type=None, *, match=None):
+        """Assert the last drive propagated an exception to the CALLER of the
+        entrypoint — the SideEffects re-raise contract.
+
+        ``exc_type`` optionally constrains the exception class (or tuple of
+        classes); ``match`` optionally requires a substring of ``str(exc)``.
+        Reads the exception the harness captured, so it pins that a failing
+        side-effect surfaces to the caller — a swallow-vs-reraise regression
+        (the 0.1.6->0.2.0 flip) makes this assertion fail.
+        """
+        raised = self._last_raised
+        if raised is None:
+            self._record_assert('assert_raised', ok=False, detail='nothing raised')
+            self._fail(
+                'Expected the drive to propagate an exception to the caller, '
+                'but nothing was raised — a failure that must re-raise was '
+                'swallowed, or no failure occurred.')
+        if exc_type is not None and not isinstance(raised, exc_type):
+            self._record_assert('assert_raised', ok=False,
+                                detail=f'{type(raised).__name__}')
+            self._fail(
+                f'Expected the drive to raise {exc_type}, but it raised '
+                f'{type(raised).__name__}: {raised}.')
+        if match is not None and match not in str(raised):
+            self._record_assert('assert_raised', ok=False,
+                                detail=f'{raised!r} lacks {match!r}')
+            self._fail(
+                f'Expected the raised exception to contain {match!r}, but it '
+                f'was {type(raised).__name__}: {raised}.')
+        self._record_assert('assert_raised', ok=True,
+                            detail=f'{type(raised).__name__}: {raised}')
+
+    def assert_not_raised(self):
+        """Assert the last drive did NOT propagate an exception to the caller
+        — the swallow contract (Callbacks / NextTransition /
+        FailureSideEffects). A regression that starts re-raising a best-effort
+        failure makes this assertion fail."""
+        raised = self._last_raised
+        if raised is not None:
+            self._record_assert('assert_not_raised', ok=False,
+                                detail=f'{type(raised).__name__}: {raised}')
+            self._fail(
+                f'Expected the failure to be swallowed at the caller boundary, '
+                f'but {type(raised).__name__} propagated to the caller: '
+                f'{raised}.')
+        self._record_assert('assert_not_raised', ok=True)
+
+    # --- object journey --------------------------------------------------
+
+    def assert_state_trace(self, expected):
+        """Assert the ordered sequence of states the object passed through
+        during the last drive (in_progress -> target, plus next_transition
+        follow-ups and failed_state writes).
+
+        This is the direct expression of *how the object changed as it went
+        through the action* — e.g. a background chain drive yields
+        ``['fulfilling', 'fulfilled', 'exporting', 'exported']``. Captured
+        by ``track()`` wrapping ``State.set_state``.
+        """
+        trace = list(self._tracker().state_trace)
+        if trace != expected:
+            self._record_assert(f'assert_state_trace({expected})', ok=False,
+                                detail=f'got {trace}')
+            self._fail(
+                f'Expected the object to pass through states {expected}, '
+                f'but the recorded state trace is {trace}.',
+                instance=None,
+            )
+        self._record_assert(f'assert_state_trace({expected})', ok=True,
+                            detail=f'got {trace}')
+
+    def assert_journey(self, expected_steps):
+        """Assert the full ordered journey the object took across all drives
+        in this test. Each ``JourneyStep`` pins one drive's observable
+        transformation (action, before -> after, side-effects, callbacks,
+        failed). One assertion locks the whole end-to-end behaviour."""
+        from django_logic.testing.scenario import JourneyStep
+        actual = self._journey
+        if len(actual) != len(expected_steps):
+            self._record_assert(f'assert_journey({len(expected_steps)} steps)',
+                                ok=False, detail=f'got {len(actual)} steps')
+            self._fail(
+                f'Expected a journey of {len(expected_steps)} steps, but '
+                f'the recorded journey has {len(actual)} steps.',
+                instance=None,
+            )
+        for i, (exp, got) in enumerate(zip(expected_steps, actual), 1):
+            if isinstance(exp, JourneyStep):
+                if not exp.matches(got):
+                    self._record_assert(f'assert_journey(step {i})', ok=False,
+                                        detail=f'expected {exp}, got {got}')
+                    self._fail(
+                        f'Journey step {i} did not match.\n'
+                        f'  expected: {exp}\n'
+                        f'  got:      {got}',
+                        instance=None,
+                    )
+            else:
+                # Allow a plain dict for ergonomics.
+                exp_step = JourneyStep(**exp)
+                if not exp_step.matches(got):
+                    self._record_assert(f'assert_journey(step {i})', ok=False,
+                                        detail=f'expected {exp_step}, got {got}')
+                    self._fail(
+                        f'Journey step {i} did not match.\n'
+                        f'  expected: {exp_step}\n'
+                        f'  got:      {got}',
+                        instance=None,
+                    )
+        self._record_assert(f'assert_journey({len(expected_steps)} steps)',
+                            ok=True)
+
+    # --- background owner (phase-2 restore discriminator) ---------------
+
+    def assert_transition_owner(self, instance, owner, *, transition_name=None):
+        """Assert the recorded ``owning_process_class`` on the instance's
+        latest ``TransitionMessage`` (or the one named ``transition_name``
+        when given). Pins the phase-2 owner discriminator — critical for
+        chained/nested background transitions, where the follow-up must
+        record its OWN owner, not the predecessor's.
+        """
+        if transition_name is not None:
+            tm = message_for(instance, transition_name)
+            label = f'assert_transition_owner({transition_name!r}, {owner!r})'
+        else:
+            tm = latest_message(instance)
+            label = f'assert_transition_owner({owner!r})'
+        actual = None if tm is None else tm.owning_process_class
+        if actual != owner:
+            self._record_assert(label, ok=False,
+                                detail=f'got {actual!r}')
+            if transition_name is None:
+                where = 'the latest TransitionMessage'
+            else:
+                where = f'TransitionMessage for {transition_name!r}'
+            suffix = '' if tm is not None else ' (no TransitionMessage exists.)'
+            self._fail(
+                f'Expected owning_process_class={owner!r} on {where}, '
+                f'but got {actual!r}.{suffix}',
+                instance=instance,
+            )
+        self._record_assert(label, ok=True, detail=f'got {actual!r}')
