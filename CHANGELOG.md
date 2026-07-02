@@ -4,6 +4,14 @@
 
 _Nothing yet — the next release accumulates here._
 
+## [0.4.1] — 2026-07-02
+
+### Added
+
+- **Advertise Django 6.0 support.** Added the `Framework :: Django :: 6.0`
+  trove classifier. This is metadata only — the `django>=4.0` requirement
+  already permitted Django 6.0, and the full test suite passes against it.
+
 ## [0.4.0] — 2026-07-02
 
 Stability hardening plus condition-disambiguated nested background
