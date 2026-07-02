@@ -2,7 +2,18 @@
 
 ## [Unreleased]
 
-### Added
+_Nothing yet — the next release accumulates here._
+
+## [0.4.0] — 2026-07-02
+
+Stability hardening plus condition-disambiguated nested background
+transitions (#98) and standardised `AppConfig.ready()` process↔model binding
+(#100). Every defect from the 0.3.x stability review (R1–R6 reproduced
+defects, D1–D5 design races) is fixed with a permanent regression test. See
+`docs/STABILITY_REVIEW_AND_V1_PLAN.md` in the planning repo for the full
+findings and resolution mapping.
+
+### Added — nested background transition routing (#98)
 
 - **Condition-disambiguated background transitions across nested processes**
   (issue #98). Two nested processes may now declare background transitions
@@ -75,13 +86,6 @@
   determine which sibling it meant and will finalize it without side-effects
   (safe, but the work does not run). Rows enqueued after this release always
   record their owner and are immune.
-
-## [0.4.0] — 2026-06-10
-
-Stability hardening: every defect from the 0.3.x stability review (R1–R6
-reproduced defects, D1–D5 design races) is fixed with a permanent regression
-test. See `docs/STABILITY_REVIEW_AND_V1_PLAN.md` in the planning repo for the
-full findings and resolution mapping.
 
 ### Breaking Changes
 

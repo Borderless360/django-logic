@@ -239,3 +239,9 @@ dmypy.json
 .idea/modules.xml
 .idea/vcs.xml
 /logs/
+
+# PyPI publishing credentials — NEVER commit these
+.pypirc
+*.pypirc
+.env.local
+.secrets/
