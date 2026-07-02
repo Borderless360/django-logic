@@ -17,16 +17,26 @@ class BackgroundTestsConfig(AppConfig):
             AmbiguousConversationProcess,
             ArchivableProcess,
             ArchivableWidget,
+            CascadeInnerProcess,
+            CascadeOuterProcess,
+            ChainConversationProcess,
             Conversation,
             ConversationProcess,
             MixedSyncBgProcess,
             ScenarioGuardProcess,
             SharedActionConversationProcess,
             Widget,
+            WidgetAmbiguousConditionProcess,
+            WidgetAmbiguousNextProcess,
             WidgetAuditProcess,
+            WidgetBgChainProcess,
             WidgetChainProcess,
+            WidgetContextProcess,
+            WidgetNestedSyncProcess,
             WidgetParentProcess,
             WidgetProcess,
+            WidgetProcGuardProcess,
+            WidgetSyncProcess,
         )
 
         ProcessManager.bind_model_process(Widget, WidgetProcess, state_field='status')
@@ -40,3 +50,17 @@ class BackgroundTestsConfig(AppConfig):
         # Test-local processes attached to Widget (see models.py).
         ProcessManager.bind_model_process(Widget, ScenarioGuardProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, WidgetChainProcess, state_field='status')
+        # Behavior-focused scenario fixtures (sync matrix + bg->bg chain +
+        # context chain + nested sync delegation).
+        ProcessManager.bind_model_process(Widget, WidgetSyncProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, WidgetBgChainProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, WidgetContextProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, WidgetNestedSyncProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, WidgetAmbiguousNextProcess, state_field='status')
+        ProcessManager.bind_model_process(Conversation, ChainConversationProcess, state_field='status')
+        # Contract fixtures: resolve-time ambiguity, process-level guards, and
+        # the cross-machine failure cascade (fundamental problem.md §3).
+        ProcessManager.bind_model_process(Widget, WidgetAmbiguousConditionProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, WidgetProcGuardProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, CascadeOuterProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, CascadeInnerProcess, state_field='status')
