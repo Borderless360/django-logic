@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **0.5.0 regression:** bind-time hook validation crashed with
+  `TypeError: 'property' object is not iterable` on a Process whose
+  class-level `conditions`/`permissions` is a property/descriptor
+  (computed per instance). Such definitions cannot be inspected at bind
+  time and are now skipped (#121).
+
 ## [0.5.0] — 2026-07-17
 
 Type-faithful background kwargs (#107, #108), bind-time hook-signature
