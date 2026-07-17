@@ -426,11 +426,14 @@ def _validate_hook_signatures(process_cls) -> None:
     for proc_cls in _iter_process_tree(process_cls):
         owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
         # Process-level conditions/permissions are plain lists of callables
-        # (executed via Conditions/Permissions in Process.is_valid).
-        for fn in getattr(proc_cls, 'conditions', None) or []:
-            check(fn, owner)
-        for fn in getattr(proc_cls, 'permissions', None) or []:
-            check(fn, owner)
+        # (executed via Conditions/Permissions in Process.is_valid). A
+        # subclass may instead define them as a property/descriptor computed
+        # per instance — those cannot be inspected at bind time; skip them.
+        for attr in ('conditions', 'permissions'):
+            hooks = getattr(proc_cls, attr, None)
+            if isinstance(hooks, (list, tuple)):
+                for fn in hooks:
+                    check(fn, owner)
         for transition in proc_cls.transitions or []:
             # getattr-guarded: a duck-typed custom transition that the
             # engine never asks for one of these must not fail to bind.

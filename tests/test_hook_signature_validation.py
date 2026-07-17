@@ -117,3 +117,27 @@ class HookSignatureValidationTests(SimpleTestCase):
         with override_settings(DJANGO_LOGIC={'STRICT_HOOK_SIGNATURES': True}):
             ProcessManager.bind_model_process(
                 Invoice, _DuckProcess, state_field='status')
+
+
+class PropertyConditionsRegressionTests(SimpleTestCase):
+    def test_process_with_property_conditions_binds(self):
+        # A subclass may compute conditions per instance via a property; at
+        # class level that is a non-iterable descriptor and must be skipped,
+        # not crash the bind (issue #121).
+        class DynamicConditionsProcess(Process):
+            process_name = 'sig_dynamic_process'
+            transitions = [
+                Transition('approve', sources=['draft'], target='approved',
+                           side_effects=[good_hook]),
+            ]
+
+            @property
+            def conditions(self):
+                return []
+
+        try:
+            ProcessManager.bind_model_process(Invoice, DynamicConditionsProcess,
+                                              state_field='status')
+        finally:
+            if 'sig_dynamic_process' in vars(Invoice):
+                delattr(Invoice, 'sig_dynamic_process')
