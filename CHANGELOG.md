@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-17
+
 ### Fixed
 
 - **0.5.0 regression:** bind-time hook validation crashed with
