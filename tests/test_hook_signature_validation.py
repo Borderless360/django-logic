@@ -74,6 +74,8 @@ class HookSignatureValidationTests(SimpleTestCase):
                      'sig_proc_level_process', 'sig_duck_process'):
             if name in vars(Invoice):
                 delattr(Invoice, name)
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings if b.model is not Invoice]
         super().tearDown()
 
     def test_clean_hooks_bind_silently(self):
@@ -141,3 +143,5 @@ class PropertyConditionsRegressionTests(SimpleTestCase):
         finally:
             if 'sig_dynamic_process' in vars(Invoice):
                 delattr(Invoice, 'sig_dynamic_process')
+            ProcessManager.bindings = [
+                b for b in ProcessManager.bindings if b.model is not Invoice]
