@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-17
+
+Consumer-facing observability: a first-class bindings registry and a
+Django system check that makes warn-mode hook-signature offenders
+impossible to miss (#125). Also lands the sync/background parity contract
+matrix (#111) — test-only, but it pins the cross-class contracts consumer
+migrations depend on.
+
 ### Added — bindings registry + system checks (#125)
 
 - **`ProcessManager.bindings`** — a public registry of
