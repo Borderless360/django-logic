@@ -2,7 +2,28 @@
 
 ## [Unreleased]
 
-_Nothing yet — the next release accumulates here._
+### Changed — kwargs serialization (#107, #108)
+
+- **Type-faithful kwargs round-trip** (#108). Background-transition kwargs
+  are now persisted with a self-describing type tag (`__dl_type__`) and
+  restored to their original Python types in phase 2: `datetime`, `date`,
+  `time`, `Decimal`, `UUID`, `tuple`, `set`, `frozenset` — recursively
+  inside containers. A side-effect now receives the same types whether its
+  transition is synchronous or background. `Decimal` and `set`, previously
+  rejected at phase 1, are now supported. Rows written by older versions
+  (plain ISO strings) still decode; deploy web and workers together when
+  upgrading across this boundary (an old worker passes tagged dicts through
+  verbatim). Model instances remain rejected — pass a pk and re-fetch.
+- **`request` is dropped loudly** (#107). Phase-1 serialization logs a
+  warning (with the tr_id) when it drops `request` from a background
+  transition's kwargs, and the new
+  `DJANGO_LOGIC['STRICT_KWARGS_SERIALIZATION'] = True` raises `TypeError`
+  instead. Phase-2 hooks must never read `request` — the engine rehydrates
+  `user`; pass anything else as plain values.
+- New `deserialize_kwargs()` is the phase-2 inverse of
+  `serialize_kwargs()`; `restore_user()` remains available.
+  `make_json_safe()` is kept as a legacy helper but is no longer used by
+  the engine.
 
 ## [0.4.1] — 2026-07-02
 

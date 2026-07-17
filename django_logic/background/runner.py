@@ -52,7 +52,7 @@ from django.db import OperationalError, transaction
 from django_logic.background import settings as bg_settings
 from django_logic.background.models import TransitionMessage
 from django_logic.background.observability import set_sentry_context
-from django_logic.background.serializers import restore_user
+from django_logic.background.serializers import deserialize_kwargs
 from django_logic.background.transitions import BackgroundAction, BackgroundTransition
 from django_logic.logger import TransitionEventType, transition_logger
 from django_logic.process import _transition_context
@@ -303,8 +303,7 @@ def _finalize_terminal_from_watchdog(
         tm.mark_as_completed(measure_duration=False)
         return None
 
-    kwargs = dict(tm.kwargs or {})
-    restore_user(kwargs)
+    kwargs = deserialize_kwargs(tm.kwargs)
     # Mirror the sync path: side-effects/callbacks may read ``context``.
     kwargs.setdefault('context', {})
     state = process.state
@@ -398,8 +397,7 @@ def _run_atomic(tm_id: int) -> _Outcome:
         # best-effort, no-op without sentry-sdk. See observability.py / issue #78.
         set_sentry_context(tm)
 
-        kwargs = dict(tm.kwargs or {})
-        restore_user(kwargs)
+        kwargs = deserialize_kwargs(tm.kwargs)
         # Mirror the synchronous path (Transition._init_transition_context):
         # side-effects/callbacks may read a framework-provided ``context``
         # dict. serialize_kwargs drops it at phase 1, so rebuild it here —
