@@ -26,7 +26,7 @@ Two cases:
    (``GmailChainProcess`` / ``DummyChainProcess``), not the bound parent
    and not the predecessor — the riskiest owner-overwrite case.
 """
-from django.test import override_settings
+from django.test import TestCase, override_settings
 
 from django_logic.background.models import TransitionMessage
 from django_logic.testing import JourneyStep, ProcessScenario
@@ -205,3 +205,73 @@ class NestedDisambiguatedBgChainScenario(ProcessScenario):
         self.assertNotIn('dummy_', gmail.se_log)
         self.assertIn('dummy_report,', dummy.se_log)
         self.assertNotIn('gmail_', dummy.se_log)
+
+
+_STRICT_SYNC_SETTINGS = {**_SYNC_SETTINGS, 'STRICT_KWARGS_SERIALIZATION': True}
+
+_CHAIN_SEEN: dict = {}
+
+
+def _record_chain_kwargs(instance, **kwargs):
+    _CHAIN_SEEN.clear()
+    _CHAIN_SEEN.update(kwargs)
+
+
+@override_settings(DJANGO_LOGIC=_STRICT_SYNC_SETTINGS)
+class SyncToBackgroundRequestChainTests(TestCase):
+    """#129: a sync transition's next_transition into a BACKGROUND follow-up
+    must not forward ``request`` — under STRICT_KWARGS_SERIALIZATION the
+    follow-up's phase-1 failure is swallowed by NextTransition, silently
+    killing the chain. Sync follow-ups keep receiving request."""
+
+    @classmethod
+    def setUpClass(cls):
+        from django_logic import Process, Transition
+        from django_logic.background import BackgroundTransition
+        from django_logic.process import ProcessManager
+
+        super().setUpClass()
+
+        class RequestChainProcess(Process):
+            process_name = 'request_chain_process'
+            transitions = [
+                Transition('kick', sources=['draft'], target='kicked',
+                           next_transition='bg_finish'),
+                BackgroundTransition('bg_finish', sources=['kicked'], target='done',
+                                     side_effects=[_record_chain_kwargs]),
+                Transition('kick_sync', sources=['draft'], target='kicked',
+                           next_transition='sync_finish'),
+                Transition('sync_finish', sources=['kicked'], target='done',
+                           side_effects=[_record_chain_kwargs]),
+            ]
+
+        cls.process_class = RequestChainProcess
+        ProcessManager.bind_model_process(Widget, RequestChainProcess,
+                                          state_field='status')
+
+    @classmethod
+    def tearDownClass(cls):
+        from django_logic.process import ProcessManager
+
+        if 'request_chain_process' in vars(Widget):
+            delattr(Widget, 'request_chain_process')
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings if b.process_class is not cls.process_class]
+        super().tearDownClass()
+
+    def setUp(self):
+        _CHAIN_SEEN.clear()
+        self.widget = Widget.objects.create(status='draft')
+
+    def test_background_follow_up_runs_despite_request_under_strict(self):
+        self.widget.request_chain_process.kick(request=object())
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'done')
+        self.assertNotIn('request', _CHAIN_SEEN)
+
+    def test_sync_follow_up_still_receives_request(self):
+        sentinel = object()
+        self.widget.request_chain_process.kick_sync(request=sentinel)
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'done')
+        self.assertIs(_CHAIN_SEEN.get('request'), sentinel)

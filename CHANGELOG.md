@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **NextTransition no longer forwards `request` into background
+  follow-ups** (#129). Under `STRICT_KWARGS_SERIALIZATION` the follow-up's
+  phase-1 failure is swallowed by the best-effort next-transition hand-off,
+  silently killing sync→background chains; sync follow-ups keep receiving
+  `request`.
+
 ## [0.6.0] — 2026-07-17
 
 Consumer-facing observability: a first-class bindings registry and a

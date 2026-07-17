@@ -160,6 +160,13 @@ class NextTransition:
             )
             return None
 
+        if getattr(transitions[0], 'is_background', False):
+            # request is phase-1-only and unserializable; forwarding it into
+            # a background follow-up would fail phase-1 serialization under
+            # STRICT_KWARGS_SERIALIZATION — and that failure is swallowed
+            # below, silently killing the chain (#129).
+            kwargs = {k: v for k, v in kwargs.items() if k != 'request'}
+
         try:
             # Invoke through the Process entrypoint so the follow-up mints
             # its own tr_id and manages _transition_context (root_id chains,
