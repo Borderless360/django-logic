@@ -10,3 +10,4 @@ class BackgroundConfig(AppConfig):
     def ready(self) -> None:
         from django_logic.background.settings import validate_on_ready
         validate_on_ready()
+        from django_logic import checks  # noqa: F401 — registers system checks

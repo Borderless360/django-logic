@@ -7,6 +7,7 @@ process as a property on a Django model, after which callers use
 """
 import inspect
 import uuid
+from collections import namedtuple
 from contextvars import ContextVar
 
 from django.core.exceptions import ImproperlyConfigured
@@ -402,6 +403,33 @@ def _validate_hook_signatures(process_cls) -> None:
     """
     from django.conf import settings
 
+    offenders = collect_hook_signature_offenders(process_cls)
+    if not offenders:
+        return
+    message = _hook_signature_message(offenders)
+    conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
+    if conf.get('STRICT_HOOK_SIGNATURES', False):
+        raise ImproperlyConfigured(message)
+    transition_logger.warning(message)
+
+
+def _hook_signature_message(offenders) -> str:
+    return (
+        'FSM hooks without a named instance-first parameter — the engine '
+        'calls hooks as fn(instance, **kwargs) (permissions as '
+        'fn(instance, user, **kwargs)), so give each hook a named first '
+        'parameter, e.g. def hook(instance, **kwargs); decorated hooks '
+        'need functools.wraps to expose the real signature: '
+        f'{"; ".join(sorted(set(offenders)))}'
+    )
+
+
+def collect_hook_signature_offenders(process_cls) -> list:
+    """Every hook across ``process_cls``'s tree whose first parameter is not
+    a named positional, as ``module.qualname (on Owner[.action])`` strings.
+    Pure collection — enforcement lives in bind-time validation and the
+    ``django_logic`` system check.
+    """
     offenders = []
 
     def check(fn, owner):
@@ -441,26 +469,25 @@ def _validate_hook_signatures(process_cls) -> None:
                 wrapper = getattr(transition, attr, None)
                 for fn in getattr(wrapper, 'commands', None) or []:
                     check(fn, f'{owner}.{getattr(transition, "action_name", "?")}')
-    if not offenders:
-        return
-    message = (
-        'FSM hooks without a named instance-first parameter — the engine '
-        'calls hooks as fn(instance, **kwargs) (permissions as '
-        'fn(instance, user, **kwargs)), so give each hook a named first '
-        'parameter, e.g. def hook(instance, **kwargs); decorated hooks '
-        'need functools.wraps to expose the real signature: '
-        f'{"; ".join(sorted(set(offenders)))}'
-    )
-    conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
-    if conf.get('STRICT_HOOK_SIGNATURES', False):
-        raise ImproperlyConfigured(message)
-    transition_logger.warning(message)
+    return offenders
+
+
+#: One record per ``bind_model_process`` call.
+ModelProcessBinding = namedtuple(
+    'ModelProcessBinding', ['model', 'process_class', 'state_field'])
 
 
 class ProcessManager:
+    #: Public registry of every bound machine, in bind order. Consumer
+    #: tooling (coverage audits, contract tests, the ``django_logic``
+    #: system check) reads this instead of re-deriving bindings from
+    #: model attributes.
+    bindings: list = []
+
     @classmethod
     def bind_model_process(cls, model, process_class, state_field: str = 'state') -> None:
         _validate_hook_signatures(process_class)
+        cls.bindings.append(ModelProcessBinding(model, process_class, state_field))
 
         def make_process_getter(field_name, process_cls):
             return lambda self: process_cls(field_name=field_name, instance=self)

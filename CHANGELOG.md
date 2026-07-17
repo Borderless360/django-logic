@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added — bindings registry + system checks (#125)
+
+- **`ProcessManager.bindings`** — a public registry of
+  `(model, process_class, state_field)` recorded by every
+  `bind_model_process` call, so consumer tooling (coverage audits,
+  contract tests) no longer re-derives bindings from model attributes.
+- **`django_logic.W001` system check** — re-runs hook-signature
+  validation over the registry through Django's checks framework, so
+  warn-mode offenders surface in `manage.py check`, every test run and
+  deploy checks. Bind-time logger warnings alone are emitted during
+  `ready()`, before logging is configured, and can go entirely unseen —
+  a consumer's warn-mode suite showed zero warnings on a tree where
+  strict mode found three real offenders.
+
 ## [0.5.1] — 2026-07-17
 
 ### Fixed
