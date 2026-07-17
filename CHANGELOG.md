@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Transition-execution coverage** (#132). The resolver now notifies
+  `django_logic.process.transition_observers` with
+  `(owning_process_cls, action_name, instance)` on every transition
+  initiation (direct calls, `next_transition` follow-ups, background
+  phase 1; phase-2 restore does not re-notify). A raising observer is
+  logged and never breaks the transition. On top of it,
+  `django_logic.coverage` records executed `(process, action)` pairs and
+  diffs them against every transition declared by `ProcessManager.bindings`
+  (nested processes included): `TransitionCoverage` (in-memory context
+  manager), `DJANGO_LOGIC['TRANSITION_COVERAGE_LOG'] = path` (file-backed,
+  fork/spawn-safe parallel test runs), and `coverage_report()`. Static
+  test-tree analysis cannot see transitive or dynamically-dispatched
+  drives; the engine can — this answers "which transitions did the suite
+  never drive?" exactly.
+
 ### Fixed
 
 - **NextTransition no longer forwards `request` into background
