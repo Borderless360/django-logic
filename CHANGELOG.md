@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-17
+
+Type-faithful background kwargs (#107, #108), bind-time hook-signature
+validation (#113), and a Django-version CI matrix plus a downstream
+consumer-contract job (#110, #112).
+
+### Upgrade notes
+
+The typed kwargs round-trip **changes what background hooks receive in
+phase 2** — this is the headline behavioural change of this release:
+
+- **Audit background hooks written against the 0.4.x contract.** Hooks
+  that parse ISO strings back into `datetime`/`UUID`, or re-wrap values
+  (`UUID(kwargs['some_id'])`), now receive the original types directly.
+  While pre-upgrade rows drain, a hook can see *both* forms — tolerate
+  both (e.g. `v if isinstance(v, UUID) else UUID(v)`) until the queue is
+  clean, then simplify to the typed form.
+- **Deploy web and workers together.** A 0.4.x worker passes 0.5.0's
+  tagged kwargs dicts through verbatim (it cannot decode them), and
+  rolling back to 0.4.x leaves any 0.5.0-written pending rows undecodable.
+  Drain or requeue pending `TransitionMessage` rows if you must roll back.
+- **Snapshot assertions on persisted kwargs change shape.** The testing
+  snapshot helper (`django_logic.testing.snapshot`) exposes the stored
+  `TransitionMessage.kwargs`, which now contains `__dl_type__` tag dicts
+  for non-JSON-native values.
+- **New warnings are on by default.** Passing `request` to a background
+  transition, hooks without a named instance-first parameter, and
+  non-string dict keys in kwargs each log a warning. Silence them by
+  fixing the call sites — or make them hard errors with
+  `DJANGO_LOGIC['STRICT_KWARGS_SERIALIZATION']` /
+  `DJANGO_LOGIC['STRICT_HOOK_SIGNATURES']`.
+- **Trove classifiers now match what CI tests**: Django 4.2 / 5.1 / 5.2 /
+  6.0. Dropped 4.0 (never installable under the `requires-python >= 3.11`
+  floor this package already had) and 5.0 (end-of-life, untested); added
+  4.2, which CI has always tested.
+
 ### Added — bind-time hook-signature validation (#113)
 
 - `ProcessManager.bind_model_process` now validates every hook across the
