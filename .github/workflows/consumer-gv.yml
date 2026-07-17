@@ -1,0 +1,106 @@
+name: Consumer contract (gv)
+
+# Runs gv's FSM test subset against django-logic at this ref (issue #110):
+# the engine's one serious consumer is the best regression detector it has,
+# and RELEASING.md gates releases on this job being green.
+#
+# Requires a repository secret GV_REPO_TOKEN with read access to
+# Borderless360/gv. Without it the job skips with a warning (so forks and
+# tokenless runs stay green).
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'django_logic/**'
+      - 'pyproject.toml'
+
+jobs:
+  gv-contract:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: gv
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gv"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check for gv access token
+        id: token
+        env:
+          GV_REPO_TOKEN: ${{ secrets.GV_REPO_TOKEN }}
+        run: |
+          if [ -z "$GV_REPO_TOKEN" ]; then
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GV_REPO_TOKEN is not configured — skipping the gv consumer contract job"
+          else
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.have == 'true'
+        with:
+          path: django-logic
+
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.have == 'true'
+        with:
+          repository: Borderless360/gv
+          token: ${{ secrets.GV_REPO_TOKEN }}
+          ref: staging
+          path: gv
+
+      - uses: astral-sh/setup-uv@v5
+        if: steps.token.outputs.have == 'true'
+
+      - name: System deps (gettext for compilemessages)
+        if: steps.token.outputs.have == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gettext
+
+      - name: Install gv with django-logic at this ref
+        if: steps.token.outputs.have == 'true'
+        working-directory: gv
+        run: |
+          uv sync --group dev
+          uv pip install ../django-logic
+
+      - name: Run gv FSM contract subset
+        if: steps.token.outputs.have == 'true'
+        working-directory: gv
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/gv
+          REDIS_URL: redis://127.0.0.1:6379/1
+          SKIP_MIGRATIONS: 'True'
+        run: |
+          source .venv/bin/activate
+          python manage.py compilemessages -l en > /dev/null
+          # Engine-facing subset: per-machine lifecycle scenarios, the
+          # cross-process journey suites, and gv's FSM guard tests.
+          python manage.py test --settings=gv.settings.test --noinput --parallel 4 \
+            --pattern 'test_*lifecycle_scenario.py'
+          python manage.py test --settings=gv.settings.test --noinput --parallel 4 \
+            --pattern 'test_journey_*.py'
+          python manage.py test --settings=gv.settings.test --noinput \
+            gv.tests order.tests.test_golden_journey
