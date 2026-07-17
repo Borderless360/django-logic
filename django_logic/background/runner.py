@@ -303,7 +303,20 @@ def _finalize_terminal_from_watchdog(
         tm.mark_as_completed(measure_duration=False)
         return None
 
-    kwargs = deserialize_kwargs(tm.kwargs)
+    try:
+        with transaction.atomic():
+            kwargs = deserialize_kwargs(tm.kwargs)
+    except Exception as exc:
+        # Terminal finalization must not be blocked by kwargs that no
+        # longer decode: proceed with empty kwargs so failed_state and
+        # completion still land and the retry loop stops. The savepoint
+        # keeps the outer transaction healthy if the failure was a
+        # genuine DatabaseError (restore_user queries the user table).
+        transition_logger.error(
+            f'{source}: TransitionMessage#{tm.pk} kwargs failed to decode '
+            f'({type(exc).__name__}: {exc}); finalizing with empty kwargs.'
+        )
+        kwargs = {}
     # Mirror the sync path: side-effects/callbacks may read ``context``.
     kwargs.setdefault('context', {})
     state = process.state
@@ -397,7 +410,21 @@ def _run_atomic(tm_id: int) -> _Outcome:
         # best-effort, no-op without sentry-sdk. See observability.py / issue #78.
         set_sentry_context(tm)
 
-        kwargs = deserialize_kwargs(tm.kwargs)
+        # A decode failure must be accounted like any attempt failure —
+        # raised here it would escape before record_error with errors_count
+        # still 0, and retry_stale_transitions would re-dispatch the row
+        # forever. Hold the error and route it through _handle_failure once
+        # the row is restored below. The savepoint keeps the outer
+        # transaction healthy if the failure was a genuine DatabaseError
+        # (restore_user queries the user table), so the error bookkeeping
+        # always works.
+        decode_error = None
+        try:
+            with transaction.atomic():
+                kwargs = deserialize_kwargs(tm.kwargs)
+        except Exception as exc:
+            decode_error = exc
+            kwargs = {}
         # Mirror the synchronous path (Transition._init_transition_context):
         # side-effects/callbacks may read a framework-provided ``context``
         # dict. serialize_kwargs drops it at phase 1, so rebuild it here —
@@ -463,6 +490,10 @@ def _run_atomic(tm_id: int) -> _Outcome:
                 f'{transition.action_name} {state.instance_key} '
                 f'queue={tm.queue_name}'
             )
+            if decode_error is not None:
+                return _handle_failure(
+                    tm, transition, state, kwargs, decode_error
+                )
             try:
                 # Savepoint: a failed attempt rolls back every side-effect
                 # write (all-or-nothing per attempt), and a genuine

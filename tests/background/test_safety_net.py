@@ -197,6 +197,27 @@ class DetectStuckTests(TestCase):
         )
         self.assertEqual(detect_stuck_transitions(), 0)
 
+    def test_undecodable_kwargs_row_still_finalized(self):
+        """A stuck row whose kwargs no longer decode must still be forced
+        terminal (failed_state + completed) with empty kwargs — a decode
+        failure must not block the safety net and re-wedge the retry loop."""
+        widget = Widget.objects.create(status='fulfilling')
+        TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=widget.pk,
+            process_name='process',
+            transition_name='fulfil',
+            queue_name='q',
+            kwargs={'user_id': ['not', 'a', 'pk']},
+            errors_count=3,
+        )
+        self.assertEqual(detect_stuck_transitions(), 1)
+        tm = TransitionMessage.objects.get(instance_id=widget.pk)
+        self.assertTrue(tm.is_completed)
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'fulfilment_failed')
+
     def test_unrestorable_row_still_marked_completed(self):
         """A stuck row pointing at a non-existent transition still gets
         terminated so the retry loop stops."""

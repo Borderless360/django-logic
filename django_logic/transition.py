@@ -84,8 +84,9 @@ class Transition(BaseTransition):
       3. optionally set ``in_progress_state``
       4. run side-effects
       5. on success: set ``target``, unlock, run callbacks, run ``next_transition``
-      6. on failure: run ``failure_side_effects``, set ``failed_state``,
-         unlock, run ``failure_callbacks`` (and re-raise)
+      6. on failure: set ``failed_state`` (so failure hooks observe the
+         contained state), run ``failure_side_effects``, unlock, run
+         ``failure_callbacks`` (and re-raise)
     """
 
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
