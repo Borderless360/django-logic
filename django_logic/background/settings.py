@@ -224,3 +224,14 @@ def _check_lock_cache_in_celery_mode() -> None:
         logger.warning(message)
     else:
         raise ImproperlyConfigured(message)
+
+
+def strict_kwargs_serialization() -> bool:
+    """When True, phase-1 kwargs serialization raises on silently-droppable
+    caller kwargs (``request``) instead of logging a warning.
+
+    Default False: generic API layers commonly pass ``request`` to every
+    transition uniformly, so raising by default would break them. Enable
+    once call sites are clean to turn the drop into a hard contract.
+    """
+    return bool(_conf().get('STRICT_KWARGS_SERIALIZATION', False))

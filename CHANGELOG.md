@@ -2,7 +2,45 @@
 
 ## [Unreleased]
 
-_Nothing yet — the next release accumulates here._
+### Added — bind-time hook-signature validation (#113)
+
+- `ProcessManager.bind_model_process` now validates every hook across the
+  process tree — transition-level side-effects, callbacks, failure hooks,
+  conditions and permissions, plus process-level `conditions`/`permissions`:
+  the engine calls hooks as `fn(instance, **kwargs)` (permissions as
+  `fn(instance, user, **kwargs)`), so a hook whose first parameter is not a
+  named positional (e.g. task-style `def hook(*args, **kwargs)`) is flagged
+  at bind time instead of failing at runtime on a worker. Warns by default;
+  `DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] = True` raises
+  `ImproperlyConfigured`. Decorated hooks need `functools.wraps` so their
+  real signature is visible to the validator.
+
+### Changed — kwargs serialization (#107, #108)
+
+- **Type-faithful kwargs round-trip** (#108). Background-transition kwargs
+  are now persisted with a self-describing type tag (`__dl_type__`) and
+  restored to their original Python types in phase 2: `datetime`, `date`,
+  `time`, `Decimal`, `UUID`, `tuple`, `set`, `frozenset` — recursively
+  inside containers. A side-effect now receives the same types whether its
+  transition is synchronous or background. `Decimal` and `set`, previously
+  rejected at phase 1, are now supported. Rows written by older versions
+  (plain ISO strings) still decode; deploy web and workers together when
+  upgrading across this boundary (an old worker passes tagged dicts through
+  verbatim). Model instances remain rejected — pass a pk and re-fetch.
+  Non-string dict keys cannot round-trip (JSON objects have string keys):
+  phase 1 flags them with a warning, or a `TypeError` under
+  `STRICT_KWARGS_SERIALIZATION`.
+- **`request` is dropped loudly** (#107). Phase-1 serialization logs a
+  warning (with the tr_id) when it drops `request` from a background
+  transition's kwargs, and the new
+  `DJANGO_LOGIC['STRICT_KWARGS_SERIALIZATION'] = True` raises `TypeError`
+  (specifically `serializers.KwargsSerializationError`) instead. Phase-2
+  hooks must never read `request` — the engine rehydrates `user`; pass
+  anything else as plain values.
+- New `deserialize_kwargs()` is the phase-2 inverse of
+  `serialize_kwargs()`; `restore_user()` remains available.
+  `make_json_safe()` is kept as a legacy helper but is no longer used by
+  the engine.
 
 ## [0.4.1] — 2026-07-02
 

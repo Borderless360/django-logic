@@ -7,6 +7,7 @@ point of django_logic.background.serializers is this boundary. Runs in sync
 mode (the default) so phase 1 + phase 2 execute inline.
 """
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from django.contrib.auth import get_user_model
@@ -14,6 +15,7 @@ from django.test import TestCase, override_settings
 
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
+from django_logic.background.serializers import KwargsSerializationError
 from tests.background import models as bg_models
 from tests.background.models import Widget
 
@@ -74,6 +76,18 @@ class KwargsRoundTripTests(TestCase):
             tm.owning_process_class, 'tests.background.models.WidgetProcess'
         )
 
+    @override_settings(
+        DJANGO_LOGIC={**_SYNC_SETTINGS, 'STRICT_KWARGS_SERIALIZATION': True})
+    def test_strict_request_drop_raises_typeerror_through_real_dispatch(self):
+        # The contract consumers actually see: the strict-mode rejection
+        # reaches the caller as the documented TypeError (not wrapped into
+        # the dispatcher's "not JSON-serializable" ImproperlyConfigured).
+        with self.assertRaisesMessage(
+                KwargsSerializationError, "'request' dropped"):
+            self.widget.process.fulfil(request=object())
+        # Phase 1 failed before persisting anything.
+        self.assertFalse(TransitionMessage.objects.exists())
+
     def test_owning_process_class_kept_out_of_nested_side_effect_kwargs(self):
         # Same contract for a NESTED owner: nested_fulfil is declared on
         # NestedBgChildProcess and reached through the bound parent_process.
@@ -89,15 +103,43 @@ class KwargsRoundTripTests(TestCase):
             'tests.background.models.NestedBgChildProcess',
         )
 
-    def test_datetime_and_uuid_arrive_as_strings_documented_contract(self):
-        # The serialization round-trip is lossy by design: types are not
-        # preserved. This test pins that contract so a future "fix" that
-        # silently changes it is caught.
-        self.widget.process.fulfil(when=_WHEN, some_uuid=_UUID)
+    def test_typed_kwargs_arrive_with_original_types(self):
+        # The round-trip is type-faithful: a phase-2 side-effect receives the
+        # same Python types the identical synchronous transition would. This
+        # pins the contract so a regression back to lossy strings is caught.
+        self.widget.process.fulfil(
+            when=_WHEN,
+            some_uuid=_UUID,
+            amount=Decimal('19.99'),
+            pair=(1, 'two'),
+            tags={'a', 'b'},
+        )
         seen = bg_models.LAST_KWARGS
-        self.assertIsInstance(seen['when'], str)
+        self.assertEqual(seen['when'], _WHEN)
+        self.assertIs(type(seen['when']), datetime)
+        self.assertEqual(seen['some_uuid'], _UUID)
+        self.assertIs(type(seen['some_uuid']), UUID)
+        self.assertEqual(seen['amount'], Decimal('19.99'))
+        self.assertEqual(seen['pair'], (1, 'two'))
+        self.assertEqual(seen['tags'], {'a', 'b'})
+
+    def test_legacy_untagged_row_still_runs(self):
+        # A TransitionMessage written before the typed encoding carries plain
+        # ISO strings — phase 2 must pass them through unchanged, not crash.
+        self.widget.status = 'fulfilling'
+        self.widget.save(update_fields=['status'])
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=str(self.widget.pk),
+            process_name='process',
+            transition_name='fulfil',
+            queue_name='django_logic.critical',
+            kwargs={'when': _WHEN.isoformat(), 'some_uuid': str(_UUID)},
+        )
+        run_background_transition(tm.pk)
+        seen = bg_models.LAST_KWARGS
         self.assertEqual(seen['when'], _WHEN.isoformat())
-        self.assertIsInstance(seen['some_uuid'], str)
         self.assertEqual(seen['some_uuid'], str(_UUID))
 
     def test_deleted_user_degrades_to_none(self):

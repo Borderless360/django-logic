@@ -678,6 +678,9 @@ DJANGO_LOGIC = {
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
     'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
     'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
+    'SENTRY_TRANSACTION_NAMING': True,  # per-transition Sentry naming (no-op without sentry-sdk)
+    'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
+    'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
 }
 ```
 
