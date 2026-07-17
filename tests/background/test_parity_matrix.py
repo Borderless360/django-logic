@@ -158,6 +158,22 @@ class ParityMatrixTests(TestCase):
             with self.assertRaises(ImproperlyConfigured, msg=action):
                 _drive(self._fresh(), action, blob=Blob())
 
+    def test_non_finite_float_kwarg_fails_at_phase1_for_background_only(self):
+        # NaN/Infinity pass Python's json.dumps (non-standard tokens) but
+        # are not valid JSON — without the phase-1 guard the failure
+        # surfaces backend-dependently at the row write (issue #118). Same
+        # dispatcher contract as an unserializable kwarg above.
+        from django.core.exceptions import ImproperlyConfigured
+        from django_logic.background.models import TransitionMessage
+
+        for action in BACKGROUND_ACTIONS:
+            for bad in (float('nan'), float('inf'), float('-inf')):
+                with self.assertRaises(
+                        ImproperlyConfigured, msg=f'{action} {bad!r}'):
+                    _drive(self._fresh(), action, rate=bad)
+        # Phase 1 failed before persisting anything.
+        self.assertFalse(TransitionMessage.objects.exists())
+
     def test_callbacks_observe_the_target_state_in_all_four_classes(self):
         expected = {'sync_transition': 'done', 'sync_action': 'draft',
                     'bg_transition': 'done', 'bg_action': 'draft'}
