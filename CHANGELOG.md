@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added — bind-time hook-signature validation (#113)
+
+- `ProcessManager.bind_model_process` now validates every hook across the
+  process tree (side-effects, callbacks, failure hooks, conditions,
+  permissions): the engine calls hooks as `fn(instance, **kwargs)`, so a
+  hook whose first parameter is not a named positional (e.g. task-style
+  `def hook(*args, **kwargs)`) is flagged at bind time instead of failing
+  at runtime on a worker. Warns by default;
+  `DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] = True` raises
+  `ImproperlyConfigured`.
+
 ### Changed — kwargs serialization (#107, #108)
 
 - **Type-faithful kwargs round-trip** (#108). Background-transition kwargs

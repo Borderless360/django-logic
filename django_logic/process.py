@@ -5,6 +5,7 @@ nested processes. ``ProcessManager.bind_model_process`` attaches the
 process as a property on a Django model, after which callers use
 ``instance.my_process.action_name(...)`` to drive transitions.
 """
+import inspect
 import uuid
 from contextvars import ContextVar
 
@@ -385,9 +386,62 @@ def _validate_unique_background_action_names(process_cls):
             local_background[name] = _where(proc_cls, transition)
 
 
+def _validate_hook_signatures(process_cls) -> None:
+    """Every hook must accept the instance as a named first positional
+    parameter.
+
+    A task-style ``def hook(*args, **kwargs)`` binds fine, receives the
+    instance invisibly in ``args``, and typically reads ids out of kwargs
+    the engine never passes — failing only at runtime, on the worker.
+    Validating at bind time turns that latent failure into a boot-time
+    signal. Warns by default; ``DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] =
+    True`` raises ``ImproperlyConfigured`` instead.
+    """
+    from django.conf import settings
+
+    offenders = []
+    for proc_cls in _iter_process_tree(process_cls):
+        for transition in proc_cls.transitions or []:
+            wrappers = (
+                transition.side_effects, transition.callbacks,
+                transition.failure_side_effects, transition.failure_callbacks,
+                transition.conditions, transition.permissions,
+            )
+            for wrapper in wrappers:
+                for fn in wrapper.commands:
+                    try:
+                        params = list(inspect.signature(fn).parameters.values())
+                    except (TypeError, ValueError):
+                        continue
+                    ok = params and params[0].kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                    if not ok:
+                        offenders.append(
+                            f'{getattr(fn, "__module__", "?")}.'
+                            f'{getattr(fn, "__qualname__", fn)} (on '
+                            f'{proc_cls.__module__}.{proc_cls.__name__}.'
+                            f'{transition.action_name})'
+                        )
+    if not offenders:
+        return
+    message = (
+        'FSM hooks without a named instance-first parameter — the engine '
+        'calls every hook as fn(instance, **kwargs), so rewrite as '
+        f'def hook(instance, **kwargs): {"; ".join(sorted(set(offenders)))}'
+    )
+    conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
+    if conf.get('STRICT_HOOK_SIGNATURES', False):
+        raise ImproperlyConfigured(message)
+    transition_logger.warning(message)
+
+
 class ProcessManager:
     @classmethod
     def bind_model_process(cls, model, process_class, state_field: str = 'state') -> None:
+        _validate_hook_signatures(process_class)
+
         def make_process_getter(field_name, process_cls):
             return lambda self: process_cls(field_name=field_name, instance=self)
 
