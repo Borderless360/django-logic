@@ -30,27 +30,34 @@ Everything runs through [`uv`](https://github.com/astral-sh/uv) (build) and
 3. **Update `CHANGELOG.md`**: move `[Unreleased]` into a dated `[X.Y.Z]`
    section; leave a fresh empty `[Unreleased]`.
 4. **Run the tests**: `python tests/manage.py test` (or `make test`).
-5. **Build + validate the artifacts**:
+5. **Check the consumer contract job is green**: the `Consumer contract (gv)`
+   workflow (nightly + `workflow_dispatch`) runs gv's FSM test subset against
+   django-logic@master. Trigger it manually for the release candidate and do
+   not publish while it is red:
+   ```bash
+   gh workflow run consumer-gv.yml && gh run watch
+   ```
+6. **Build + validate the artifacts**:
    ```bash
    make dist          # rm -rf dist/ build/ *.egg-info && uv build && twine check dist/*
    ```
-6. **Publish to PyPI**:
+7. **Publish to PyPI**:
    ```bash
    make publish       # uploads dist/* using .pypirc
    ```
-7. **Tag and push**:
+8. **Tag and push**:
    ```bash
    git tag -a vX.Y.Z -m "django-logic X.Y.Z"
    git push origin master vX.Y.Z
    ```
-8. **Create the GitHub release** with the changelog section as notes and the
+9. **Create the GitHub release** with the changelog section as notes and the
    built artifacts attached:
    ```bash
    gh release create vX.Y.Z --title "django-logic X.Y.Z" \
      --notes-file <notes.md> --latest \
      dist/django_logic-X.Y.Z-py3-none-any.whl dist/django_logic-X.Y.Z.tar.gz
    ```
-9. **Verify**: `pip install django-logic==X.Y.Z` in a clean venv imports cleanly.
+10. **Verify**: `pip install django-logic==X.Y.Z` in a clean venv imports cleanly.
 
 > PyPI uploads are **irreversible** — a version number can never be re-uploaded.
 > Always `make dist` + install-check before `make publish`.
