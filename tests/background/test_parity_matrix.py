@@ -18,7 +18,16 @@ Contracts pinned per class:
 * failure routing — sync raises to the caller and routes failed_state
   immediately; background absorbs at the caller and routes after
   retries are exhausted;
-* callbacks observe the target state in all four classes.
+* callbacks observe the target state in all four classes;
+* hook ordering — side-effects run while the persisted state is still
+  the source, callbacks only after the target write is observable; on
+  terminal failure, failed_state is written first, then
+  failure_side_effects, then failure_callbacks — the same sequence
+  sync and background;
+* ``next_transition`` — the same background follow-up runs with the
+  same typed kwargs and a live ``user`` whether the parent is sync or
+  background, and never sees ``request``; the declared difference: a
+  sync ``Action`` never chains, a ``BackgroundAction`` does.
 """
 from datetime import datetime, timezone as tz
 from decimal import Decimal
@@ -56,6 +65,8 @@ _ENGINE_KEYS = {'tr_id', 'root_id', 'parent_id', 'context', 'user', 'process_cla
 SEEN: dict = {}
 CALLBACK_STATE: dict = {}
 FAIL = {'on': False}
+ORDER: list = []
+HOP_SEEN: dict = {}
 
 
 def record_kwargs(instance, **kwargs):
@@ -70,25 +81,74 @@ def record_callback_state(instance, **kwargs):
     CALLBACK_STATE['status'] = instance.status
 
 
+def record_order_side_effect(instance, **kwargs):
+    instance.refresh_from_db()
+    ORDER.append(('side_effect', instance.status))
+
+
+def record_order_callback(instance, **kwargs):
+    instance.refresh_from_db()
+    ORDER.append(('callback', instance.status))
+
+
+def record_order_failure_side_effect(instance, **kwargs):
+    instance.refresh_from_db()
+    ORDER.append(('failure_side_effect', instance.status))
+
+
+def record_order_failure_callback(instance, **kwargs):
+    instance.refresh_from_db()
+    ORDER.append(('failure_callback', instance.status))
+
+
+def record_hop_kwargs(instance, **kwargs):
+    HOP_SEEN.clear()
+    HOP_SEEN.update(kwargs)
+
+
 class ParityProcess(Process):
     process_name = 'parity_process'
     transitions = [
         Transition('sync_transition', sources=['draft'], target='done',
                    failed_state='failed',
-                   side_effects=[record_kwargs], callbacks=[record_callback_state]),
+                   side_effects=[record_kwargs, record_order_side_effect],
+                   callbacks=[record_callback_state, record_order_callback],
+                   failure_side_effects=[record_order_failure_side_effect],
+                   failure_callbacks=[record_order_failure_callback]),
         Action('sync_action', sources=['draft'],
-               side_effects=[record_kwargs], callbacks=[record_callback_state]),
+               side_effects=[record_kwargs, record_order_side_effect],
+               callbacks=[record_callback_state, record_order_callback]),
         BackgroundTransition('bg_transition', sources=['draft'], target='done',
                              failed_state='failed',
-                             side_effects=[record_kwargs], callbacks=[record_callback_state]),
+                             side_effects=[record_kwargs, record_order_side_effect],
+                             callbacks=[record_callback_state, record_order_callback],
+                             failure_side_effects=[record_order_failure_side_effect],
+                             failure_callbacks=[record_order_failure_callback]),
         BackgroundAction('bg_action', sources=['draft'],
-                         side_effects=[record_kwargs], callbacks=[record_callback_state]),
+                         side_effects=[record_kwargs, record_order_side_effect],
+                         callbacks=[record_callback_state, record_order_callback]),
+        # next_transition parity: one parent per class, every one chaining
+        # into the same background follow-up. The hop accepts both 'draft'
+        # (Action parents change no state) and 'chained_src' (Transition
+        # parents' target).
+        Transition('sync_transition_chain', sources=['draft'],
+                   target='chained_src', next_transition='chain_hop'),
+        Action('sync_action_chain', sources=['draft'],
+               next_transition='chain_hop'),
+        BackgroundTransition('bg_transition_chain', sources=['draft'],
+                             target='chained_src', next_transition='chain_hop'),
+        BackgroundAction('bg_action_chain', sources=['draft'],
+                         next_transition='chain_hop'),
+        BackgroundTransition('chain_hop', sources=['draft', 'chained_src'],
+                             target='chained', side_effects=[record_hop_kwargs]),
     ]
 
 
 ALL_ACTIONS = ('sync_transition', 'sync_action', 'bg_transition', 'bg_action')
 BACKGROUND_ACTIONS = ('bg_transition', 'bg_action')
 SYNC_ACTIONS = ('sync_transition', 'sync_action')
+CHAIN_PARENTS = ('sync_transition_chain', 'sync_action_chain',
+                 'bg_transition_chain', 'bg_action_chain')
 
 
 def _drive(widget, action, **kwargs):
@@ -111,6 +171,8 @@ class ParityMatrixTests(TestCase):
     def setUp(self):
         SEEN.clear()
         CALLBACK_STATE.clear()
+        ORDER.clear()
+        HOP_SEEN.clear()
         FAIL['on'] = False
         self.user = get_user_model().objects.create(username='parity-actor')
 
@@ -181,6 +243,93 @@ class ParityMatrixTests(TestCase):
             CALLBACK_STATE.clear()
             _drive(self._fresh(), action)
             self.assertEqual(CALLBACK_STATE.get('status'), expected[action], action)
+
+    def test_side_effects_precede_the_target_write_and_callbacks_follow_it(self):
+        # The callback-state test above pins WHICH state callbacks observe;
+        # this pins the ORDER around the state write: the side-effect runs
+        # while the persisted state is still the SOURCE (this process
+        # declares no in_progress_state; when one is declared, the sync
+        # path and background phase 1 both write it before side-effects
+        # run, so the pre-target contract stays symmetric), and the
+        # callback runs only after the target write is observable. Actions
+        # differ only in the state the callback sees — they never write one.
+        expected = {'sync_transition': 'done', 'sync_action': 'draft',
+                    'bg_transition': 'done', 'bg_action': 'draft'}
+        for action in ALL_ACTIONS:
+            ORDER.clear()
+            _drive(self._fresh(), action)
+            self.assertEqual(
+                ORDER,
+                [('side_effect', 'draft'), ('callback', expected[action])],
+                action,
+            )
+
+    def test_terminal_failure_order_is_identical_for_both_failure_capable_classes(self):
+        # failed_state is written FIRST, so both failure hooks observe the
+        # contained state; failure_side_effects run before failure_callbacks.
+        # Every implementation site agrees on this sequence — the sync path
+        # (Transition.fail_transition), the background terminal attempt
+        # (runner._handle_failure), and the watchdog finalizer that mirrors
+        # it — and that cross-class symmetry is the contract pinned here.
+        # (Transition's class docstring lists failure_side_effects before
+        # the failed_state write; the code does not, in any class.)
+        from django_logic.background.models import TransitionMessage
+        from django_logic.background.runner import run_background_transition
+
+        FAIL['on'] = True
+        results = {}
+        for action in ('sync_transition', 'bg_transition'):
+            ORDER.clear()
+            widget = self._fresh()
+            with self.assertRaises(ValueError):
+                _drive(widget, action)
+            if action == 'bg_transition':
+                # sync runs the terminal sequence on its only attempt; the
+                # background one runs at MAX_ERRORS — the retry-timing
+                # difference already pinned by the failure-routing tests.
+                tm = TransitionMessage.objects.get(instance_id=str(widget.pk),
+                                                   transition_name=action)
+                for _ in range(2):
+                    with self.assertRaises(ValueError):
+                        run_background_transition(tm.pk)
+            widget.refresh_from_db()
+            self.assertEqual(widget.status, 'failed', action)
+            results[action] = list(ORDER)
+
+        for action, order in results.items():
+            self.assertEqual(order, [('failure_side_effect', 'failed'),
+                                     ('failure_callback', 'failed')], action)
+        FAIL['on'] = False
+
+    def test_next_transition_chains_equivalently_across_all_four_classes(self):
+        # The parent's class must not change WHAT the follow-up receives:
+        # the same background follow-up runs with the same typed kwargs and
+        # a live user, and request never reaches it — stripped by
+        # NextTransition for a sync parent (#129), dropped at the parent's
+        # own phase 1 for a background parent. The one declared difference:
+        # a sync Action never runs next_transition (see the divergence note
+        # on Action), while a BackgroundAction's phase 2 does.
+        chains = {'sync_transition_chain': True, 'sync_action_chain': False,
+                  'bg_transition_chain': True, 'bg_action_chain': True}
+        for parent in CHAIN_PARENTS:
+            HOP_SEEN.clear()
+            widget = self._fresh()
+            _drive(widget, parent, user=self.user, request=object(),
+                   **dict(TYPED_KWARGS))
+            widget.refresh_from_db()
+            if not chains[parent]:
+                self.assertEqual(HOP_SEEN, {}, parent)
+                self.assertEqual(widget.status, 'draft', parent)
+                continue
+            self.assertEqual(widget.status, 'chained', parent)
+            hop_kwargs = {k: v for k, v in HOP_SEEN.items()
+                          if k not in _ENGINE_KEYS}
+            self.assertEqual(hop_kwargs, TYPED_KWARGS, parent)
+            for key, value in TYPED_KWARGS.items():
+                self.assertIs(type(hop_kwargs[key]), type(value),
+                              f'{parent}.{key}')
+            self.assertEqual(HOP_SEEN['user'].pk, self.user.pk, parent)
+            self.assertNotIn('request', HOP_SEEN, parent)
 
     def test_sync_failure_raises_and_routes_failed_state_immediately(self):
         FAIL['on'] = True
