@@ -22,6 +22,9 @@ Deliberate handling:
   ``json.dumps`` (``TypeError``). Pass a pk and re-fetch in the hook:
   phase 2 may run much later and must see fresh rows, not a stale
   snapshot.
+* Non-string dict keys — JSON objects only have string keys, so these are
+  stringified in storage and do **not** round-trip. Flagged loudly at
+  phase 1 (warning, or ``TypeError`` under the strict setting).
 
 .. note::
 
@@ -40,6 +43,17 @@ from uuid import UUID
 
 from django_logic.background import settings as bg_settings
 from django_logic.logger import transition_logger
+
+
+class KwargsSerializationError(TypeError):
+    """Strict-mode rejection of kwargs that phase 1 would otherwise mutate
+    silently (a dropped ``request``, stringified non-string dict keys).
+
+    A ``TypeError`` subclass, so the documented "raises ``TypeError``"
+    contract holds — but distinct, so the phase-1 dispatcher re-raises it
+    as-is instead of wrapping it in the generic "not JSON-serializable"
+    ``ImproperlyConfigured``.
+    """
 
 
 _CONTEXT_KEYS = ('tr_id', 'root_id', 'parent_id')
@@ -134,15 +148,36 @@ def decode_value(value):
     return value
 
 
+def _non_string_key_paths(value, path='kwargs'):
+    """Yield a path for every dict key that is not a ``str``.
+
+    JSON objects only have string keys, so ``{1: 'a'}`` is persisted as
+    ``{"1": "a"}`` — silently, since ``json.dumps`` stringifies int/float/
+    bool/None keys instead of raising. That breaks the type-faithful
+    round-trip (a phase-2 hook sees ``'1'`` where the synchronous path saw
+    ``1``), so phase 1 flags it loudly instead.
+    """
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                yield f'{path}[{k!r}]'
+            yield from _non_string_key_paths(v, f'{path}[{k!r}]')
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _non_string_key_paths(item, f'{path}[]')
+
+
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
     Drops ``request`` (warning, or ``TypeError`` under
     ``STRICT_KWARGS_SERIALIZATION``). Replaces ``user`` with ``user_id``.
     Tag-encodes non-JSON-native values so phase 2 restores real types.
-    Raises ``TypeError`` via ``json.dumps`` if something unexpected slips
-    through — the caller should let that propagate so the failure is
-    visible at phase 1 rather than at phase 2.
+    Non-string dict keys are stringified by JSON persistence and cannot
+    round-trip — flagged with a warning (or ``TypeError`` under the strict
+    setting). Raises ``TypeError`` via ``json.dumps`` if something
+    unexpected slips through — the caller should let that propagate so the
+    failure is visible at phase 1 rather than at phase 2.
     """
     out = dict(kwargs)
     if 'request' in out:
@@ -153,7 +188,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
             f"'user'; pass anything else as plain values)"
         )
         if bg_settings.strict_kwargs_serialization():
-            raise TypeError(message)
+            raise KwargsSerializationError(message)
         transition_logger.warning(message)
     out.pop('context', None)  # rebuilt in phase 2
     # Persisted on its own TransitionMessage column, not in the kwargs JSON:
@@ -173,6 +208,19 @@ def serialize_kwargs(kwargs: dict) -> dict:
     for key in _CONTEXT_KEYS:
         if key in out and out[key] is not None:
             out[key] = str(out[key])
+
+    bad_keys = sorted(set(_non_string_key_paths(out)))
+    if bad_keys:
+        message = (
+            f"{out.get('tr_id')} non-string dict keys in background "
+            f"transition kwargs ({', '.join(bad_keys)}) are stringified by "
+            f"JSON persistence — a phase-2 hook sees '1' where the "
+            f"synchronous path saw 1, and colliding keys ({{1: …, '1': …}}) "
+            f"silently lose data. Use string keys, or a list of pairs."
+        )
+        if bg_settings.strict_kwargs_serialization():
+            raise KwargsSerializationError(message)
+        transition_logger.warning(message)
 
     out = encode_value(out)
 

@@ -15,6 +15,7 @@ from django.test import TestCase, override_settings
 
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
+from django_logic.background.serializers import KwargsSerializationError
 from tests.background import models as bg_models
 from tests.background.models import Widget
 
@@ -74,6 +75,18 @@ class KwargsRoundTripTests(TestCase):
         self.assertEqual(
             tm.owning_process_class, 'tests.background.models.WidgetProcess'
         )
+
+    @override_settings(
+        DJANGO_LOGIC={**_SYNC_SETTINGS, 'STRICT_KWARGS_SERIALIZATION': True})
+    def test_strict_request_drop_raises_typeerror_through_real_dispatch(self):
+        # The contract consumers actually see: the strict-mode rejection
+        # reaches the caller as the documented TypeError (not wrapped into
+        # the dispatcher's "not JSON-serializable" ImproperlyConfigured).
+        with self.assertRaisesMessage(
+                KwargsSerializationError, "'request' dropped"):
+            self.widget.process.fulfil(request=object())
+        # Phase 1 failed before persisting anything.
+        self.assertFalse(TransitionMessage.objects.exists())
 
     def test_owning_process_class_kept_out_of_nested_side_effect_kwargs(self):
         # Same contract for a NESTED owner: nested_fulfil is declared on

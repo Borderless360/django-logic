@@ -26,7 +26,10 @@ from django.db import IntegrityError, transaction
 from django_logic.background import settings as bg_settings
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
-from django_logic.background.serializers import serialize_kwargs
+from django_logic.background.serializers import (
+    KwargsSerializationError,
+    serialize_kwargs,
+)
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import (
     redact_log_kwargs,
@@ -160,6 +163,10 @@ class BackgroundTransition(Transition):
         }
         try:
             serialized = serialize_kwargs(kwargs)
+        except KwargsSerializationError:
+            # Strict-mode contract violation — the message is already
+            # precise; wrapping it as "not JSON-serializable" would mislead.
+            raise
         except TypeError as e:
             raise ImproperlyConfigured(
                 f"BackgroundTransition '{self.action_name}' received a "

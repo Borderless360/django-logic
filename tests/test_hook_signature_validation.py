@@ -48,9 +48,30 @@ class _BadProcess(Process):
     ]
 
 
+class _ProcessLevelBad(Process):
+    process_name = 'sig_proc_level_process'
+    conditions = [kwargs_only_hook]
+    permissions = [task_style_hook]
+    transitions = [
+        Transition('approve', sources=['draft'], target='approved'),
+    ]
+
+
+class _DuckTransition:
+    """Custom transition exposing only what it needs — the validator must
+    not require the full hook-attribute surface."""
+    action_name = 'quack'
+
+
+class _DuckProcess(Process):
+    process_name = 'sig_duck_process'
+    transitions = [_DuckTransition()]
+
+
 class HookSignatureValidationTests(SimpleTestCase):
     def tearDown(self):
-        for name in ('sig_ok_process', 'sig_bad_process'):
+        for name in ('sig_ok_process', 'sig_bad_process',
+                     'sig_proc_level_process', 'sig_duck_process'):
             if name in vars(Invoice):
                 delattr(Invoice, name)
         super().tearDown()
@@ -78,3 +99,21 @@ class HookSignatureValidationTests(SimpleTestCase):
     @override_settings(DJANGO_LOGIC={'STRICT_HOOK_SIGNATURES': True})
     def test_strict_setting_accepts_clean_hooks(self):
         ProcessManager.bind_model_process(Invoice, _GoodProcess, state_field='status')
+
+    def test_process_level_conditions_and_permissions_are_validated(self):
+        # Process.is_valid executes class-level conditions/permissions with
+        # the same instance-first convention — they must not escape the walk.
+        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
+            ProcessManager.bind_model_process(
+                Invoice, _ProcessLevelBad, state_field='status')
+        message = logs.output[0]
+        self.assertIn('kwargs_only_hook', message)
+        self.assertIn('task_style_hook', message)
+        self.assertIn('_ProcessLevelBad', message)
+
+    def test_duck_typed_transition_without_hook_attributes_binds(self):
+        # Regardless of the strict flag, a transition object exposing only
+        # part of the hook surface must not crash bind_model_process.
+        with override_settings(DJANGO_LOGIC={'STRICT_HOOK_SIGNATURES': True}):
+            ProcessManager.bind_model_process(
+                Invoice, _DuckProcess, state_field='status')

@@ -394,42 +394,59 @@ def _validate_hook_signatures(process_cls) -> None:
     instance invisibly in ``args``, and typically reads ids out of kwargs
     the engine never passes — failing only at runtime, on the worker.
     Validating at bind time turns that latent failure into a boot-time
-    signal. Warns by default; ``DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] =
-    True`` raises ``ImproperlyConfigured`` instead.
+    signal. Covers transition-level hooks (side-effects, callbacks,
+    failure hooks, conditions, permissions) and process-level
+    ``conditions``/``permissions``. Warns by default;
+    ``DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] = True`` raises
+    ``ImproperlyConfigured`` instead.
     """
     from django.conf import settings
 
     offenders = []
-    for proc_cls in _iter_process_tree(process_cls):
-        for transition in proc_cls.transitions or []:
-            wrappers = (
-                transition.side_effects, transition.callbacks,
-                transition.failure_side_effects, transition.failure_callbacks,
-                transition.conditions, transition.permissions,
+
+    def check(fn, owner):
+        try:
+            params = list(inspect.signature(fn).parameters.values())
+        except (TypeError, ValueError):
+            return
+        ok = params and params[0].kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        if not ok:
+            offenders.append(
+                f'{getattr(fn, "__module__", "?")}.'
+                f'{getattr(fn, "__qualname__", fn)} (on {owner})'
             )
-            for wrapper in wrappers:
-                for fn in wrapper.commands:
-                    try:
-                        params = list(inspect.signature(fn).parameters.values())
-                    except (TypeError, ValueError):
-                        continue
-                    ok = params and params[0].kind in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    )
-                    if not ok:
-                        offenders.append(
-                            f'{getattr(fn, "__module__", "?")}.'
-                            f'{getattr(fn, "__qualname__", fn)} (on '
-                            f'{proc_cls.__module__}.{proc_cls.__name__}.'
-                            f'{transition.action_name})'
-                        )
+
+    _HOOK_ATTRS = (
+        'side_effects', 'callbacks', 'failure_side_effects',
+        'failure_callbacks', 'conditions', 'permissions',
+    )
+    for proc_cls in _iter_process_tree(process_cls):
+        owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
+        # Process-level conditions/permissions are plain lists of callables
+        # (executed via Conditions/Permissions in Process.is_valid).
+        for fn in getattr(proc_cls, 'conditions', None) or []:
+            check(fn, owner)
+        for fn in getattr(proc_cls, 'permissions', None) or []:
+            check(fn, owner)
+        for transition in proc_cls.transitions or []:
+            # getattr-guarded: a duck-typed custom transition that the
+            # engine never asks for one of these must not fail to bind.
+            for attr in _HOOK_ATTRS:
+                wrapper = getattr(transition, attr, None)
+                for fn in getattr(wrapper, 'commands', None) or []:
+                    check(fn, f'{owner}.{getattr(transition, "action_name", "?")}')
     if not offenders:
         return
     message = (
         'FSM hooks without a named instance-first parameter — the engine '
-        'calls every hook as fn(instance, **kwargs), so rewrite as '
-        f'def hook(instance, **kwargs): {"; ".join(sorted(set(offenders)))}'
+        'calls hooks as fn(instance, **kwargs) (permissions as '
+        'fn(instance, user, **kwargs)), so give each hook a named first '
+        'parameter, e.g. def hook(instance, **kwargs); decorated hooks '
+        'need functools.wraps to expose the real signature: '
+        f'{"; ".join(sorted(set(offenders)))}'
     )
     conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
     if conf.get('STRICT_HOOK_SIGNATURES', False):

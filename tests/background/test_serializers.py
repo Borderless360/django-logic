@@ -9,6 +9,7 @@ from django.test import SimpleTestCase, override_settings
 
 from django_logic.background.serializers import (
     decode_value, deserialize_kwargs, restore_user, serialize_kwargs,
+    KwargsSerializationError,
 )
 
 
@@ -109,6 +110,34 @@ class SerializeKwargsTests(SimpleTestCase):
         out = serialize_kwargs({'a': 1, 'b': 'x', 'c': None})
         # Must be valid JSON as-is.
         self.assertEqual(json.loads(json.dumps(out)), out)
+
+    def test_strict_raise_is_a_distinct_typeerror_subclass(self):
+        # The phase-1 dispatcher wraps generic TypeError in
+        # ImproperlyConfigured ("not JSON-serializable") — the strict-mode
+        # rejection must stay distinguishable so it propagates verbatim.
+        with override_settings(DJANGO_LOGIC={'STRICT_KWARGS_SERIALIZATION': True}):
+            with self.assertRaises(KwargsSerializationError):
+                serialize_kwargs({'request': Mock()})
+
+    def test_non_string_dict_keys_warn(self):
+        # JSON stringifies int keys silently ({1: 'a'} -> {"1": "a"}), which
+        # breaks the type-faithful contract — phase 1 must say so.
+        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
+            out = serialize_kwargs({'m': {1: 'a'}})
+        self.assertIn('non-string dict keys', logs.output[0])
+        self.assertIn("'m'", logs.output[0])
+        # The documented (lossy) persisted contract: keys become strings.
+        self.assertEqual(json.loads(json.dumps(out)), {'m': {'1': 'a'}})
+
+    def test_non_string_dict_keys_nested_in_containers_warn(self):
+        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
+            serialize_kwargs({'items': [{'deep': {2: 'b'}}]})
+        self.assertIn('non-string dict keys', logs.output[0])
+
+    @override_settings(DJANGO_LOGIC={'STRICT_KWARGS_SERIALIZATION': True})
+    def test_non_string_dict_keys_raise_under_strict_setting(self):
+        with self.assertRaisesMessage(TypeError, 'non-string dict keys'):
+            serialize_kwargs({'m': {1: 'a'}})
 
 
 class DeserializeKwargsTests(SimpleTestCase):
