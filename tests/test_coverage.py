@@ -7,7 +7,7 @@ every initiation path, never breaks a transition) and the coverage report
 """
 import tempfile
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from django_logic.coverage import (
     TransitionCoverage,
@@ -157,3 +157,142 @@ class TransitionObserverAndCoverageTests(TestCase):
             recorders = [o for o in transition_observers
                          if o.__class__.__name__ == '_FileRecorder']
             self.assertEqual(len(recorders), 1)
+
+    def test_coverage_report_tolerates_a_never_written_log(self):
+        # The recorder creates the file on the first pair — a run that drove
+        # nothing is a valid all-uncovered report, not a crash.
+        report = coverage_report(log_path='/nonexistent/dir/coverage.log')
+        self.assertEqual(report['executed'], 0)
+
+    # --- observer isolation / cleanup ---------------------------------------
+
+    def test_dirty_with_block_exit_still_unregisters_the_observer(self):
+        cov = TransitionCoverage()
+        with self.assertRaises(RuntimeError):
+            with cov:
+                raise RuntimeError('test body blew up')
+        self.assertNotIn(cov._observe, transition_observers)
+
+    def test_raising_observer_does_not_block_later_observers(self):
+        invoice = Invoice.objects.create(status='draft')
+        seen = []
+
+        def broken(cls, action, instance):
+            raise RuntimeError('observer bug')
+
+        def working(cls, action, instance):
+            seen.append(action)
+
+        transition_observers.extend([broken, working])
+        try:
+            with self.assertLogs('django-logic.transition', level='ERROR'):
+                invoice.coverage_process.approve()
+        finally:
+            transition_observers.remove(broken)
+            transition_observers.remove(working)
+        self.assertEqual(seen, ['approve'])
+
+
+_SYNC_SETTINGS = {
+    'LOCK_TIMEOUT': 7200,
+    'BACKGROUND_EXECUTION': 'sync',
+    'STARTER_QUEUE': 'django_logic.starter',
+    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
+    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
+    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
+}
+
+_BG_FAIL = {'on': False}
+
+
+def _bg_side_effect(instance, **kwargs):
+    if _BG_FAIL['on']:
+        raise ValueError('injected failure')
+
+
+@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
+class BackgroundObserverSemanticsTests(TestCase):
+    """The headline claims: background phase 1 notifies exactly once;
+    phase-2 execution and retries never re-notify; a next_transition
+    follow-up notifies once more, attributed to the follow-up's owner."""
+
+    @classmethod
+    def setUpClass(cls):
+        from django_logic.background import BackgroundTransition
+        from tests.background.models import Widget
+
+        super().setUpClass()
+
+        class ObserverBgProcess(Process):
+            process_name = 'observer_bg_process'
+            transitions = [
+                BackgroundTransition('bg_go', sources=['draft'], target='done',
+                                     failed_state='failed',
+                                     side_effects=[_bg_side_effect]),
+                Transition('kick', sources=['draft'], target='kicked',
+                           next_transition='bg_finish'),
+                BackgroundTransition('bg_finish', sources=['kicked'],
+                                     target='done',
+                                     side_effects=[_bg_side_effect]),
+            ]
+
+        cls.process_class = ObserverBgProcess
+        cls.Widget = Widget
+        ProcessManager.bind_model_process(Widget, ObserverBgProcess,
+                                          state_field='status')
+
+    @classmethod
+    def tearDownClass(cls):
+        if 'observer_bg_process' in vars(cls.Widget):
+            delattr(cls.Widget, 'observer_bg_process')
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings
+            if b.process_class is not cls.process_class
+        ]
+        super().tearDownClass()
+
+    def setUp(self):
+        _BG_FAIL['on'] = False
+        self.seen = []
+        self._observer = lambda cls_, action, instance: self.seen.append(
+            (cls_.__name__, action))
+        transition_observers.append(self._observer)
+        self.widget = self.Widget.objects.create(status='draft')
+
+    def tearDown(self):
+        transition_observers.remove(self._observer)
+        super().tearDown()
+
+    def test_background_initiation_notifies_exactly_once(self):
+        # Sync execution mode runs phase 1 AND phase 2 inline — phase 2
+        # (restore + side-effect execution) must not add a second record.
+        self.widget.observer_bg_process.bg_go()
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'done')
+        self.assertEqual(self.seen, [('ObserverBgProcess', 'bg_go')])
+
+    def test_retries_do_not_renotify(self):
+        from django_logic.background.models import TransitionMessage
+        from django_logic.background.runner import run_background_transition
+
+        _BG_FAIL['on'] = True
+        with self.assertRaises(ValueError):
+            self.widget.observer_bg_process.bg_go()
+        tm = TransitionMessage.objects.get(instance_id=str(self.widget.pk),
+                                           transition_name='bg_go')
+        for _ in range(2):  # drive the remaining attempts as the worker would
+            try:
+                run_background_transition(tm.pk)
+            except ValueError:
+                pass
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'failed')
+        # Three attempts, one initiation, one record.
+        self.assertEqual(self.seen, [('ObserverBgProcess', 'bg_go')])
+
+    def test_next_transition_follow_up_notifies_with_its_own_initiation(self):
+        self.widget.observer_bg_process.kick()
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'done')
+        self.assertEqual(self.seen, [('ObserverBgProcess', 'kick'),
+                                     ('ObserverBgProcess', 'bg_finish')])

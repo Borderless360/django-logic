@@ -681,6 +681,7 @@ DJANGO_LOGIC = {
     'SENTRY_TRANSACTION_NAMING': True,  # per-transition Sentry naming (no-op without sentry-sdk)
     'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
     'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
+    # 'TRANSITION_COVERAGE_LOG': '...',  # opt-in: record driven transitions to a file (see "Transition-execution coverage")
 }
 ```
 
@@ -1195,6 +1196,10 @@ Diffing `report['uncovered']` in CI catches transitions that silently stop
 being exercised. The observer list is public — consumers can register their
 own hooks (metrics, tracing); a raising observer is logged and never breaks a
 transition.
+
+The log is **append-only and never truncated** — point each run at a fresh
+path (or delete the old file first), or stale pairs from earlier runs count
+as covered.
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.

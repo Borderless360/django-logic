@@ -25,9 +25,19 @@ Two front-ends:
   worker appends unique pairs (activated in ``AppConfig.ready``); afterwards
   ``coverage_report(log_path=...)`` merges and diffs.
 
-Initiation semantics: a pair is recorded when a transition is resolved and
-about to execute. Phase-2 background restore and retries do not re-notify —
-phase 1 already recorded the pair.
+Initiation semantics: a pair is recorded when a transition is *resolved* —
+an initiation refused later (lock contention, under-lock revalidation,
+``AlreadyInProgress``) still counts as driven. Phase-2 background restore
+and retries do not re-notify — phase 1 already recorded the pair.
+
+Two footguns worth knowing:
+
+* The log file is append-only and never truncated — point each run at a
+  fresh path (or delete the old file first), or stale pairs from earlier
+  runs silently count as covered.
+* Pairs are keyed on ``(owning process class, action_name)``: a synchronous
+  and a background transition sharing an ``action_name`` within one class
+  (courier-style polymorphism) collapse into a single entry.
 
 No test-framework imports here: activation happens in ``AppConfig.ready``,
 which also runs in production processes.
@@ -73,8 +83,15 @@ def coverage_report(executed=None, log_path=None) -> dict:
     """
     executed_keys = set(executed or ())
     if log_path:
-        with open(log_path) as fh:
-            executed_keys.update(line.rstrip('\n') for line in fh if line.strip())
+        try:
+            with open(log_path) as fh:
+                executed_keys.update(
+                    line.rstrip('\n') for line in fh if line.strip())
+        except FileNotFoundError:
+            # The recorder only creates the file on the first pair — a run
+            # that drove no transitions is a valid (all-uncovered) report,
+            # not a crash.
+            pass
 
     declared = {}
     for binding, process_cls, transition in iter_bound_transitions():
@@ -138,9 +155,12 @@ class _FileRecorder:
         key = _key(owning_process_cls, action_name)
         if key in self.seen:
             return
-        self.seen.add(key)
         with open(self.path, 'a') as fh:
             fh.write(key + '\n')
+        # Marked seen only after the append succeeds — a transient write
+        # failure (disk full, permissions) retries on the next initiation
+        # instead of permanently dropping the pair.
+        self.seen.add(key)
 
 
 _file_recorder = None
