@@ -24,6 +24,25 @@ _transition_context: ContextVar[dict | None] = ContextVar(
     '_transition_context', default=None
 )
 
+#: Transition-initiation observers. Each callable is invoked as
+#: ``observer(owning_process_cls, action_name, instance)`` after a
+#: transition resolves, before it executes — for every initiation path
+#: (direct calls, next_transition follow-ups, background phase 1; phase-2
+#: restore does not re-notify). Observers must never break a transition:
+#: exceptions are logged and swallowed. Registered by
+#: ``django_logic.coverage``; open to consumer metrics/tracing hooks.
+transition_observers: list = []
+
+
+def _notify_transition_observers(owning_process, action_name, instance):
+    for observer in tuple(transition_observers):
+        try:
+            observer(type(owning_process), action_name, instance)
+        except Exception:
+            transition_logger.exception(
+                f'transition observer {observer!r} raised; ignored'
+            )
+
 
 class Process:
     """Declarative container of transitions and nested processes.
@@ -113,6 +132,10 @@ class Process:
         transition, owning_process = self._resolve_transition_with_owner(
             action_name, user
         )
+        if transition_observers:
+            _notify_transition_observers(
+                owning_process, action_name, self.state.instance
+            )
 
         tr_id = uuid.uuid4()
         transition_logger.info(

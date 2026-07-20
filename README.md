@@ -681,6 +681,7 @@ DJANGO_LOGIC = {
     'SENTRY_TRANSACTION_NAMING': True,  # per-transition Sentry naming (no-op without sentry-sdk)
     'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
     'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
+    # 'TRANSITION_COVERAGE_LOG': '...',  # opt-in: record driven transitions to a file (see "Transition-execution coverage")
 }
 ```
 
@@ -1156,6 +1157,49 @@ class TestStuckOrder(ProcessScenario):
 `ProcessScenario` extends `TransactionTestCase`, so it works with the durable `TransitionMessage` + atomic-block machinery. Full design: [docs/design/TESTING_SCENARIOS.md](docs/design/TESTING_SCENARIOS.md).
 
 **The full guide — [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md)** — documents every test scenario for a process (happy paths, gating, failures, retries, terminal failures, one-in-flight conflicts, superseded rows, nested processes, snapshot replay) with copy-pasteable examples, and explains the philosophy: **you test your process; the library guarantees the background machinery** (validated by its own regression suite and a production-style Heroku matrix), so your tests never need a Celery broker.
+
+### Transition-execution coverage
+
+Which transitions does your test suite actually drive? Static analysis of the
+test tree can't tell — a test that exercises a view or Celery task which calls
+`instance.process.action()` looks uncovered, and dynamically-dispatched drives
+(`getattr(process, name)()`) can't be attributed at all. The engine can answer
+exactly: every initiation resolves the transition and its declaring (possibly
+nested) process in one place, and notifies
+`django_logic.process.transition_observers`.
+
+```python
+from django_logic.coverage import TransitionCoverage
+
+with TransitionCoverage() as cov:
+    ...  # drive processes / run tests
+report = cov.report()
+report['uncovered']  # [{'process': ..., 'action': ..., 'background': ..., 'models': [...]}]
+```
+
+For parallel test runs (fork or spawn), record to a file instead — every
+worker appends unique `(process, action)` pairs:
+
+```python
+# settings used for the coverage run
+DJANGO_LOGIC = {..., 'TRANSITION_COVERAGE_LOG': '/tmp/fsm_coverage.log'}
+```
+
+```python
+from django_logic.coverage import coverage_report
+report = coverage_report(log_path='/tmp/fsm_coverage.log')
+```
+
+A pair is recorded at *initiation* (direct calls, `next_transition`
+follow-ups, background phase 1); phase-2 restore and retries don't re-notify.
+Diffing `report['uncovered']` in CI catches transitions that silently stop
+being exercised. The observer list is public — consumers can register their
+own hooks (metrics, tracing); a raising observer is logged and never breaks a
+transition.
+
+The log is **append-only and never truncated** — point each run at a fresh
+path (or delete the old file first), or stale pairs from earlier runs count
+as covered.
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
