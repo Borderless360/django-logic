@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-20
+
+Transition-execution coverage (#132): initiation observers on the resolver
+plus a coverage report that answers "which transitions did the test suite
+never drive?" exactly. A new top-level `django_logic` AppConfig activates
+system checks and coverage recording for sync-only installs (closing the
+W001 registration gap noted on #126), and the consumer-contract workflow
+got the #119 polish (PR-runs on workflow edits, no persisted token,
+reliable release-gate watch).
+
 ### Added
 
 - **Transition-execution coverage** (#132). The resolver now notifies
@@ -17,7 +27,22 @@
   fork/spawn-safe parallel test runs), and `coverage_report()`. Static
   test-tree analysis cannot see transitive or dynamically-dispatched
   drives; the engine can — this answers "which transitions did the suite
-  never drive?" exactly.
+  never drive?" exactly. The log is append-only (fresh path per run);
+  `coverage_report` treats a never-written log as all-uncovered.
+- **Top-level `django_logic` AppConfig.** System checks (`django_logic.W001`)
+  and coverage-log activation now bootstrap for sync-only consumers that
+  install just `'django_logic'` — previously both required the optional
+  `django_logic.background` app (gap noted on #126). Idempotent with the
+  background app's own `ready()`.
+
+### Changed
+
+- **consumer-gv workflow polish** (#119, items 2–4): PR runs trigger on
+  edits to the workflow file itself, the gv checkout no longer persists
+  `GV_REPO_TOKEN` on disk while gv-controlled code executes, and
+  RELEASING.md's release gate resolves the dispatched run id instead of
+  the unreliable bare `gh run watch` (and documents that the gate is
+  vacuous until the secret is configured).
 
 ## [0.7.0] — 2026-07-17
 
