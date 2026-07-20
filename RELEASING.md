@@ -33,10 +33,17 @@ Everything runs through [`uv`](https://github.com/astral-sh/uv) (build) and
 5. **Check the consumer contract job is green**: the `Consumer contract (gv)`
    workflow (nightly + `workflow_dispatch`) runs gv's FSM test subset against
    django-logic@master. Trigger it manually for the release candidate and do
-   not publish while it is red:
+   not publish while it is red. (`gh run watch` with no argument prompts
+   interactively and may pick the wrong run — resolve the id of the run you
+   just dispatched first.)
    ```bash
-   gh workflow run consumer-gv.yml && gh run watch
+   gh workflow run consumer-gv.yml
+   sleep 5   # give the dispatch a moment to register
+   gh run watch "$(gh run list --workflow=consumer-gv.yml --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
    ```
+   NB: while the `GV_REPO_TOKEN` secret is not configured the job **skips
+   with a warning and comes up green without testing anything** — a green
+   run only means something once the secret exists (issue #119).
 6. **Build + validate the artifacts**:
    ```bash
    make dist          # rm -rf dist/ build/ *.egg-info && uv build && twine check dist/*

@@ -17,6 +17,7 @@ on:
     paths:
       - 'django_logic/**'
       - 'pyproject.toml'
+      - '.github/workflows/consumer-gv.yml'
 
 jobs:
   gv-contract:
@@ -71,6 +72,10 @@ jobs:
           token: ${{ secrets.GV_REPO_TOKEN }}
           ref: staging
           path: gv
+          # Don't leave the token on disk while gv-controlled code
+          # (its test suite) executes; nothing after checkout needs git
+          # credentials.
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@v5
         if: steps.token.outputs.have == 'true'
