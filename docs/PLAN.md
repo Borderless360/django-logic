@@ -596,12 +596,44 @@ written to the TransitionMessage, then read back in phase 2). This
 means tests catch serialization bugs that `task_always_eager` would
 miss.
 
-Built-in handling for non-serializable values at TransitionMessage
-creation:
-- `request` → stripped (framework pulls `user` first)
-- `user` → `user_id`
-- `UUID` → `str`
-- `datetime` / `date` → `.isoformat()`
+> **Historical — the design as shipped in 0.3.0, superseded by the
+> typed round-trip in 0.5.0 (#107, #108).** Non-serializable values
+> were coerced lossily at TransitionMessage creation, so a phase-2
+> hook received strings where the synchronous path passed real
+> `UUID`/`datetime` objects:
+>
+> - `request` → stripped (framework pulls `user` first)
+> - `user` → `user_id`
+> - `UUID` → `str`
+> - `datetime` / `date` → `.isoformat()`
+
+Since 0.5.0 the round-trip is type-faithful. Values that JSON cannot
+represent natively are persisted with a self-describing `__dl_type__`
+tag and restored to their original Python types in phase 2, so a
+side-effect receives the same types whether its transition is
+synchronous or background:
+
+- `request` → dropped loudly: a warning is logged, and
+  `DJANGO_LOGIC['STRICT_KWARGS_SERIALIZATION'] = True` raises instead.
+  A live request cannot cross the phase boundary; extract `user`
+  (which is rehydrated) or pass plain values.
+- `user` → `user_id`, restored to a live `user` in phase 2.
+- `datetime` / `date` / `time` / `Decimal` / `UUID` / `tuple` / `set`
+  / `frozenset` → tag-encoded, restored in phase 2 with the original
+  type (recursively, inside containers). `Decimal` and `set`,
+  previously rejected at phase 1, are supported.
+- Model instances and arbitrary objects → still rejected at phase 1
+  (`TypeError`). Pass a pk and re-fetch in the hook: phase 2 may run
+  much later and must see fresh rows, not a stale snapshot.
+- Non-string dict keys → JSON objects only have string keys, so these
+  cannot round-trip; flagged loudly at phase 1 (warning, or
+  `TypeError` under the strict setting).
+
+Rows written before the typed encoding (plain ISO strings) still
+decode; deploy web and workers together when upgrading across this
+boundary — an older worker passes the tagged dicts through verbatim.
+The authoritative contract lives in the
+`django_logic/background/serializers.py` module docstring.
 
 ### 2.13 Django app setup
 

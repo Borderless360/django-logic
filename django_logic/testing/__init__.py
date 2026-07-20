@@ -21,6 +21,7 @@ JSON and rebuild it in a test, turning a production bug into a regression test.
 
 See ``docs/design/TESTING_SCENARIOS.md`` for the full design.
 """
+from django_logic.testing.idempotency import assert_idempotent
 from django_logic.testing.scenario import ProcessScenario, JourneyStep
 from django_logic.testing.snapshot import from_snapshot, snapshot, to_json
 from django_logic.testing.tracking import ExecutionTracker
@@ -32,4 +33,5 @@ __all__ = [
     'from_snapshot',
     'to_json',
     'ExecutionTracker',
+    'assert_idempotent',
 ]

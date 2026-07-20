@@ -85,6 +85,38 @@ class SerializeKwargsTests(SimpleTestCase):
         with self.assertLogs('django-logic.transition', level='WARNING'):
             self.assertEqual(decode_value(dict(row)), row)
 
+    def test_malformed_scalar_payload_passes_through_with_a_warning(self):
+        # A KNOWN tag whose payload no longer decodes (hand-edited row,
+        # cross-version writer bug) must not crash phase 2 — same
+        # passthrough contract as an unknown tag.
+        row = {'when': {'__dl_type__': 'datetime', 'value': 'not-a-datetime'}}
+        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
+            self.assertEqual(decode_value(dict(row)), row)
+        self.assertIn('malformed payload', logs.output[0])
+        self.assertIn("'datetime'", logs.output[0])
+
+    def test_missing_payload_for_known_tag_passes_through(self):
+        # Tagged dict without its 'value' key: the inner payload is None.
+        row = {'when': {'__dl_type__': 'datetime'}}
+        with self.assertLogs('django-logic.transition', level='WARNING'):
+            self.assertEqual(decode_value(dict(row)), row)
+
+    def test_malformed_container_payload_passes_through(self):
+        for tag in ('dict', 'tuple', 'set', 'frozenset'):
+            row = {'v': {'__dl_type__': tag, 'value': None}}
+            with self.assertLogs('django-logic.transition', level='WARNING'):
+                self.assertEqual(decode_value(dict(row)), row, tag)
+
+    def test_well_formed_neighbours_of_a_malformed_payload_still_decode(self):
+        row = {
+            'bad': {'__dl_type__': 'uuid', 'value': 'not-a-uuid'},
+            'good': {'__dl_type__': 'decimal', 'value': '1.5'},
+        }
+        with self.assertLogs('django-logic.transition', level='WARNING'):
+            out = decode_value(dict(row))
+        self.assertEqual(out['bad'], row['bad'])
+        self.assertEqual(out['good'], Decimal('1.5'))
+
     def test_tr_ids_stringified_when_uuid(self):
         tr_id = UUID(int=99)
         out = serialize_kwargs({
@@ -100,6 +132,29 @@ class SerializeKwargsTests(SimpleTestCase):
 
         with self.assertRaises(TypeError):
             serialize_kwargs({'blob': Unserializable()})
+
+    def test_nan_rejected_naming_the_offending_value(self):
+        # float('nan') passes Python's json.dumps (non-standard NaN token)
+        # but is not valid JSON — the failure would otherwise surface
+        # backend-dependently at the row write.
+        with self.assertRaisesMessage(TypeError, "kwargs['rate']=nan"):
+            serialize_kwargs({'rate': float('nan')})
+
+    def test_infinity_rejected_naming_the_offending_value(self):
+        with self.assertRaisesMessage(TypeError, "kwargs['rate']=inf"):
+            serialize_kwargs({'rate': float('inf')})
+
+    def test_negative_infinity_rejected(self):
+        with self.assertRaisesMessage(TypeError, "kwargs['rate']=-inf"):
+            serialize_kwargs({'rate': float('-inf')})
+
+    def test_nested_non_finite_float_rejected_with_its_path(self):
+        with self.assertRaisesMessage(
+                TypeError, "kwargs['stats']['values'][]=nan"):
+            serialize_kwargs({'stats': {'values': [1.0, float('nan')]}})
+
+    def test_finite_floats_still_pass(self):
+        self.assertEqual(serialize_kwargs({'rate': 1.5}), {'rate': 1.5})
 
     def test_context_kwarg_stripped(self):
         out = serialize_kwargs({'context': {'x': 1}, 'keep': 2})

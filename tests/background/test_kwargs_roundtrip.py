@@ -142,6 +142,63 @@ class KwargsRoundTripTests(TestCase):
         self.assertEqual(seen['when'], _WHEN.isoformat())
         self.assertEqual(seen['some_uuid'], str(_UUID))
 
+    def test_malformed_tagged_row_passes_through_and_completes(self):
+        # A KNOWN tag whose payload no longer decodes (hand-edited row,
+        # cross-version writer bug) must not wedge phase 2: the raw tagged
+        # form passes through to the side-effect and the row completes.
+        self.widget.status = 'fulfilling'
+        self.widget.save(update_fields=['status'])
+        bad = {'__dl_type__': 'datetime', 'value': 'not-a-datetime'}
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=str(self.widget.pk),
+            process_name='process',
+            transition_name='fulfil',
+            queue_name='django_logic.critical',
+            kwargs={'when': bad},
+        )
+        with self.assertLogs('django-logic.transition', level='WARNING'):
+            run_background_transition(tm.pk)
+        tm.refresh_from_db()
+        self.assertTrue(tm.is_completed)
+        self.assertEqual(tm.errors_count, 0)
+        self.assertEqual(bg_models.LAST_KWARGS['when'], bad)
+
+    def test_undecodable_kwargs_row_counts_errors_and_routes_failed_state(self):
+        # kwargs whose decode genuinely raises (a user_id that cannot be a
+        # pk) must be accounted like any attempt failure — errors_count
+        # increments per attempt instead of escaping at 0 and being
+        # re-dispatched by retry_stale_transitions forever, and exhaustion
+        # routes failed_state (issue #117).
+        self.widget.status = 'fulfilling'
+        self.widget.save(update_fields=['status'])
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=str(self.widget.pk),
+            process_name='process',
+            transition_name='fulfil',
+            queue_name='django_logic.critical',
+            kwargs={'user_id': ['not', 'a', 'pk']},
+        )
+        with self.assertRaises(TypeError):
+            run_background_transition(tm.pk)
+        tm.refresh_from_db()
+        self.assertFalse(tm.is_completed)
+        self.assertEqual(tm.errors_count, 1)
+
+        # Drive the remaining attempts as the worker would (the periodic
+        # starter only picks rows up once RETRY_MINUTES have elapsed).
+        for _ in range(2):
+            with self.assertRaises(TypeError):
+                run_background_transition(tm.pk)
+        tm.refresh_from_db()
+        self.assertTrue(tm.is_completed)
+        self.assertEqual(tm.errors_count, 3)
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'fulfilment_failed')
+
     def test_deleted_user_degrades_to_none(self):
         # A user that vanished between phase 1 and phase 2 restores to None
         # (the work becomes "system-initiated"). Drive phase 2 directly with

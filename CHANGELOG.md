@@ -19,6 +19,40 @@
   drives; the engine can — this answers "which transitions did the suite
   never drive?" exactly.
 
+## [0.7.0] — 2026-07-17
+
+Robustness and testing: the sync→background chain fix (#129), phase-2
+decode hardening (#117), loud NaN/Infinity rejection (#118), an
+`assert_idempotent` testing helper (#106), and parity-matrix coverage of
+hook ordering and `next_transition` chaining (#127).
+
+### Added
+
+- **`django_logic.testing.assert_idempotent(fn, instance, *, fields=None,
+  capture=None, refresh_from_db=True, **kwargs)`** (#106). Applies the
+  side-effect twice and asserts the second application changes nothing
+  observable (named instance fields and/or a `capture(instance)` callable
+  for off-instance effects). Background side-effects re-run from scratch
+  on every retry, so idempotence is a contract worth pinning per hook.
+- **Parity matrix extensions** (#127): hook ordering (side-effects before
+  the target write, callbacks after; on terminal failure `failed_state`
+  first, then `failure_side_effects`, then `failure_callbacks`) and
+  `next_transition` chaining are now pinned as identical across
+  `Transition` / `Action` / `BackgroundTransition` / `BackgroundAction`.
+  (The `Transition` docstring previously listed the failure order
+  backwards; fixed to match all implementation sites.)
+
+### Changed
+
+- **Non-finite floats are rejected at phase 1** (#118). `float('nan')` /
+  `float('inf')` pass Python's `json.dumps` (non-standard tokens) but are
+  not valid JSON, so they previously failed backend-dependently at the
+  row write (opaque on PostgreSQL, silently stored on SQLite). They now
+  raise at dispatch with the offending path named, surfacing as
+  `ImproperlyConfigured` like any unserializable kwarg. Pass `None` or an
+  explicit sentinel instead. `Decimal('NaN')` is unaffected.
+
+
 ### Fixed
 
 - **NextTransition no longer forwards `request` into background
@@ -26,6 +60,20 @@
   phase-1 failure is swallowed by the best-effort next-transition hand-off,
   silently killing sync→background chains; sync follow-ups keep receiving
   `request`.
+- **Phase-2 decode failures can no longer wedge an instance** (#117). A
+  malformed payload for a known kwargs type tag warns and passes the raw
+  tagged value through (mirroring the unknown-tag path) instead of
+  crashing phase 2; and any residual `deserialize_kwargs` failure (e.g. a
+  corrupt `user_id`) is accounted like an attempt failure — `errors_count`
+  increments, retries honor `TRANSITION_MESSAGE_MAX_ERRORS`, and
+  exhaustion routes `failed_state` — instead of escaping before the error
+  bookkeeping and being re-dispatched forever. Watchdog terminal
+  finalization proceeds with empty kwargs when a row no longer decodes.
+- **Documented isoformat fidelity limits** (#118): a `ZoneInfo` tzinfo
+  degrades to a fixed-offset `timezone` across the round-trip (UTC
+  instant preserved, zone identity not) and `datetime.fold` is not
+  preserved. `docs/PLAN.md` no longer describes the pre-0.5.0 lossy
+  encoding (#120).
 
 ## [0.6.0] — 2026-07-17
 

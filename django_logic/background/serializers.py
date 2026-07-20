@@ -15,7 +15,10 @@ Deliberate handling:
 * ``user`` — replaced with ``user_id`` (restored on the phase-2 side).
 * ``datetime`` / ``date`` / ``time`` / ``Decimal`` / ``UUID`` / ``tuple``
   / ``set`` / ``frozenset`` — tag-encoded, restored in phase 2 with the
-  original type (recursively, inside dicts/lists/tuples/sets).
+  original type (recursively, inside dicts/lists/tuples/sets). Two known
+  fidelity limits of the isoformat round-trip: a ``ZoneInfo`` tzinfo
+  degrades to a fixed-offset ``timezone`` (the UTC instant is preserved,
+  the zone identity is not), and ``datetime.fold`` is not preserved.
 * ``_transition_context``-managed keys (``tr_id``, ``root_id``,
   ``parent_id``) — stringified when present.
 * Model instances and arbitrary objects — rejected at phase 1 via
@@ -37,6 +40,7 @@ Deliberate handling:
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
@@ -127,24 +131,35 @@ def decode_value(value):
         if tag is None:
             return {k: decode_value(v) for k, v in value.items()}
         inner = value.get('value')
-        if tag == 'dict':
-            return {k: decode_value(v) for k, v in inner.items()}
-        if tag == 'tuple':
-            return tuple(decode_value(v) for v in inner)
-        if tag == 'set':
-            return {decode_value(v) for v in inner}
-        if tag == 'frozenset':
-            return frozenset(decode_value(v) for v in inner)
-        decoder = _SCALAR_DECODERS.get(tag)
-        if decoder is None:
-            # A row written by a newer version than this worker: pass the
-            # tagged form through rather than crash phase 2.
+        try:
+            if tag == 'dict':
+                return {k: decode_value(v) for k, v in inner.items()}
+            if tag == 'tuple':
+                return tuple(decode_value(v) for v in inner)
+            if tag == 'set':
+                return {decode_value(v) for v in inner}
+            if tag == 'frozenset':
+                return frozenset(decode_value(v) for v in inner)
+            decoder = _SCALAR_DECODERS.get(tag)
+            if decoder is not None:
+                return decoder(inner)
+        except Exception as e:
+            # A known tag whose payload no longer decodes (hand-edited row,
+            # cross-version writer bug): mirror the unknown-tag passthrough
+            # below rather than crash phase 2 — the raw tagged form stays
+            # visible to the side-effect and the log says why.
             transition_logger.warning(
-                f"unknown kwargs type tag {tag!r} — passing value through "
-                f"undecoded (worker older than the row writer?)"
+                f"malformed payload for kwargs type tag {tag!r} "
+                f"({type(e).__name__}: {e}) — passing value through undecoded"
             )
             return value
-        return decoder(inner)
+        # A row written by a newer version than this worker: pass the
+        # tagged form through rather than crash phase 2.
+        transition_logger.warning(
+            f"unknown kwargs type tag {tag!r} — passing value through "
+            f"undecoded (worker older than the row writer?)"
+        )
+        return value
     return value
 
 
@@ -167,6 +182,26 @@ def _non_string_key_paths(value, path='kwargs'):
             yield from _non_string_key_paths(item, f'{path}[]')
 
 
+def _non_finite_float_paths(value, path='kwargs'):
+    """Yield ``path=value`` for every float that is NaN or +/-Infinity.
+
+    ``json.dumps`` accepts them by default — Python emits the non-standard
+    ``NaN``/``Infinity`` tokens — so they pass the phase-1 round-trip guard
+    but are not valid JSON: the failure then surfaces backend-dependently
+    (PostgreSQL rejects them opaquely at the row write). Phase 1 must
+    reject them loudly, naming the offending value.
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            yield f'{path}={value!r}'
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _non_finite_float_paths(v, f'{path}[{k!r}]')
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _non_finite_float_paths(item, f'{path}[]')
+
+
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
@@ -175,9 +210,12 @@ def serialize_kwargs(kwargs: dict) -> dict:
     Tag-encodes non-JSON-native values so phase 2 restores real types.
     Non-string dict keys are stringified by JSON persistence and cannot
     round-trip — flagged with a warning (or ``TypeError`` under the strict
-    setting). Raises ``TypeError`` via ``json.dumps`` if something
-    unexpected slips through — the caller should let that propagate so the
-    failure is visible at phase 1 rather than at phase 2.
+    setting). Non-finite floats (``float('nan')`` / ``float('inf')``) are
+    not valid JSON despite passing ``json.dumps`` — rejected with a
+    ``TypeError`` naming the offending value. Raises ``TypeError`` via
+    ``json.dumps`` if something unexpected slips through — the caller
+    should let that propagate so the failure is visible at phase 1 rather
+    than at phase 2.
     """
     out = dict(kwargs)
     if 'request' in out:
@@ -222,11 +260,30 @@ def serialize_kwargs(kwargs: dict) -> dict:
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
 
+    bad_floats = sorted(set(_non_finite_float_paths(out)))
+    if bad_floats:
+        raise TypeError(
+            f"{out.get('tr_id')} non-finite float in background transition "
+            f"kwargs ({', '.join(bad_floats)}): NaN/Infinity pass Python's "
+            f"json.dumps but are not valid JSON, so the failure would "
+            f"surface backend-dependently at the row write. Pass None, or "
+            f"encode the sentinel explicitly."
+        )
+
     out = encode_value(out)
 
     # Round-trip through json to surface any remaining non-serializable
     # types at phase 1. Cheap on small dicts and invaluable in tests.
-    json.dumps(out)
+    # allow_nan=False so a non-finite float the scan above could not reach
+    # (e.g. one hiding in a dict key) still fails here rather than at the
+    # row write; translated to TypeError to keep the dispatcher contract
+    # (ImproperlyConfigured wraps TypeError, not ValueError).
+    try:
+        json.dumps(out, allow_nan=False)
+    except ValueError as e:
+        raise TypeError(
+            f"{out.get('tr_id')} kwargs are not valid JSON: {e}"
+        ) from e
     return out
 
 
