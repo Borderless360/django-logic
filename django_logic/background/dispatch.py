@@ -152,30 +152,24 @@ def recover_stranded_states() -> int:
     ``TransitionMessage`` row is the durable record the retry starter /
     watchdog / stuck finalizer already act on.
 
-    Stranded means **all** of:
+    A candidate is an instance sitting in a transition's declared
+    ``in_progress_state`` with no uncompleted ``TransitionMessage``.
+    Recovery itself runs **under the state lock** with the same contract
+    as the phase-2 state guard (a manual fix or a re-drive that wins the
+    race always wins — see :func:`_recover_stranded_instance`), so the
+    sweep can never clobber live work or steal another caller's lock.
 
-    * the instance sits in a transition's declared ``in_progress_state``;
-    * the state lock is **not** held — a live sync execution holds the
-      lock for its whole run, so an expired/absent lock means the holder
-      died (or the lock outlived ``LOCK_TIMEOUT``);
-    * the instance has **no uncompleted** ``TransitionMessage`` — an
-      in-flight background transition is the starter's job, not ours
-      (checked per instance, not per process: conservative when several
-      processes share a model).
-
-    Each stranded instance is driven through the owning transition's
-    normal failure path — ``failed_state`` write, failure side-effects,
-    failure callbacks — with a synthetic ``[stranded]`` error, so the
-    standard alerting/retry paths apply. A stranded instance whose
-    transition declares no ``failed_state`` is logged loudly and left
-    untouched (it stays re-drivable via the implicit source).
+    Each recovered instance goes through the owning transition's normal
+    failure path — ``failed_state`` write, failure side-effects, failure
+    callbacks — with a synthetic ``[stranded]`` error, so the standard
+    alerting/retry paths apply. A stranded instance whose transition
+    declares no ``failed_state`` is logged loudly and left untouched (it
+    stays re-drivable via the implicit source).
 
     Returns the number of instances recovered.
     """
     from django_logic.coverage import iter_bound_transitions
     from django_logic.background.models import TransitionMessage
-    from django_logic.logger import logger
-    from django_logic.state import State
 
     recovered = 0
     seen = set()
@@ -189,51 +183,108 @@ def recover_stranded_states() -> int:
             continue
         seen.add(key)
 
-        candidates = binding.model.objects.filter(
-            **{binding.state_field: in_progress}
+        pks = list(
+            binding.model.objects
+            .filter(**{binding.state_field: in_progress})
+            .values_list('pk', flat=True)
         )
-        for instance in candidates.iterator():
-            state = State(instance, binding.state_field)
-            if state.is_locked():
-                continue  # a live execution still holds it
-            in_flight = TransitionMessage.objects.filter(
-                app_label=instance._meta.app_label,
-                model_name=instance._meta.model_name,
-                instance_id=str(instance.pk),
+        if not pks:
+            continue
+        # One query per batch: an instance with ANY uncompleted message
+        # belongs to the background machinery (starter/watchdog), not to
+        # this sweep. Conservative on purpose — re-checked under the lock
+        # before acting.
+        in_flight = set(
+            TransitionMessage.objects.filter(
+                app_label=binding.model._meta.app_label,
+                model_name=binding.model._meta.model_name,
+                instance_id__in=[str(pk) for pk in pks],
                 is_completed=False,
-            ).exists()
-            if in_flight:
-                continue  # background machinery owns this one
-
-            label = (f'{binding.model._meta.label}#{instance.pk} '
-                     f'{binding.state_field}={in_progress!r} '
-                     f'({transition.action_name})')
-            if not transition.failed_state:
-                logger.warning(
-                    f'recover_stranded_states: {label} is stranded but the '
-                    f'transition declares no failed_state — left as-is '
-                    f'(re-drivable via the implicit in-progress source).'
-                )
+            ).values_list('instance_id', flat=True)
+        )
+        for pk in pks:
+            if str(pk) in in_flight:
                 continue
-            try:
-                transition.fail_transition(
-                    state,
-                    RuntimeError(
-                        f'{STRANDED_MARKER} recovered by '
-                        f'recover_stranded_states: the process died '
-                        f'mid-transition and left this instance in '
-                        f'{in_progress!r}.'
-                    ),
-                    tr_id='stranded-recovery',
-                )
-                logger.error(
-                    f'recover_stranded_states: recovered {label} -> '
-                    f'{transition.failed_state!r}'
-                )
+            if _recover_stranded_instance(binding, transition, pk):
                 recovered += 1
-            except Exception as e:
-                # One bad instance must not stop the sweep.
-                logger.error(
-                    f'recover_stranded_states: failed to recover {label}: {e}'
-                )
     return recovered
+
+
+def _recover_stranded_instance(binding, transition, pk) -> bool:
+    """Recover one candidate **under the state lock**, mirroring the
+    phase-2 state guard:
+
+    1. ``state.lock()`` — atomic take-ownership. A live execution holds
+       the lock for its whole run, so a failed ``lock()`` means "not
+       stranded (or another sweep got here first)": skip.
+    2. Re-read the **persisted** state under the lock. A re-drive or a
+       manual fix that won the race has moved it — their write wins;
+       release and skip.
+    3. Re-check for an uncompleted ``TransitionMessage`` under the lock.
+       Phase 1 must hold this same lock to create one, so this check is
+       race-free while we hold it.
+    4. Only then drive ``fail_transition``. Lock ownership transfers to
+       it — its ``finally`` releases the lock — so the sweep never
+       double-unlocks and can never delete a lock a later caller has
+       just acquired.
+
+    Returns True when the instance was recovered.
+    """
+    from django_logic.background.models import TransitionMessage
+    from django_logic.logger import logger
+    from django_logic.state import State
+
+    instance = binding.model.objects.filter(pk=pk).first()
+    if instance is None:
+        return False
+    state = State(instance, binding.state_field)
+    label = (f'{binding.model._meta.label}#{pk} '
+             f'{binding.state_field}={transition.in_progress_state!r} '
+             f'({transition.action_name})')
+
+    if not state.lock():
+        return False  # live execution (or a concurrent sweep) owns it
+    we_hold_lock = True
+    try:
+        if state.get_db_state() != transition.in_progress_state:
+            return False  # moved under us — the other writer wins
+        if TransitionMessage.objects.filter(
+            app_label=instance._meta.app_label,
+            model_name=instance._meta.model_name,
+            instance_id=str(instance.pk),
+            is_completed=False,
+        ).exists():
+            return False  # background work started — starter's job
+
+        if not transition.failed_state:
+            logger.warning(
+                f'recover_stranded_states: {label} is stranded but the '
+                f'transition declares no failed_state — left as-is '
+                f'(re-drivable via the implicit in-progress source).'
+            )
+            return False
+
+        # Ownership transfer: fail_transition ALWAYS releases the lock in
+        # its own finally (even when a hook raises), so from here on the
+        # sweep must not unlock again.
+        we_hold_lock = False
+        transition.fail_transition(
+            state,
+            RuntimeError(
+                f'{STRANDED_MARKER} recovered by recover_stranded_states: '
+                f'the process died mid-transition and left this instance '
+                f'in {transition.in_progress_state!r}.'
+            ),
+            tr_id='stranded-recovery',
+        )
+        logger.error(
+            f'recover_stranded_states: recovered {label} -> '
+            f'{transition.failed_state!r}'
+        )
+        return True
+    except Exception as e:
+        logger.error(f'recover_stranded_states: failed to recover {label}: {e}')
+        return False
+    finally:
+        if we_hold_lock:
+            state.unlock()

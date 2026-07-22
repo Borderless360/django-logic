@@ -18,10 +18,17 @@
   `TransitionMessage`** — provably stranded — and drives each through the
   owning transition's normal failure path (`failed_state`, failure
   side-effects, failure callbacks) with a synthetic `[stranded]` error,
-  so standard alerting and retry paths apply. Stranded instances whose
-  transition declares no `failed_state` are logged loudly and left
-  re-drivable. Background transitions are unaffected: their durable row
-  is already recovered by the starter / watchdog / stuck finalizer.
+  so standard alerting and retry paths apply. Recovery runs **under the
+  state lock** with the phase-2 state-guard contract: the sweep takes the
+  lock (a live execution holding it means "not stranded"), re-reads the
+  persisted state and the in-flight check under the lock — a re-drive or
+  manual fix that won the race always wins — and transfers lock ownership
+  to `fail_transition`, so it never clobbers live work, never
+  double-unlocks, and never releases a lock it doesn't own. Stranded
+  instances whose transition declares no `failed_state` are logged loudly
+  and left re-drivable. Background transitions are unaffected: their
+  durable row is already recovered by the starter / watchdog / stuck
+  finalizer.
   (Issue #136 was reported against the legacy `django-logic 0.1.6` +
   `django-logic-celery` line, where the equivalent gap is unrecoverable —
   bounded lock TTLs, implicit-source re-drive, `reject_on_worker_lost`

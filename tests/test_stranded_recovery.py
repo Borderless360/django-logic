@@ -144,3 +144,86 @@ class RecoverStrandedStatesTests(TestCase):
         entry = schedule.get('django-logic-recover-stranded')
         self.assertIsNotNone(entry)
         self.assertEqual(entry['task'], 'django_logic.recover_stranded_states')
+
+
+class GuardedRecoveryTests(TestCase):
+    """The per-instance recovery guards (Bugbot HIGH on #137): recovery
+    runs under the state lock with phase-2-state-guard semantics, so a
+    re-drive or manual fix that wins the race is never clobbered and no
+    foreign lock is ever released."""
+
+    def setUp(self):
+        super().setUp()
+        FAILURE_LOG.clear()
+        ProcessManager.bind_model_process(
+            Invoice, _StrandedProcess, state_field='status')
+        from django_logic.process import ProcessManager as PM
+        self.binding = next(b for b in PM.bindings
+                            if b.process_class is _StrandedProcess)
+        self.transition = next(t for t in _StrandedProcess.transitions
+                               if t.action_name == 'sync_up')
+
+    def tearDown(self):
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings
+            if b.process_class is not _StrandedProcess
+        ]
+        if 'stranded_process' in vars(Invoice):
+            delattr(Invoice, 'stranded_process')
+        super().tearDown()
+
+    def _recover_one(self, pk):
+        from django_logic.background.dispatch import _recover_stranded_instance
+        return _recover_stranded_instance(self.binding, self.transition, pk)
+
+    def test_state_moved_under_the_race_window_wins(self):
+        """The exact Bugbot scenario: the candidate was scanned as
+        stranded, but by recovery time another writer moved the state —
+        the under-lock re-read must make their write win."""
+        invoice = Invoice.objects.create(status='draft')
+        Invoice.objects.filter(pk=invoice.pk).update(status='syncing')
+        # the "winning" concurrent writer: a manual fix back to draft
+        Invoice.objects.filter(pk=invoice.pk).update(status='draft')
+
+        self.assertFalse(self._recover_one(invoice.pk))
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'draft', 'the manual fix survives')
+        self.assertEqual(FAILURE_LOG, [])
+        self.assertFalse(State(invoice, 'status').is_locked(),
+                         'the sweep released the lock it took')
+
+    def test_background_message_appearing_in_the_window_is_respected(self):
+        invoice = Invoice.objects.create(status='draft')
+        Invoice.objects.filter(pk=invoice.pk).update(status='syncing')
+        TransitionMessage.objects.create(
+            app_label='tests', model_name='invoice',
+            instance_id=str(invoice.pk), process_name='stranded_process',
+            transition_name='sync_up', queue_name='q',
+        )
+        self.assertFalse(self._recover_one(invoice.pk))
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'syncing')
+        self.assertFalse(State(invoice, 'status').is_locked())
+
+    def test_lock_held_by_live_execution_blocks_recovery(self):
+        invoice = Invoice.objects.create(status='draft')
+        Invoice.objects.filter(pk=invoice.pk).update(status='syncing')
+        state = State(invoice, 'status')
+        self.assertTrue(state.lock())
+        try:
+            self.assertFalse(self._recover_one(invoice.pk))
+            invoice.refresh_from_db()
+            self.assertEqual(invoice.status, 'syncing')
+            self.assertTrue(state.is_locked(),
+                            "the sweep must not release a lock it doesn't own")
+        finally:
+            state.unlock()
+
+    def test_successful_recovery_leaves_no_lock_behind(self):
+        invoice = Invoice.objects.create(status='draft')
+        Invoice.objects.filter(pk=invoice.pk).update(status='syncing')
+        self.assertTrue(self._recover_one(invoice.pk))
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'failed')
+        self.assertFalse(State(invoice, 'status').is_locked(),
+                         'fail_transition released the transferred lock')
