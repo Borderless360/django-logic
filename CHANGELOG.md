@@ -31,15 +31,19 @@
   `django_logic.background.dispatch.recover_stranded_states`) walks
   `ProcessManager.bindings`, finds instances that are in a declared
   `in_progress_state` with **no lock held** and **no uncompleted
-  `TransitionMessage`** — provably stranded — and drives each through the
-  owning transition's normal failure path (`failed_state`, failure
-  side-effects, failure callbacks) with a synthetic `[stranded]` error,
-  so standard alerting and retry paths apply. Recovery runs **under the
-  state lock** with the phase-2 state-guard contract: the sweep takes the
-  lock via the bound process's declared `state_class` (a live execution
-  holding it means "not stranded"; a `RedisState` keeps a truthful state
-  value visible under the key), re-checks the in-flight message **first**
-  and only then re-reads the persisted state — order matters, because
+  `TransitionMessage` for that process** — provably stranded — and drives
+  each through the owning transition's normal failure path
+  (`failed_state`, failure side-effects, failure callbacks) with a
+  synthetic `[stranded]` error, so standard alerting and retry paths
+  apply. The in-flight-message shield is scoped by `process_name` (same
+  as `_ensure_no_background_in_flight` and the partial unique
+  constraint), so a sibling process's background row on the same
+  instance cannot delay recovery. Recovery runs **under the state lock**
+  with the phase-2 state-guard contract: the sweep takes the lock via
+  the bound process's declared `state_class` (a live execution holding
+  it means "not stranded"; a `RedisState` keeps a truthful state value
+  visible under the key), re-checks the in-flight message **first** and
+  only then re-reads the persisted state — order matters, because
   phase-2 completion holds no state lock and commits its state write
   atomically with `is_completed`, so a completion landing between the
   guards is always observed — a re-drive or manual fix that won the race

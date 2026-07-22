@@ -882,7 +882,7 @@ The periodic starter re-dispatches stale transitions back to their own queue —
 
 ### Safety-net tasks
 
-Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
+Five periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
 
 - `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
@@ -955,9 +955,9 @@ Celery mode has three things you **must** wire up, or the durability guarantees 
 
 **1. A real broker.** `BACKGROUND_EXECUTION='celery'` requires a durable broker (Redis/RabbitMQ). With no broker configured, Celery falls back to an in-memory transport that no worker drains — `apply_async` succeeds but the task never runs (django-logic logs a one-time warning on first dispatch).
 
-**2. The five periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, and the timeout watchdog never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
+**2. The five periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, the timeout watchdog, and stranded-sync recovery never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
 
-Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, cleanup daily), each overridable by keyword:
+Use the ready-made schedule — it routes all five tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, stranded 300s, cleanup daily), each overridable by keyword:
 
 ```python
 # celery.py — after the app is configured
@@ -966,7 +966,7 @@ from django_logic.background import beat_schedule
 app.conf.beat_schedule = {**app.conf.beat_schedule, **beat_schedule()}
 ```
 
-(A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)
+(A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.recover_stranded_states`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)
 
 Run a worker that consumes both your transition queues **and** the starter queue, plus beat:
 

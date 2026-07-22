@@ -193,6 +193,27 @@ class RecoverStrandedStatesTests(TestCase):
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, 'syncing')
 
+    def test_sibling_process_transition_message_does_not_block_recovery(self):
+        """The in-flight shield is per process — same scope as
+        ``_ensure_no_background_in_flight`` and the partial unique
+        constraint. An uncompleted TransitionMessage for a *different*
+        process on the same instance must not delay recovering a
+        stranded sync transition on this one."""
+        invoice = self._strand('syncing')
+        TransitionMessage.objects.create(
+            app_label='tests', model_name='invoice',
+            instance_id=str(invoice.pk),
+            process_name='unrelated_sibling_process',
+            transition_name='something_else', queue_name='q',
+        )
+
+        self.assertEqual(recover_stranded_states(), 1)
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'failed')
+        self.assertTrue(any('[stranded]' in e[2] for e in FAILURE_LOG
+                            if e[0] == 'side_effect'))
+
     def test_no_failed_state_warns_and_leaves_redrivable(self):
         invoice = self._strand('archiving')
 

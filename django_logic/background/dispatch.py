@@ -153,23 +153,27 @@ def recover_stranded_states() -> int:
     watchdog / stuck finalizer already act on.
 
     A candidate is an instance sitting in a transition's declared
-    ``in_progress_state`` with no uncompleted ``TransitionMessage``.
-    ``Action``\\ s are never candidates: an Action accepts
-    ``in_progress_state`` but only as an implicit source — it never
-    *writes* it, so it cannot have stranded an instance there. (Its
-    ``fail_transition`` also holds no lock: it neither unlocks nor
-    writes ``failed_state`` while the state is locked, so the
-    ownership-transfer contract below would not hold for it.)
-    Recovery itself runs **under the state lock** with the same contract
-    as the phase-2 state guard (a manual fix or a re-drive that wins the
-    race always wins — see :func:`_recover_stranded_instance`), so the
-    sweep never clobbers live work or steals another caller's lock — as
-    long as live runs finish within their lock TTL. A synchronous run
-    that *outlives* its lock is indistinguishable from a stranded one
-    (this TTL-expiry hazard predates the sweep; the sweep makes acting
-    on it prompt). Size the global ``LOCK_TIMEOUT`` above your longest
-    synchronous side-effect, or give legitimately long transitions
-    (report generation, large exports) their own
+    ``in_progress_state`` with no uncompleted ``TransitionMessage``
+    **for that process** (same scope as
+    ``_ensure_no_background_in_flight`` and the partial unique
+    constraint — an in-flight background job on a *different* bound
+    process must not delay recovery). ``Action``\\ s are never
+    candidates: an Action accepts ``in_progress_state`` but only as an
+    implicit source — it never *writes* it, so it cannot have stranded
+    an instance there. (Its ``fail_transition`` also holds no lock: it
+    neither unlocks nor writes ``failed_state`` while the state is
+    locked, so the ownership-transfer contract below would not hold for
+    it.) Recovery itself runs **under the state lock** with the same
+    contract as the phase-2 state guard (a manual fix or a re-drive that
+    wins the race always wins — see
+    :func:`_recover_stranded_instance`), so the sweep never clobbers
+    live work or steals another caller's lock — as long as live runs
+    finish within their lock TTL. A synchronous run that *outlives* its
+    lock is indistinguishable from a stranded one (this TTL-expiry
+    hazard predates the sweep; the sweep makes acting on it prompt).
+    Size the global ``LOCK_TIMEOUT`` above your longest synchronous
+    side-effect, or give legitimately long transitions (report
+    generation, large exports) their own
     ``Transition(..., lock_timeout=...)``.
 
     Each recovered instance goes through the owning transition's normal
@@ -237,17 +241,21 @@ def _sweep_transition(binding, transition) -> int:
         .values_list('pk', flat=True)
     )
     recovered = 0
+    process_name = binding.process_class.process_name
     for start in range(0, len(pks), _TM_SCAN_CHUNK):
         chunk = pks[start:start + _TM_SCAN_CHUNK]
-        # One query per chunk: an instance with ANY uncompleted message
+        # One query per chunk: an uncompleted message for THIS process
         # belongs to the background machinery (starter/watchdog), not to
-        # this sweep. Conservative on purpose — re-checked under the lock
-        # before acting.
+        # this sweep. Scoped by process_name — same as
+        # _ensure_no_background_in_flight and the partial unique
+        # constraint — so a sibling process's in-flight row cannot delay
+        # recovery. Re-checked under the lock before acting.
         in_flight = set(
             TransitionMessage.objects.filter(
                 app_label=binding.model._meta.app_label,
                 model_name=binding.model._meta.model_name,
                 instance_id__in=[str(pk) for pk in chunk],
+                process_name=process_name,
                 is_completed=False,
             ).values_list('instance_id', flat=True)
         )
@@ -270,9 +278,10 @@ def _recover_stranded_instance(binding, transition, pk) -> bool:
        execution holds the lock for its whole run, so a failed
        ``lock()`` means "not stranded (or another sweep got here
        first)": skip.
-    2. Re-check for an uncompleted ``TransitionMessage`` under the lock.
-       Phase 1 must hold this same lock to create one, so no new message
-       can appear after this check.
+    2. Re-check for an uncompleted ``TransitionMessage`` for this
+       process under the lock. Phase 1 must hold this same lock to
+       create one, so no new same-process message can appear after
+       this check.
     3. Re-read the **persisted** state under the lock, AFTER the message
        check. Order matters: phase-2 completion holds no state lock —
        it commits its state write and ``is_completed`` atomically — so a
@@ -316,9 +325,10 @@ def _recover_stranded_instance(binding, transition, pk) -> bool:
             app_label=instance._meta.app_label,
             model_name=instance._meta.model_name,
             instance_id=str(instance.pk),
+            process_name=binding.process_class.process_name,
             is_completed=False,
         ).exists():
-            return False  # background work started — starter's job
+            return False  # same-process background work — starter's job
         # get_persisted_state, not get_db_state: the authoritative DB read
         # (RedisState overrides get_db_state with a cached read — under
         # the sweep's own lock that cache entry is the lock payload).
