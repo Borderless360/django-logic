@@ -78,8 +78,9 @@ def beat_schedule(
     detect_stuck_seconds: float = 300.0,
     watchdog_seconds: float = 120.0,
     cleanup_seconds: float = 86_400.0,
+    stranded_seconds: float = 300.0,
 ) -> dict:
-    """Ready-made Celery beat entries for the four safety-net tasks,
+    """Ready-made Celery beat entries for the five safety-net tasks,
     routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
     Use it from your project's ``celery.py`` (after the app is configured)
@@ -103,6 +104,8 @@ def beat_schedule(
             'django_logic.detect_stuck_transitions', detect_stuck_seconds),
         'django-logic-watchdog': entry(
             'django_logic.watchdog_stale_attempts', watchdog_seconds),
+        'django-logic-recover-stranded': entry(
+            'django_logic.recover_stranded_states', stranded_seconds),
         'django-logic-cleanup': entry(
             'django_logic.cleanup_completed_transitions', cleanup_seconds),
     }

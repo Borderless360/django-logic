@@ -133,3 +133,107 @@ def retry_pending() -> int:
     """
     from django_logic.background.tasks import _retry_pending_inline
     return _retry_pending_inline()
+
+
+STRANDED_MARKER = '[stranded]'
+
+
+def recover_stranded_states() -> int:
+    """Drive provably-stranded instances out of their ``in_progress_state``
+    (#136).
+
+    A hard-killed **synchronous** transition (worker OOM / SIGKILL / dyno
+    eviction mid side-effect) leaves its instance parked in the
+    transition's ``in_progress_state``. The state lock self-expires after
+    ``LOCK_TIMEOUT`` and the implicit-source rule keeps the transition
+    re-drivable — but nothing *acts*: no failure hooks run, no counter
+    increments, no alert fires, and the instance sits until a human
+    notices. Background transitions never need this sweep: their
+    ``TransitionMessage`` row is the durable record the retry starter /
+    watchdog / stuck finalizer already act on.
+
+    Stranded means **all** of:
+
+    * the instance sits in a transition's declared ``in_progress_state``;
+    * the state lock is **not** held — a live sync execution holds the
+      lock for its whole run, so an expired/absent lock means the holder
+      died (or the lock outlived ``LOCK_TIMEOUT``);
+    * the instance has **no uncompleted** ``TransitionMessage`` — an
+      in-flight background transition is the starter's job, not ours
+      (checked per instance, not per process: conservative when several
+      processes share a model).
+
+    Each stranded instance is driven through the owning transition's
+    normal failure path — ``failed_state`` write, failure side-effects,
+    failure callbacks — with a synthetic ``[stranded]`` error, so the
+    standard alerting/retry paths apply. A stranded instance whose
+    transition declares no ``failed_state`` is logged loudly and left
+    untouched (it stays re-drivable via the implicit source).
+
+    Returns the number of instances recovered.
+    """
+    from django_logic.coverage import iter_bound_transitions
+    from django_logic.background.models import TransitionMessage
+    from django_logic.logger import logger
+    from django_logic.state import State
+
+    recovered = 0
+    seen = set()
+    for binding, process_cls, transition in iter_bound_transitions():
+        in_progress = getattr(transition, 'in_progress_state', None)
+        if not in_progress:
+            continue
+        key = (binding.model._meta.label, binding.state_field,
+               in_progress, transition.action_name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        candidates = binding.model.objects.filter(
+            **{binding.state_field: in_progress}
+        )
+        for instance in candidates.iterator():
+            state = State(instance, binding.state_field)
+            if state.is_locked():
+                continue  # a live execution still holds it
+            in_flight = TransitionMessage.objects.filter(
+                app_label=instance._meta.app_label,
+                model_name=instance._meta.model_name,
+                instance_id=str(instance.pk),
+                is_completed=False,
+            ).exists()
+            if in_flight:
+                continue  # background machinery owns this one
+
+            label = (f'{binding.model._meta.label}#{instance.pk} '
+                     f'{binding.state_field}={in_progress!r} '
+                     f'({transition.action_name})')
+            if not transition.failed_state:
+                logger.warning(
+                    f'recover_stranded_states: {label} is stranded but the '
+                    f'transition declares no failed_state — left as-is '
+                    f'(re-drivable via the implicit in-progress source).'
+                )
+                continue
+            try:
+                transition.fail_transition(
+                    state,
+                    RuntimeError(
+                        f'{STRANDED_MARKER} recovered by '
+                        f'recover_stranded_states: the process died '
+                        f'mid-transition and left this instance in '
+                        f'{in_progress!r}.'
+                    ),
+                    tr_id='stranded-recovery',
+                )
+                logger.error(
+                    f'recover_stranded_states: recovered {label} -> '
+                    f'{transition.failed_state!r}'
+                )
+                recovered += 1
+            except Exception as e:
+                # One bad instance must not stop the sweep.
+                logger.error(
+                    f'recover_stranded_states: failed to recover {label}: {e}'
+                )
+    return recovered

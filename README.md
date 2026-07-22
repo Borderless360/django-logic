@@ -888,6 +888,7 @@ Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durab
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
 - `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
 - `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
+- `recover_stranded_states` — recovers instances a hard-killed **synchronous** transition left parked in an `in_progress_state` (no lock held, no uncompleted `TransitionMessage`): drives them through the owning transition's failure path (`failed_state` + failure hooks) with a synthetic `[stranded]` error. Transitions without a `failed_state` are logged loudly and left re-drivable (#136).
 
 ### Per-attempt timeouts
 
@@ -954,7 +955,7 @@ Celery mode has three things you **must** wire up, or the durability guarantees 
 
 **1. A real broker.** `BACKGROUND_EXECUTION='celery'` requires a durable broker (Redis/RabbitMQ). With no broker configured, Celery falls back to an in-memory transport that no worker drains — `apply_async` succeeds but the task never runs (django-logic logs a one-time warning on first dispatch).
 
-**2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, and the timeout watchdog never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
+**2. The five periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, and the timeout watchdog never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
 
 Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, cleanup daily), each overridable by keyword:
 

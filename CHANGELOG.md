@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`recover_stranded_states` — the fifth safety-net task** (#136). A
+  hard-killed *synchronous* transition (worker OOM / SIGKILL / dyno
+  eviction mid side-effect) leaves its instance parked in the
+  transition's `in_progress_state`: the lock self-expires after
+  `LOCK_TIMEOUT` and the implicit-source rule keeps it re-drivable, but
+  nothing *acted* — no failure hooks, no alert. The new periodic task
+  (`django_logic.recover_stranded_states`, added to `beat_schedule()`;
+  also callable inline via
+  `django_logic.background.dispatch.recover_stranded_states`) walks
+  `ProcessManager.bindings`, finds instances that are in a declared
+  `in_progress_state` with **no lock held** and **no uncompleted
+  `TransitionMessage`** — provably stranded — and drives each through the
+  owning transition's normal failure path (`failed_state`, failure
+  side-effects, failure callbacks) with a synthetic `[stranded]` error,
+  so standard alerting and retry paths apply. Stranded instances whose
+  transition declares no `failed_state` are logged loudly and left
+  re-drivable. Background transitions are unaffected: their durable row
+  is already recovered by the starter / watchdog / stuck finalizer.
+  (Issue #136 was reported against the legacy `django-logic 0.1.6` +
+  `django-logic-celery` line, where the equivalent gap is unrecoverable —
+  bounded lock TTLs, implicit-source re-drive, `reject_on_worker_lost`
+  redelivery and the safety-net tasks all already exist on 0.5+; this
+  closes the last piece, active recovery for record-less sync strandings.)
+
 ## [0.8.0] — 2026-07-20
 
 Transition-execution coverage (#132): initiation observers on the resolver
