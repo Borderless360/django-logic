@@ -8,6 +8,8 @@ instances (in-progress + unlocked + no uncompleted TransitionMessage) are
 driven through the owning transition's failure path; everything else is
 left alone.
 """
+from unittest import mock
+
 from django.test import TestCase
 
 from django_logic.background.dispatch import recover_stranded_states
@@ -15,7 +17,7 @@ from django_logic.background.models import TransitionMessage
 from django_logic.background.settings import beat_schedule
 from django_logic.process import Process, ProcessManager
 from django_logic.state import State
-from django_logic.transition import Transition
+from django_logic.transition import Action, Transition
 from tests.models import Invoice
 
 FAILURE_LOG = []
@@ -29,16 +31,43 @@ def record_failure_callback(instance, **kwargs):
     FAILURE_LOG.append(('callback', instance.pk))
 
 
+def context_requiring_side_effect(instance, context, **kwargs):
+    """The engine guarantees `context` to hooks (``_init_transition_context``
+    on the sync path, the phase-2 restore in the runner). A hook declared
+    with this signature TypeErrors if a caller omits it — and the hook
+    runners swallow that, silently skipping the hook."""
+    FAILURE_LOG.append(('context_hook', instance.pk, context))
+
+
+def raising_failure_side_effect(instance, **kwargs):
+    FAILURE_LOG.append(('raiser', instance.pk))
+    raise ValueError('failure hook exploded')
+
+
 class _StrandedProcess(Process):
     process_name = 'stranded_process'
     transitions = [
         Transition('sync_up', sources=['draft'], target='done',
                    in_progress_state='syncing',
                    failed_state='failed',
-                   failure_side_effects=[record_failure_side_effect],
+                   failure_side_effects=[record_failure_side_effect,
+                                         context_requiring_side_effect],
                    failure_callbacks=[record_failure_callback]),
+        Transition('sync_boom', sources=['ready'], target='shipped',
+                   in_progress_state='shipping',
+                   failed_state='ship_failed',
+                   failure_side_effects=[raising_failure_side_effect]),
         Transition('archive', sources=['done'], target='archived',
                    in_progress_state='archiving'),  # no failed_state
+        # An Action ACCEPTS in_progress_state (implicit source only —
+        # never written) and failed_state; it must not be a sweep
+        # candidate: its fail_transition holds no lock, so it neither
+        # unlocks nor writes failed_state while the state is locked.
+        Action('audit', sources=['done'],
+               in_progress_state='auditing',
+               failed_state='audit_failed',
+               failure_side_effects=[record_failure_side_effect],
+               failure_callbacks=[record_failure_callback]),
     ]
 
 
@@ -84,6 +113,63 @@ class RecoverStrandedStatesTests(TestCase):
                             if e[0] == 'side_effect'))
         self.assertTrue(any('recovered' in line for line in logs.output))
 
+    def test_context_requiring_hooks_receive_context(self):
+        """Hooks declared `def fn(instance, context, **kwargs)` are an
+        engine-supported signature; the sweep must pass `context` like
+        every other fail_transition caller, or the hook TypeErrors and
+        the hook runner swallows it — silently skipped."""
+        invoice = self._strand('syncing')
+        self.assertEqual(recover_stranded_states(), 1)
+        self.assertIn(('context_hook', invoice.pk, {}), FAILURE_LOG)
+
+    def test_multiple_stranded_instances_recovered_in_one_sweep(self):
+        a = self._strand('syncing')
+        b = self._strand('syncing')
+        c = self._strand('syncing')
+        TransitionMessage.objects.create(
+            app_label='tests', model_name='invoice',
+            instance_id=str(c.pk), process_name='stranded_process',
+            transition_name='sync_up', queue_name='q',
+        )
+
+        self.assertEqual(recover_stranded_states(), 2)
+
+        for invoice, expected in ((a, 'failed'), (b, 'failed'),
+                                  (c, 'syncing')):
+            invoice.refresh_from_db()
+            self.assertEqual(invoice.status, expected)
+        recovered_pks = {e[1] for e in FAILURE_LOG if e[0] == 'side_effect'}
+        self.assertEqual(recovered_pks, {a.pk, b.pk})
+
+    def test_raising_failure_side_effect_is_swallowed_and_still_counts(self):
+        """FailureSideEffects swallow hook exceptions: recovery must
+        still write failed_state, count the instance, and release the
+        lock exactly once (fail_transition's finally)."""
+        invoice = self._strand('shipping')
+
+        self.assertEqual(recover_stranded_states(), 1)
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'ship_failed')
+        self.assertIn(('raiser', invoice.pk),
+                      [(e[0], e[1]) for e in FAILURE_LOG])
+        self.assertFalse(State(invoice, 'status').is_locked())
+
+    def test_rows_hidden_by_a_filtered_default_manager_are_recovered(self):
+        """The sweep scans via _base_manager (like State.get_persisted_state
+        and the phase-2 restore): a soft-deleted row stranded in an
+        in_progress_state must not be invisible to recovery. Uses the
+        issue-#90 fixture whose default manager hides archived rows."""
+        from tests.background.models import ArchivableWidget
+        widget = ArchivableWidget.all_objects.create(
+            archived=True, status='finishing')
+
+        self.assertEqual(recover_stranded_states(), 1)
+
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'finish_failed')
+        self.assertFalse(State(widget, 'status').is_locked())
+
     def test_locked_instance_is_skipped(self):
         invoice = self._strand('syncing')
         state = State(invoice, 'status')
@@ -126,6 +212,23 @@ class RecoverStrandedStatesTests(TestCase):
         Invoice.objects.create(status='done')
         self.assertEqual(recover_stranded_states(), 0)
         self.assertEqual(FAILURE_LOG, [])
+
+    def test_action_declared_in_progress_state_is_not_a_candidate(self):
+        """An Action never writes its in_progress_state, so an instance
+        sitting there was not stranded BY the Action — and driving
+        Action.fail_transition under the sweep's lock would skip the
+        failed_state write, run spurious failure hooks, and leak the
+        lock until LOCK_TIMEOUT (it holds no lock, so it releases none).
+        The sweep must skip Action candidates entirely."""
+        invoice = self._strand('auditing')
+
+        self.assertEqual(recover_stranded_states(), 0)
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'auditing', 'left untouched')
+        self.assertEqual(FAILURE_LOG, [], 'no spurious failure hooks')
+        self.assertFalse(State(invoice, 'status').is_locked(),
+                         'no lock leaked behind')
 
     def test_recovered_instance_rejoins_the_normal_flow(self):
         invoice = self._strand('syncing')
@@ -227,3 +330,55 @@ class GuardedRecoveryTests(TestCase):
         self.assertEqual(invoice.status, 'failed')
         self.assertFalse(State(invoice, 'status').is_locked(),
                          'fail_transition released the transferred lock')
+
+    def test_phase2_completion_landing_between_the_guards_is_respected(self):
+        """Guard ORDER pin. Phase-2 completion holds no state lock — it
+        commits its state write and is_completed atomically. A completion
+        landing at the under-lock message check must not be clobbered:
+        the message check runs FIRST, so the later persisted-state read
+        observes the committed result. (With the guards reversed, the
+        sweep reads the pre-commit state, then finds no uncompleted
+        message, and overwrites a SUCCESSFUL re-drive with failed_state.)"""
+        invoice = Invoice.objects.create(status='draft')
+        Invoice.objects.filter(pk=invoice.pk).update(status='syncing')
+
+        real_filter = TransitionMessage.objects.filter
+
+        def completion_lands_now(*args, **kwargs):
+            # the re-drive's phase 2 commits target + completed message
+            # right as the sweep runs its under-lock message check
+            Invoice.objects.filter(pk=invoice.pk).update(status='done')
+            return real_filter(*args, **kwargs)
+
+        with mock.patch.object(TransitionMessage.objects, 'filter',
+                               side_effect=completion_lands_now):
+            self.assertFalse(self._recover_one(invoice.pk))
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'done',
+                         'the successful re-drive result survives')
+        self.assertEqual(FAILURE_LOG, [])
+        self.assertFalse(State(invoice, 'status').is_locked())
+
+    def test_sweep_uses_the_process_declared_state_class(self):
+        """The sweep must lock via the bound process's state_class — a
+        RedisState stores the state VALUE under the lock key, so locking
+        with the plain base State would make concurrent readers see the
+        lock payload (True) as the state for the whole recovery window."""
+        lock_calls = []
+
+        class RecordingState(State):
+            def lock(self, timeout=None):
+                lock_calls.append(type(self).__name__)
+                return super().lock(timeout)
+
+        invoice = Invoice.objects.create(status='draft')
+        Invoice.objects.filter(pk=invoice.pk).update(status='syncing')
+
+        with mock.patch.object(_StrandedProcess, 'state_class',
+                               RecordingState, create=True):
+            self.assertTrue(self._recover_one(invoice.pk))
+
+        self.assertEqual(lock_calls, ['RecordingState'])
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'failed')
