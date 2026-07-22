@@ -4,6 +4,22 @@
 
 ### Added
 
+- **Per-transition `lock_timeout`**. `Transition(..., lock_timeout=14400)`
+  overrides the global `DJANGO_LOGIC['LOCK_TIMEOUT']` for that
+  transition's synchronous execution. The state lock is the liveness
+  signal `recover_stranded_states` relies on — a sync run that outlives
+  its lock TTL becomes indistinguishable from a stranded one — so
+  transitions whose side-effects legitimately run long (report
+  generation, large exports) declare their own budget instead of
+  inflating the global for everyone. `RedisState` remembers the TTL the
+  lock was taken with, so its `set_state` refreshes keep the custom
+  lifetime instead of silently shortening it mid-run. Validated at
+  declaration time (`ImproperlyConfigured` on non-positive values).
+  Background transitions don't need it: their phase-1 critical section
+  is short and the uncompleted `TransitionMessage` row — which shields
+  them from the stranded sweep regardless of lock expiry — is their
+  in-flight marker.
+
 - **`recover_stranded_states` — the fifth safety-net task** (#136). A
   hard-killed *synchronous* transition (worker OOM / SIGKILL / dyno
   eviction mid side-effect) leaves its instance parked in the
@@ -20,13 +36,28 @@
   side-effects, failure callbacks) with a synthetic `[stranded]` error,
   so standard alerting and retry paths apply. Recovery runs **under the
   state lock** with the phase-2 state-guard contract: the sweep takes the
-  lock (a live execution holding it means "not stranded"), re-reads the
-  persisted state and the in-flight check under the lock — a re-drive or
-  manual fix that won the race always wins — and transfers lock ownership
-  to `fail_transition`, so it never clobbers live work, never
-  double-unlocks, and never releases a lock it doesn't own. Stranded
+  lock via the bound process's declared `state_class` (a live execution
+  holding it means "not stranded"; a `RedisState` keeps a truthful state
+  value visible under the key), re-checks the in-flight message **first**
+  and only then re-reads the persisted state — order matters, because
+  phase-2 completion holds no state lock and commits its state write
+  atomically with `is_completed`, so a completion landing between the
+  guards is always observed — a re-drive or manual fix that won the race
+  always wins — and transfers lock ownership to `fail_transition`
+  (called with the full hook contract, including `context`), so it never
+  clobbers live work, never double-unlocks, and never releases a lock it
+  doesn't own. Scans are chunked and each transition's sweep is
+  exception-contained, so one oversized backlog or misbehaving model
+  cannot abort the rest of the sweep. Stranded
   instances whose transition declares no `failed_state` are logged loudly
-  and left re-drivable. Background transitions are unaffected: their
+  and left re-drivable. `Action`s are never candidates: an Action accepts
+  `in_progress_state` only as an implicit source and never writes it, and
+  its `fail_transition` holds no lock (it neither unlocks nor writes
+  `failed_state` while the state is locked) — so the ownership-transfer
+  contract applies only to state-writing transitions. The sweep queries
+  through `_base_manager` (like `State.get_persisted_state`), so a
+  filtered or renamed default manager cannot hide stranded rows.
+  Background transitions are unaffected: their
   durable row is already recovered by the starter / watchdog / stuck
   finalizer.
   (Issue #136 was reported against the legacy `django-logic 0.1.6` +

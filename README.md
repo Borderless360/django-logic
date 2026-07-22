@@ -670,7 +670,7 @@ Add `'django_logic.background'` to `INSTALLED_APPS` and configure:
 
 ```python
 DJANGO_LOGIC = {
-    'LOCK_TIMEOUT': 7200,
+    'LOCK_TIMEOUT': 7200,   # per-transition override: Transition(..., lock_timeout=...)
     'BACKGROUND_EXECUTION': 'celery',   # the default; set 'sync' in test settings
     'DEFAULT_QUEUE': 'django_logic',    # queue for transitions without queue=
     'STARTER_QUEUE': 'django_logic.starter',
@@ -888,7 +888,7 @@ Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durab
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
 - `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
 - `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
-- `recover_stranded_states` — recovers instances a hard-killed **synchronous** transition left parked in an `in_progress_state` (no lock held, no uncompleted `TransitionMessage`): drives them through the owning transition's failure path (`failed_state` + failure hooks) with a synthetic `[stranded]` error. Transitions without a `failed_state` are logged loudly and left re-drivable (#136).
+- `recover_stranded_states` — recovers instances a hard-killed **synchronous** transition left parked in an `in_progress_state` (no lock held, no uncompleted `TransitionMessage`): drives them through the owning transition's failure path (`failed_state` + failure hooks) with a synthetic `[stranded]` error. Transitions without a `failed_state` are logged loudly and left re-drivable (#136). The state lock is the liveness signal, so size `LOCK_TIMEOUT` above your longest synchronous side-effect — or give legitimately long transitions (report generation, large exports) their own `Transition(..., lock_timeout=...)`. Long-running **background** transitions need neither: their uncompleted `TransitionMessage` row shields them from this sweep regardless of lock expiry.
 
 ### Per-attempt timeouts
 
