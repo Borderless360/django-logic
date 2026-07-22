@@ -63,12 +63,20 @@ class State(object):
     def _get_hash(self):
         return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
 
-    def lock(self):
+    def lock(self, timeout=None):
         """
         Atomically locks the state.
         Returns True if the lock was acquired, False if already locked.
+
+        ``timeout`` overrides the global ``LOCK_TIMEOUT`` for this lock
+        (per-transition ``lock_timeout``); the effective value is
+        remembered on the instance so later TTL refreshes (RedisState's
+        ``set_state``) keep the same lifetime.
         """
-        return cache.add(self._get_hash(), True, _get_lock_timeout())
+        self._effective_lock_timeout = (
+            timeout if timeout is not None else _get_lock_timeout()
+        )
+        return cache.add(self._get_hash(), True, self._effective_lock_timeout)
 
     def unlock(self):
         """
@@ -118,7 +126,10 @@ class RedisState(State):
 
     @property
     def lock_timeout(self):
-        return _get_lock_timeout()
+        # Prefer the TTL this instance locked with (per-transition
+        # lock_timeout); fall back to the global for state objects that
+        # never locked (e.g. phase 2's unlocked xx refreshes).
+        return getattr(self, '_effective_lock_timeout', None) or _get_lock_timeout()
 
     def _store_value(self, state):
         """Wrap None state values with a sentinel so is_locked() works."""
@@ -130,7 +141,10 @@ class RedisState(State):
             return None
         return cached
 
-    def lock(self):
+    def lock(self, timeout=None):
+        self._effective_lock_timeout = (
+            timeout if timeout is not None else _get_lock_timeout()
+        )
         current = super().get_state()
         return cache.set(self._get_hash(), self._store_value(current), self.lock_timeout, nx=True) or False
 

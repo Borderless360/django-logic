@@ -22,6 +22,8 @@ in ``django_logic.background.transitions`` (phase 1) and
 from abc import ABC
 from uuid import UUID
 
+from django.core.exceptions import ImproperlyConfigured
+
 from django_logic.commands import (
     Callbacks,
     Conditions,
@@ -105,6 +107,23 @@ class Transition(BaseTransition):
             # at listing time.
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
+        # Per-transition override of the global LOCK_TIMEOUT for the
+        # synchronous execution path — for transitions whose side-effects
+        # legitimately run long (report generation, large exports). The
+        # lock is the liveness signal recover_stranded_states relies on,
+        # so size it above the longest expected run. Background
+        # transitions don't need this: their phase-1 critical section is
+        # short and their in-flight marker is the TransitionMessage row.
+        self.lock_timeout = kwargs.get('lock_timeout')
+        if self.lock_timeout is not None and (
+            not isinstance(self.lock_timeout, (int, float))
+            or isinstance(self.lock_timeout, bool)
+            or self.lock_timeout <= 0
+        ):
+            raise ImproperlyConfigured(
+                f"Transition '{action_name}': lock_timeout must be a "
+                f"positive number of seconds, got {self.lock_timeout!r}."
+            )
         self.failure_callbacks = self.failure_callbacks_class(
             kwargs.get('failure_callbacks', []), transition=self
         )
@@ -154,7 +173,7 @@ class Transition(BaseTransition):
         # A separate is_locked() pre-check only adds a TOCTOU window and a
         # redundant round-trip (a stale is_locked()==True could even reject
         # a transition the atomic lock() would have granted).
-        if not state.lock():
+        if not state.lock(self.lock_timeout):
             raise TransitionNotAllowed("State is locked")
 
         transition_logger.info(
