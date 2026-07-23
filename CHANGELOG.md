@@ -2,7 +2,145 @@
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **Transition observers receive the resolved declaration** (#146).
+  `django_logic.process.transition_observers` callables are now invoked
+  as `observer(owning_process_cls, action_name, instance, transition)` —
+  the resolved transition object as a fourth argument. Observers written
+  against the 0.8 three-argument form must add the parameter. Both
+  built-in recorders are updated; coverage is now keyed **per
+  declaration** (class + action + sync/background + sources→target), so
+  legal same-name transitions — condition-disambiguated variants and
+  sync+background namesake pairs — count and cover separately instead of
+  collapsing into one entry. Report entries expose `sources`/`target`.
+  File logs written by 0.8 recorders (2-field lines) are still accepted
+  with their original cover-all-namesakes semantics.
+
+- **`RedisState` storage format**. The single value+lock key now wraps
+  `{state, ownership token}` (see lock ownership below). Deploy web and
+  workers together; keys written by 0.8 stay readable (they carry no
+  token, so only a force-release can delete them until reacquired).
+
+- **Binding validation** (#143). `ProcessManager.bind_model_process`
+  raises `ImproperlyConfigured` when a `(model, process_name)` is
+  already bound to a different process/field (previously the model
+  property was silently overwritten while the registry kept both
+  claims), and when `state_field` is not a concrete model field.
+  Identical re-binds are now idempotent no-ops. Topologies that were
+  silently broken now fail at startup.
+
 ### Added
+
+- **Lock ownership tokens** (#139). Every lock acquisition stores a
+  unique token; `unlock()` is a compare-and-delete. A holder that
+  outlives its lock TTL can no longer delete the lock a successor
+  acquired (T1 expiry → T2 takeover → T1 late unlock previously let T3
+  enter alongside T2). Tokenless `State` objects keep the historical
+  unconditional delete as a manual force-release path. `RedisState`
+  writes preserve the stored token on both holder and non-holder
+  (xx-refresh) paths — a race there degrades to a TTL-bounded leak,
+  never a wrong unlock.
+
+- **`DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT']`** (#141, default off).
+  Inside an outer `transaction.atomic()` a synchronous transition's
+  state write is invisible until commit while the cache lock is not
+  transactional — releasing on completion (the historical behavior,
+  still the default) opens a window where a second connection acquires
+  the lock, reads the old committed state, and runs conflicting
+  side-effects. With the flag on, success/failure unlocks ride
+  `transaction.on_commit` so exclusion covers the whole invisible span.
+  Trade-offs (documented in the README): rollback leaves the lock to
+  expire via TTL; same-instance follow-ups inside the atomic block are
+  skipped as locked. Two-connection PostgreSQL regression tests pin both
+  modes.
+
+- **`django_logic.E001` system check** (#143): an `in_progress_state`
+  claimed by more than one bound machine on the same (model,
+  state_field) has no provenance for a record-less stranding —
+  `recover_stranded_states` skips such states at runtime with a loud
+  error, and the check flags the topology itself.
+
+- **Process-scoped `ProcessScenario` message helpers** (#150).
+  `uncompleted_message` / `latest_message` / `message_for` accept an
+  optional `process_name`; `ProcessScenario` threads its own process
+  through retries, error assertions, owner assertions, failure output
+  and snapshots — with two machines bound to one model, a scenario no
+  longer inspects or reruns a sibling's `TransitionMessage`.
+
+- **`DJANGO_LOGIC['PROCESS_CLASS_ALIASES']`** (#140). A dict of
+  old-dotted-path → new-dotted-path applied when restoring a
+  `TransitionMessage`'s recorded process class, so in-flight rows drain
+  correctly across a process rename instead of failing closed.
+
+- **`django_logic.E002` system check** (#148). The background engine
+  uses unqualified managers and bare `transaction.atomic()` — both
+  resolve to the `default` alias — so the atomic-outbox invariant (state
+  write + `TransitionMessage` row in one transaction) cannot hold when a
+  database router sends `TransitionMessage` or a background-bound model
+  elsewhere. Such topologies are now rejected at check time instead of
+  silently degrading row locking, atomicity, and the one-in-flight
+  constraint. Supported topology: `TransitionMessage` and every
+  background-bound model share the `default` alias.
+
+- **Boot-time validation of every safety setting** (#149).
+  `TRANSITION_MESSAGE_MAX_ERRORS` (int ≥ 1), `RETRY_MINUTES` (≥ 0),
+  `CLEANUP_DAYS` (≥ 0), `LOCK_TIMEOUT` (> 0, finite),
+  `DEFER_UNLOCK_UNTIL_COMMIT` (real bool), `PROCESS_CLASS_ALIASES`
+  (dict[str, str]) and `LOG_KWARGS_REDACTOR` (importable dotted path)
+  are validated in `validate_on_ready()` for all execution modes —
+  misconfiguration raises `ImproperlyConfigured` naming the setting at
+  boot instead of failing inside a periodic task (booleans and NaN were
+  previously accepted; a negative `RETRY_MINUTES` hot-looped the
+  starter; a negative `CLEANUP_DAYS` deleted every completed row).
+
+### Fixed
+
+- **Unrestorable recorded process classes fail closed** (#140). A
+  `TransitionMessage` whose recorded `process_class` no longer imports
+  used to fall back to whatever process was currently bound under the
+  same `process_name` — executing side effects phase 1 never asked for
+  after a rename/removal. Restore now completes the row as terminal and
+  auditable (`last_error_message` starts with `[unrestorable]`, no side
+  effects, no state write), and the previously-unguarded load in the
+  attribute-miss branch no longer escapes as a raw `ImportError` that
+  re-dispatched the row forever without counting errors.
+
+- **The stranded sweep is bounded and quiet** (#145). Candidate scans
+  page by pk-keyset instead of materializing every matching primary key
+  (a no-broker misconfiguration can park thousands of rows in an
+  in-progress state), and the no-`failed_state` warning fires once per
+  transition per process lifetime — hoisted out of the per-instance path
+  so such candidates are never locked or touched — instead of re-warning
+  for every candidate on every 5-minute tick.
+
+- **Best-effort hooks no longer poison the caller's transaction**
+  (#138). A database error swallowed by callbacks (success or failure),
+  failure side-effects, or a `next_transition` follow-up inside an open
+  `transaction.atomic()` marked the connection rollback-only — every
+  later ORM call raised `TransactionManagementError` and the
+  transition's own state write could roll back with the caller. Each
+  callback now runs in its own savepoint when (and only when) the caller
+  is inside an open transaction, and one failed callback no longer
+  prevents the rest of the list from running; failure side-effects get
+  the same bundle-level savepoint contract phase 2 already applied.
+
+- **Custom `State.lock()` compatibility** (#142). `state_class` is a
+  public extension point; the engine now calls `state.lock()` with no
+  argument when a transition declares no `lock_timeout`, so subclasses
+  written against the pre-`lock_timeout` `lock(self)` signature keep
+  working. Non-finite `lock_timeout` values (NaN/Infinity) are rejected
+  at declaration.
+
+- **Docs and metadata drift** (#144, #147). README installs from PyPI
+  (not a legacy tag), the Django floor is 4.2 everywhere, and the
+  pyproject dependency is `django>=4.2,!=5.0.*` matching classifiers, CI
+  matrix, and the 0.5.0 changelog. `docs/INDEX.md` separates current
+  guidance from historical planning material; `tests/test_metadata.py`
+  pins classifiers ↔ CI ↔ dependency ↔ README consistency as a
+  pre-release check.
+
+### Added (from the #136 line of work)
 
 - **Per-transition `lock_timeout`**. `Transition(..., lock_timeout=14400)`
   overrides the global `DJANGO_LOGIC['LOCK_TIMEOUT']` for that
