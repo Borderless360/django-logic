@@ -4,6 +4,16 @@
 
 ## [0.9.0] — 2026-07-23
 
+Stranded-state recovery (#136): `recover_stranded_states`, the fifth
+safety-net task, actively recovers instances that a hard-killed
+*synchronous* transition left parked in an `in_progress_state`, driving
+each through the owning transition's normal failure path. Per-transition
+`lock_timeout` lets legitimately long side-effects declare their own lock
+budget. Plus the #138–#150 hardening batch: lock ownership tokens, opt-in
+`DEFER_UNLOCK_UNTIL_COMMIT`, per-hook savepoints, fail-closed restore of
+unimportable process classes, binding validation, the `E001`/`E002` system
+checks, and boot-time validation of every safety setting.
+
 ### Changed (breaking)
 
 - **Transition observers receive the resolved declaration** (#146).

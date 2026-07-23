@@ -44,7 +44,7 @@ Extras:
 ## Installation
 
 ```bash
-# Installs the current release from PyPI (0.8.0 at the time of writing).
+# Installs the current release from PyPI (0.9.0 at the time of writing).
 # Celery and django-redis are installed automatically.
 pip install django-logic
 ```
