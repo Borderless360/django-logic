@@ -71,7 +71,10 @@ class RedisStateTestCase(TestCase):
 
     def test_lock_stores_current_state(self, mock_cache):
         self.state.lock()
-        self.assertEqual(mock_cache.get(self.state._get_hash()), 'draft')
+        cached = mock_cache.get(self.state._get_hash())
+        self.assertEqual(self.state._read_value(cached), 'draft')
+        # The stored value also carries the ownership token (#139).
+        self.assertEqual(self.state._stored_token(cached), self.state._lock_token)
 
     def test_lock_is_atomic(self, mock_cache):
         self.assertTrue(self.state.lock())
@@ -87,7 +90,10 @@ class RedisStateTestCase(TestCase):
         self.state.lock()
         self.state.set_state('in_progress')
 
-        self.assertEqual(mock_cache.get(self.state._get_hash()), 'in_progress')
+        cached = mock_cache.get(self.state._get_hash())
+        self.assertEqual(self.state._read_value(cached), 'in_progress')
+        # A state write by the holder must preserve its ownership token.
+        self.assertEqual(self.state._stored_token(cached), self.state._lock_token)
         self.instance.refresh_from_db()
         self.assertEqual(self.instance.status, 'in_progress')
 
@@ -177,7 +183,8 @@ class RedisStateSetStateXXTestCase(TestCase):
         self.state.lock()
         self.state.set_state('approved')
 
-        self.assertEqual(mock_cache.get(self.state._get_hash()), 'approved')
+        cached = mock_cache.get(self.state._get_hash())
+        self.assertEqual(self.state._read_value(cached), 'approved')
         self.instance.refresh_from_db()
         self.assertEqual(self.instance.status, 'approved')
 

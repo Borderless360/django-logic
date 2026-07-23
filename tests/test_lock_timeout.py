@@ -99,6 +99,41 @@ class TransitionLockTimeoutTests(TestCase):
         self.assertEqual(self._run_and_capture_lock_ttl('quick'), [None])
 
     def test_invalid_lock_timeout_is_rejected_at_declaration(self):
-        for bad in (0, -5, 'long', True):
-            with self.assertRaises(ImproperlyConfigured):
+        for bad in (0, -5, 'long', True, float('nan'), float('inf'), float('-inf')):
+            with self.assertRaises(ImproperlyConfigured, msg=repr(bad)):
                 Transition('x', sources=['a'], target='b', lock_timeout=bad)
+
+    def test_legacy_state_subclass_without_timeout_param_still_works(self):
+        """#142: ``state_class`` is a public extension point. A custom
+        State written against the pre-lock_timeout ``lock(self)`` contract
+        must keep working for transitions that declare no lock_timeout —
+        the engine only passes the argument when one is configured."""
+        calls = []
+
+        class LegacyState(State):
+            def lock(self):  # no timeout parameter, old contract
+                calls.append('lock')
+                return super().lock()
+
+        class LegacyProcess(Process):
+            process_name = 'legacy_state_process'
+            state_class = LegacyState
+            transitions = [
+                Transition('quick', sources=['draft'], target='done'),
+            ]
+
+        ProcessManager.bind_model_process(
+            Invoice, LegacyProcess, state_field='status')
+        try:
+            invoice = Invoice.objects.create(status='draft')
+            invoice.legacy_state_process.quick()
+            invoice.refresh_from_db()
+            self.assertEqual(invoice.status, 'done')
+            self.assertEqual(calls, ['lock'])
+        finally:
+            ProcessManager.bindings = [
+                b for b in ProcessManager.bindings
+                if b.process_class is not LegacyProcess
+            ]
+            if 'legacy_state_process' in vars(Invoice):
+                delattr(Invoice, 'legacy_state_process')

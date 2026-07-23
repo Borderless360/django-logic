@@ -19,6 +19,7 @@ executes the side-effects and writes the final state. Definitions live
 in ``django_logic.background.transitions`` (phase 1) and
 ``django_logic.background.runner`` (phase 2).
 """
+import math
 from abc import ABC
 from uuid import UUID
 
@@ -119,6 +120,7 @@ class Transition(BaseTransition):
             not isinstance(self.lock_timeout, (int, float))
             or isinstance(self.lock_timeout, bool)
             or self.lock_timeout <= 0
+            or not math.isfinite(self.lock_timeout)
         ):
             raise ImproperlyConfigured(
                 f"Transition '{action_name}': lock_timeout must be a "
@@ -173,7 +175,16 @@ class Transition(BaseTransition):
         # A separate is_locked() pre-check only adds a TOCTOU window and a
         # redundant round-trip (a stale is_locked()==True could even reject
         # a transition the atomic lock() would have granted).
-        if not state.lock(self.lock_timeout):
+        #
+        # No-arg call when no per-transition override is configured, so
+        # custom State subclasses written against the pre-lock_timeout
+        # ``lock(self)`` signature keep working (#142).
+        locked = (
+            state.lock()
+            if self.lock_timeout is None
+            else state.lock(self.lock_timeout)
+        )
+        if not locked:
             raise TransitionNotAllowed("State is locked")
 
         transition_logger.info(

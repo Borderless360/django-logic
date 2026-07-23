@@ -1,4 +1,6 @@
 from hashlib import blake2b
+from uuid import uuid4
+
 from django.conf import settings
 from django.core.cache import cache
 
@@ -68,6 +70,10 @@ class State(object):
         Atomically locks the state.
         Returns True if the lock was acquired, False if already locked.
 
+        Stores a unique ownership token as the lock value, so a stale
+        holder whose lock TTL-expired cannot release a successor's lock
+        (see ``unlock``).
+
         ``timeout`` overrides the global ``LOCK_TIMEOUT`` for this lock
         (per-transition ``lock_timeout``); the effective value is
         remembered on the instance so later TTL refreshes (RedisState's
@@ -76,13 +82,35 @@ class State(object):
         self._effective_lock_timeout = (
             timeout if timeout is not None else _get_lock_timeout()
         )
-        return cache.add(self._get_hash(), True, self._effective_lock_timeout)
+        token = uuid4().hex
+        if cache.add(self._get_hash(), token, self._effective_lock_timeout):
+            self._lock_token = token
+            return True
+        return False
+
+    def _stored_token(self, cached):
+        """Extract the ownership token from a cached lock value."""
+        return cached
 
     def unlock(self):
+        """Release the lock — but only if this State object still owns it.
+
+        Compare-and-delete on the ownership token issued by ``lock()``:
+        if this holder's lock TTL-expired and another caller acquired the
+        key since, the stored token no longer matches and the successor's
+        lock is left intact. The get+compare+delete pair is not atomic on
+        generic cache backends, but it shrinks the misdelete window from
+        "always, after any takeover" to a takeover happening between the
+        compare and the delete.
+
+        A State object that never acquired the lock holds no token and
+        falls back to an unconditional delete — the historical
+        force-release behavior, kept for manual repair paths.
         """
-        It unlocks the current state
-        """
-        cache.delete(self._get_hash())
+        key = self._get_hash()
+        token = getattr(self, '_lock_token', None)
+        if token is None or self._stored_token(cache.get(key)) == token:
+            cache.delete(key)
 
     def is_locked(self):
         """
@@ -90,7 +118,7 @@ class State(object):
         It might return False due to the race conditions.
         However, `lock` method should guarantees it will be locked only once.
         """
-        return cache.get(self._get_hash()) or False
+        return cache.get(self._get_hash()) is not None
 
 
 class RedisState(State):
@@ -123,6 +151,8 @@ class RedisState(State):
     after lock_timeout seconds and the state becomes available again.
     """
     _SENTINEL = '__django_logic_locked__'
+    _STATE_KEY = '__dl_state__'
+    _TOKEN_KEY = '__dl_token__'
 
     @property
     def lock_timeout(self):
@@ -131,22 +161,50 @@ class RedisState(State):
         # never locked (e.g. phase 2's unlocked xx refreshes).
         return getattr(self, '_effective_lock_timeout', None) or _get_lock_timeout()
 
-    def _store_value(self, state):
-        """Wrap None state values with a sentinel so is_locked() works."""
-        return self._SENTINEL if state is None else state
+    def _store_value(self, state, token):
+        """Wrap state + ownership token for single-key storage.
+
+        The dict wrapper replaces the pre-0.9 raw state value; None
+        states keep the sentinel so ``is_locked()`` works. ``_read_value``
+        still understands raw legacy values, so keys written by an older
+        version stay readable across an upgrade (they carry no token, so
+        only a force-release can delete them until they are reacquired).
+        """
+        return {
+            self._STATE_KEY: self._SENTINEL if state is None else state,
+            self._TOKEN_KEY: token,
+        }
 
     def _read_value(self, cached):
-        """Unwrap sentinel back to None."""
+        """Unwrap the storage wrapper (or a raw legacy value) to the state."""
+        if isinstance(cached, dict) and self._STATE_KEY in cached:
+            cached = cached[self._STATE_KEY]
         if cached == self._SENTINEL:
             return None
         return cached
+
+    def _stored_token(self, cached):
+        if isinstance(cached, dict):
+            return cached.get(self._TOKEN_KEY)
+        # Raw legacy value written by a pre-token version: no ownership
+        # information, never CAD-matched (force-release still works).
+        return None
 
     def lock(self, timeout=None):
         self._effective_lock_timeout = (
             timeout if timeout is not None else _get_lock_timeout()
         )
+        token = uuid4().hex
         current = super().get_state()
-        return cache.set(self._get_hash(), self._store_value(current), self.lock_timeout, nx=True) or False
+        acquired = cache.set(
+            self._get_hash(),
+            self._store_value(current, token),
+            self.lock_timeout,
+            nx=True,
+        ) or False
+        if acquired:
+            self._lock_token = token
+        return acquired
 
     def is_locked(self):
         return cache.get(self._get_hash()) is not None
@@ -158,7 +216,20 @@ class RedisState(State):
         # must not implicitly create a lock nobody will release. (Background
         # phase 1's in_progress write happens UNDER its critical-section
         # lock, so there the xx write refreshes the live key's value.)
-        cache.set(self._get_hash(), self._store_value(state), self.lock_timeout, xx=True)
+        #
+        # Preserve the ownership token already stored on the key: a state
+        # write must not clobber the holder's token. The read-merge-write
+        # is not atomic; a takeover between the read and the write leaves
+        # a stale token behind, which fails the holder's compare-and-delete
+        # and lets the lock expire via TTL — a bounded leak, never a wrong
+        # unlock.
+        current_token = self._stored_token(cache.get(self._get_hash()))
+        cache.set(
+            self._get_hash(),
+            self._store_value(state, current_token),
+            self.lock_timeout,
+            xx=True,
+        )
         super().set_state(state)
 
     def get_state(self):
