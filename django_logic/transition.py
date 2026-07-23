@@ -221,17 +221,23 @@ class Transition(BaseTransition):
         return kwargs.get('tr_id')
 
     def complete_transition(self, state: State, **kwargs):
-        """Write target state, unlock, then run callbacks.
+        """Write target state, release the lock, then run callbacks.
 
-        The lock is released **before** callbacks run, so a callback can
-        safely trigger another transition on the same instance. If the
-        worker crashes during callbacks they are lost — callbacks are
+        By default the lock is released **before** callbacks run, so a
+        callback can safely trigger another transition on the same
+        instance. Under ``DEFER_UNLOCK_UNTIL_COMMIT`` inside an open
+        transaction the release rides ``transaction.on_commit`` instead —
+        callbacks then still find the state locked, and a same-instance
+        follow-up is skipped as best-effort (see ``_release_lock``). If
+        the worker crashes during callbacks they are lost — callbacks are
         best-effort.
 
         A failed target write must still release the lock (otherwise the
         instance's FSM freezes until the lock TTL): the transition fails
         loudly either way, but a leaked lock turns one failed request into
-        hours of rejected transitions.
+        hours of rejected transitions. The release follows the same
+        deferral rule as ``fail_transition`` — deferred only when
+        ``in_progress_state`` was written under this lock.
         """
         try:
             state.set_state(self.target)

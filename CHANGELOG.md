@@ -107,6 +107,12 @@
 
 ### Removed
 
+- **`django_logic.background.serializers.make_json_safe`.** The legacy
+  lossy coercion helper (UUID/datetime → strings, tuples → lists) had
+  zero callers since the typed encoder replaced it in 0.5.0. Anyone
+  importing it directly should use `serialize_kwargs` /
+  `encode_value` — they preserve types.
+
 - **The `consumer-gv.yml` workflow.** A public library's CI should not
   name or check out a private consumer — the dependency points the wrong
   way. Consumer-contract validation moves to the consumers' own CI
