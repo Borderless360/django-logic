@@ -84,9 +84,13 @@ class RestoreVerificationTests(TestCase):
         self.assertTrue(tm.is_completed)
         self.assertEqual(tm.field_name, 'status')
 
-    def test_unimportable_recorded_class_falls_back_to_bound_process(self):
-        # The recorded class vanished (deploy renamed it). Phase 2 logs an
-        # error and falls back to the attribute-resolved bound process.
+    def test_unimportable_recorded_class_fails_closed(self):
+        # The recorded class vanished (deploy renamed it, no alias
+        # configured). Phase 2 must FAIL CLOSED (#140): running the
+        # attribute-resolved bound process instead would execute
+        # side-effects phase 1 never asked for. The row completes as
+        # unrestorable — no side-effects, no state write — with the
+        # reason on last_error_message for the audit trail.
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
         tm = TransitionMessage.objects.create(
@@ -107,13 +111,131 @@ class RestoreVerificationTests(TestCase):
             run_background_transition(tm.pk)
 
         self.widget.refresh_from_db()
+        # NO substitute side-effects ran, state untouched by them.
+        self.assertEqual(self.widget.status, 'fulfilling')
+        self.assertEqual(self.widget.se_log, '')
+        tm.refresh_from_db()
+        self.assertTrue(tm.is_completed)  # retries stop
+        self.assertIn('[unrestorable]', tm.last_error_message)
+        self.assertIn('could not be loaded', tm.last_error_message)
+        self.assertIsNotNone(tm.last_error_dt)
+        self.assertTrue(
+            any('could not be loaded' in line for line in logs.output)
+        )
+
+    def test_alias_map_restores_renamed_recorded_class(self):
+        # The recorded class moved; DJANGO_LOGIC['PROCESS_CLASS_ALIASES']
+        # maps the old dotted path to the new one, so the in-flight row
+        # restores the CORRECT process and its side-effects run (#140).
+        self.widget.status = 'rogue_fulfilling'
+        self.widget.save(update_fields=['status'])
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=str(self.widget.pk),
+            process_name='process',
+            field_name='status',
+            transition_name='fulfil',
+            queue_name='django_logic.critical',
+            kwargs={
+                'process_class': 'tests.old_home.RenamedRogueProcess',
+            },
+        )
+
+        with override_settings(DJANGO_LOGIC={
+            **_SYNC_SETTINGS,
+            'PROCESS_CLASS_ALIASES': {
+                'tests.old_home.RenamedRogueProcess':
+                    'tests.background.test_restore_verification.RogueProcess',
+            },
+        }):
+            run_background_transition(tm.pk)
+
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'rogue_fulfilled')
+        self.assertEqual(RAN, ['rogue_side_effect'])
+        tm.refresh_from_db()
+        self.assertTrue(tm.is_completed)
+        self.assertEqual(tm.last_error_message, '')
+
+    def test_aliased_rename_of_the_bound_class_does_not_log_a_mismatch(self):
+        # The recorded path is the bound class's OLD dotted path, covered
+        # by an alias. The recorded-vs-resolved comparison must apply the
+        # alias map too, so the rename neither warns nor reloads — the
+        # bound transition just runs.
+        self.widget.status = 'fulfilling'
+        self.widget.save(update_fields=['status'])
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=str(self.widget.pk),
+            process_name='process',
+            field_name='status',
+            transition_name='fulfil',
+            queue_name='django_logic.critical',
+            kwargs={
+                'process_class': 'tests.old_home.OldWidgetProcess',
+            },
+        )
+
+        with override_settings(DJANGO_LOGIC={
+            **_SYNC_SETTINGS,
+            'PROCESS_CLASS_ALIASES': {
+                'tests.old_home.OldWidgetProcess':
+                    'tests.background.models.WidgetProcess',
+            },
+        }):
+            with self.assertNoLogs('django-logic.transition', level='WARNING'):
+                run_background_transition(tm.pk)
+
+        self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilled')  # bound transition ran
         self.assertIn('ok,', self.widget.se_log)
         tm.refresh_from_db()
         self.assertTrue(tm.is_completed)
-        self.assertTrue(
-            any('could not be loaded' in line for line in logs.output)
+
+    def test_unimportable_path_via_attribute_error_branch_terminates(self):
+        # The instance has NO attribute for the recorded process_name, so
+        # restore goes through the process_class fallback — and that path
+        # is unimportable. Pre-#140 the raw ImportError escaped _run_atomic
+        # (which only catches _RestoreError), the attempt rolled back with
+        # errors_count still 0, and retry_stale_transitions re-dispatched
+        # the row forever. Now the row terminates cleanly.
+        from django_logic.background.tasks import _retry_pending_inline
+
+        self.widget.status = 'fulfilling'
+        self.widget.save(update_fields=['status'])
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=str(self.widget.pk),
+            process_name='no_such_process_attr',
+            field_name='status',
+            transition_name='fulfil',
+            queue_name='django_logic.critical',
+            kwargs={
+                'process_class': 'tests.no.such.module.GhostProcess',
+            },
         )
+
+        with self.assertLogs('django-logic.transition', level='ERROR'):
+            run_background_transition(tm.pk)
+
+        tm.refresh_from_db()
+        self.assertTrue(tm.is_completed)
+        self.assertEqual(tm.errors_count, 0)  # unrestorable, not "failing"
+        self.assertIn('[unrestorable]', tm.last_error_message)
+
+        # No infinite retry: the starter has nothing left to re-dispatch.
+        with override_settings(DJANGO_LOGIC={
+            **_SYNC_SETTINGS, 'TRANSITION_MESSAGE_RETRY_MINUTES': 0,
+        }):
+            self.assertEqual(_retry_pending_inline(), 0)
+        tm.refresh_from_db()
+        self.assertEqual(tm.errors_count, 0, 'errors must not grow')
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'fulfilling',
+                         'no substitute side-effects, no state write')
 
     def test_phase_one_records_the_bound_field_name(self):
         with sync_execution():

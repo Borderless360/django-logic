@@ -207,7 +207,7 @@ Briefly, for the record:
 | Approach | Why rejected |
 |---|---|
 | **Fire-and-forget** (PR #75's `run_in_background`, GV's `BackgroundTransition`) | Worker crash, broker loss, or dropped `on_commit` all leave the model stuck in `in_progress_state` with zero recovery. Every interesting failure case needs manual intervention. |
-| **Celery chain-of-tasks** (legacy `django-logic-celery`) | A crash between side-effect N and N+1 leaves the model stuck mid-flight. Interacts badly with the nested-transition re-raise problem documented in `fundamental problem.md`. Removed from this workspace. |
+| **Celery chain-of-tasks** (legacy `django-logic-celery`) | A crash between side-effect N and N+1 leaves the model stuck mid-flight. Interacts badly with the nested-transition re-raise problem documented in [`docs/recipes/nested-processes.md`](../recipes/nested-processes.md) (originally analysed in an external research note that is not part of this repo). Removed from this workspace. |
 | **DB-backed MQ with separate handler task, side-effects outside atomic** (earlier iteration of the design) | Side-effects succeeding but the state write being lost to a worker crash is the worst failure mode — invisible inconsistency. Moving the state write into the same atomic block as side-effects fixes it. |
 
 ---

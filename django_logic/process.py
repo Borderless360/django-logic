@@ -10,7 +10,7 @@ import uuid
 from collections import namedtuple
 from contextvars import ContextVar
 
-from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 
 from django_logic.commands import Conditions, Permissions
 from django_logic.exceptions import TransitionNotAllowed
@@ -25,19 +25,23 @@ _transition_context: ContextVar[dict | None] = ContextVar(
 )
 
 #: Transition-initiation observers. Each callable is invoked as
-#: ``observer(owning_process_cls, action_name, instance)`` after a
-#: transition resolves, before it executes — for every initiation path
-#: (direct calls, next_transition follow-ups, background phase 1; phase-2
-#: restore does not re-notify). Observers must never break a transition:
-#: exceptions are logged and swallowed. Registered by
-#: ``django_logic.coverage``; open to consumer metrics/tracing hooks.
+#: ``observer(owning_process_cls, action_name, instance, transition)``
+#: after a transition resolves, before it executes — for every initiation
+#: path (direct calls, next_transition follow-ups, background phase 1;
+#: phase-2 restore does not re-notify). ``transition`` is the resolved
+#: declaration object, so condition-disambiguated same-name transitions
+#: are distinguishable (#146; the argument was added in 0.9 — observers
+#: written against the 0.8 three-argument form need a ``transition=None``
+#: parameter added). Observers must never break a transition: exceptions
+#: are logged and swallowed. Registered by ``django_logic.coverage``;
+#: open to consumer metrics/tracing hooks.
 transition_observers: list = []
 
 
-def _notify_transition_observers(owning_process, action_name, instance):
+def _notify_transition_observers(owning_process, action_name, instance, transition):
     for observer in tuple(transition_observers):
         try:
-            observer(type(owning_process), action_name, instance)
+            observer(type(owning_process), action_name, instance, transition)
         except Exception:
             transition_logger.exception(
                 f'transition observer {observer!r} raised; ignored'
@@ -80,10 +84,13 @@ class Process:
         if state is not None:
             self.state = state
         else:
-            assert field_name and instance is not None, (
-                'Process requires either a state object or '
-                '(field_name, instance).'
-            )
+            if not field_name or instance is None:
+                # A real exception, not an assert — asserts vanish under
+                # python -O and this is the constructor's only guard.
+                raise TypeError(
+                    'Process requires either a state object or '
+                    '(field_name, instance).'
+                )
             self.state = self.state_class(
                 instance=instance,
                 field_name=field_name,
@@ -134,7 +141,7 @@ class Process:
         )
         if transition_observers:
             _notify_transition_observers(
-                owning_process, action_name, self.state.instance
+                owning_process, action_name, self.state.instance, transition
             )
 
         tr_id = uuid.uuid4()
@@ -495,6 +502,50 @@ def collect_hook_signature_offenders(process_cls) -> list:
     return offenders
 
 
+def collect_ambiguous_in_progress_states() -> dict:
+    """Cross-binding in-progress ownership map (#143).
+
+    Uniqueness of ``in_progress_state`` is enforced per process tree, but
+    two *bindings* on the same (model, state_field) may legally exist.
+    If their trees share an ``in_progress_state``, a record-less stranded
+    instance in that state has no provenance: automatic recovery could
+    run the wrong transition's ``failed_state`` and failure hooks.
+
+    Returns ``{(model_label, state_field, in_progress_state):
+    [(process_cls, transition), ...]}`` for every key claimed by more
+    than one binding. ``Action``\\ s never write their
+    ``in_progress_state`` and are excluded (mirrors the stranded sweep).
+    Consumed by the ``django_logic.E001`` system check and by
+    ``recover_stranded_states``, which skips ambiguous keys.
+    """
+    from django_logic.transition import Action
+
+    claims: dict = {}
+    for binding in ProcessManager.bindings:
+        stack = [binding.process_class]
+        seen_cls = set()
+        while stack:
+            process_cls = stack.pop()
+            if process_cls in seen_cls:
+                continue
+            seen_cls.add(process_cls)
+            for transition in process_cls.transitions or []:
+                in_progress = getattr(transition, 'in_progress_state', None)
+                if not in_progress or isinstance(transition, Action):
+                    continue
+                key = (binding.model._meta.label, binding.state_field,
+                       in_progress)
+                claims.setdefault(key, []).append((process_cls, transition))
+            stack.extend(process_cls.nested_processes)
+    return {
+        # The same transition object reachable through two bindings is
+        # not ambiguous — recovery drives the identical failed_state and
+        # hooks either way. Only distinct declarations conflict.
+        key: owners for key, owners in claims.items()
+        if len({id(transition) for _, transition in owners}) > 1
+    }
+
+
 #: One record per ``bind_model_process`` call.
 ModelProcessBinding = namedtuple(
     'ModelProcessBinding', ['model', 'process_class', 'state_field'])
@@ -509,8 +560,51 @@ class ProcessManager:
 
     @classmethod
     def bind_model_process(cls, model, process_class, state_field: str = 'state') -> None:
+        binding = ModelProcessBinding(model, process_class, state_field)
+        if binding in cls.bindings:
+            # Identical re-bind (an AppConfig.ready() running twice, a
+            # test re-import) is a harmless no-op — the model property
+            # and registry entry are already in place (#143).
+            return
+
+        # The state field must be a concrete column: a typo, a property,
+        # or a relation silently accepted here only fails much later —
+        # deep inside a transition's state write or the stranded sweep.
+        try:
+            field = model._meta.get_field(state_field)
+        except FieldDoesNotExist as exc:
+            raise ImproperlyConfigured(
+                f"bind_model_process({model._meta.label}, "
+                f"{process_class.__name__}): state_field {state_field!r} "
+                f"is not a field on {model._meta.label}."
+            ) from exc
+        if not field.concrete:
+            raise ImproperlyConfigured(
+                f"bind_model_process({model._meta.label}, "
+                f"{process_class.__name__}): state_field {state_field!r} "
+                f"must be a concrete model field (got {type(field).__name__})."
+            )
+
+        # A different binding under the same process_name would silently
+        # overwrite the model property while its registry entry kept
+        # claiming the old machine — every registry consumer (coverage,
+        # system checks, stranded recovery) would then disagree with
+        # runtime dispatch (#143).
+        for existing in cls.bindings:
+            if (existing.model is model
+                    and existing.process_class.process_name
+                    == process_class.process_name):
+                raise ImproperlyConfigured(
+                    f"bind_model_process({model._meta.label}, "
+                    f"{process_class.__name__}): process_name "
+                    f"{process_class.process_name!r} is already bound on "
+                    f"this model (to {existing.process_class.__name__} on "
+                    f"state_field {existing.state_field!r}). Give one of "
+                    f"the processes a distinct process_name."
+                )
+
         _validate_hook_signatures(process_class)
-        cls.bindings.append(ModelProcessBinding(model, process_class, state_field))
+        cls.bindings.append(binding)
 
         def make_process_getter(field_name, process_cls):
             return lambda self: process_cls(field_name=field_name, instance=self)

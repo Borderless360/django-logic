@@ -24,7 +24,7 @@ Planned changes for upcoming versions of django-logic.
 
 ## 1.0.0
 
-- [ ] Scenario-based testing framework (`django_logic.testing`): `ProcessScenario`, snapshot/replay, AI-readable failure output
+- [x] Scenario-based testing framework (`django_logic.testing`): `ProcessScenario`, snapshot/replay, AI-readable failure output — shipped early, in 0.4.0
 - [ ] Admin + DRF integration modules
 - [ ] `manage.py transition_status` management command
 - [ ] Better error messages (include current state + available transitions)

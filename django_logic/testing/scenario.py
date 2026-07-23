@@ -27,12 +27,12 @@ from django_logic.testing.assertions import ScenarioAssertions
 from django_logic.testing.output import format_failure
 from django_logic.testing.runner import (
     all_transitions,
+    latest_message,
     rerun_message,
     run_background_sync,
     transitions_for,
     uncompleted_message,
 )
-from django_logic.testing.runner import latest_message
 from django_logic.testing.snapshot import from_snapshot as _from_snapshot
 from django_logic.testing.snapshot import snapshot as _snapshot
 from django_logic.testing.tracking import track
@@ -125,7 +125,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
             return None
 
     def _fail(self, message, instance=None):
-        tm = latest_message(instance) if instance is not None else None
+        tm = (latest_message(instance, process_name=self.process_name)
+              if instance is not None else None)
         self.fail(format_failure(message, self._timeline, tm=tm,
                                  snapshot=self._snapshot_if_enabled(instance)))
 
@@ -193,7 +194,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                          expect_raises=None):
         """Re-run the instance's uncompleted transition inline — what the
         periodic starter would do."""
-        tm = uncompleted_message(instance)
+        tm = uncompleted_message(instance, process_name=self.process_name)
         if tm is None:
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
             self._fail('retry_transition(): no uncompleted TransitionMessage for '

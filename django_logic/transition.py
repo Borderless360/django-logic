@@ -19,8 +19,11 @@ executes the side-effects and writes the final state. Definitions live
 in ``django_logic.background.transitions`` (phase 1) and
 ``django_logic.background.runner`` (phase 2).
 """
-from abc import ABC
+import math
 from uuid import UUID
+
+from django.core.exceptions import ImproperlyConfigured
+from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.commands import (
     Callbacks,
@@ -29,6 +32,7 @@ from django_logic.commands import (
     NextTransition,
     Permissions,
     SideEffects,
+    note_deferred_unlock,
 )
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import (
@@ -36,10 +40,11 @@ from django_logic.logger import (
     transition_logger,
     TransitionEventType,
 )
+from django_logic.conf import defer_unlock_until_commit as _defer_unlock_until_commit
 from django_logic.state import State
 
 
-class BaseTransition(ABC):
+class BaseTransition:
     side_effects_class = SideEffects
     callbacks_class = Callbacks
     failure_callbacks_class = Callbacks
@@ -105,23 +110,43 @@ class Transition(BaseTransition):
             # at listing time.
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
+        # Per-transition override of the global LOCK_TIMEOUT for the
+        # synchronous execution path — for transitions whose side-effects
+        # legitimately run long (report generation, large exports). The
+        # lock is the liveness signal recover_stranded_states relies on,
+        # so size it above the longest expected run. Background
+        # transitions don't need this: their phase-1 critical section is
+        # short and their in-flight marker is the TransitionMessage row.
+        self.lock_timeout = kwargs.get('lock_timeout')
+        if self.lock_timeout is not None and (
+            not isinstance(self.lock_timeout, (int, float))
+            or isinstance(self.lock_timeout, bool)
+            or self.lock_timeout <= 0
+            or not math.isfinite(self.lock_timeout)
+        ):
+            raise ImproperlyConfigured(
+                f"Transition '{action_name}': lock_timeout must be a "
+                f"positive number of seconds, got {self.lock_timeout!r}."
+            )
+        # Only SideEffects dereferences its transition (to drive
+        # complete/fail); the other command bundles never read it.
         self.failure_callbacks = self.failure_callbacks_class(
-            kwargs.get('failure_callbacks', []), transition=self
+            kwargs.get('failure_callbacks', [])
         )
         self.failure_side_effects = self.failure_side_effects_class(
-            kwargs.get('failure_side_effects', []), transition=self
+            kwargs.get('failure_side_effects', [])
         )
         self.side_effects = self.side_effects_class(
             kwargs.get('side_effects', []), transition=self
         )
         self.callbacks = self.callbacks_class(
-            kwargs.get('callbacks', []), transition=self
+            kwargs.get('callbacks', [])
         )
         self.permissions = self.permissions_class(
-            kwargs.get('permissions', []), transition=self
+            kwargs.get('permissions', [])
         )
         self.conditions = self.conditions_class(
-            kwargs.get('conditions', []), transition=self
+            kwargs.get('conditions', [])
         )
         self.next_transition = self.next_transition_class(
             kwargs.get('next_transition')
@@ -154,7 +179,16 @@ class Transition(BaseTransition):
         # A separate is_locked() pre-check only adds a TOCTOU window and a
         # redundant round-trip (a stale is_locked()==True could even reject
         # a transition the atomic lock() would have granted).
-        if not state.lock():
+        #
+        # No-arg call when no per-transition override is configured, so
+        # custom State subclasses written against the pre-lock_timeout
+        # ``lock(self)`` signature keep working (#142).
+        locked = (
+            state.lock()
+            if self.lock_timeout is None
+            else state.lock(self.lock_timeout)
+        )
+        if not locked:
             raise TransitionNotAllowed("State is locked")
 
         transition_logger.info(
@@ -187,17 +221,23 @@ class Transition(BaseTransition):
         return kwargs.get('tr_id')
 
     def complete_transition(self, state: State, **kwargs):
-        """Write target state, unlock, then run callbacks.
+        """Write target state, release the lock, then run callbacks.
 
-        The lock is released **before** callbacks run, so a callback can
-        safely trigger another transition on the same instance. If the
-        worker crashes during callbacks they are lost — callbacks are
+        By default the lock is released **before** callbacks run, so a
+        callback can safely trigger another transition on the same
+        instance. Under ``DEFER_UNLOCK_UNTIL_COMMIT`` inside an open
+        transaction the release rides ``transaction.on_commit`` instead —
+        callbacks then still find the state locked, and a same-instance
+        follow-up is skipped as best-effort (see ``_release_lock``). If
+        the worker crashes during callbacks they are lost — callbacks are
         best-effort.
 
         A failed target write must still release the lock (otherwise the
         instance's FSM freezes until the lock TTL): the transition fails
         loudly either way, but a leaked lock turns one failed request into
-        hours of rejected transitions.
+        hours of rejected transitions. The release follows the same
+        deferral rule as ``fail_transition`` — deferred only when
+        ``in_progress_state`` was written under this lock.
         """
         try:
             state.set_state(self.target)
@@ -206,17 +246,21 @@ class Transition(BaseTransition):
                 f'{kwargs.get("tr_id")} target-state write failed for '
                 f'{state.instance_key}; releasing the lock before re-raising.'
             )
-            state.unlock()
+            # Same deferral rule as fail_transition: if in_progress_state
+            # was written under this lock, its uncommitted span still
+            # needs protecting — an immediate release would reopen the
+            # unlock-before-commit window (#141). With no prior write,
+            # release now (nothing to protect, nothing to leak).
+            self._release_lock(
+                state, deferrable=bool(self.in_progress_state), **kwargs
+            )
             raise
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
             f'{self.target}'
         )
 
-        state.unlock()
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
-        )
+        self._release_lock(state, **kwargs)
 
         self.callbacks.execute(state, **kwargs)
         self.next_transition.execute(state, **kwargs)
@@ -226,9 +270,18 @@ class Transition(BaseTransition):
         # failure_side_effects bundle) must still release the lock; the
         # original side-effect exception keeps propagating out of
         # SideEffects.execute either way.
+        #
+        # Deferral (#141) only applies when a state write actually
+        # happened under this lock — the in_progress_state written in
+        # change_state, or the failed_state written below. A failure with
+        # neither wrote nothing: there is no invisible span to protect,
+        # so the unlock stays immediate (deferring would only leak the
+        # lock until TTL when the outer transaction rolls back).
+        wrote_state = bool(self.in_progress_state)
         try:
             if self.failed_state:
                 state.set_state(self.failed_state)
+                wrote_state = True
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                     f'{self.failed_state}'
@@ -236,12 +289,61 @@ class Transition(BaseTransition):
 
             self.failure_side_effects.execute(state, exception=exception, **kwargs)
         finally:
-            state.unlock()
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
-            )
+            self._release_lock(state, deferrable=wrote_state, **kwargs)
 
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
+
+    @staticmethod
+    def _release_lock(state: State, deferrable: bool = True, **kwargs):
+        """Release the state lock — now, or at commit (#141).
+
+        Inside an outer ``transaction.atomic()`` the target/failed state
+        write is invisible to other connections until the block commits,
+        while the cache lock is not transactional. Releasing immediately
+        (the historical default) opens a window in which a second
+        transition can acquire the lock, read the OLD committed state and
+        run conflicting side-effects — the final state then depends on
+        commit ordering.
+
+        With ``DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] = True`` the
+        unlock is deferred to ``transaction.on_commit`` so mutual
+        exclusion covers the whole invisible span. Documented trade-offs
+        (see README):
+
+        * on rollback the hook never fires — the lock expires via its
+          TTL, a *bounded* lockout (same failure mode as a crashed
+          process). Rollback-prone flows should pair this with a
+          per-transition ``lock_timeout``;
+        * same-instance follow-ups (callbacks / ``next_transition``)
+          inside the atomic block find the state still locked and are
+          skipped (they are best-effort by contract) — chain them from
+          ``transaction.on_commit`` in the caller instead.
+
+        Only the paths that follow a successful state write defer
+        (``deferrable=True``); when nothing was written under the lock
+        there is no visibility window to protect and deferring would only
+        leak the lock until TTL on rollback — the early
+        revalidation-failure unlock in ``change_state`` and a failure
+        path that wrote no state (no ``in_progress_state``, no
+        ``failed_state``) release immediately.
+        """
+        if deferrable and _defer_unlock_until_commit():
+            using = state.instance._state.db or DEFAULT_DB_ALIAS
+            if transaction.get_connection(using).in_atomic_block:
+                transaction.on_commit(state.unlock, using=using)
+                # Registered so a hook savepoint that rolls back can
+                # release this lock instead of silently discarding the
+                # on_commit hook with it (commands._run_in_savepoint).
+                note_deferred_unlock(using, state)
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
+                    f'deferred until commit'
+                )
+                return
+        state.unlock()
+        transition_logger.info(
+            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
+        )
 
     @staticmethod
     def _init_transition_context(kwargs: dict) -> None:

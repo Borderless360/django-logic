@@ -133,3 +133,331 @@ def retry_pending() -> int:
     """
     from django_logic.background.tasks import _retry_pending_inline
     return _retry_pending_inline()
+
+
+STRANDED_MARKER = '[stranded]'
+
+
+def recover_stranded_states() -> int:
+    """Drive provably-stranded instances out of their ``in_progress_state``
+    (#136).
+
+    A hard-killed **synchronous** transition (worker OOM / SIGKILL / dyno
+    eviction mid side-effect) leaves its instance parked in the
+    transition's ``in_progress_state``. The state lock self-expires after
+    ``LOCK_TIMEOUT`` and the implicit-source rule keeps the transition
+    re-drivable — but nothing *acts*: no failure hooks run, no counter
+    increments, no alert fires, and the instance sits until a human
+    notices. Background transitions never need this sweep: their
+    ``TransitionMessage`` row is the durable record the retry starter /
+    watchdog / stuck finalizer already act on.
+
+    A candidate is an instance sitting in a transition's declared
+    ``in_progress_state`` with no uncompleted ``TransitionMessage``
+    **for that process** (same scope as
+    ``_ensure_no_background_in_flight`` and the partial unique
+    constraint — an in-flight background job on a *different* bound
+    process must not delay recovery). ``Action``\\ s are never
+    candidates: an Action accepts ``in_progress_state`` but only as an
+    implicit source — it never *writes* it, so it cannot have stranded
+    an instance there. (Its ``fail_transition`` also holds no lock: it
+    neither unlocks nor writes ``failed_state`` while the state is
+    locked, so the ownership-transfer contract below would not hold for
+    it.) Recovery itself runs **under the state lock** with the same
+    contract as the phase-2 state guard (a manual fix or a re-drive that
+    wins the race always wins — see
+    :func:`_recover_stranded_instance`), so the sweep never clobbers
+    live work or steals another caller's lock — as long as live runs
+    finish within their lock TTL. A synchronous run that *outlives* its
+    lock is indistinguishable from a stranded one (this TTL-expiry
+    hazard predates the sweep; the sweep makes acting on it prompt).
+    Size the global ``LOCK_TIMEOUT`` above your longest synchronous
+    side-effect, or give legitimately long transitions (report
+    generation, large exports) their own
+    ``Transition(..., lock_timeout=...)``.
+
+    Each recovered instance goes through the owning transition's normal
+    failure path — ``failed_state`` write, failure side-effects, failure
+    callbacks — with a synthetic ``[stranded]`` error, so the standard
+    alerting/retry paths apply. A stranded instance whose transition
+    declares no ``failed_state`` is logged loudly and left untouched (it
+    stays re-drivable via the implicit source).
+
+    Returns the number of instances recovered.
+    """
+    from django_logic.coverage import iter_bound_transitions
+    from django_logic.logger import logger
+    from django_logic.process import collect_ambiguous_in_progress_states
+    from django_logic.transition import Action
+
+    recovered = 0
+    seen = set()
+    # In-progress states claimed by more than one bound machine have no
+    # provenance for a record-less stranding — recovering would guess an
+    # owner and could run the wrong failed_state/hooks. Skip them loudly;
+    # the django_logic.E001 system check flags the topology itself (#143).
+    ambiguous = collect_ambiguous_in_progress_states()
+    for key in sorted(ambiguous):
+        model_label, state_field, in_progress = key
+        logger.error(
+            f'recover_stranded_states: in_progress_state {in_progress!r} '
+            f'on {model_label}.{state_field} is claimed by multiple bound '
+            f'machines (django_logic.E001); skipping recovery for it — '
+            f'stranded instances stay parked until the binding topology '
+            f'is fixed.'
+        )
+    for binding, process_cls, transition in iter_bound_transitions():
+        in_progress = getattr(transition, 'in_progress_state', None)
+        if not in_progress:
+            continue
+        if (binding.model._meta.label, binding.state_field, in_progress) in ambiguous:
+            continue
+        # An Action never writes its in_progress_state (change_state skips
+        # the state machinery), so it cannot have stranded an instance
+        # there — and Action.fail_transition neither unlocks nor writes
+        # failed_state while the state is locked, which would leak the
+        # sweep's lock until LOCK_TIMEOUT.
+        if isinstance(transition, Action):
+            continue
+        key = (binding.model._meta.label, binding.state_field,
+               in_progress, transition.action_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        # A transition without failed_state has nowhere to recover TO:
+        # its candidates are re-drivable (implicit in-progress source)
+        # but stay parked until handled. That's a property of the
+        # TRANSITION, not of any candidate — skip the whole sweep for it
+        # and warn once per process lifetime (per-candidate-per-run
+        # warnings were pure noise, and each one took the state lock
+        # first).
+        if not transition.failed_state:
+            _warn_once_about_missing_failed_state(binding, transition)
+            continue
+        # Contained per transition: one misbehaving model/binding must
+        # not abort the sweep for every remaining binding.
+        try:
+            recovered += _sweep_transition(binding, transition)
+        except Exception:
+            logger.exception(
+                f'recover_stranded_states: sweep failed for '
+                f'{binding.model._meta.label}.{binding.state_field} '
+                f'({transition.action_name}); continuing.'
+            )
+    return recovered
+
+
+#: Chunk size for the sweep's pk pages AND the batched
+#: uncompleted-TransitionMessage pre-check — bounds both the per-page
+#: memory footprint and the ``instance_id__in`` list (SQLite caps query
+#: variables, and a no-broker misconfiguration can pile thousands of
+#: rows into an in-progress state).
+_TM_SCAN_CHUNK = 500
+
+#: (model_label, state_field, action_name) triples already warned about
+#: for a missing failed_state — once per process lifetime, following the
+#: ``_celery_config_warned`` precedent above. Tests reset via
+#: :func:`_reset_warned`.
+_no_failed_state_warned: set = set()
+
+
+def _reset_warned() -> None:
+    """Test hook: forget which no-failed_state transitions were warned
+    about, so a test can assert the warn-once behaviour in isolation."""
+    _no_failed_state_warned.clear()
+
+
+def _warn_once_about_missing_failed_state(binding, transition) -> None:
+    """Warn — once per process lifetime per (model, state_field, action) —
+    that a transition's stranded candidates cannot be recovered because it
+    declares no ``failed_state``. The candidate count is included (one
+    ``.count()``, cheap because this fires once) so the parked backlog
+    stays observable."""
+    from django_logic.logger import logger
+
+    key = (binding.model._meta.label, binding.state_field,
+           transition.action_name)
+    if key in _no_failed_state_warned:
+        return
+    _no_failed_state_warned.add(key)
+    candidates = (
+        binding.model._base_manager
+        .filter(**{binding.state_field: transition.in_progress_state})
+        .count()
+    )
+    logger.warning(
+        f'recover_stranded_states: transition {transition.action_name!r} '
+        f'on {binding.model._meta.label}.{binding.state_field} declares '
+        f'no failed_state — stranded instances in '
+        f'{transition.in_progress_state!r} ({candidates} candidate(s) '
+        f'right now) are left as-is: re-drivable via the implicit '
+        f'in-progress source, but parked until handled. '
+        f'(Warned once per process; give the transition a failed_state '
+        f'to make them recoverable.)'
+    )
+
+
+def _sweep_transition(binding, transition) -> int:
+    """Scan one (model, state_field, transition) for stranded instances
+    and recover each; returns the number recovered.
+
+    Pages through candidates by pk-keyset (``pk__gt=last_pk``, ordered,
+    ``_TM_SCAN_CHUNK`` at a time) instead of materialising every
+    candidate pk up front — a no-broker misconfiguration can strand tens
+    of thousands of rows in one in-progress state. Keyset pagination
+    (not ``.iterator()``): recovery opens its own queries and atomic
+    blocks per instance, and holding a long-lived server-side cursor
+    open across those ``fail_transition`` calls is fragile across
+    backends — the same reasoning as the periodic starter's
+    materialise-then-act loop in ``tasks._retry_pending_inline``.
+    Recovered instances leave the state between pages; ``pk__gt`` keeps
+    forward progress past skipped (locked / in-flight) ones.
+    """
+    from django_logic.background.models import TransitionMessage
+
+    # _base_manager, like State.get_persisted_state: a filtered or
+    # renamed default manager must not hide stranded rows (or crash
+    # the sweep on a model without `.objects`).
+    base_qs = binding.model._base_manager.filter(
+        **{binding.state_field: transition.in_progress_state}
+    )
+    recovered = 0
+    process_name = binding.process_class.process_name
+    last_pk = None
+    while True:
+        page_qs = base_qs if last_pk is None else base_qs.filter(pk__gt=last_pk)
+        chunk = list(
+            page_qs.order_by('pk').values_list('pk', flat=True)[:_TM_SCAN_CHUNK]
+        )
+        if not chunk:
+            break
+        last_pk = chunk[-1]
+        # One query per chunk: an uncompleted message for THIS process
+        # belongs to the background machinery (starter/watchdog), not to
+        # this sweep. Scoped by process_name — same as
+        # _ensure_no_background_in_flight and the partial unique
+        # constraint — so a sibling process's in-flight row cannot delay
+        # recovery. Re-checked under the lock before acting.
+        in_flight = set(
+            TransitionMessage.objects.filter(
+                app_label=binding.model._meta.app_label,
+                model_name=binding.model._meta.model_name,
+                instance_id__in=[str(pk) for pk in chunk],
+                process_name=process_name,
+                is_completed=False,
+            ).values_list('instance_id', flat=True)
+        )
+        for pk in chunk:
+            if str(pk) in in_flight:
+                continue
+            if _recover_stranded_instance(binding, transition, pk):
+                recovered += 1
+    return recovered
+
+
+def _recover_stranded_instance(binding, transition, pk) -> bool:
+    """Recover one candidate **under the state lock**, mirroring the
+    phase-2 state guard:
+
+    1. ``state.lock()`` — atomic take-ownership, using the bound
+       process's declared ``state_class`` (a ``RedisState`` stores the
+       *state value* under the lock key, so concurrent readers keep
+       seeing a truthful state for the whole recovery window). A live
+       execution holds the lock for its whole run, so a failed
+       ``lock()`` means "not stranded (or another sweep got here
+       first)": skip.
+    2. Re-check for an uncompleted ``TransitionMessage`` for this
+       process under the lock. Phase 1 must hold this same lock to
+       create one, so no new same-process message can appear after
+       this check.
+    3. Re-read the **persisted** state under the lock, AFTER the message
+       check. Order matters: phase-2 completion holds no state lock —
+       it commits its state write and ``is_completed`` atomically — so a
+       message that completed *between* the two checks has already made
+       its state write visible to this later read. A re-drive or a
+       manual fix that won the race has moved the state — their write
+       wins; release and skip.
+    4. Only then drive ``fail_transition``. Lock ownership transfers to
+       it — ``Transition.fail_transition``'s ``finally`` releases the
+       lock — so the sweep never double-unlocks and can never delete a
+       lock a later caller has just acquired. (This contract is why
+       ``Action``\\ s — whose ``fail_transition`` holds no lock and
+       releases none — are excluded at candidate collection.)
+
+    Returns True when the instance was recovered.
+    """
+    from django_logic.background.models import TransitionMessage
+    from django_logic.logger import logger
+
+    instance = binding.model._base_manager.filter(pk=pk).first()
+    if instance is None:
+        return False
+    state = binding.process_class.state_class(
+        instance=instance,
+        field_name=binding.state_field,
+        process_name=binding.process_class.process_name,
+    )
+    label = (f'{binding.model._meta.label}#{pk} '
+             f'{binding.state_field}={transition.in_progress_state!r} '
+             f'({transition.action_name})')
+
+    if not state.lock():
+        return False  # live execution (or a concurrent sweep) owns it
+    we_hold_lock = True
+    try:
+        # Message check FIRST (see the docstring for why the order is
+        # load-bearing): creation is gated on the lock we hold, and a
+        # completion landing before this check has already committed its
+        # state write, which the persisted read below then observes.
+        if TransitionMessage.objects.filter(
+            app_label=instance._meta.app_label,
+            model_name=instance._meta.model_name,
+            instance_id=str(instance.pk),
+            process_name=binding.process_class.process_name,
+            is_completed=False,
+        ).exists():
+            return False  # same-process background work — starter's job
+        # get_persisted_state, not get_db_state: the authoritative DB read
+        # (RedisState overrides get_db_state with a cached read — under
+        # the sweep's own lock that cache entry is the lock payload).
+        if state.get_persisted_state() != transition.in_progress_state:
+            return False  # moved under us — the other writer wins
+
+        if not transition.failed_state:
+            # Unreachable from recover_stranded_states (the transition
+            # loop skips no-failed_state transitions before any lock is
+            # taken, warning once per process — see
+            # _warn_once_about_missing_failed_state); kept as a silent
+            # guard for direct callers.
+            return False
+
+        # Ownership transfer: fail_transition ALWAYS releases the lock in
+        # its own finally (even when a hook raises), so from here on the
+        # sweep must not unlock again.
+        we_hold_lock = False
+        transition.fail_transition(
+            state,
+            RuntimeError(
+                f'{STRANDED_MARKER} recovered by recover_stranded_states: '
+                f'the process died mid-transition and left this instance '
+                f'in {transition.in_progress_state!r}.'
+            ),
+            tr_id='stranded-recovery',
+            # Every other fail_transition caller guarantees `context` to
+            # hooks (_init_transition_context / the phase-2 restore);
+            # hooks declared `def fn(instance, context, **kwargs)` would
+            # otherwise TypeError — swallowed by the hook runners, i.e.
+            # silently skipped.
+            context={},
+        )
+        logger.error(
+            f'recover_stranded_states: recovered {label} -> '
+            f'{transition.failed_state!r}'
+        )
+        return True
+    except Exception as e:
+        logger.error(f'recover_stranded_states: failed to recover {label}: {e}')
+        return False
+    finally:
+        if we_hold_lock:
+            state.unlock()

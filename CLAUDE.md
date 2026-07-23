@@ -77,7 +77,7 @@ change on success) for anything slow, external, or retriable.
 - Crash re-delivery is built in (every django-logic task sets
   `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
   pair only for your *own* tasks. You still need a **single beat**
-  scheduling the four `django_logic.*` safety-net tasks —
+  scheduling the five `django_logic.*` safety-net tasks —
   `app.conf.beat_schedule = beat_schedule()` (from
   `django_logic.background`) routes them to `STARTER_QUEUE` — and a worker
   for every queue you use.

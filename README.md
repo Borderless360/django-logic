@@ -32,29 +32,27 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 
 ## Requirements
 - Python 3.11+
-- Django 4.0+
+- Django 4.2+ (4.2, 5.1, 5.2 and 6.0 are tested in CI; 5.0 is not supported)
 - django-model-utils >= 4.5.1
 - celery >= 5.0 — **installed automatically**; background transitions are Celery tasks
 - django-redis >= 5.0.0 — **installed automatically**; provides the cross-process state lock (the lock cache / `RedisState`)
 
 Extras:
-- `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; 0.4.x ships no DRF-specific code)
-- `[celery]` and `[redis]` remain as **empty aliases**, so existing `pip install django-logic[celery,redis]` pins keep resolving — both packages are core dependencies as of 0.4
+- `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; no DRF-specific code ships since 0.4)
+- `[celery]` and `[redis]` remain as **empty aliases**, so existing `pip install django-logic[celery,redis]` pins keep resolving — both packages are core dependencies since 0.4
 
 ## Installation
 
-> **Heads up — versions.** The PyPI release is still the legacy `0.1.x` line.
-> The 0.4.x API documented in this README ships from GitHub (`master`);
-> install it from a tag until 0.4.x is published to PyPI.
-
 ```bash
-# 0.4.x — the version this README documents (from GitHub).
+# Installs the current release from PyPI (0.8.0 at the time of writing).
 # Celery and django-redis are installed automatically.
-pip install "django-logic @ git+https://github.com/Borderless360/django-logic.git@v0.4.0"
-
-# 0.1.x — legacy release on PyPI (different API)
 pip install django-logic
 ```
+
+This README documents the current release line (the API introduced in 0.4).
+If you are upgrading from a pre-0.2 release — the old DRF/Celery-coupled API —
+note that the API changed substantially in 0.2–0.4; [CHANGELOG.md](CHANGELOG.md)
+documents every breaking change and the migration steps.
 
 ## Quick Start
 
@@ -670,7 +668,7 @@ Add `'django_logic.background'` to `INSTALLED_APPS` and configure:
 
 ```python
 DJANGO_LOGIC = {
-    'LOCK_TIMEOUT': 7200,
+    'LOCK_TIMEOUT': 7200,   # per-transition override: Transition(..., lock_timeout=...)
     'BACKGROUND_EXECUTION': 'celery',   # the default; set 'sync' in test settings
     'DEFAULT_QUEUE': 'django_logic',    # queue for transitions without queue=
     'STARTER_QUEUE': 'django_logic.starter',
@@ -681,11 +679,13 @@ DJANGO_LOGIC = {
     'SENTRY_TRANSACTION_NAMING': True,  # per-transition Sentry naming (no-op without sentry-sdk)
     'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
     'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
+    'DEFER_UNLOCK_UNTIL_COMMIT': False,  # True: sync unlocks ride transaction.on_commit (see "Concurrency and locking")
+    'PROCESS_CLASS_ALIASES': {},        # old dotted path -> new, for renamed processes with in-flight rows
     # 'TRANSITION_COVERAGE_LOG': '...',  # opt-in: record driven transitions to a file (see "Transition-execution coverage")
 }
 ```
 
-Every key has the default shown above, so an empty `DJANGO_LOGIC = {}` is a valid production start. Run `manage.py migrate` to create the `TransitionMessage` table.
+Every key has the default shown above, so an empty `DJANGO_LOGIC = {}` is a valid production start. Numeric and safety-critical settings are validated at boot — a bad value raises `ImproperlyConfigured` naming the setting instead of failing inside a worker at 3 a.m. Run `manage.py migrate` to create the `TransitionMessage` table.
 
 At boot, celery mode fails fast on two misconfigurations that would silently break the guarantees: a SQLite database for `TransitionMessage` (no `select_for_update(nowait)`), and — when `DEBUG=False` — a per-process `default` cache (locmem/dummy), because the state lock must be shared between web processes and workers:
 
@@ -882,12 +882,13 @@ The periodic starter re-dispatches stale transitions back to their own queue —
 
 ### Safety-net tasks
 
-Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
+Five periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
 
 - `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
 - `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
 - `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
+- `recover_stranded_states` — recovers instances a hard-killed **synchronous** transition left parked in an `in_progress_state` (no lock held, no uncompleted `TransitionMessage`): drives them through the owning transition's failure path (`failed_state` + failure hooks) with a synthetic `[stranded]` error. Transitions without a `failed_state` are logged loudly and left re-drivable (#136). The state lock is the liveness signal, so size `LOCK_TIMEOUT` above your longest synchronous side-effect — or give legitimately long transitions (report generation, large exports) their own `Transition(..., lock_timeout=...)`. Long-running **background** transitions need neither: their uncompleted `TransitionMessage` row shields them from this sweep regardless of lock expiry.
 
 ### Per-attempt timeouts
 
@@ -922,6 +923,16 @@ The constraint is scoped **per process**: two independent state machines bound t
 
 Because the in-flight marker is a database row rather than a held lock, nothing leaks if the caller's surrounding transaction rolls back — the row, the `in_progress_state` write, and the dispatch all disappear together.
 
+**Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired (it just logs and leaves it intact). A `State` object that never locked keeps the historical unconditional delete as a manual force-release path. For `RedisState` the token rides inside the single value+lock key — its storage format changed in 0.9, so deploy web and workers together; keys written by 0.8 stay readable.
+
+**Synchronous transitions inside an outer `transaction.atomic()`.** By default the lock is released as soon as the transition completes — before the outer block commits. That window is real: another connection can acquire the lock, read the *old committed* state, and run the same transition again (both side-effect runs happen; the final state depends on commit ordering). If your code drives transitions inside atomic blocks and needs exclusion to cover the whole uncommitted span, opt in:
+
+```python
+DJANGO_LOGIC = {..., 'DEFER_UNLOCK_UNTIL_COMMIT': True}
+```
+
+The unlock then rides `transaction.on_commit`. Trade-offs to design for: on **rollback** the hook never fires, so the lock expires via its TTL — a bounded lockout, the same failure mode as a crashed process (give rollback-prone flows a per-transition `lock_timeout`); and same-instance follow-ups (`callbacks` / `next_transition`) inside the atomic block find the state still locked and are skipped — chain them from `transaction.on_commit` in the caller instead. Alternatively, keep the default and invoke transitions via `transaction.on_commit` so they start only once the surrounding write is visible.
+
 Practical consequence: you **cannot** chain a background transition from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 
 > ⚠️ **Swallow-dedup loses mid-execution updates.** Catching `AlreadyInProgress` as "already queued — the running job will pick up my changes" is only safe while the existing attempt has **not started**. If phase 2 is already executing, it has already read its inputs: your update lands after the read, the in-flight run commits a result computed from pre-update data, and nothing ever re-runs. For recompute-style transitions, persist a dirty flag (or version) *before* dispatching, clear it inside the side-effect, and re-dispatch from a success callback if it is set again:
@@ -954,9 +965,9 @@ Celery mode has three things you **must** wire up, or the durability guarantees 
 
 **1. A real broker.** `BACKGROUND_EXECUTION='celery'` requires a durable broker (Redis/RabbitMQ). With no broker configured, Celery falls back to an in-memory transport that no worker drains — `apply_async` succeeds but the task never runs (django-logic logs a one-time warning on first dispatch).
 
-**2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, and the timeout watchdog never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
+**2. The five periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, the timeout watchdog, and stranded-sync recovery never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
 
-Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, cleanup daily), each overridable by keyword:
+Use the ready-made schedule — it routes all five tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, stranded 300s, cleanup daily), each overridable by keyword:
 
 ```python
 # celery.py — after the app is configured
@@ -965,7 +976,7 @@ from django_logic.background import beat_schedule
 app.conf.beat_schedule = {**app.conf.beat_schedule, **beat_schedule()}
 ```
 
-(A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)
+(A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.recover_stranded_states`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)
 
 Run a worker that consumes both your transition queues **and** the starter queue, plus beat:
 
@@ -1177,8 +1188,13 @@ report = cov.report()
 report['uncovered']  # [{'process': ..., 'action': ..., 'background': ..., 'models': [...]}]
 ```
 
+Coverage is keyed **per declaration**, not per action name: legal same-name
+transitions (condition-disambiguated variants, or a synchronous + background
+namesake pair in one class) count and cover separately — the entry carries the
+declaration's `sources`/`target`/`background` so you can tell them apart.
+
 For parallel test runs (fork or spawn), record to a file instead — every
-worker appends unique `(process, action)` pairs:
+worker appends unique declaration keys:
 
 ```python
 # settings used for the coverage run
@@ -1193,9 +1209,13 @@ report = coverage_report(log_path='/tmp/fsm_coverage.log')
 A pair is recorded at *initiation* (direct calls, `next_transition`
 follow-ups, background phase 1); phase-2 restore and retries don't re-notify.
 Diffing `report['uncovered']` in CI catches transitions that silently stop
-being exercised. The observer list is public — consumers can register their
-own hooks (metrics, tracing); a raising observer is logged and never breaks a
-transition.
+being exercised. Logs written by 0.8 recorders (2-field `class\taction`
+lines) are still accepted with their original semantics — a legacy line
+covers every same-name namesake. The observer list is public — consumers can
+register their own hooks (metrics, tracing), called as
+`observer(owning_process_cls, action_name, instance, transition)` (the
+resolved declaration object was added as a fourth argument in 0.9); a raising
+observer is logged and never breaks a transition.
 
 The log is **append-only and never truncated** — point each run at a fresh
 path (or delete the old file first), or stale pairs from earlier runs count

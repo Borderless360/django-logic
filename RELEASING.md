@@ -30,41 +30,40 @@ Everything runs through [`uv`](https://github.com/astral-sh/uv) (build) and
 3. **Update `CHANGELOG.md`**: move `[Unreleased]` into a dated `[X.Y.Z]`
    section; leave a fresh empty `[Unreleased]`.
 4. **Run the tests**: `python tests/manage.py test` (or `make test`).
-5. **Check the consumer contract job is green**: the `Consumer contract (gv)`
-   workflow (nightly + `workflow_dispatch`) runs gv's FSM test subset against
-   django-logic@master. Trigger it manually for the release candidate and do
-   not publish while it is red. (`gh run watch` with no argument prompts
-   interactively and may pick the wrong run — resolve the id of the run you
-   just dispatched first.)
-   ```bash
-   gh workflow run consumer-gv.yml
-   sleep 5   # give the dispatch a moment to register
-   gh run watch "$(gh run list --workflow=consumer-gv.yml --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
-   ```
-   NB: while the `GV_REPO_TOKEN` secret is not configured the job **skips
-   with a warning and comes up green without testing anything** — a green
-   run only means something once the secret exists (issue #119).
-6. **Build + validate the artifacts**:
+5. **Run the metadata drift check**: `python tests/manage.py test tests.test_metadata`
+   — verifies that the Django trove classifiers, the CI test matrix, the
+   `[project]` dependency floors, and the README support statement all agree
+   (issues #144/#147). Do not publish while it is red: it means the package
+   would advertise or resolve a Django/Python combination we don't test.
+6. **Run the downstream consumer checks**: consumer-side validation lives
+   with the consumers, not in this repo — a library should not know who
+   consumes it. Before publishing, run each known downstream's suite against
+   the release candidate from *its own* checkout/CI (install this repo at
+   the candidate ref, e.g. `uv pip install --no-deps /path/to/django-logic`)
+   and do not publish while any of them is red. The public validation rig
+   (`django-logic-test`) exercises the release candidate on real
+   broker/worker infrastructure and is the minimum bar.
+7. **Build + validate the artifacts**:
    ```bash
    make dist          # rm -rf dist/ build/ *.egg-info && uv build && twine check dist/*
    ```
-7. **Publish to PyPI**:
+8. **Publish to PyPI**:
    ```bash
    make publish       # uploads dist/* using .pypirc
    ```
-8. **Tag and push**:
+9. **Tag and push**:
    ```bash
    git tag -a vX.Y.Z -m "django-logic X.Y.Z"
    git push origin master vX.Y.Z
    ```
-9. **Create the GitHub release** with the changelog section as notes and the
-   built artifacts attached:
-   ```bash
-   gh release create vX.Y.Z --title "django-logic X.Y.Z" \
-     --notes-file <notes.md> --latest \
-     dist/django_logic-X.Y.Z-py3-none-any.whl dist/django_logic-X.Y.Z.tar.gz
-   ```
-10. **Verify**: `pip install django-logic==X.Y.Z` in a clean venv imports cleanly.
+10. **Create the GitHub release** with the changelog section as notes and the
+    built artifacts attached:
+    ```bash
+    gh release create vX.Y.Z --title "django-logic X.Y.Z" \
+      --notes-file <notes.md> --latest \
+      dist/django_logic-X.Y.Z-py3-none-any.whl dist/django_logic-X.Y.Z.tar.gz
+    ```
+11. **Verify**: `pip install django-logic==X.Y.Z` in a clean venv imports cleanly.
 
 > PyPI uploads are **irreversible** — a version number can never be re-uploaded.
 > Always `make dist` + install-check before `make publish`.

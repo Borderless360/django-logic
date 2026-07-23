@@ -1,5 +1,10 @@
 # Django Logic — Road to 1,000 Stars
 
+> **HISTORICAL** — this is a snapshot of the v3 execution plan, superseded by
+> the shipped 0.4–0.8 releases; see [CHANGELOG.md](../CHANGELOG.md) for what
+> actually shipped and [INDEX.md](INDEX.md) for current documentation.
+> Kept for context, not normative.
+
 > Document-driven development plan.
 > Status: **v3 — executing. Stage 1 complete.**
 
@@ -47,7 +52,7 @@ scenario-based tests verify it.
 | **Core package** | `django-logic` v0.2.0 (Stage 1 complete, PR #76) |
 | **Legacy celery package** | `django-logic-celery` — removed from this workspace; superseded by Stage 2 |
 | **Production consumer** | GV project — will receive the Stage 2 code vendored and migrate transition-by-transition |
-| **Fundamental problem** | Documented in `fundamental problem.md` at repo root; addressed by the Stage 2 single-task execution model |
+| **Fundamental problem** | Documented in [`docs/recipes/nested-processes.md`](recipes/nested-processes.md) (the original external research note, `fundamental problem.md`, is not part of this repo); addressed by the Stage 2 single-task execution model |
 | **GitHub stars** | 66 |
 
 ### What PR #75 already delivers
@@ -129,7 +134,9 @@ but ensure deprecation warnings are emitted via `warnings.warn()`.
 
 Two forces shaped this stage:
 
-1. **The fundamental problem** (see `fundamental problem.md` at repo root):
+1. **The fundamental problem** (see
+   [`docs/recipes/nested-processes.md`](recipes/nested-processes.md); the
+   original external research note is not part of this repo):
    nested `process.xxx()` calls inside side-effects created cascading
    `fail_transition` chains the moment `django-logic 0.2.0` started
    re-raising. The single-task execution model below sidesteps that class
@@ -313,7 +320,9 @@ side-effect was its own task, with `complete_transition` as the final
 task and `fail_transition` as an error handler. A worker crash between
 side-effect N and side-effect N+1 left the model stuck in
 `in_progress_state` with no recovery. Worse, it interacted badly with
-the nested-transition problem from `fundamental problem.md`.
+the nested-transition problem documented in
+[`docs/recipes/nested-processes.md`](recipes/nested-processes.md) (originally
+analysed in an external research note that is not part of this repo).
 
 In the new model:
 
@@ -978,7 +987,7 @@ See `docs/INDEX.md` for full documentation map.
 
 | Document | Location |
 |----------|----------|
-| Fundamental Problem (nested transitions) | `fundamental problem.md` (repo root) |
+| Fundamental Problem (nested transitions) | [`docs/recipes/nested-processes.md`](recipes/nested-processes.md) (the original external research note is not part of this repo) |
 | Background Transition Analysis | `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md` |
 | Scenario-Based Testing Design | `docs/design/TESTING_SCENARIOS.md` |
 | PR #75 Review (historical) | `docs/research/PR-75-REVIEW.md` |

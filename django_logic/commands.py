@@ -5,12 +5,71 @@ side-effects, callbacks, failure side-effects, failure callbacks — is
 represented by a ``BaseCommand`` subclass that owns a list of callables
 and knows how to run them.
 """
+from django.db import DEFAULT_DB_ALIAS, transaction
+
 from django_logic.logger import (
     redact_log_kwargs,
     transition_logger,
     TransitionEventType,
 )
 from django_logic.state import State
+
+
+def _in_open_transaction(instance) -> tuple[str, bool]:
+    """The instance's DB alias, and whether that connection is inside an
+    open ``atomic`` block (savepoint isolation is only needed — and only
+    safe to add without changing autocommit semantics — in that case)."""
+    using = instance._state.db or DEFAULT_DB_ALIAS
+    return using, transaction.get_connection(using).in_atomic_block
+
+
+def _deferred_unlocks(conn) -> list:
+    if not hasattr(conn, '_dl_deferred_unlocks'):
+        conn._dl_deferred_unlocks = []
+    return conn._dl_deferred_unlocks
+
+
+def note_deferred_unlock(using: str, state: State) -> None:
+    """Record a DEFER_UNLOCK_UNTIL_COMMIT unlock (#141) so hook
+    savepoints can release it if their rollback discards the
+    ``transaction.on_commit`` registration (see ``_run_in_savepoint``).
+    Called by ``Transition._release_lock`` right after registering the
+    on_commit hook."""
+    conn = transaction.get_connection(using)
+    registry = _deferred_unlocks(conn)
+    if not registry:
+        # First deferral this transaction: clear at commit so stale
+        # State objects don't accumulate on a long-lived connection
+        # (entries below a wrapper's window are never popped, so a
+        # missed clear after a rollback is inert, just retained).
+        transaction.on_commit(registry.clear, using=using)
+    registry.append(state)
+
+
+def _run_in_savepoint(using: str, fn):
+    """Run ``fn`` inside a savepoint, without losing deferred unlocks.
+
+    When the savepoint rolls back, Django discards every
+    ``transaction.on_commit`` hook registered inside it — including the
+    DEFER_UNLOCK_UNTIL_COMMIT unlocks (#141) of transitions the hook
+    drove. Their state writes roll back with the savepoint, so those
+    locks protect nothing anymore; dropping the hooks would leak them
+    until TTL *while the outer transaction commits successfully*.
+    On rollback, release exactly the unlocks registered within this
+    savepoint's window (``unlock()`` is a token compare-and-delete, so
+    this can never race a lock that was legitimately re-acquired)."""
+    conn = transaction.get_connection(using)
+    registry = _deferred_unlocks(conn)
+    before = len(registry)
+    try:
+        with transaction.atomic(using=using):
+            return fn()
+    except BaseException:
+        dropped = registry[before:]
+        del registry[before:]
+        for state in dropped:
+            state.unlock()
+        raise
 
 
 class BaseCommand:
@@ -30,7 +89,7 @@ class BaseCommand:
 
 class Conditions(BaseCommand):
     def execute(self, instance, **kwargs):
-        return all(command(instance, **kwargs) for command in self._commands)
+        return all(command(instance, **kwargs) for command in self.commands)
 
 
 class Permissions(BaseCommand):
@@ -39,7 +98,7 @@ class Permissions(BaseCommand):
         # Callers that need authenticated-only transitions must enforce that
         # at the caller site.
         return user is None or all(
-            command(instance, user, **kwargs) for command in self._commands
+            command(instance, user, **kwargs) for command in self.commands
         )
 
 
@@ -53,9 +112,9 @@ class SideEffects(BaseCommand):
     def execute(self, state: State, **kwargs):
         try:
             transition_logger.info(
-                f'{kwargs.get("tr_id")} SideEffects {len(self._commands)}'
+                f'{kwargs.get("tr_id")} SideEffects {len(self.commands)}'
             )
-            for command in self._commands:
+            for command in self.commands:
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                     f'{getattr(command, "__name__", repr(command))}'
@@ -70,28 +129,53 @@ class SideEffects(BaseCommand):
 
 
 class Callbacks(BaseCommand):
-    """Best-effort follow-ups. Exceptions are logged and swallowed."""
+    """Best-effort follow-ups. Exceptions are logged and swallowed.
+
+    Each callback is isolated (#138): one failing callback does not
+    prevent the later ones from being attempted, and when the caller is
+    inside an open transaction each callback runs in its own savepoint —
+    a database error would otherwise mark the whole outer transaction
+    rollback-only, so the swallow left every later ORM call broken
+    (``TransactionManagementError``) and could roll back the transition's
+    own state write. Outside a transaction there is nothing to poison and
+    no savepoint is taken (a failing callback's earlier autocommit writes
+    persist, as before).
+    """
 
     def execute(self, state: State, **kwargs):
         transition_logger.info(
-            f'{kwargs.get("tr_id")} Callbacks {len(self._commands)}'
+            f'{kwargs.get("tr_id")} Callbacks {len(self.commands)}'
         )
-        command_name = None
-        try:
-            for command in self.commands:
-                command_name = getattr(command, '__name__', repr(command))
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
-                    f'{command_name}'
-                )
-                command(state.instance, **kwargs)
-        except Exception as error:
-            transition_logger.error(
+        using, in_transaction = _in_open_transaction(state.instance)
+        for command in self.commands:
+            command_name = getattr(command, '__name__', repr(command))
+            transition_logger.info(
                 f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
-                f'{command_name}: {error}',
-                exc_info=True,
-                extra={'kwargs': redact_log_kwargs(kwargs)},
+                f'{command_name}'
             )
+            try:
+                if in_transaction:
+                    _run_in_savepoint(
+                        using, lambda: command(state.instance, **kwargs))
+                else:
+                    command(state.instance, **kwargs)
+            except Exception as error:
+                transition_logger.error(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
+                    f'{command_name}: {error}',
+                    exc_info=True,
+                    extra={'kwargs': redact_log_kwargs(kwargs)},
+                )
+
+
+class _FailureSideEffectsRollback(Exception):
+    """Internal: forces the failure_side_effects savepoint to roll back
+    while carrying the swallowed error out (the execute contract is to
+    *return* it, so the savepoint context manager would otherwise commit
+    the partial writes of a broken cleanup path)."""
+
+    def __init__(self, error: BaseException):
+        self.error = error
 
 
 class FailureSideEffects(BaseCommand):
@@ -101,12 +185,34 @@ class FailureSideEffects(BaseCommand):
     failure that triggered ``fail_transition``, but the raised exception
     is returned to the caller so background transitions can record it on
     the ``TransitionMessage`` (otherwise broken cleanup is invisible).
+
+    When the caller is inside an open transaction, the bundle runs in a
+    savepoint that rolls back on error (#138): the same contract phase 2
+    applies — a broken cleanup path neither poisons the outer transaction
+    nor commits its partial writes. Outside a transaction the historical
+    autocommit behavior is unchanged.
     """
 
     def execute(self, state: State, **kwargs):
+        using, in_transaction = _in_open_transaction(state.instance)
+        if not in_transaction:
+            return self._run(state, **kwargs)
+
+        def _bundle():
+            error = self._run(state, **kwargs)
+            if error is not None:
+                raise _FailureSideEffectsRollback(error)
+
+        try:
+            _run_in_savepoint(using, _bundle)
+        except _FailureSideEffectsRollback as rollback:
+            return rollback.error
+        return None
+
+    def _run(self, state: State, **kwargs):
         try:
             transition_logger.info(
-                f'{kwargs.get("tr_id")} FailureSideEffects {len(self._commands)}'
+                f'{kwargs.get("tr_id")} FailureSideEffects {len(self.commands)}'
             )
             for command in self.commands:
                 transition_logger.info(
@@ -167,12 +273,20 @@ class NextTransition:
             # below, silently killing the chain (#129).
             kwargs = {k: v for k, v in kwargs.items() if k != 'request'}
 
+        using, in_transaction = _in_open_transaction(state.instance)
         try:
             # Invoke through the Process entrypoint so the follow-up mints
             # its own tr_id and manages _transition_context (root_id chains,
             # parent_id = this transition), instead of inheriting the
             # parent's tr_id via a direct change_state call. Failures of the
-            # follow-up must not bubble into the current transition.
+            # follow-up must not bubble into the current transition — and,
+            # like Callbacks, a swallowed database error inside an open
+            # transaction must not poison it (#138), so the follow-up runs
+            # in a savepoint there.
+            if in_transaction:
+                return _run_in_savepoint(
+                    using,
+                    lambda: getattr(process, self._next_transition)(**kwargs))
             return getattr(process, self._next_transition)(**kwargs)
         except Exception as error:
             transition_logger.error(error)

@@ -280,3 +280,23 @@ def _watchdog_stale_attempts_inline() -> int:
                 f'TransitionMessage#{pk}: {e}'
             )
     return touched
+
+
+@shared_task(
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name='django_logic.recover_stranded_states',
+    bind=False,
+)
+def recover_stranded_states() -> int:
+    """Periodic: recover instances stranded in an ``in_progress_state`` by a
+    hard-killed synchronous transition (#136) — no lock held, no uncompleted
+    ``TransitionMessage`` — by driving them through the owning transition's
+    failure path. See ``django_logic.background.dispatch.recover_stranded_states``.
+
+    Returns the number of instances recovered.
+    """
+    from django_logic.background.dispatch import (
+        recover_stranded_states as _recover,
+    )
+    return _recover()

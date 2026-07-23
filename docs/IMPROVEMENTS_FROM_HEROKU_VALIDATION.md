@@ -62,7 +62,9 @@ app→pgbouncer hop. **Proposal:** add a "Running behind pgbouncer" docs section
 optionally detect a pooled DSN and warn if prepared statements are enabled.
 
 ### 4. Ship a parent/child coordination recipe (and maybe helpers) — HIGH **[issue]**
-The original pain (`fundamental problem.md`) is nested `process.xxx()` in
+The original pain (documented in
+[`docs/recipes/nested-processes.md`](recipes/nested-processes.md); the original
+external research note is not part of this repo) is nested `process.xxx()` in
 side-effects. The validated clean pattern — parent fans out, child failure
 contained in its own `failed_state`, children report via best-effort callbacks
 running an idempotent guarded completion check, errors aggregated by reading

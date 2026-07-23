@@ -75,22 +75,6 @@ _SCALAR_DECODERS = {
 }
 
 
-def make_json_safe(value):
-    """Recursively coerce a value into something JSON-serializable.
-
-    Legacy helper (lossy: UUID/datetime become strings, tuples become
-    lists). Kept for backward compatibility; :func:`serialize_kwargs` now
-    uses the type-preserving :func:`encode_value` instead.
-    """
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {k: make_json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [make_json_safe(item) for item in value]
-    return value
 
 
 def encode_value(value):

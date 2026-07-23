@@ -5,6 +5,8 @@ one place and default values are documented once.
 """
 from __future__ import annotations
 
+import math
+
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
@@ -78,8 +80,9 @@ def beat_schedule(
     detect_stuck_seconds: float = 300.0,
     watchdog_seconds: float = 120.0,
     cleanup_seconds: float = 86_400.0,
+    stranded_seconds: float = 300.0,
 ) -> dict:
-    """Ready-made Celery beat entries for the four safety-net tasks,
+    """Ready-made Celery beat entries for the five safety-net tasks,
     routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
     Use it from your project's ``celery.py`` (after the app is configured)
@@ -103,21 +106,133 @@ def beat_schedule(
             'django_logic.detect_stuck_transitions', detect_stuck_seconds),
         'django-logic-watchdog': entry(
             'django_logic.watchdog_stale_attempts', watchdog_seconds),
+        'django-logic-recover-stranded': entry(
+            'django_logic.recover_stranded_states', stranded_seconds),
         'django-logic-cleanup': entry(
             'django_logic.cleanup_completed_transitions', cleanup_seconds),
     }
 
 
+def _validated_number(
+    key: str,
+    default,
+    *,
+    minimum,
+    allow_zero: bool = True,
+    integral: bool = False,
+):
+    """Read ``DJANGO_LOGIC[key]`` and validate it is a sane number.
+
+    Raises ``ImproperlyConfigured`` naming the setting and the offending
+    value. ``bool`` is rejected explicitly (it subclasses ``int``, so
+    ``True`` would otherwise pass as ``1``); non-finite floats (``nan``,
+    ``inf``) are rejected; ``integral=True`` additionally rejects
+    non-integral floats and returns an ``int``.
+
+    ``allow_zero=False`` makes the bound strict: the value must be
+    ``> minimum`` rather than ``>= minimum``.
+    """
+    value = _conf().get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC[{key!r}] must be a number, got {value!r}."
+        )
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC[{key!r}] must be a finite number, got {value!r}."
+        )
+    if integral and isinstance(value, float) and not value.is_integer():
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC[{key!r}] must be a whole number, got {value!r}."
+        )
+    if allow_zero:
+        if value < minimum:
+            raise ImproperlyConfigured(
+                f"DJANGO_LOGIC[{key!r}] must be >= {minimum}, got {value!r}."
+            )
+    elif value <= minimum:
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC[{key!r}] must be > {minimum}, got {value!r}."
+        )
+    if integral:
+        return int(value)
+    return value
+
+
 def max_errors() -> int:
-    return int(_conf().get('TRANSITION_MESSAGE_MAX_ERRORS', 5))
+    """Attempts before a background transition is finalized as failed.
+    Must be a whole number >= 1 (0 would finalize before the first
+    attempt ever ran)."""
+    return _validated_number(
+        'TRANSITION_MESSAGE_MAX_ERRORS', 5, minimum=1, integral=True)
 
 
-def retry_minutes() -> int:
-    return int(_conf().get('TRANSITION_MESSAGE_RETRY_MINUTES', 2))
+def retry_minutes():
+    """Age (minutes) before the periodic starter re-dispatches an
+    uncompleted row. Must be >= 0; zero means "retry immediately" and is
+    used by tests to drive the starter without back-dating rows."""
+    return _validated_number(
+        'TRANSITION_MESSAGE_RETRY_MINUTES', 2, minimum=0)
 
 
-def cleanup_days() -> int:
-    return int(_conf().get('TRANSITION_MESSAGE_CLEANUP_DAYS', 7))
+def cleanup_days():
+    """Age (days) before completed rows are deleted by the periodic
+    cleanup. Must be >= 0. Zero deletes every completed row on the next
+    cleanup tick — that erases the audit trail, so it is test-only."""
+    return _validated_number(
+        'TRANSITION_MESSAGE_CLEANUP_DAYS', 7, minimum=0)
+
+
+def process_class_aliases() -> dict:
+    """``DJANGO_LOGIC['PROCESS_CLASS_ALIASES']`` — escape hatch for
+    renaming/moving a Process class while rows recorded under its old
+    dotted path are still in flight (#140).
+
+    A dict mapping old dotted path -> new dotted path, applied by the
+    phase-2 restore before importing a recorded ``process_class``.
+    Default ``{}``.
+    """
+    aliases = _conf().get('PROCESS_CLASS_ALIASES', {})
+    if aliases is None:
+        return {}
+    if not isinstance(aliases, dict) or not all(
+        isinstance(k, str) and isinstance(v, str)
+        for k, v in aliases.items()
+    ):
+        raise ImproperlyConfigured(
+            "DJANGO_LOGIC['PROCESS_CLASS_ALIASES'] must be a dict mapping "
+            "old dotted process-class paths (str) to new dotted paths (str)."
+        )
+    return aliases
+
+
+
+
+def _validate_log_kwargs_redactor() -> None:
+    """``LOG_KWARGS_REDACTOR`` (if set) must be a callable or an
+    importable dotted path. ``redact_log_kwargs`` degrades a broken
+    redactor to a ``__redaction_error__`` marker at runtime (it must
+    never break a transition), which means a typo'd dotted path silently
+    ruins every log line — so import it once here and fail at boot."""
+    redactor = _conf().get('LOG_KWARGS_REDACTOR')
+    if redactor is None:
+        return
+    if isinstance(redactor, str):
+        from django.utils.module_loading import import_string
+        try:
+            import_string(redactor)
+        except ImportError as exc:
+            raise ImproperlyConfigured(
+                f"DJANGO_LOGIC['LOG_KWARGS_REDACTOR'] ({redactor!r}) is not "
+                f"an importable dotted path: {exc}. A broken redactor "
+                f"degrades every transition log line to a redaction marker."
+            ) from exc
+        return
+    if not callable(redactor):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['LOG_KWARGS_REDACTOR'] must be a callable or a "
+            f"dotted path to one, got {redactor!r}."
+        )
 
 
 def phase2_state_guard() -> str:
@@ -154,6 +269,19 @@ def validate_on_ready() -> None:
     default_queue()
     starter_queue()
     phase2_state_guard()
+    # Safety settings (#149): every numeric knob the retry/cleanup/lock
+    # machinery depends on is validated at boot in EVERY mode — a bad
+    # value must not wait for its first use (which may be a 3am retry
+    # tick) to explode, or worse, silently misbehave.
+    max_errors()
+    retry_minutes()
+    cleanup_days()
+    process_class_aliases()
+    _validate_log_kwargs_redactor()
+    # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) — shared with
+    # DjangoLogicConfig.ready so sync-only installs validate them too.
+    from django_logic.conf import validate_core_settings
+    validate_core_settings()
     if mode == EXECUTION_CELERY:
         _reject_sqlite_in_celery_mode()
         _check_lock_cache_in_celery_mode()

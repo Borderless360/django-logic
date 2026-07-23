@@ -62,11 +62,13 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
         'fields': fields,
     }
 
-    # The most recent TransitionMessage for this instance (if the background
-    # app is installed and a row exists).
+    # The most recent TransitionMessage for this instance's process (if the
+    # background app is installed and a row exists). Scoped by process_name so
+    # a second process bound to another state field of the same model can't
+    # leak its row into this snapshot (issue #150).
     try:
         from django_logic.testing.runner import latest_message
-        tm = latest_message(instance)
+        tm = latest_message(instance, process_name=process_name)
         if tm is not None:
             data['transition_message'] = {
                 'transition_name': tm.transition_name,

@@ -369,14 +369,27 @@ class TestCacheBackendFailure(StabilityTestCase):
                 state.is_locked()
 
     def test_unlock_failure_is_visible(self):
-        """If unlock (cache.delete) fails, the error should propagate."""
+        """If unlock fails at the cache, the error should propagate.
+
+        Since #139 unlock() is a compare-and-delete: it reads the stored
+        ownership token before deleting. A downed cache backend surfaces
+        at either round-trip — both must stay visible.
+        """
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
 
         self.assertTrue(state.lock())
         self.track_lock(state)
 
+        # Failure at the ownership read.
         with patch('django_logic.state.cache') as mock_cache:
+            mock_cache.get.side_effect = ConnectionError("Redis down")
+            with self.assertRaises(ConnectionError):
+                state.unlock()
+
+        # Failure at the delete (ownership read succeeds).
+        with patch('django_logic.state.cache') as mock_cache:
+            mock_cache.get.return_value = state._lock_token
             mock_cache.delete.side_effect = ConnectionError("Redis down")
             with self.assertRaises(ConnectionError):
                 state.unlock()

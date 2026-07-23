@@ -189,12 +189,12 @@ class BeatScheduleTests(ProcessScenario):
     process_class = WidgetProcess
     model = Widget
 
-    def test_routes_all_four_tasks_to_the_starter_queue(self):
+    def test_routes_all_five_tasks_to_the_starter_queue(self):
         from django_logic.background import beat_schedule
 
         with override_settings(DJANGO_LOGIC={'STARTER_QUEUE': 'my.starter'}):
             schedule = beat_schedule(retry_seconds=30.0)
-        self.assertEqual(len(schedule), 4)
+        self.assertEqual(len(schedule), 5)
         self.assertEqual(
             {entry['options']['queue'] for entry in schedule.values()},
             {'my.starter'},
@@ -212,6 +212,7 @@ class BeatScheduleTests(ProcessScenario):
             tasks.cleanup_completed_transitions.name,
             tasks.detect_stuck_transitions.name,
             tasks.watchdog_stale_attempts.name,
+            tasks.recover_stranded_states.name,
         }
         for entry in schedule.values():
             self.assertIn(entry['task'], registered)

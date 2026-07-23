@@ -46,57 +46,49 @@ def run_background_sync(instance, process_name, action_name, kwargs):
         return getattr(process, action_name)(**kwargs)
 
 
-def uncompleted_message(instance):
+def _messages(instance, process_name=None, **filters):
+    """Base queryset for the instance's ``TransitionMessage`` rows, newest
+    first. ``process_name`` (when given) scopes to one bound process — two
+    processes on different state fields of the same model are independent
+    state machines, and their rows must not be confused (issue #150).
+    ``None`` keeps the historical unscoped behaviour."""
+    from django_logic.background.models import TransitionMessage
+    qs = TransitionMessage.objects.filter(
+        app_label=instance._meta.app_label,
+        model_name=instance._meta.model_name,
+        instance_id=str(instance.pk),
+        **filters,
+    )
+    if process_name is not None:
+        qs = qs.filter(process_name=process_name)
+    return qs.order_by('-id')
+
+
+def uncompleted_message(instance, process_name=None):
     """The instance's uncompleted ``TransitionMessage`` (what the periodic
-    starter would re-dispatch), or ``None``."""
-    from django_logic.background.models import TransitionMessage
-    return (
-        TransitionMessage.objects
-        .filter(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-            is_completed=False,
-        )
-        .order_by('-id')
-        .first()
-    )
+    starter would re-dispatch), or ``None``. ``process_name`` scopes the
+    lookup to one bound process; ``None`` = any process (legacy)."""
+    return _messages(instance, process_name, is_completed=False).first()
 
 
-def latest_message(instance):
-    """The instance's most recent ``TransitionMessage`` (completed or not)."""
-    from django_logic.background.models import TransitionMessage
-    return (
-        TransitionMessage.objects
-        .filter(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-        )
-        .order_by('-id')
-        .first()
-    )
+def latest_message(instance, process_name=None):
+    """The instance's most recent ``TransitionMessage`` (completed or not).
+    ``process_name`` scopes the lookup to one bound process; ``None`` = any
+    process (legacy)."""
+    return _messages(instance, process_name).first()
 
 
-def message_for(instance, transition_name):
+def message_for(instance, transition_name, process_name=None):
     """The instance's most recent ``TransitionMessage`` for a given action.
 
     Used by ``assert_transition_owner`` to pin the recorded
     ``owning_process_class`` of a specific transition in a chained/next-
     transition workflow, where several TMs exist for one instance.
+    ``process_name`` scopes the lookup to one bound process; ``None`` = any
+    process (legacy).
     """
-    from django_logic.background.models import TransitionMessage
-    return (
-        TransitionMessage.objects
-        .filter(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-            transition_name=transition_name,
-        )
-        .order_by('-id')
-        .first()
-    )
+    return _messages(instance, process_name,
+                     transition_name=transition_name).first()
 
 
 def rerun_message(message_id):

@@ -15,6 +15,14 @@ class DjangoLogicConfig(AppConfig):
         from django.conf import settings
 
         from django_logic import checks  # noqa: F401 — registers system checks
+        from django_logic.conf import validate_core_settings
+
+        # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) are used by
+        # the engine with or without the background app installed — a
+        # sync-only install must fail fast on misconfiguration too. The
+        # background app's validate_on_ready() re-runs this as part of its
+        # full gate; both are idempotent.
+        validate_core_settings()
 
         # Transition-coverage recording (#132). Activated in ready() so
         # spawn-based parallel test workers, which re-run it, self-activate;
