@@ -39,8 +39,13 @@
   enter alongside T2). Tokenless `State` objects keep the historical
   unconditional delete as a manual force-release path. `RedisState`
   writes preserve the stored token on both holder and non-holder
-  (xx-refresh) paths — a race there degrades to a TTL-bounded leak,
-  never a wrong unlock.
+  (xx-refresh) paths, and a holder whose key now carries a successor's
+  token skips the refresh entirely (it must not re-plant its own token
+  over the successor's lock). Residual: the get→compare→set refresh is
+  not multi-process atomic — a takeover strictly between the two calls
+  can still misplace a token (TTL-bounded leak for tokenless writers, a
+  narrow wrong-unlock window for holders); a fully atomic refresh is
+  tracked as #151.
 
 - **`DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT']`** (#141, default off).
   Inside an outer `transaction.atomic()` a synchronous transition's

@@ -156,6 +156,34 @@ class RedisStateOwnershipTokenTests(TestCase):
         t1.unlock()
         self.assertFalse(t1.is_locked())
 
+    def test_set_state_after_takeover_does_not_rewrite_successor_token(self, mock_cache):
+        """A stale holder's set_state must not re-plant its own token
+        over a successor's lock — that would make the stale holder's
+        later unlock delete the successor's lock, the exact dual-entry
+        hazard tokens exist to close."""
+        t1 = self._state()
+        self.assertTrue(t1.lock())
+
+        # T1's TTL expires; T2 takes over.
+        mock_cache.delete(t1._get_hash())
+        t2 = self._state()
+        self.assertTrue(t2.lock())
+
+        # T1 finishes late and writes its target state: the cache refresh
+        # is skipped (successor owns the key), the DB write still lands.
+        t1.set_state('late_write')
+        cached = mock_cache.get(t2._get_hash())
+        self.assertEqual(t2._stored_token(cached), t2._lock_token)
+        self.assertEqual(
+            Invoice.objects.get(pk=self.invoice.pk).status, 'late_write')
+
+        # T1's late unlock therefore cannot release T2's lock.
+        t1.unlock()
+        self.assertTrue(t2.is_locked())
+
+        t2.unlock()
+        self.assertFalse(t2.is_locked())
+
     def test_legacy_raw_value_still_readable_and_not_cad_deleted(self, mock_cache):
         t1 = self._state()
         # A key written by a pre-token version stores the raw state value.

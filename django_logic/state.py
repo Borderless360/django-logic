@@ -218,12 +218,29 @@ class RedisState(State):
         # lock, so there the xx write refreshes the live key's value.)
         #
         # Preserve the ownership token already stored on the key: a state
-        # write must not clobber the holder's token. The read-merge-write
-        # is not atomic; a takeover between the read and the write leaves
-        # a stale token behind, which fails the holder's compare-and-delete
-        # and lets the lock expire via TTL — a bounded leak, never a wrong
-        # unlock.
+        # write must not clobber the holder's token. Token-gated for
+        # holders: if this object holds a token but the key now carries a
+        # DIFFERENT one, our lock TTL-expired and a successor owns the
+        # key — skip the cache refresh entirely, or we would re-plant our
+        # own token over theirs and our later unlock would delete their
+        # lock (the dual-entry hazard #139 closes). The DB write below
+        # still happens; the phase-2 state guard / under-lock revalidation
+        # arbitrate the outcome.
+        #
+        # The get→compare→set is still not multi-process atomic: a
+        # takeover strictly between the read and the write can leave a
+        # stale token behind. For tokenless writers that degrades to a
+        # TTL-bounded leak; for a holder it remains a narrow wrong-unlock
+        # window — fully closing it needs an atomic refresh (issue #151).
         current_token = self._stored_token(cache.get(self._get_hash()))
+        own_token = getattr(self, '_lock_token', None)
+        if (
+            own_token is not None
+            and current_token is not None
+            and current_token != own_token
+        ):
+            super().set_state(state)
+            return
         cache.set(
             self._get_hash(),
             self._store_value(state, current_token),
