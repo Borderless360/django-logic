@@ -126,7 +126,7 @@ class ScenarioAssertions:
     # --- background error state ------------------------------------------
 
     def assert_error_recorded(self, instance, contains):
-        tm = latest_message(instance)
+        tm = latest_message(instance, process_name=self.process_name)
         if tm is None or contains not in (tm.last_error_message or ''):
             self._record_assert(f'assert_error_recorded({contains!r})', ok=False)
             self._fail(
@@ -138,7 +138,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_error_recorded({contains!r})', ok=True)
 
     def assert_error_count(self, instance, expected):
-        tm = latest_message(instance)
+        tm = latest_message(instance, process_name=self.process_name)
         actual = None if tm is None else tm.errors_count
         if actual != expected:
             self._record_assert(f'assert_error_count({expected})', ok=False)
@@ -321,28 +321,17 @@ class ScenarioAssertions:
                 instance=None,
             )
         for i, (exp, got) in enumerate(zip(expected_steps, actual), 1):
-            if isinstance(exp, JourneyStep):
-                if not exp.matches(got):
-                    self._record_assert(f'assert_journey(step {i})', ok=False,
-                                        detail=f'expected {exp}, got {got}')
-                    self._fail(
-                        f'Journey step {i} did not match.\n'
-                        f'  expected: {exp}\n'
-                        f'  got:      {got}',
-                        instance=None,
-                    )
-            else:
-                # Allow a plain dict for ergonomics.
-                exp_step = JourneyStep(**exp)
-                if not exp_step.matches(got):
-                    self._record_assert(f'assert_journey(step {i})', ok=False,
-                                        detail=f'expected {exp_step}, got {got}')
-                    self._fail(
-                        f'Journey step {i} did not match.\n'
-                        f'  expected: {exp_step}\n'
-                        f'  got:      {got}',
-                        instance=None,
-                    )
+            # Allow a plain dict for ergonomics.
+            exp = exp if isinstance(exp, JourneyStep) else JourneyStep(**exp)
+            if not exp.matches(got):
+                self._record_assert(f'assert_journey(step {i})', ok=False,
+                                    detail=f'expected {exp}, got {got}')
+                self._fail(
+                    f'Journey step {i} did not match.\n'
+                    f'  expected: {exp}\n'
+                    f'  got:      {got}',
+                    instance=None,
+                )
         self._record_assert(f'assert_journey({len(expected_steps)} steps)',
                             ok=True)
 
@@ -356,10 +345,11 @@ class ScenarioAssertions:
         record its OWN owner, not the predecessor's.
         """
         if transition_name is not None:
-            tm = message_for(instance, transition_name)
+            tm = message_for(instance, transition_name,
+                             process_name=self.process_name)
             label = f'assert_transition_owner({transition_name!r}, {owner!r})'
         else:
-            tm = latest_message(instance)
+            tm = latest_message(instance, process_name=self.process_name)
             label = f'assert_transition_owner({owner!r})'
         actual = None if tm is None else tm.owning_process_class
         if actual != owner:
