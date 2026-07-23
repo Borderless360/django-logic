@@ -82,7 +82,7 @@ def run_background_transition(transition_message_id: int) -> None:
         # The atomic block rolled back, so we couldn't mark_as_completed
         # from inside it. Do it here, in its own statement, to stop the
         # retry loop from picking the row up forever.
-        _mark_unrestorable_completed(exc.tm_id)
+        _mark_unrestorable_completed(exc.tm_id, exc.reason)
         return
     except _NothingToDo:
         return
@@ -116,15 +116,24 @@ class _NothingToDo(Exception):
 class _StopRetry(Exception):
     """Internal signal: the TM refers to a model/transition that no
     longer exists. The atomic block rolled back; the outer handler
-    marks the TM completed in its own statement so retries stop."""
+    marks the TM completed in its own statement so retries stop.
+    ``reason`` carries the restore-failure description for the audit
+    trail on ``last_error_message``."""
 
-    def __init__(self, tm_id: int):
+    def __init__(self, tm_id: int, reason: str = ''):
         self.tm_id = tm_id
+        self.reason = reason
 
 
-def _mark_unrestorable_completed(tm_id: int) -> None:
+UNRESTORABLE_MARKER = '[unrestorable]'
+
+
+def _mark_unrestorable_completed(tm_id: int, reason: str = '') -> None:
     """Mark an unrestorable TM completed so the periodic starter stops
-    re-dispatching it forever.
+    re-dispatching it forever, recording WHY on ``last_error_message``
+    (mirroring the ``'[superseded]'`` convention — see
+    ``TransitionMessage.mark_as_superseded``) so an operator reading the
+    row later isn't left with a completed row and no explanation.
 
     Runs as a single UPDATE outside the (already-exited, rolled-back)
     phase-2 atomic block. Durability depends on the execution mode:
@@ -142,10 +151,15 @@ def _mark_unrestorable_completed(tm_id: int) -> None:
     """
     from django.utils import timezone
 
+    now = timezone.now()
+    note = f'{UNRESTORABLE_MARKER} {reason or "restore failed"}'[:10_000]
     try:
         TransitionMessage.objects.filter(pk=tm_id, is_completed=False).update(
             is_completed=True,
-            completed_at=timezone.now(),
+            completed_at=now,
+            last_error_message=note,
+            last_error_dt=now,
+            modified=now,  # .update() bypasses auto_now
         )
     except Exception as e:
         transition_logger.error(
@@ -443,7 +457,7 @@ def _run_atomic(tm_id: int) -> _Outcome:
             # block that will roll back when we exit. The outer handler
             # in run_background_transition() performs the mark in a
             # fresh statement so the stop-retry flag actually persists.
-            raise _StopRetry(tm.pk) from exc
+            raise _StopRetry(tm.pk, str(exc)) from exc
 
         state = process.state
 
@@ -739,7 +753,18 @@ def _restore(tm: TransitionMessage):
                 f'instance has no process named {tm.process_name!r} and '
                 f'no process_class stored on the message'
             )
-        process = _load_process_from_path(instance, recorded_path, tm)
+        try:
+            process = _load_process_from_path(instance, recorded_path, tm)
+        except Exception as exc:
+            # Fail closed, through the accounted stop-retry path. A raw
+            # ImportError here would escape _run_atomic (which only
+            # catches _RestoreError), roll the attempt back with
+            # errors_count still untouched, and retry_stale_transitions
+            # would re-dispatch the row forever.
+            raise _RestoreError(
+                f'recorded process_class {recorded_path!r} could not be '
+                f'loaded: {exc}'
+            ) from exc
     else:
         # Verify the attribute resolved the same class phase 1 enqueued.
         # Every Process defaults to process_name='process', so a name
@@ -749,7 +774,13 @@ def _restore(tm: TransitionMessage):
         # never asked for. Prefer the recorded class on mismatch.
         if recorded_path:
             resolved_path = f'{type(process).__module__}.{type(process).__name__}'
-            if resolved_path != recorded_path:
+            # A rename covered by PROCESS_CLASS_ALIASES is not a mismatch:
+            # compare against the aliased path so an aliased rename doesn't
+            # warn (and doesn't force a redundant reload of the same class).
+            effective_recorded = bg_settings.process_class_aliases().get(
+                recorded_path, recorded_path
+            )
+            if resolved_path != effective_recorded:
                 transition_logger.warning(
                     f'TransitionMessage#{tm.pk}: process_name '
                     f'{tm.process_name!r} resolved to {resolved_path}, but '
@@ -761,12 +792,16 @@ def _restore(tm: TransitionMessage):
                         instance, recorded_path, tm
                     )
                 except Exception as exc:
-                    transition_logger.error(
-                        f'TransitionMessage#{tm.pk}: recorded process_class '
-                        f'{recorded_path!r} could not be loaded ({exc}); '
-                        f'falling back to the bound process '
-                        f'{resolved_path}.'
-                    )
+                    # Fail closed: running the attribute-resolved process
+                    # instead would execute side-effects phase 1 never
+                    # asked for. The row completes as unrestorable (no
+                    # side-effects, no state write) — map the old path via
+                    # DJANGO_LOGIC['PROCESS_CLASS_ALIASES'] to drain
+                    # in-flight rows across a rename.
+                    raise _RestoreError(
+                        f'recorded process_class {recorded_path!r} could '
+                        f'not be loaded: {exc}'
+                    ) from exc
 
     transition = _find_transition(process, tm)
     if transition is None:
@@ -778,6 +813,9 @@ def _restore(tm: TransitionMessage):
 
 
 def _load_process_from_path(instance, dotted: str, tm: TransitionMessage):
+    # PROCESS_CLASS_ALIASES first: rows recorded under a class's old
+    # dotted path stay restorable across a rename/move (#140).
+    dotted = bg_settings.process_class_aliases().get(dotted, dotted)
     module_path, class_name = dotted.rsplit('.', 1)
     module = importlib.import_module(module_path)
     process_class = getattr(module, class_name)
