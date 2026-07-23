@@ -12,7 +12,10 @@ from unittest import mock
 
 from django.test import TestCase
 
-from django_logic.background.dispatch import recover_stranded_states
+from django_logic.background.dispatch import (
+    _reset_warned,
+    recover_stranded_states,
+)
 from django_logic.background.models import TransitionMessage
 from django_logic.background.settings import beat_schedule
 from django_logic.process import Process, ProcessManager
@@ -75,6 +78,9 @@ class RecoverStrandedStatesTests(TestCase):
     def setUp(self):
         super().setUp()
         FAILURE_LOG.clear()
+        # The missing-failed_state warning fires once per process
+        # lifetime; reset so each test observes it deterministically.
+        _reset_warned()
         ProcessManager.bind_model_process(
             Invoice, _StrandedProcess, state_field='status')
 
@@ -227,6 +233,57 @@ class RecoverStrandedStatesTests(TestCase):
         invoice.stranded_process.archive()
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, 'archived')
+
+    def test_no_failed_state_warns_once_per_process_not_per_candidate(self):
+        """#145: the missing-failed_state condition is a property of the
+        TRANSITION, so the sweep warns exactly once per process lifetime
+        — not per candidate per run — and never locks or touches the
+        parked instances (pre-fix it took the state lock per candidate
+        before discovering there was nothing to recover to)."""
+        a = self._strand('archiving')
+        b = self._strand('archiving')
+
+        with self.assertLogs('django-logic', level='WARNING') as first:
+            self.assertEqual(recover_stranded_states(), 0)
+        warnings = [line for line in first.output
+                    if 'no failed_state' in line and "'archive'" in line
+                    and 'tests.Invoice' in line]
+        self.assertEqual(len(warnings), 1,
+                         'one warning per transition, not per candidate')
+        # observable: the parked backlog size is in the warning
+        self.assertIn('2 candidate', warnings[0])
+
+        # Second sweep: no repeat warning, and the sweep never even
+        # reaches the per-instance recovery (no lock is ever taken).
+        with self.assertNoLogs('django-logic', level='WARNING'):
+            with mock.patch(
+                'django_logic.background.dispatch._recover_stranded_instance'
+            ) as recover_one:
+                self.assertEqual(recover_stranded_states(), 0)
+        recover_one.assert_not_called()
+
+        for invoice in (a, b):
+            invoice.refresh_from_db()
+            self.assertEqual(invoice.status, 'archiving', 'left as-is')
+            self.assertFalse(State(invoice, 'status').is_locked(),
+                             'never locked')
+
+    def test_large_backlog_is_fully_recovered_in_bounded_pages(self):
+        """#145 regression: the sweep must page through candidates by
+        pk-keyset instead of materialising every pk up front — and every
+        stranded instance across multiple pages must still be recovered
+        (recovered rows leave the state between pages; the keyset must
+        not skip anyone)."""
+        count = 120  # > 2 * the patched _TM_SCAN_CHUNK
+        Invoice.objects.bulk_create(
+            Invoice(status='syncing') for _ in range(count))
+
+        with mock.patch('django_logic.background.dispatch._TM_SCAN_CHUNK', 50):
+            self.assertEqual(recover_stranded_states(), count)
+
+        self.assertEqual(Invoice.objects.filter(status='failed').count(),
+                         count)
+        self.assertEqual(Invoice.objects.filter(status='syncing').count(), 0)
 
     def test_healthy_instances_are_untouched(self):
         Invoice.objects.create(status='draft')

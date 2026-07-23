@@ -224,6 +224,16 @@ def recover_stranded_states() -> int:
         if key in seen:
             continue
         seen.add(key)
+        # A transition without failed_state has nowhere to recover TO:
+        # its candidates are re-drivable (implicit in-progress source)
+        # but stay parked until handled. That's a property of the
+        # TRANSITION, not of any candidate — skip the whole sweep for it
+        # and warn once per process lifetime (per-candidate-per-run
+        # warnings were pure noise, and each one took the state lock
+        # first).
+        if not transition.failed_state:
+            _warn_once_about_missing_failed_state(binding, transition)
+            continue
         # Contained per transition: one misbehaving model/binding must
         # not abort the sweep for every remaining binding.
         try:
@@ -237,30 +247,91 @@ def recover_stranded_states() -> int:
     return recovered
 
 
-#: Chunk size for the batched uncompleted-TransitionMessage pre-check —
-#: bounds the ``instance_id__in`` list (SQLite caps query variables, and a
-#: no-broker misconfiguration can pile thousands of rows into an
-#: in-progress state).
+#: Chunk size for the sweep's pk pages AND the batched
+#: uncompleted-TransitionMessage pre-check — bounds both the per-page
+#: memory footprint and the ``instance_id__in`` list (SQLite caps query
+#: variables, and a no-broker misconfiguration can pile thousands of
+#: rows into an in-progress state).
 _TM_SCAN_CHUNK = 500
+
+#: (model_label, state_field, action_name) triples already warned about
+#: for a missing failed_state — once per process lifetime, following the
+#: ``_celery_config_warned`` precedent above. Tests reset via
+#: :func:`_reset_warned`.
+_no_failed_state_warned: set = set()
+
+
+def _reset_warned() -> None:
+    """Test hook: forget which no-failed_state transitions were warned
+    about, so a test can assert the warn-once behaviour in isolation."""
+    _no_failed_state_warned.clear()
+
+
+def _warn_once_about_missing_failed_state(binding, transition) -> None:
+    """Warn — once per process lifetime per (model, state_field, action) —
+    that a transition's stranded candidates cannot be recovered because it
+    declares no ``failed_state``. The candidate count is included (one
+    ``.count()``, cheap because this fires once) so the parked backlog
+    stays observable."""
+    from django_logic.logger import logger
+
+    key = (binding.model._meta.label, binding.state_field,
+           transition.action_name)
+    if key in _no_failed_state_warned:
+        return
+    _no_failed_state_warned.add(key)
+    candidates = (
+        binding.model._base_manager
+        .filter(**{binding.state_field: transition.in_progress_state})
+        .count()
+    )
+    logger.warning(
+        f'recover_stranded_states: transition {transition.action_name!r} '
+        f'on {binding.model._meta.label}.{binding.state_field} declares '
+        f'no failed_state — stranded instances in '
+        f'{transition.in_progress_state!r} ({candidates} candidate(s) '
+        f'right now) are left as-is: re-drivable via the implicit '
+        f'in-progress source, but parked until handled. '
+        f'(Warned once per process; give the transition a failed_state '
+        f'to make them recoverable.)'
+    )
 
 
 def _sweep_transition(binding, transition) -> int:
     """Scan one (model, state_field, transition) for stranded instances
-    and recover each; returns the number recovered."""
+    and recover each; returns the number recovered.
+
+    Pages through candidates by pk-keyset (``pk__gt=last_pk``, ordered,
+    ``_TM_SCAN_CHUNK`` at a time) instead of materialising every
+    candidate pk up front — a no-broker misconfiguration can strand tens
+    of thousands of rows in one in-progress state. Keyset pagination
+    (not ``.iterator()``): recovery opens its own queries and atomic
+    blocks per instance, and holding a long-lived server-side cursor
+    open across those ``fail_transition`` calls is fragile across
+    backends — the same reasoning as the periodic starter's
+    materialise-then-act loop in ``tasks._retry_pending_inline``.
+    Recovered instances leave the state between pages; ``pk__gt`` keeps
+    forward progress past skipped (locked / in-flight) ones.
+    """
     from django_logic.background.models import TransitionMessage
 
     # _base_manager, like State.get_persisted_state: a filtered or
     # renamed default manager must not hide stranded rows (or crash
     # the sweep on a model without `.objects`).
-    pks = list(
-        binding.model._base_manager
-        .filter(**{binding.state_field: transition.in_progress_state})
-        .values_list('pk', flat=True)
+    base_qs = binding.model._base_manager.filter(
+        **{binding.state_field: transition.in_progress_state}
     )
     recovered = 0
     process_name = binding.process_class.process_name
-    for start in range(0, len(pks), _TM_SCAN_CHUNK):
-        chunk = pks[start:start + _TM_SCAN_CHUNK]
+    last_pk = None
+    while True:
+        page_qs = base_qs if last_pk is None else base_qs.filter(pk__gt=last_pk)
+        chunk = list(
+            page_qs.order_by('pk').values_list('pk', flat=True)[:_TM_SCAN_CHUNK]
+        )
+        if not chunk:
+            break
+        last_pk = chunk[-1]
         # One query per chunk: an uncompleted message for THIS process
         # belongs to the background machinery (starter/watchdog), not to
         # this sweep. Scoped by process_name — same as
@@ -353,11 +424,11 @@ def _recover_stranded_instance(binding, transition, pk) -> bool:
             return False  # moved under us — the other writer wins
 
         if not transition.failed_state:
-            logger.warning(
-                f'recover_stranded_states: {label} is stranded but the '
-                f'transition declares no failed_state — left as-is '
-                f'(re-drivable via the implicit in-progress source).'
-            )
+            # Unreachable from recover_stranded_states (the transition
+            # loop skips no-failed_state transitions before any lock is
+            # taken, warning once per process — see
+            # _warn_once_about_missing_failed_state); kept as a silent
+            # guard for direct callers.
             return False
 
         # Ownership transfer: fail_transition ALWAYS releases the lock in
