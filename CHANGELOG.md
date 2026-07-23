@@ -94,6 +94,17 @@
   previously accepted; a negative `RETRY_MINUTES` hot-looped the
   starter; a negative `CLEANUP_DAYS` deleted every completed row).
 
+### Removed
+
+- **The `consumer-gv.yml` workflow.** A public library's CI should not
+  name or check out a private consumer — the dependency points the wrong
+  way. Consumer-contract validation moves to the consumers' own CI
+  (install this repo at the candidate ref and run their suites);
+  RELEASING.md documents the release gate in consumer-neutral terms. The
+  job had also never actually run: its access token was never configured,
+  so it always skipped with a warning while advertising the consumer's
+  internals.
+
 ### Fixed
 
 - **Unrestorable recorded process classes fail closed** (#140). A
