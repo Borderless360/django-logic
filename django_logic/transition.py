@@ -23,7 +23,9 @@ import math
 from abc import ABC
 from uuid import UUID
 
+from django.conf import settings as django_settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.commands import (
     Callbacks,
@@ -40,6 +42,15 @@ from django_logic.logger import (
     TransitionEventType,
 )
 from django_logic.state import State
+
+
+def _defer_unlock_until_commit() -> bool:
+    """DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] — read on every call
+    (not cached at import time), like LOCK_TIMEOUT."""
+    return bool(
+        getattr(django_settings, 'DJANGO_LOGIC', {})
+        .get('DEFER_UNLOCK_UNTIL_COMMIT', False)
+    )
 
 
 class BaseTransition(ABC):
@@ -243,10 +254,7 @@ class Transition(BaseTransition):
             f'{self.target}'
         )
 
-        state.unlock()
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
-        )
+        self._release_lock(state, **kwargs)
 
         self.callbacks.execute(state, **kwargs)
         self.next_transition.execute(state, **kwargs)
@@ -266,12 +274,54 @@ class Transition(BaseTransition):
 
             self.failure_side_effects.execute(state, exception=exception, **kwargs)
         finally:
-            state.unlock()
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
-            )
+            self._release_lock(state, **kwargs)
 
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
+
+    @staticmethod
+    def _release_lock(state: State, **kwargs):
+        """Release the state lock — now, or at commit (#141).
+
+        Inside an outer ``transaction.atomic()`` the target/failed state
+        write is invisible to other connections until the block commits,
+        while the cache lock is not transactional. Releasing immediately
+        (the historical default) opens a window in which a second
+        transition can acquire the lock, read the OLD committed state and
+        run conflicting side-effects — the final state then depends on
+        commit ordering.
+
+        With ``DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] = True`` the
+        unlock is deferred to ``transaction.on_commit`` so mutual
+        exclusion covers the whole invisible span. Documented trade-offs
+        (see README):
+
+        * on rollback the hook never fires — the lock expires via its
+          TTL, a *bounded* lockout (same failure mode as a crashed
+          process). Rollback-prone flows should pair this with a
+          per-transition ``lock_timeout``;
+        * same-instance follow-ups (callbacks / ``next_transition``)
+          inside the atomic block find the state still locked and are
+          skipped (they are best-effort by contract) — chain them from
+          ``transaction.on_commit`` in the caller instead.
+
+        Only the paths that follow a successful state write defer; the
+        early revalidation-failure unlock in ``change_state`` stays
+        immediate (nothing was written, so there is no visibility window
+        to protect and nothing to leak on rollback).
+        """
+        if _defer_unlock_until_commit():
+            using = state.instance._state.db or DEFAULT_DB_ALIAS
+            if transaction.get_connection(using).in_atomic_block:
+                transaction.on_commit(state.unlock, using=using)
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
+                    f'deferred until commit'
+                )
+                return
+        state.unlock()
+        transition_logger.info(
+            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
+        )
 
     @staticmethod
     def _init_transition_context(kwargs: dict) -> None:
