@@ -183,19 +183,6 @@ def cleanup_days():
         'TRANSITION_MESSAGE_CLEANUP_DAYS', 7, minimum=0)
 
 
-def lock_timeout():
-    """Boot-time validation gate for ``DJANGO_LOGIC['LOCK_TIMEOUT']`` —
-    the state-lock TTL in seconds. Must be a finite number > 0 (a zero
-    or negative TTL means the lock never holds and every transition's
-    mutual exclusion silently disappears).
-
-    ``django_logic.state`` keeps its own private per-call reader; this
-    accessor exists so :func:`validate_on_ready` rejects a bad value at
-    boot rather than on the first lock attempt.
-    """
-    return _validated_number('LOCK_TIMEOUT', 7200, minimum=0, allow_zero=False)
-
-
 def process_class_aliases() -> dict:
     """``DJANGO_LOGIC['PROCESS_CLASS_ALIASES']`` — escape hatch for
     renaming/moving a Process class while rows recorded under its old
@@ -219,17 +206,6 @@ def process_class_aliases() -> dict:
     return aliases
 
 
-def _validate_defer_unlock_until_commit() -> None:
-    """``DEFER_UNLOCK_UNTIL_COMMIT`` gates lock-release semantics; truthy
-    garbage (``'false'``, ``1``) reads as enabled/disabled by accident,
-    so require a real bool. The runtime reader lives in
-    ``django_logic.transition``; this is the boot-time gate."""
-    value = _conf().get('DEFER_UNLOCK_UNTIL_COMMIT', False)
-    if not isinstance(value, bool):
-        raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] must be a bool, "
-            f"got {value!r}."
-        )
 
 
 def _validate_log_kwargs_redactor() -> None:
@@ -300,10 +276,12 @@ def validate_on_ready() -> None:
     max_errors()
     retry_minutes()
     cleanup_days()
-    lock_timeout()
     process_class_aliases()
-    _validate_defer_unlock_until_commit()
     _validate_log_kwargs_redactor()
+    # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) — shared with
+    # DjangoLogicConfig.ready so sync-only installs validate them too.
+    from django_logic.conf import validate_core_settings
+    validate_core_settings()
     if mode == EXECUTION_CELERY:
         _reject_sqlite_in_celery_mode()
         _check_lock_cache_in_celery_mode()

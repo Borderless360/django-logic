@@ -93,6 +93,12 @@
   boot instead of failing inside a periodic task (booleans and NaN were
   previously accepted; a negative `RETRY_MINUTES` hot-looped the
   starter; a negative `CLEANUP_DAYS` deleted every completed row).
+  The core knobs (`LOCK_TIMEOUT`, `DEFER_UNLOCK_UNTIL_COMMIT`) live in
+  the new `django_logic.conf` and are additionally validated from the
+  core `DjangoLogicConfig.ready`, so **sync-only installs** (without the
+  background app) fail fast too; the runtime reader for
+  `DEFER_UNLOCK_UNTIL_COMMIT` is strict — only a literal `True` defers,
+  so truthy garbage (`'false'`) can never flip lock-release semantics.
 
 ### Removed
 

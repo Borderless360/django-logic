@@ -13,12 +13,12 @@ from django.test import SimpleTestCase, override_settings
 
 from django_logic.background.settings import (
     cleanup_days,
-    lock_timeout,
     max_errors,
     process_class_aliases,
     retry_minutes,
     validate_on_ready,
 )
+from django_logic.conf import lock_timeout
 
 
 _BASE = {

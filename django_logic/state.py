@@ -1,13 +1,9 @@
 from hashlib import blake2b
 from uuid import uuid4
 
-from django.conf import settings
 from django.core.cache import cache
 
-
-def _get_lock_timeout():
-    """Read LOCK_TIMEOUT from settings on every call (not cached at import time)."""
-    return getattr(settings, 'DJANGO_LOGIC', {}).get('LOCK_TIMEOUT', 7200)
+from django_logic.conf import lock_timeout as _get_lock_timeout
 
 
 class State(object):

@@ -22,7 +22,6 @@ in ``django_logic.background.transitions`` (phase 1) and
 import math
 from uuid import UUID
 
-from django.conf import settings as django_settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, transaction
 
@@ -40,16 +39,8 @@ from django_logic.logger import (
     transition_logger,
     TransitionEventType,
 )
+from django_logic.conf import defer_unlock_until_commit as _defer_unlock_until_commit
 from django_logic.state import State
-
-
-def _defer_unlock_until_commit() -> bool:
-    """DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] — read on every call
-    (not cached at import time), like LOCK_TIMEOUT."""
-    return bool(
-        getattr(django_settings, 'DJANGO_LOGIC', {})
-        .get('DEFER_UNLOCK_UNTIL_COMMIT', False)
-    )
 
 
 class BaseTransition:
