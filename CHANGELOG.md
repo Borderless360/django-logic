@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-23
+
 ### Changed (breaking)
 
 - **Transition observers receive the resolved declaration** (#146).
