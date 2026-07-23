@@ -1176,8 +1176,13 @@ report = cov.report()
 report['uncovered']  # [{'process': ..., 'action': ..., 'background': ..., 'models': [...]}]
 ```
 
+Coverage is keyed **per declaration**, not per action name: legal same-name
+transitions (condition-disambiguated variants, or a synchronous + background
+namesake pair in one class) count and cover separately — the entry carries the
+declaration's `sources`/`target`/`background` so you can tell them apart.
+
 For parallel test runs (fork or spawn), record to a file instead — every
-worker appends unique `(process, action)` pairs:
+worker appends unique declaration keys:
 
 ```python
 # settings used for the coverage run
@@ -1192,9 +1197,13 @@ report = coverage_report(log_path='/tmp/fsm_coverage.log')
 A pair is recorded at *initiation* (direct calls, `next_transition`
 follow-ups, background phase 1); phase-2 restore and retries don't re-notify.
 Diffing `report['uncovered']` in CI catches transitions that silently stop
-being exercised. The observer list is public — consumers can register their
-own hooks (metrics, tracing); a raising observer is logged and never breaks a
-transition.
+being exercised. Logs written by 0.8 recorders (2-field `class\taction`
+lines) are still accepted with their original semantics — a legacy line
+covers every same-name namesake. The observer list is public — consumers can
+register their own hooks (metrics, tracing), called as
+`observer(owning_process_cls, action_name, instance, transition)` (the
+resolved declaration object was added as a fourth argument in 0.9); a raising
+observer is logged and never breaks a transition.
 
 The log is **append-only and never truncated** — point each run at a fresh
 path (or delete the old file first), or stale pairs from earlier runs count

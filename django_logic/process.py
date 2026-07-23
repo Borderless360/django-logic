@@ -25,19 +25,23 @@ _transition_context: ContextVar[dict | None] = ContextVar(
 )
 
 #: Transition-initiation observers. Each callable is invoked as
-#: ``observer(owning_process_cls, action_name, instance)`` after a
-#: transition resolves, before it executes — for every initiation path
-#: (direct calls, next_transition follow-ups, background phase 1; phase-2
-#: restore does not re-notify). Observers must never break a transition:
-#: exceptions are logged and swallowed. Registered by
-#: ``django_logic.coverage``; open to consumer metrics/tracing hooks.
+#: ``observer(owning_process_cls, action_name, instance, transition)``
+#: after a transition resolves, before it executes — for every initiation
+#: path (direct calls, next_transition follow-ups, background phase 1;
+#: phase-2 restore does not re-notify). ``transition`` is the resolved
+#: declaration object, so condition-disambiguated same-name transitions
+#: are distinguishable (#146; the argument was added in 0.9 — observers
+#: written against the 0.8 three-argument form need a ``transition=None``
+#: parameter added). Observers must never break a transition: exceptions
+#: are logged and swallowed. Registered by ``django_logic.coverage``;
+#: open to consumer metrics/tracing hooks.
 transition_observers: list = []
 
 
-def _notify_transition_observers(owning_process, action_name, instance):
+def _notify_transition_observers(owning_process, action_name, instance, transition):
     for observer in tuple(transition_observers):
         try:
-            observer(type(owning_process), action_name, instance)
+            observer(type(owning_process), action_name, instance, transition)
         except Exception:
             transition_logger.exception(
                 f'transition observer {observer!r} raised; ignored'
@@ -134,7 +138,7 @@ class Process:
         )
         if transition_observers:
             _notify_transition_observers(
-                owning_process, action_name, self.state.instance
+                owning_process, action_name, self.state.instance, transition
             )
 
         tr_id = uuid.uuid4()

@@ -30,14 +30,20 @@ an initiation refused later (lock contention, under-lock revalidation,
 ``AlreadyInProgress``) still counts as driven. Phase-2 background restore
 and retries do not re-notify — phase 1 already recorded the pair.
 
-Two footguns worth knowing:
+One footgun worth knowing:
 
 * The log file is append-only and never truncated — point each run at a
   fresh path (or delete the old file first), or stale pairs from earlier
   runs silently count as covered.
-* Pairs are keyed on ``(owning process class, action_name)``: a synchronous
-  and a background transition sharing an ``action_name`` within one class
-  (courier-style polymorphism) collapse into a single entry.
+
+Declaration identity (#146): keys carry the declaration's kind
+(sync/background) and shape (sources → target) besides the class and
+action name, so condition-disambiguated same-name transitions — including
+a sync + background namesake pair in one class — count and cover
+separately. Two *literally identical* declarations still collapse (they
+are behaviorally indistinguishable). Logs written by 0.8 recorders used
+2-field ``class\taction`` keys; ``coverage_report`` still accepts them
+with the old semantics (a legacy line covers every same-name namesake).
 
 No test-framework imports here: activation happens in ``AppConfig.ready``,
 which also runs in production processes.
@@ -45,8 +51,21 @@ which also runs in production processes.
 from django_logic.process import ProcessManager, transition_observers
 
 
-def _key(process_cls, action_name: str) -> str:
+def _pair(process_cls, action_name: str) -> str:
+    """The 0.8-era 2-field prefix — still the anchor legacy log lines
+    are matched against."""
     return f'{process_cls.__module__}.{process_cls.__qualname__}\t{action_name}'
+
+
+def _key(process_cls, transition) -> str:
+    """Stable per-declaration identity: class, action, kind, and the
+    declared shape. Independent of declaration order (sources sorted),
+    survives process restarts and transition-list reorders."""
+    kind = 'bg' if getattr(transition, 'is_background', False) else 'sync'
+    sources = '|'.join(sorted(transition.sources))
+    target = transition.target or ''
+    return (f'{_pair(process_cls, transition.action_name)}'
+            f'\t{kind}\t{sources}>{target}')
 
 
 def iter_bound_transitions():
@@ -93,20 +112,30 @@ def coverage_report(executed=None, log_path=None) -> dict:
             # not a crash.
             pass
 
+    # Legacy 0.8 recorders wrote 2-field 'class\taction' lines, which
+    # cannot distinguish namesakes: they cover every declaration sharing
+    # the prefix (the old semantics — no false "uncovered" churn on old
+    # logs). Full keys cover exactly one declaration.
+    legacy_pairs = {key for key in executed_keys if key.count('\t') == 1}
+
     declared = {}
     for binding, process_cls, transition in iter_bound_transitions():
-        entry = declared.setdefault(_key(process_cls, transition.action_name), {
+        entry = declared.setdefault(_key(process_cls, transition), {
             'process': f'{process_cls.__module__}.{process_cls.__qualname__}',
             'action': transition.action_name,
             'background': bool(getattr(transition, 'is_background', False)),
+            'sources': sorted(transition.sources),
+            'target': transition.target or '',
             'models': set(),
+            '_pair': _pair(process_cls, transition.action_name),
         })
         entry['models'].add(binding.model._meta.label)
 
     uncovered = [
-        {**entry, 'models': sorted(entry['models'])}
+        {k: v for k, v in {**entry, 'models': sorted(entry['models'])}.items()
+         if k != '_pair'}
         for key, entry in sorted(declared.items())
-        if key not in executed_keys
+        if key not in executed_keys and entry['_pair'] not in legacy_pairs
     ]
     return {
         'total': len(declared),
@@ -121,8 +150,8 @@ class TransitionCoverage:
     def __init__(self):
         self.executed = set()
 
-    def _observe(self, owning_process_cls, action_name, instance):
-        self.executed.add(_key(owning_process_cls, action_name))
+    def _observe(self, owning_process_cls, action_name, instance, transition):
+        self.executed.add(_key(owning_process_cls, transition))
 
     def start(self):
         if self._observe not in transition_observers:
@@ -151,8 +180,8 @@ class _FileRecorder:
         self.path = path
         self.seen = set()
 
-    def __call__(self, owning_process_cls, action_name, instance):
-        key = _key(owning_process_cls, action_name)
+    def __call__(self, owning_process_cls, action_name, instance, transition):
+        key = _key(owning_process_cls, transition)
         if key in self.seen:
             return
         with open(self.path, 'a') as fh:

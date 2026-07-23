@@ -64,18 +64,19 @@ class TransitionObserverAndCoverageTests(TestCase):
     def test_observer_receives_owner_action_and_instance(self):
         invoice = Invoice.objects.create(status='draft')
         seen = []
-        observer = lambda cls, action, instance: seen.append((cls, action, instance.pk))  # noqa: E731
+        observer = lambda cls, action, instance, transition: seen.append(
+            (cls, action, instance.pk, transition.action_name))  # noqa: E731
         transition_observers.append(observer)
         try:
             invoice.coverage_process.approve()
         finally:
             transition_observers.remove(observer)
-        self.assertEqual(seen, [(_CoverageProcess, 'approve', invoice.pk)])
+        self.assertEqual(seen, [(_CoverageProcess, 'approve', invoice.pk, 'approve')])
 
     def test_observer_attributes_nested_transition_to_declaring_process(self):
         invoice = Invoice.objects.create(status='approved')
         seen = []
-        observer = lambda cls, action, instance: seen.append((cls, action))  # noqa: E731
+        observer = lambda cls, action, instance, transition: seen.append((cls, action))  # noqa: E731
         transition_observers.append(observer)
         try:
             invoice.coverage_process.archive()
@@ -86,7 +87,7 @@ class TransitionObserverAndCoverageTests(TestCase):
     def test_raising_observer_does_not_break_the_transition(self):
         invoice = Invoice.objects.create(status='draft')
 
-        def broken(cls, action, instance):
+        def broken(cls, action, instance, transition):
             raise RuntimeError('observer bug')
 
         transition_observers.append(broken)
@@ -177,10 +178,10 @@ class TransitionObserverAndCoverageTests(TestCase):
         invoice = Invoice.objects.create(status='draft')
         seen = []
 
-        def broken(cls, action, instance):
+        def broken(cls, action, instance, transition):
             raise RuntimeError('observer bug')
 
-        def working(cls, action, instance):
+        def working(cls, action, instance, transition):
             seen.append(action)
 
         transition_observers.extend([broken, working])
@@ -254,7 +255,7 @@ class BackgroundObserverSemanticsTests(TestCase):
     def setUp(self):
         _BG_FAIL['on'] = False
         self.seen = []
-        self._observer = lambda cls_, action, instance: self.seen.append(
+        self._observer = lambda cls_, action, instance, transition: self.seen.append(
             (cls_.__name__, action))
         transition_observers.append(self._observer)
         self.widget = self.Widget.objects.create(status='draft')
@@ -296,3 +297,77 @@ class BackgroundObserverSemanticsTests(TestCase):
         self.assertEqual(self.widget.status, 'done')
         self.assertEqual(self.seen, [('ObserverBgProcess', 'kick'),
                                      ('ObserverBgProcess', 'bg_finish')])
+
+
+@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
+class NamesakeDeclarationIdentityTests(TestCase):
+    """#146 — condition-disambiguated same-name transitions (including a
+    sync + background namesake pair in one class) count and cover as
+    separate declarations; 0.8-era 2-field log lines keep the legacy
+    cover-all-namesakes semantics."""
+
+    @classmethod
+    def setUpClass(cls):
+        from django_logic.background import BackgroundTransition
+
+        super().setUpClass()
+
+        class NamesakeProcess(Process):
+            process_name = 'namesake_process'
+            transitions = [
+                Transition('ship', sources=['fast_lane'], target='shipped_fast'),
+                Transition('ship', sources=['slow_lane'], target='shipped_slow'),
+                Transition('export', sources=['ready'], target='exported_inline'),
+                BackgroundTransition('export', sources=['queued'],
+                                     target='exported'),
+            ]
+
+        cls.process_class = NamesakeProcess
+        ProcessManager.bind_model_process(Invoice, NamesakeProcess,
+                                          state_field='status')
+
+    @classmethod
+    def tearDownClass(cls):
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings
+            if b.process_class is not cls.process_class
+        ]
+        if 'namesake_process' in vars(Invoice):
+            delattr(Invoice, 'namesake_process')
+        super().tearDownClass()
+
+    def _ours(self, report):
+        return [u for u in report['uncovered']
+                if u['process'].endswith('NamesakeProcess')]
+
+    def test_each_namesake_declaration_counts_separately(self):
+        report = coverage_report(executed=())
+        ours = self._ours(report)
+        self.assertEqual(len(ours), 4)
+        ships = [u for u in ours if u['action'] == 'ship']
+        self.assertEqual({u['target'] for u in ships},
+                         {'shipped_fast', 'shipped_slow'})
+        exports = [u for u in ours if u['action'] == 'export']
+        self.assertEqual({u['background'] for u in exports}, {True, False})
+
+    def test_driving_one_namesake_covers_only_that_declaration(self):
+        invoice = Invoice.objects.create(status='fast_lane')
+        with TransitionCoverage() as cov:
+            invoice.namesake_process.ship()
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'shipped_fast')
+
+        ours = self._ours(cov.report())
+        self.assertEqual(len(ours), 3)
+        remaining_ship = [u for u in ours if u['action'] == 'ship']
+        self.assertEqual([u['target'] for u in remaining_ship],
+                         ['shipped_slow'])
+
+    def test_legacy_two_field_log_line_covers_all_namesakes(self):
+        proc = self.process_class
+        legacy_line = f'{proc.__module__}.{proc.__qualname__}\tship'
+        report = coverage_report(executed=[legacy_line])
+        ours = self._ours(report)
+        # Both ship declarations covered (old semantics); both exports not.
+        self.assertEqual({u['action'] for u in ours}, {'export'})
+        self.assertEqual(len(ours), 2)
