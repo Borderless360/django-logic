@@ -32,6 +32,7 @@ from django_logic.commands import (
     NextTransition,
     Permissions,
     SideEffects,
+    note_deferred_unlock,
 )
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import (
@@ -239,7 +240,14 @@ class Transition(BaseTransition):
                 f'{kwargs.get("tr_id")} target-state write failed for '
                 f'{state.instance_key}; releasing the lock before re-raising.'
             )
-            state.unlock()
+            # Same deferral rule as fail_transition: if in_progress_state
+            # was written under this lock, its uncommitted span still
+            # needs protecting — an immediate release would reopen the
+            # unlock-before-commit window (#141). With no prior write,
+            # release now (nothing to protect, nothing to leak).
+            self._release_lock(
+                state, deferrable=bool(self.in_progress_state), **kwargs
+            )
             raise
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
@@ -317,6 +325,10 @@ class Transition(BaseTransition):
             using = state.instance._state.db or DEFAULT_DB_ALIAS
             if transaction.get_connection(using).in_atomic_block:
                 transaction.on_commit(state.unlock, using=using)
+                # Registered so a hook savepoint that rolls back can
+                # release this lock instead of silently discarding the
+                # on_commit hook with it (commands._run_in_savepoint).
+                note_deferred_unlock(using, state)
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
                     f'deferred until commit'

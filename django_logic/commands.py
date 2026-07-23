@@ -23,6 +23,55 @@ def _in_open_transaction(instance) -> tuple[str, bool]:
     return using, transaction.get_connection(using).in_atomic_block
 
 
+def _deferred_unlocks(conn) -> list:
+    if not hasattr(conn, '_dl_deferred_unlocks'):
+        conn._dl_deferred_unlocks = []
+    return conn._dl_deferred_unlocks
+
+
+def note_deferred_unlock(using: str, state: State) -> None:
+    """Record a DEFER_UNLOCK_UNTIL_COMMIT unlock (#141) so hook
+    savepoints can release it if their rollback discards the
+    ``transaction.on_commit`` registration (see ``_run_in_savepoint``).
+    Called by ``Transition._release_lock`` right after registering the
+    on_commit hook."""
+    conn = transaction.get_connection(using)
+    registry = _deferred_unlocks(conn)
+    if not registry:
+        # First deferral this transaction: clear at commit so stale
+        # State objects don't accumulate on a long-lived connection
+        # (entries below a wrapper's window are never popped, so a
+        # missed clear after a rollback is inert, just retained).
+        transaction.on_commit(registry.clear, using=using)
+    registry.append(state)
+
+
+def _run_in_savepoint(using: str, fn):
+    """Run ``fn`` inside a savepoint, without losing deferred unlocks.
+
+    When the savepoint rolls back, Django discards every
+    ``transaction.on_commit`` hook registered inside it — including the
+    DEFER_UNLOCK_UNTIL_COMMIT unlocks (#141) of transitions the hook
+    drove. Their state writes roll back with the savepoint, so those
+    locks protect nothing anymore; dropping the hooks would leak them
+    until TTL *while the outer transaction commits successfully*.
+    On rollback, release exactly the unlocks registered within this
+    savepoint's window (``unlock()`` is a token compare-and-delete, so
+    this can never race a lock that was legitimately re-acquired)."""
+    conn = transaction.get_connection(using)
+    registry = _deferred_unlocks(conn)
+    before = len(registry)
+    try:
+        with transaction.atomic(using=using):
+            return fn()
+    except BaseException:
+        dropped = registry[before:]
+        del registry[before:]
+        for state in dropped:
+            state.unlock()
+        raise
+
+
 class BaseCommand:
     """Base class for command bundles (Pattern: Command)."""
 
@@ -106,8 +155,8 @@ class Callbacks(BaseCommand):
             )
             try:
                 if in_transaction:
-                    with transaction.atomic(using=using):
-                        command(state.instance, **kwargs)
+                    _run_in_savepoint(
+                        using, lambda: command(state.instance, **kwargs))
                 else:
                     command(state.instance, **kwargs)
             except Exception as error:
@@ -148,11 +197,14 @@ class FailureSideEffects(BaseCommand):
         using, in_transaction = _in_open_transaction(state.instance)
         if not in_transaction:
             return self._run(state, **kwargs)
+
+        def _bundle():
+            error = self._run(state, **kwargs)
+            if error is not None:
+                raise _FailureSideEffectsRollback(error)
+
         try:
-            with transaction.atomic(using=using):
-                error = self._run(state, **kwargs)
-                if error is not None:
-                    raise _FailureSideEffectsRollback(error)
+            _run_in_savepoint(using, _bundle)
         except _FailureSideEffectsRollback as rollback:
             return rollback.error
         return None
@@ -232,8 +284,9 @@ class NextTransition:
             # transaction must not poison it (#138), so the follow-up runs
             # in a savepoint there.
             if in_transaction:
-                with transaction.atomic(using=using):
-                    return getattr(process, self._next_transition)(**kwargs)
+                return _run_in_savepoint(
+                    using,
+                    lambda: getattr(process, self._next_transition)(**kwargs))
             return getattr(process, self._next_transition)(**kwargs)
         except Exception as error:
             transition_logger.error(error)
