@@ -30,6 +30,13 @@ class _DeferProcess(Process):
         Transition('fulfill', sources=['approved'], target='fulfilled'),
         Transition('explode', sources=['draft'], target='done',
                    failed_state='failed', side_effects=[_boom]),
+        # Fails without writing ANY state under the lock: no
+        # in_progress_state, no failed_state.
+        Transition('explode_bare', sources=['draft'], target='done',
+                   side_effects=[_boom]),
+        # Fails after writing in_progress_state (but no failed_state).
+        Transition('explode_in_progress', sources=['draft'], target='done',
+                   in_progress_state='working', side_effects=[_boom]),
     ]
 
 
@@ -99,6 +106,28 @@ class DeferUnlockUntilCommitTests(TestCase):
             self.invoice.refresh_from_db()
             self.assertEqual(self.invoice.status, 'failed')
         self.assertFalse(self.state.is_locked())
+
+    def test_failure_without_any_state_write_unlocks_immediately(self):
+        """No in_progress_state, no failed_state: nothing was written
+        under the lock, so there is no invisible span to protect —
+        deferring would only leak the lock until TTL on rollback."""
+        with self.assertRaises(ValueError):
+            self._process().explode_bare()
+        self.assertFalse(self.state.is_locked())
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'draft')
+
+    def test_failure_after_in_progress_write_defers(self):
+        """The in_progress_state written in change_state IS a state write
+        under this lock — its visibility span is protected like any
+        other."""
+        with self.captureOnCommitCallbacks(execute=True):
+            with self.assertRaises(ValueError):
+                self._process().explode_in_progress()
+            self.assertTrue(self.state.is_locked())
+        self.assertFalse(self.state.is_locked())
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'working')
 
     def test_revalidation_failure_still_unlocks_immediately(self):
         # A transition rejected under the lock (persisted state no longer

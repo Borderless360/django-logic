@@ -12,13 +12,14 @@ class State(object):
         self.field_name = field_name
         self.process_name = process_name
 
-    def _remember_effective_timeout(self, timeout):
-        """Resolve and remember the TTL to lock with (per-transition
-        override or the global), so later refreshes keep the lifetime."""
-        self._effective_lock_timeout = (
-            timeout if timeout is not None else _get_lock_timeout()
-        )
-        return self._effective_lock_timeout
+    @staticmethod
+    def _effective_timeout(timeout):
+        """Resolve the TTL to lock with: per-transition override or the
+        global. Pure — the caller remembers it only on a SUCCESSFUL
+        acquisition, so a later failed ``lock()`` on the same object
+        cannot clobber the TTL the held lock was taken with (RedisState's
+        ``set_state`` refreshes reuse it; see ``lock_timeout``)."""
+        return timeout if timeout is not None else _get_lock_timeout()
 
     def get_db_state(self):
         """
@@ -83,10 +84,11 @@ class State(object):
         remembered on the instance so later TTL refreshes (RedisState's
         ``set_state``) keep the same lifetime.
         """
+        effective = self._effective_timeout(timeout)
         token = uuid4().hex
-        if cache.add(self._get_hash(), token,
-                     self._remember_effective_timeout(timeout)):
+        if cache.add(self._get_hash(), token, effective):
             self._lock_token = token
+            self._effective_lock_timeout = effective
             return True
         return False
 
@@ -193,17 +195,18 @@ class RedisState(State):
         return None
 
     def lock(self, timeout=None):
-        self._remember_effective_timeout(timeout)
+        effective = self._effective_timeout(timeout)
         token = uuid4().hex
         current = super().get_state()
         acquired = cache.set(
             self._get_hash(),
             self._store_value(current, token),
-            self.lock_timeout,
+            effective,
             nx=True,
         ) or False
         if acquired:
             self._lock_token = token
+            self._effective_lock_timeout = effective
         return acquired
 
     def is_locked(self):

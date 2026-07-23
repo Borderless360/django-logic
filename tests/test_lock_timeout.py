@@ -60,6 +60,24 @@ class StateLockTimeoutTests(TestCase):
             state.set_state('generating')
         self.assertEqual(cache.set.call_args[0][2], 900)
 
+    def test_failed_reacquisition_does_not_clobber_the_remembered_ttl(self):
+        """A failed lock() on the same object (key already held) must not
+        overwrite the TTL the held lock was taken with — otherwise the
+        next set_state refresh silently shortens a custom lifetime
+        mid-run, the exact hazard lock_timeout exists to prevent."""
+        state = RedisState(self.invoice, 'status')
+        with mock.patch('django_logic.state.cache') as cache:
+            cache.set.return_value = True
+            self.assertTrue(state.lock(900))
+
+            cache.set.return_value = False  # already locked
+            self.assertFalse(state.lock())  # no-arg: would resolve to 7200
+
+            cache.set.return_value = True
+            state.set_state('generating')
+        # The refresh still carries the custom TTL, not the global.
+        self.assertEqual(cache.set.call_args[0][2], 900)
+
 
 class TransitionLockTimeoutTests(TestCase):
     def setUp(self):

@@ -256,9 +256,18 @@ class Transition(BaseTransition):
         # failure_side_effects bundle) must still release the lock; the
         # original side-effect exception keeps propagating out of
         # SideEffects.execute either way.
+        #
+        # Deferral (#141) only applies when a state write actually
+        # happened under this lock — the in_progress_state written in
+        # change_state, or the failed_state written below. A failure with
+        # neither wrote nothing: there is no invisible span to protect,
+        # so the unlock stays immediate (deferring would only leak the
+        # lock until TTL when the outer transaction rolls back).
+        wrote_state = bool(self.in_progress_state)
         try:
             if self.failed_state:
                 state.set_state(self.failed_state)
+                wrote_state = True
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                     f'{self.failed_state}'
@@ -266,12 +275,12 @@ class Transition(BaseTransition):
 
             self.failure_side_effects.execute(state, exception=exception, **kwargs)
         finally:
-            self._release_lock(state, **kwargs)
+            self._release_lock(state, deferrable=wrote_state, **kwargs)
 
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
     @staticmethod
-    def _release_lock(state: State, **kwargs):
+    def _release_lock(state: State, deferrable: bool = True, **kwargs):
         """Release the state lock — now, or at commit (#141).
 
         Inside an outer ``transaction.atomic()`` the target/failed state
@@ -296,12 +305,15 @@ class Transition(BaseTransition):
           skipped (they are best-effort by contract) — chain them from
           ``transaction.on_commit`` in the caller instead.
 
-        Only the paths that follow a successful state write defer; the
-        early revalidation-failure unlock in ``change_state`` stays
-        immediate (nothing was written, so there is no visibility window
-        to protect and nothing to leak on rollback).
+        Only the paths that follow a successful state write defer
+        (``deferrable=True``); when nothing was written under the lock
+        there is no visibility window to protect and deferring would only
+        leak the lock until TTL on rollback — the early
+        revalidation-failure unlock in ``change_state`` and a failure
+        path that wrote no state (no ``in_progress_state``, no
+        ``failed_state``) release immediately.
         """
-        if _defer_unlock_until_commit():
+        if deferrable and _defer_unlock_until_commit():
             using = state.instance._state.db or DEFAULT_DB_ALIAS
             if transaction.get_connection(using).in_atomic_block:
                 transaction.on_commit(state.unlock, using=using)
