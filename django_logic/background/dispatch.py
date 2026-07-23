@@ -187,13 +187,30 @@ def recover_stranded_states() -> int:
     """
     from django_logic.coverage import iter_bound_transitions
     from django_logic.logger import logger
+    from django_logic.process import collect_ambiguous_in_progress_states
     from django_logic.transition import Action
 
     recovered = 0
     seen = set()
+    # In-progress states claimed by more than one bound machine have no
+    # provenance for a record-less stranding — recovering would guess an
+    # owner and could run the wrong failed_state/hooks. Skip them loudly;
+    # the django_logic.E001 system check flags the topology itself (#143).
+    ambiguous = collect_ambiguous_in_progress_states()
+    for key in sorted(ambiguous):
+        model_label, state_field, in_progress = key
+        logger.error(
+            f'recover_stranded_states: in_progress_state {in_progress!r} '
+            f'on {model_label}.{state_field} is claimed by multiple bound '
+            f'machines (django_logic.E001); skipping recovery for it — '
+            f'stranded instances stay parked until the binding topology '
+            f'is fixed.'
+        )
     for binding, process_cls, transition in iter_bound_transitions():
         in_progress = getattr(transition, 'in_progress_state', None)
         if not in_progress:
+            continue
+        if (binding.model._meta.label, binding.state_field, in_progress) in ambiguous:
             continue
         # An Action never writes its in_progress_state (change_state skips
         # the state machinery), so it cannot have stranded an instance
