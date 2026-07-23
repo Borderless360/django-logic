@@ -62,6 +62,11 @@ class _StrandedProcess(Process):
                    failure_side_effects=[raising_failure_side_effect]),
         Transition('archive', sources=['done'], target='archived',
                    in_progress_state='archiving'),  # no failed_state
+        # A namesake of 'archive' parking in a DIFFERENT state, also
+        # without failed_state — each parked backlog must warn on its
+        # own (the warn-once key includes in_progress_state).
+        Transition('archive', sources=['cold'], target='archived',
+                   in_progress_state='cold_archiving'),  # no failed_state
         # An Action ACCEPTS in_progress_state (implicit source only —
         # never written) and failed_state; it must not be a sweep
         # candidate: its fail_transition holds no lock, so it neither
@@ -247,7 +252,7 @@ class RecoverStrandedStatesTests(TestCase):
             self.assertEqual(recover_stranded_states(), 0)
         warnings = [line for line in first.output
                     if 'no failed_state' in line and "'archive'" in line
-                    and 'tests.Invoice' in line]
+                    and 'tests.Invoice' in line and "'archiving'" in line]
         self.assertEqual(len(warnings), 1,
                          'one warning per transition, not per candidate')
         # observable: the parked backlog size is in the warning
@@ -267,6 +272,23 @@ class RecoverStrandedStatesTests(TestCase):
             self.assertEqual(invoice.status, 'archiving', 'left as-is')
             self.assertFalse(State(invoice, 'status').is_locked(),
                              'never locked')
+
+    def test_namesakes_with_distinct_in_progress_states_each_warn(self):
+        """The warn-once key includes in_progress_state: namesake
+        transitions parking candidates in different states are different
+        parked backlogs — the second must not be silenced by the first."""
+        self._strand('archiving')
+        self._strand('cold_archiving')
+
+        with self.assertLogs('django-logic', level='WARNING') as logs:
+            self.assertEqual(recover_stranded_states(), 0)
+        warnings = [line for line in logs.output
+                    if 'no failed_state' in line and "'archive'" in line
+                    and 'tests.Invoice' in line]
+        self.assertEqual(len(warnings), 2,
+                         'one warning per parked state, not per action name')
+        self.assertTrue(any("'archiving'" in w for w in warnings))
+        self.assertTrue(any("'cold_archiving'" in w for w in warnings))
 
     def test_large_backlog_is_fully_recovered_in_bounded_pages(self):
         """#145 regression: the sweep must page through candidates by

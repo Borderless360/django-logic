@@ -371,3 +371,64 @@ class NamesakeDeclarationIdentityTests(TestCase):
         # Both ship declarations covered (old semantics); both exports not.
         self.assertEqual({u['action'] for u in ours}, {'export'})
         self.assertEqual(len(ours), 2)
+
+
+def _cond_received(instance, **kwargs):
+    return instance.customer_received
+
+
+def _cond_not_received(instance, **kwargs):
+    return not instance.customer_received
+
+
+class ConditionOnlyNamesakeIdentityTests(TestCase):
+    """Same-class namesakes sharing sources→target and differing ONLY by
+    conditions (the per-courier polymorphism pattern) must count and
+    cover as separate declarations — the conditions fingerprint in the
+    key keeps them apart."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        class CourierishProcess(Process):
+            process_name = 'courierish_process'
+            transitions = [
+                Transition('ship', sources=['ready'], target='shipped',
+                           conditions=[_cond_received]),
+                Transition('ship', sources=['ready'], target='shipped',
+                           conditions=[_cond_not_received]),
+            ]
+
+        cls.process_class = CourierishProcess
+        ProcessManager.bind_model_process(Invoice, CourierishProcess,
+                                          state_field='status')
+
+    @classmethod
+    def tearDownClass(cls):
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings
+            if b.process_class is not cls.process_class
+        ]
+        if 'courierish_process' in vars(Invoice):
+            delattr(Invoice, 'courierish_process')
+        super().tearDownClass()
+
+    def _ours(self, report):
+        return [u for u in report['uncovered']
+                if u['process'].endswith('CourierishProcess')]
+
+    def test_condition_only_namesakes_count_separately(self):
+        report = coverage_report(executed=())
+        self.assertEqual(len(self._ours(report)), 2)
+
+    def test_driving_one_variant_covers_only_that_declaration(self):
+        invoice = Invoice.objects.create(status='ready',
+                                         customer_received=True)
+        with TransitionCoverage() as cov:
+            invoice.courierish_process.ship()
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'shipped')
+
+        remaining = self._ours(cov.report())
+        self.assertEqual(len(remaining), 1)

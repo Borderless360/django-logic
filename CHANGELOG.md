@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Savepoint unlock cleanup is exception-contained.** When a hook
+  savepoint rollback releases the deferred unlocks it discarded (#141 ×
+  #138), one release raising (a cache blip) no longer skips the sibling
+  releases or replaces the hook's original exception — the missed
+  release degrades to the documented TTL-bounded leak, logged.
+
+- **Coverage keys carry a conditions fingerprint** (#146 follow-up).
+  Same-class namesakes sharing sources→target and differing only by
+  `conditions` — the per-courier polymorphism pattern — no longer
+  collapse into one declaration: the key includes the condition
+  callables' sorted qualnames. (Anonymous lambdas can still collide;
+  named condition functions, the norm, stay distinct.)
+
+- **The missing-`failed_state` warn-once key includes
+  `in_progress_state`** (#145 follow-up). Namesake transitions parking
+  candidates in different states are different parked backlogs — the
+  second is no longer silenced by the first's warning.
+
 ## [0.9.0] — 2026-07-23
 
 Stranded-state recovery (#136): `recover_stranded_states`, the fifth
