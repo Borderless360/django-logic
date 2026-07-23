@@ -20,7 +20,6 @@ in ``django_logic.background.transitions`` (phase 1) and
 ``django_logic.background.runner`` (phase 2).
 """
 import math
-from abc import ABC
 from uuid import UUID
 
 from django.conf import settings as django_settings
@@ -53,7 +52,7 @@ def _defer_unlock_until_commit() -> bool:
     )
 
 
-class BaseTransition(ABC):
+class BaseTransition:
     side_effects_class = SideEffects
     callbacks_class = Callbacks
     failure_callbacks_class = Callbacks
@@ -137,23 +136,25 @@ class Transition(BaseTransition):
                 f"Transition '{action_name}': lock_timeout must be a "
                 f"positive number of seconds, got {self.lock_timeout!r}."
             )
+        # Only SideEffects dereferences its transition (to drive
+        # complete/fail); the other command bundles never read it.
         self.failure_callbacks = self.failure_callbacks_class(
-            kwargs.get('failure_callbacks', []), transition=self
+            kwargs.get('failure_callbacks', [])
         )
         self.failure_side_effects = self.failure_side_effects_class(
-            kwargs.get('failure_side_effects', []), transition=self
+            kwargs.get('failure_side_effects', [])
         )
         self.side_effects = self.side_effects_class(
             kwargs.get('side_effects', []), transition=self
         )
         self.callbacks = self.callbacks_class(
-            kwargs.get('callbacks', []), transition=self
+            kwargs.get('callbacks', [])
         )
         self.permissions = self.permissions_class(
-            kwargs.get('permissions', []), transition=self
+            kwargs.get('permissions', [])
         )
         self.conditions = self.conditions_class(
-            kwargs.get('conditions', []), transition=self
+            kwargs.get('conditions', [])
         )
         self.next_transition = self.next_transition_class(
             kwargs.get('next_transition')

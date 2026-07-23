@@ -84,10 +84,13 @@ class Process:
         if state is not None:
             self.state = state
         else:
-            assert field_name and instance is not None, (
-                'Process requires either a state object or '
-                '(field_name, instance).'
-            )
+            if not field_name or instance is None:
+                # A real exception, not an assert — asserts vanish under
+                # python -O and this is the constructor's only guard.
+                raise TypeError(
+                    'Process requires either a state object or '
+                    '(field_name, instance).'
+                )
             self.state = self.state_class(
                 instance=instance,
                 field_name=field_name,

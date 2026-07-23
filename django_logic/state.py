@@ -11,10 +11,18 @@ def _get_lock_timeout():
 
 
 class State(object):
-    def __init__(self, instance: any, field_name: str, process_name=None):
+    def __init__(self, instance, field_name: str, process_name=None):
         self.instance = instance
         self.field_name = field_name
         self.process_name = process_name
+
+    def _remember_effective_timeout(self, timeout):
+        """Resolve and remember the TTL to lock with (per-transition
+        override or the global), so later refreshes keep the lifetime."""
+        self._effective_lock_timeout = (
+            timeout if timeout is not None else _get_lock_timeout()
+        )
+        return self._effective_lock_timeout
 
     def get_db_state(self):
         """
@@ -79,11 +87,9 @@ class State(object):
         remembered on the instance so later TTL refreshes (RedisState's
         ``set_state``) keep the same lifetime.
         """
-        self._effective_lock_timeout = (
-            timeout if timeout is not None else _get_lock_timeout()
-        )
         token = uuid4().hex
-        if cache.add(self._get_hash(), token, self._effective_lock_timeout):
+        if cache.add(self._get_hash(), token,
+                     self._remember_effective_timeout(timeout)):
             self._lock_token = token
             return True
         return False
@@ -191,9 +197,7 @@ class RedisState(State):
         return None
 
     def lock(self, timeout=None):
-        self._effective_lock_timeout = (
-            timeout if timeout is not None else _get_lock_timeout()
-        )
+        self._remember_effective_timeout(timeout)
         token = uuid4().hex
         current = super().get_state()
         acquired = cache.set(

@@ -40,7 +40,7 @@ class BaseCommand:
 
 class Conditions(BaseCommand):
     def execute(self, instance, **kwargs):
-        return all(command(instance, **kwargs) for command in self._commands)
+        return all(command(instance, **kwargs) for command in self.commands)
 
 
 class Permissions(BaseCommand):
@@ -49,7 +49,7 @@ class Permissions(BaseCommand):
         # Callers that need authenticated-only transitions must enforce that
         # at the caller site.
         return user is None or all(
-            command(instance, user, **kwargs) for command in self._commands
+            command(instance, user, **kwargs) for command in self.commands
         )
 
 
@@ -63,9 +63,9 @@ class SideEffects(BaseCommand):
     def execute(self, state: State, **kwargs):
         try:
             transition_logger.info(
-                f'{kwargs.get("tr_id")} SideEffects {len(self._commands)}'
+                f'{kwargs.get("tr_id")} SideEffects {len(self.commands)}'
             )
-            for command in self._commands:
+            for command in self.commands:
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                     f'{getattr(command, "__name__", repr(command))}'
