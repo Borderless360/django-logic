@@ -34,7 +34,10 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "django>=4.0",
+    # Floor matches the tested matrix (classifiers + CI); 5.0 is explicitly
+    # excluded — support for 4.0/4.1/5.0 was dropped in 0.5.0 (see CHANGELOG).
+    # No upper bound by design: the django-main CI job is the early warning.
+    "django>=4.2,!=5.0.*",
     "django-model-utils>=4.5.1",
     # Celery and Redis are core dependencies, not extras. Background
     # transitions always execute through Celery in production ('sync'

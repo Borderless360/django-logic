@@ -32,29 +32,27 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 
 ## Requirements
 - Python 3.11+
-- Django 4.0+
+- Django 4.2+ (4.2, 5.1, 5.2 and 6.0 are tested in CI; 5.0 is not supported)
 - django-model-utils >= 4.5.1
 - celery >= 5.0 — **installed automatically**; background transitions are Celery tasks
 - django-redis >= 5.0.0 — **installed automatically**; provides the cross-process state lock (the lock cache / `RedisState`)
 
 Extras:
-- `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; 0.4.x ships no DRF-specific code)
-- `[celery]` and `[redis]` remain as **empty aliases**, so existing `pip install django-logic[celery,redis]` pins keep resolving — both packages are core dependencies as of 0.4
+- `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; no DRF-specific code ships since 0.4)
+- `[celery]` and `[redis]` remain as **empty aliases**, so existing `pip install django-logic[celery,redis]` pins keep resolving — both packages are core dependencies since 0.4
 
 ## Installation
 
-> **Heads up — versions.** The PyPI release is still the legacy `0.1.x` line.
-> The 0.4.x API documented in this README ships from GitHub (`master`);
-> install it from a tag until 0.4.x is published to PyPI.
-
 ```bash
-# 0.4.x — the version this README documents (from GitHub).
+# Installs the current release from PyPI (0.8.0 at the time of writing).
 # Celery and django-redis are installed automatically.
-pip install "django-logic @ git+https://github.com/Borderless360/django-logic.git@v0.4.0"
-
-# 0.1.x — legacy release on PyPI (different API)
 pip install django-logic
 ```
+
+This README documents the current release line (the API introduced in 0.4).
+If you are upgrading from a pre-0.2 release — the old DRF/Celery-coupled API —
+note that the API changed substantially in 0.2–0.4; [CHANGELOG.md](CHANGELOG.md)
+documents every breaking change and the migration steps.
 
 ## Quick Start
 

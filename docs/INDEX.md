@@ -1,66 +1,88 @@
 # Django Logic — Documentation Index
 
-> All planning, design, and reference material for the road to 1,000 stars.
+Documentation lives in two clearly separated tiers: **current** user-facing
+guides (normative — kept in sync with the shipped code) and **historical**
+planning/research material (kept for context, not normative).
+
+---
+
+## Current documentation — start here
+
+User-facing guides for the shipped release (see [CHANGELOG.md](../CHANGELOG.md)
+for what each version delivered):
+
+1. **[README.md](../README.md)** (repo root) — installation, quick start,
+   core concepts, background transitions, production deployment. The primary
+   user guide.
+2. **[TESTING_GUIDE.md](TESTING_GUIDE.md)** — how to test your processes:
+   the *journeys, not mirrors* principle, the full scenario catalog (gating,
+   failure paths, retries, superseded rows, nested processes, snapshot
+   replay), and the `ProcessScenario` API reference.
+3. **[recipes/nested-processes.md](recipes/nested-processes.md)** — the
+   parent/child fan-out recipe: how to coordinate work across state machines
+   without the cascading-failure anti-pattern (nested `process.xxx()` calls
+   inside side-effects).
+4. **[logger.md](logger.md)** — structured logging: the `django-logic` /
+   `django-logic.transition` loggers and how to configure them via Django
+   `LOGGING`.
+5. **[IMPROVEMENTS_FROM_HEROKU_VALIDATION.md](IMPROVEMENTS_FROM_HEROKU_VALIDATION.md)**
+   — validated-behavior notes and open improvement ideas from the
+   production-style Heroku validation (RabbitMQ + PostgreSQL + worker crashes
+   + pgbouncer).
+
+---
+
+## Historical — kept for context, not normative
+
+Planning and research material from the 0.2 → 0.8 development push. The work
+these documents plan and analyse **has shipped** (durable background
+transitions in 0.3.0/0.4.0, scenario testing in 0.4.0, observability in 0.6.0,
+transition coverage in 0.8.0); where they disagree with README/TESTING_GUIDE
+or the code, the shipped behaviour wins.
+
+- **[PLAN.md](PLAN.md)** — snapshot of the v3 execution plan (Stages 1–5),
+  superseded by the shipped 0.4–0.8 releases; see the CHANGELOG.
+- **[design/BACKGROUND_TRANSITION_ANALYSIS.md](design/BACKGROUND_TRANSITION_ANALYSIS.md)**
+  — the design record for `BackgroundTransition`: single-task execution,
+  crash-point analysis, queue strategy, reliability contract.
+- **[design/TESTING_SCENARIOS.md](design/TESTING_SCENARIOS.md)** — the design
+  record for the scenario-based testing framework (`ProcessScenario`,
+  AI-readable output, snapshots).
+- **[research/](research/)** — raw notes: PR #75 review (Stage 1),
+  race-condition investigation, monitoring/timeout/fallback ideas.
+
+> The original "fundamental problem" write-up (the nested-transition failure
+> analysis) was an external research note and is **not part of this repo**;
+> its shipped equivalent is
+> [recipes/nested-processes.md](recipes/nested-processes.md).
 
 ---
 
 ## Structure
 
 ```
-dl/
-├── fundamental problem.md            ← repo root: nested-transition
-│                                        failure analysis (GV upgrade pain)
+django-logic/
+├── README.md                         ← current: primary user guide
+├── CHANGELOG.md                      ← current: per-release history
 │
 └── docs/
     ├── INDEX.md                      ← you are here
-    ├── PLAN.md                       ← master execution plan (stages 1–5)
-    ├── TESTING_GUIDE.md              ← how to test your processes:
-    │                                   journeys-not-mirrors + scenario catalog
+    ├── TESTING_GUIDE.md              ← current: how to test your processes
+    ├── logger.md                     ← current: structured logging
+    ├── IMPROVEMENTS_FROM_HEROKU_VALIDATION.md
+    │                                 ← current: validated behavior + ideas
+    ├── recipes/
+    │   └── nested-processes.md       ← current: parent/child fan-out recipe
     │
-    ├── design/                       ← active design decisions
-    │   ├── BACKGROUND_TRANSITION_ANALYSIS.md   ← chosen design, crash
-    │   │                                         matrix, queue strategy
-    │   └── TESTING_SCENARIOS.md                ← scenario-based testing
-    │                                             framework
-    │
-    └── research/                     ← historical research & raw notes
-        ├── PR-75-REVIEW.md           ← review of PR #75 (Stage 1, complete)
-        ├── idea1.txt                 ← monitoring, timeouts, fallback ideas
-        └── race-condition-issue      ← race-condition investigation & fix
+    ├── PLAN.md                       ← historical: v3 execution plan snapshot
+    ├── design/                       ← historical: design decision records
+    │   ├── BACKGROUND_TRANSITION_ANALYSIS.md
+    │   └── TESTING_SCENARIOS.md
+    └── research/                     ← historical: raw research notes
+        ├── PR-75-REVIEW.md
+        ├── idea1.txt
+        └── race-condition-issue
 ```
-
----
-
-## Reading Order
-
-For someone new to this project, read in this order:
-
-1. **[`fundamental problem.md`](../fundamental%20problem.md)** (repo root) —
-   Why nested `process.xxx()` calls inside side-effects cascaded when
-   `django-logic` started re-raising in 0.2.0. This is the operational
-   reason the Stage 2 design exists.
-
-2. **[PLAN.md](PLAN.md)** — The master plan. Vision, current state,
-   Stages 1–5, resolved decisions, success metrics.
-
-3. **[design/BACKGROUND_TRANSITION_ANALYSIS.md](design/BACKGROUND_TRANSITION_ANALYSIS.md)** —
-   The chosen `BackgroundTransition` design in detail: single-task
-   execution, explicit per-transition queues, crash-point analysis,
-   reliability contract. Primary input for Stage 2 implementation.
-
-4. **[design/TESTING_SCENARIOS.md](design/TESTING_SCENARIOS.md)** —
-   Scenario-based testing framework for document-driven development.
-   `ProcessScenario` API, AI-readable output, state snapshots.
-   Primary input for Stage 3.
-
-5. **[TESTING_GUIDE.md](TESTING_GUIDE.md)** — The practical how-to for
-   testing your own processes: the *journeys, not mirrors* principle and
-   guardrails, the full scenario catalog (gating, failure paths, the
-   re-raise/swallow contract, domain-outcome assertions, the cross-machine
-   cascade), and the `ProcessScenario` API reference.
-
-6. **[research/](research/)** — Historical notes: PR #75 review
-   (Stage 1 complete), race-condition investigation, monitoring ideas.
 
 ---
 
@@ -69,10 +91,13 @@ For someone new to this project, read in this order:
 | Stage | Version | Status |
 |-------|---------|--------|
 | Stage 1 — Land PR #75 | v0.2.0 | Complete |
-| Stage 2 — Durable BackgroundTransition | v0.3.0 | Active |
-| Stage 3 — Observability, DX & Testing | v1.0.0 | Planned |
+| Stage 2 — Durable BackgroundTransition | v0.3.0–v0.4.0 | Complete (shipped) |
+| Stage 3 — Observability, DX & Testing | v0.4.0 (scenario testing), v0.6.0 (observability), v0.8.0 (transition coverage) | Complete (shipped) |
 | Stage 4 — Communication & Launch | — | Planned |
 | Stage 5 — Community & Ecosystem | — | Planned |
+
+See [CHANGELOG.md](../CHANGELOG.md) for the authoritative per-release record
+and [TODO.md](../TODO.md) for what remains planned.
 
 ---
 
@@ -80,6 +105,7 @@ For someone new to this project, read in this order:
 
 | Folder | Purpose | Modify? |
 |--------|---------|---------|
-| `docs/` (root) | Master plan and index | Yes — update as stages complete |
-| `docs/design/` | Active design decisions we're building from | Yes — refine as we implement |
+| `docs/` (root) | Index + current user guides (TESTING_GUIDE, logger, recipes) | Yes — keep in sync with shipped code |
+| `docs/PLAN.md` | Historical plan snapshot | No — banner + link fixes only |
+| `docs/design/` | Historical design decision records (implemented) | No — keep as-is for reference |
 | `docs/research/` | Historical research, completed reviews, raw notes | No — keep as-is for reference |
