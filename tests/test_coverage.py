@@ -371,3 +371,96 @@ class NamesakeDeclarationIdentityTests(TestCase):
         # Both ship declarations covered (old semantics); both exports not.
         self.assertEqual({u['action'] for u in ours}, {'export'})
         self.assertEqual(len(ours), 2)
+
+    def test_prior_090_four_field_line_covers_its_full_declaration(self):
+        # A 0.9.0 recorder wrote 4-field keys (no conditions fingerprint):
+        # class \t action \t kind \t sources>target. Such a line must still
+        # cover the 0.9.1 declaration sharing that prefix — including the
+        # empty-conditions trailing-tab round-trip for a no-condition
+        # transition — so a coverage log persisted across the 0.9.0→0.9.1
+        # upgrade does not spuriously report driven transitions uncovered.
+        # Unlike the 0.8 line it is precise at the sources→target level:
+        # the fast-lane declaration only, not every 'ship' namesake.
+        proc = self.process_class
+        prior_line = (f'{proc.__module__}.{proc.__qualname__}'
+                      f'\tship\tsync\tfast_lane>shipped_fast')
+        report = coverage_report(executed=[prior_line])
+        ours = self._ours(report)
+        targets = {(u['action'], u['target']) for u in ours}
+        self.assertNotIn(('ship', 'shipped_fast'), targets)  # covered
+        self.assertIn(('ship', 'shipped_slow'), targets)     # distinct prefix
+        self.assertEqual(len(ours), 3)
+
+
+def _cond_received(instance, **kwargs):
+    return instance.customer_received
+
+
+def _cond_not_received(instance, **kwargs):
+    return not instance.customer_received
+
+
+class ConditionOnlyNamesakeIdentityTests(TestCase):
+    """Same-class namesakes sharing sources→target and differing ONLY by
+    conditions (the per-courier polymorphism pattern) must count and
+    cover as separate declarations — the conditions fingerprint in the
+    key keeps them apart."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        class CourierishProcess(Process):
+            process_name = 'courierish_process'
+            transitions = [
+                Transition('ship', sources=['ready'], target='shipped',
+                           conditions=[_cond_received]),
+                Transition('ship', sources=['ready'], target='shipped',
+                           conditions=[_cond_not_received]),
+            ]
+
+        cls.process_class = CourierishProcess
+        ProcessManager.bind_model_process(Invoice, CourierishProcess,
+                                          state_field='status')
+
+    @classmethod
+    def tearDownClass(cls):
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings
+            if b.process_class is not cls.process_class
+        ]
+        if 'courierish_process' in vars(Invoice):
+            delattr(Invoice, 'courierish_process')
+        super().tearDownClass()
+
+    def _ours(self, report):
+        return [u for u in report['uncovered']
+                if u['process'].endswith('CourierishProcess')]
+
+    def test_condition_only_namesakes_count_separately(self):
+        report = coverage_report(executed=())
+        self.assertEqual(len(self._ours(report)), 2)
+
+    def test_driving_one_variant_covers_only_that_declaration(self):
+        invoice = Invoice.objects.create(status='ready',
+                                         customer_received=True)
+        with TransitionCoverage() as cov:
+            invoice.courierish_process.ship()
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'shipped')
+
+        remaining = self._ours(cov.report())
+        self.assertEqual(len(remaining), 1)
+
+    def test_prior_090_line_covers_all_condition_only_namesakes(self):
+        # 0.9.0 collapsed condition-only namesakes into ONE 4-field key, so
+        # it cannot say which variant ran: a 0.9.0 line for this
+        # sources→target must cover BOTH 0.9.1 condition variants (cover-all
+        # one level up, mirroring the 0.8 legacy rule). This is the exact
+        # false-"uncovered" gap the conditions fingerprint would otherwise
+        # open on a pre-0.9.1 log — Bugbot #153 finding.
+        proc = self.process_class
+        prior_line = (f'{proc.__module__}.{proc.__qualname__}'
+                      f'\tship\tsync\tready>shipped')
+        report = coverage_report(executed=[prior_line])
+        self.assertEqual(self._ours(report), [])
