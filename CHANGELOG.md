@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-07-24
+
 ### Fixed
 
 - **`RedisState` lock refresh is atomic on django-redis** (#151). The
@@ -12,7 +14,11 @@
   re-plant a stale holder's token over a successor's lock — closing the
   residual window #139 documented. Off django-redis (the single-process
   test fake / LocMemCache) the plain read-write is unchanged; it cannot
-  race there.
+  race there. The CAS runs on the raw django-redis connection, so a Redis
+  connection error during the refresh now surfaces to the caller
+  regardless of django-redis `IGNORE_EXCEPTIONS` (0.9.0 swallowed it on
+  the cache-wrapped path and still committed the DB write) — the lock
+  backend fails loud on an outage instead of proceeding without exclusion.
 
 - **Savepoint unlock cleanup is exception-contained.** When a hook
   savepoint rollback releases the deferred unlocks it discarded (#141 ×
