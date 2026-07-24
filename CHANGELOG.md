@@ -15,7 +15,12 @@
   `conditions` — the per-courier polymorphism pattern — no longer
   collapse into one declaration: the key includes the condition
   callables' sorted qualnames. (Anonymous lambdas can still collide;
-  named condition functions, the norm, stay distinct.)
+  named condition functions, the norm, stay distinct.) The wider key
+  stays backward-compatible with persisted coverage logs: a 0.9.0-format
+  line (no conditions field) covers every declaration sharing its
+  `class⇥action⇥kind⇥sources>target` prefix, so a log carried across the
+  upgrade does not spuriously read as all-uncovered (a fresh log per run,
+  the documented practice, avoids cross-version keys entirely).
 
 - **The missing-`failed_state` warn-once key includes
   `in_progress_state`** (#145 follow-up). Namesake transitions parking

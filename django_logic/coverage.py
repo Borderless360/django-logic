@@ -36,14 +36,21 @@ One footgun worth knowing:
   fresh path (or delete the old file first), or stale pairs from earlier
   runs silently count as covered.
 
-Declaration identity (#146): keys carry the declaration's kind
-(sync/background) and shape (sources → target) besides the class and
-action name, so condition-disambiguated same-name transitions — including
-a sync + background namesake pair in one class — count and cover
-separately. Two *literally identical* declarations still collapse (they
-are behaviorally indistinguishable). Logs written by 0.8 recorders used
-2-field ``class\taction`` keys; ``coverage_report`` still accepts them
-with the old semantics (a legacy line covers every same-name namesake).
+Declaration identity (#146, #153): keys carry the declaration's kind
+(sync/background), shape (sources → target), and a conditions fingerprint
+(the condition callables' sorted qualnames) besides the class and action
+name, so condition-disambiguated same-name transitions — including a sync
++ background namesake pair, and per-courier variants differing only by
+conditions — count and cover separately. Two *literally identical*
+declarations still collapse (they are behaviorally indistinguishable).
+
+Cross-version log compatibility: ``coverage_report`` still accepts keys
+written by older recorders. A 0.8 line was 2-field ``class\taction`` and
+covers every same-name namesake; a 0.9.0 line was 4-field (no conditions
+fingerprint) and covers every 0.9.1 declaration sharing its
+``class\taction\tkind\tsources>target`` prefix (cover-all one level up —
+that older log cannot say which condition-variant ran). A fresh log per
+run (the documented practice) sidesteps cross-version keys entirely.
 
 No test-framework imports here: activation happens in ``AppConfig.ready``,
 which also runs in production processes.
@@ -130,6 +137,16 @@ def coverage_report(executed=None, log_path=None) -> dict:
     # logs). Full keys cover exactly one declaration.
     legacy_pairs = {key for key in executed_keys if key.count('\t') == 1}
 
+    # 0.9.0 recorders wrote 4-field 'class\taction\tkind\tsources>target'
+    # keys (3 tabs) — the per-declaration format before this release added
+    # the conditions fingerprint (making full keys 4-tab). A 0.9.0 line
+    # covers every 0.9.1 declaration sharing that 4-field prefix: the older
+    # recorder collapsed condition-only namesakes, so it genuinely cannot
+    # say which variant ran (same cover-all rule as the 0.8 legacy line,
+    # one level up). Without this, a persisted/merged pre-0.9.1 log would
+    # spuriously report every declaration uncovered after the upgrade.
+    prior_full = {key for key in executed_keys if key.count('\t') == 3}
+
     declared = {}
     for binding, process_cls, transition in iter_bound_transitions():
         entry = declared.setdefault(_key(process_cls, transition), {
@@ -148,6 +165,7 @@ def coverage_report(executed=None, log_path=None) -> dict:
          if k != '_pair'}
         for key, entry in sorted(declared.items())
         if key not in executed_keys and entry['_pair'] not in legacy_pairs
+        and key.rsplit('\t', 1)[0] not in prior_full
     ]
     return {
         'total': len(declared),

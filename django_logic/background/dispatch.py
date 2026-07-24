@@ -270,8 +270,9 @@ def _reset_warned() -> None:
 
 
 def _warn_once_about_missing_failed_state(binding, transition) -> None:
-    """Warn — once per process lifetime per (model, state_field, action) —
-    that a transition's stranded candidates cannot be recovered because it
+    """Warn — once per process lifetime per (model, state_field, action,
+    in_progress_state) — that a transition's stranded candidates cannot be
+    recovered because it
     declares no ``failed_state``. The candidate count is included (one
     ``.count()``, cheap because this fires once) so the parked backlog
     stays observable."""
