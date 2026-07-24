@@ -38,6 +38,13 @@ def _drive_other_then_fail(instance, **kwargs):
     raise ValueError('hook failed after driving another instance')
 
 
+def _drive_two_others_then_fail(instance, **kwargs):
+    for pk in _OTHER['pks']:
+        other = Invoice.objects.get(pk=pk)
+        _DeferProcess(field_name='status', instance=other).approve()
+    raise ValueError('hook failed after driving two other instances')
+
+
 class _DeferProcess(Process):
     process_name = 'defer_process'
     transitions = [
@@ -55,6 +62,8 @@ class _DeferProcess(Process):
         # Succeeds, then a callback drives another instance and fails.
         Transition('chain_hook', sources=['draft'], target='approved',
                    callbacks=[_drive_other_then_fail]),
+        Transition('chain_hook_two', sources=['draft'], target='approved',
+                   callbacks=[_drive_two_others_then_fail]),
         # Fails; a failure side-effect drives another instance and fails.
         Transition('cleanup_chain', sources=['draft'], target='done',
                    failed_state='failed', side_effects=[_boom],
@@ -174,6 +183,37 @@ class DeferUnlockUntilCommitTests(TestCase):
         self.assertFalse(self.state.is_locked())
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'approved')
+
+    def test_savepoint_cleanup_survives_a_failing_unlock(self):
+        """One unlock raising (cache blip) must neither skip the sibling
+        releases nor replace the hook's original exception — the missed
+        release degrades to the documented TTL-bounded leak."""
+        first = Invoice.objects.create(status='draft')
+        second = Invoice.objects.create(status='draft')
+        _OTHER['pks'] = [first.pk, second.pk]
+        first_state = State(first, 'status', process_name='defer_process')
+        second_state = State(second, 'status', process_name='defer_process')
+
+        original_unlock = State.unlock
+
+        def blipping_unlock(state_self):
+            if state_self.instance.pk == first.pk:
+                raise ConnectionError('cache blip')
+            return original_unlock(state_self)
+
+        with mock.patch.object(State, 'unlock', blipping_unlock):
+            with self.captureOnCommitCallbacks(execute=False):
+                # The hook's ValueError is swallowed (best-effort) — the
+                # cleanup's ConnectionError must not replace it either.
+                self._process().chain_hook_two()
+
+        # First lock leaked (TTL-bounded, logged); the SECOND was still
+        # released despite the earlier blip.
+        self.assertTrue(first_state.is_locked())
+        self.assertFalse(second_state.is_locked())
+
+        # Manual cleanup for the leaked key.
+        State(first, 'status', process_name='defer_process').unlock()
 
     def test_failure_side_effect_savepoint_rollback_releases_inner_deferred_unlock(self):
         other = Invoice.objects.create(status='draft')

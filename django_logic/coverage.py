@@ -58,14 +58,26 @@ def _pair(process_cls, action_name: str) -> str:
 
 
 def _key(process_cls, transition) -> str:
-    """Stable per-declaration identity: class, action, kind, and the
-    declared shape. Independent of declaration order (sources sorted),
-    survives process restarts and transition-list reorders."""
+    """Stable per-declaration identity: class, action, kind, the declared
+    shape, and a conditions fingerprint. Independent of declaration order
+    (sources and condition names sorted), survives process restarts and
+    transition-list reorders.
+
+    The conditions fingerprint matters for the common polymorphic
+    pattern: same-class namesakes that share sources→target and differ
+    ONLY by conditions (per-courier variants) must not collapse. It uses
+    the condition callables' qualnames — two anonymous lambdas can still
+    collide, but named condition functions (the norm) stay distinct.
+    """
     kind = 'bg' if getattr(transition, 'is_background', False) else 'sync'
     sources = '|'.join(sorted(transition.sources))
     target = transition.target or ''
+    conditions = ','.join(sorted(
+        getattr(fn, '__qualname__', None) or type(fn).__name__
+        for fn in getattr(transition.conditions, 'commands', None) or ()
+    ))
     return (f'{_pair(process_cls, transition.action_name)}'
-            f'\t{kind}\t{sources}>{target}')
+            f'\t{kind}\t{sources}>{target}\t{conditions}')
 
 
 def iter_bound_transitions():

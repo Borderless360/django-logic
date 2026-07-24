@@ -254,10 +254,12 @@ def recover_stranded_states() -> int:
 #: rows into an in-progress state).
 _TM_SCAN_CHUNK = 500
 
-#: (model_label, state_field, action_name) triples already warned about
-#: for a missing failed_state — once per process lifetime, following the
-#: ``_celery_config_warned`` precedent above. Tests reset via
-#: :func:`_reset_warned`.
+#: (model_label, state_field, action_name, in_progress_state) already
+#: warned about for a missing failed_state — once per process lifetime,
+#: following the ``_celery_config_warned`` precedent above.
+#: ``in_progress_state`` is part of the key: condition-disambiguated or
+#: nested namesakes park candidates in *different* states, and each
+#: parked backlog must surface. Tests reset via :func:`_reset_warned`.
 _no_failed_state_warned: set = set()
 
 
@@ -276,7 +278,7 @@ def _warn_once_about_missing_failed_state(binding, transition) -> None:
     from django_logic.logger import logger
 
     key = (binding.model._meta.label, binding.state_field,
-           transition.action_name)
+           transition.action_name, transition.in_progress_state)
     if key in _no_failed_state_warned:
         return
     _no_failed_state_warned.add(key)

@@ -68,7 +68,18 @@ def _run_in_savepoint(using: str, fn):
         dropped = registry[before:]
         del registry[before:]
         for state in dropped:
-            state.unlock()
+            # Each release is contained: one cache blip must not skip the
+            # remaining sibling unlocks or replace the hook's original
+            # exception (a missed release degrades to the TTL-bounded
+            # leak; the loop and the re-raise both continue).
+            try:
+                state.unlock()
+            except Exception:
+                transition_logger.exception(
+                    f'failed to release a deferred unlock for '
+                    f'{state.instance_key} after a savepoint rollback; '
+                    f'the lock expires via its TTL.'
+                )
         raise
 
 
