@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`RedisState` lock refresh is atomic on django-redis** (#151). The
+  value+lock key's refresh in `set_state` is now a single server-side
+  compare-and-set (Lua): the new state is written only if the key still
+  holds exactly the bytes the ownership decision was based on, so a
+  takeover landing strictly between the read and the write can no longer
+  re-plant a stale holder's token over a successor's lock — closing the
+  residual window #139 documented. Off django-redis (the single-process
+  test fake / LocMemCache) the plain read-write is unchanged; it cannot
+  race there.
+
 ## [0.9.0] — 2026-07-23
 
 Stranded-state recovery (#136): `recover_stranded_states`, the fifth

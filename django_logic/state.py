@@ -158,6 +158,36 @@ class RedisState(State):
     _STATE_KEY = '__dl_state__'
     _TOKEN_KEY = '__dl_token__'
 
+    # Atomic refresh (#151): rewrite the live key's value with a new TTL
+    # only if it still holds exactly the bytes ``set_state`` based its
+    # ownership decision on. A takeover (value changed) or TTL expiry
+    # (value gone) since the read makes the GET mismatch, so the write is
+    # skipped — a stale holder can never re-plant its token over a
+    # successor's lock, and an unlocked writer can never recreate an
+    # expired key (xx semantics). Runs server-side on django-redis.
+    _REFRESH_CAS = (
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+        "redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3]) return 1 "
+        "end return 0"
+    )
+
+    @staticmethod
+    def _redis_conn():
+        """The raw django-redis connection used for the atomic refresh, or
+        ``None`` when the backend is not django-redis — the single-process
+        test fake / LocMemCache, where the read-compare-write below cannot
+        race and needs no server-side CAS."""
+        if getattr(cache, 'client', None) is None:
+            return None
+        try:
+            from django_redis import get_redis_connection
+        except ImportError:
+            return None
+        try:
+            return get_redis_connection('default')
+        except Exception:
+            return None
+
     @property
     def lock_timeout(self):
         # Prefer the TTL this instance locked with (per-transition
@@ -213,28 +243,59 @@ class RedisState(State):
         return cache.get(self._get_hash()) is not None
 
     def set_state(self, state):
-        # xx=True: refresh the key's value/TTL only when it exists (i.e. the
-        # state is locked). A state write outside a lock()/unlock() pair —
-        # background phase 2's target/failed writes, Action.failed_state —
-        # must not implicitly create a lock nobody will release. (Background
-        # phase 1's in_progress write happens UNDER its critical-section
-        # lock, so there the xx write refreshes the live key's value.)
-        #
-        # Preserve the ownership token already stored on the key: a state
-        # write must not clobber the holder's token. Token-gated for
-        # holders: if this object holds a token but the key now carries a
-        # DIFFERENT one, our lock TTL-expired and a successor owns the
-        # key — skip the cache refresh entirely, or we would re-plant our
-        # own token over theirs and our later unlock would delete their
-        # lock (the dual-entry hazard #139 closes). The DB write below
-        # still happens; the phase-2 state guard / under-lock revalidation
+        # Refresh the key's value/TTL only when it exists (xx semantics): a
+        # state write outside a lock()/unlock() pair — background phase 2's
+        # target/failed writes, Action.failed_state — must not implicitly
+        # create a lock nobody will release. (Background phase 1's
+        # in_progress write happens UNDER its critical-section lock, so
+        # there it refreshes the live key.) The stored ownership token is
+        # preserved: a state write must not clobber the holder's token, and
+        # a stale holder whose key now carries a successor's token must not
+        # re-plant its own (the dual-entry hazard #139 closes). The DB write
+        # always lands; the phase-2 state guard / under-lock revalidation
         # arbitrate the outcome.
         #
-        # The get→compare→set is still not multi-process atomic: a
-        # takeover strictly between the read and the write can leave a
-        # stale token behind. For tokenless writers that degrades to a
-        # TTL-bounded leak; for a holder it remains a narrow wrong-unlock
-        # window — fully closing it needs an atomic refresh (issue #151).
+        # On django-redis the read → decide → write is a single server-side
+        # compare-and-set (#151): the write applies only if the key still
+        # holds exactly the bytes the token decision was based on, so a
+        # takeover landing strictly between read and write can no longer
+        # misplace a token. Off django-redis (the single-process test fake /
+        # LocMemCache) there is no concurrency, so the plain read-write is
+        # already race-free.
+        conn = self._redis_conn()
+        if conn is None:
+            self._set_state_fallback(state)
+            return
+
+        full_key = cache.client.make_key(self._get_hash())
+        current_raw = conn.get(full_key)
+        if current_raw is None:
+            # No live key: an unlocked write must not recreate the lock.
+            super().set_state(state)
+            return
+
+        current_token = self._stored_token(cache.client.decode(current_raw))
+        own_token = getattr(self, '_lock_token', None)
+        if (
+            own_token is not None
+            and current_token is not None
+            and current_token != own_token
+        ):
+            # A successor already owns the key; leave it untouched.
+            super().set_state(state)
+            return
+
+        new_raw = cache.client.encode(self._store_value(state, current_token))
+        conn.eval(
+            self._REFRESH_CAS, 1, full_key,
+            current_raw, new_raw, int(self.lock_timeout * 1000),
+        )
+        super().set_state(state)
+
+    def _set_state_fallback(self, state):
+        """Non-atomic token-gated refresh for a single-process cache (the
+        test fake / LocMemCache). Correct there because nothing can take
+        the lock over between the read and the write."""
         current_token = self._stored_token(cache.get(self._get_hash()))
         own_token = getattr(self, '_lock_token', None)
         if (
