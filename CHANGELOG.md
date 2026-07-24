@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`RedisState` lock refresh is atomic on django-redis** (#151). The
+  value+lock key's refresh in `set_state` is now a single server-side
+  compare-and-set (Lua): the new state is written only if the key still
+  holds exactly the bytes the ownership decision was based on, so a
+  takeover landing strictly between the read and the write can no longer
+  re-plant a stale holder's token over a successor's lock — closing the
+  residual window #139 documented. Off django-redis (the single-process
+  test fake / LocMemCache) the plain read-write is unchanged; it cannot
+  race there.
+
 - **Savepoint unlock cleanup is exception-contained.** When a hook
   savepoint rollback releases the deferred unlocks it discarded (#141 ×
   #138), one release raising (a cache blip) no longer skips the sibling
