@@ -144,14 +144,20 @@ class TaskCrashRedeliveryConfigTests(TestCase):
     """#91 — acks_late is paired with reject_on_worker_lost per task."""
 
     def test_all_tasks_pair_acks_late_with_reject_on_worker_lost(self):
+        # Derived from the module, never hardcoded: a hardcoded list silently
+        # stopped covering recover_stranded_states when it was added, so both
+        # kwargs could be stripped from it with the suite still green.
         from django_logic.background import tasks
 
-        for task in (
-            tasks.run_background_transition_task,
-            tasks.retry_stale_transitions,
-            tasks.cleanup_completed_transitions,
-            tasks.detect_stuck_transitions,
-            tasks.watchdog_stale_attempts,
-        ):
+        found = [
+            obj for obj in vars(tasks).values()
+            if hasattr(obj, 'apply_async')
+            and str(getattr(obj, 'name', '')).startswith('django_logic.')
+        ]
+        self.assertEqual(
+            len(found), 6,
+            'expected every @shared_task in django_logic.background.tasks to '
+            'be discovered; got %s' % sorted(t.name for t in found))
+        for task in found:
             self.assertTrue(task.acks_late, task.name)
             self.assertTrue(task.reject_on_worker_lost, task.name)

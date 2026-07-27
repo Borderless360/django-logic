@@ -959,7 +959,16 @@ Use the ready-made schedule — it routes all five tasks to `DJANGO_LOGIC['START
 # celery.py — after the app is configured
 from django_logic.background import beat_schedule
 
-app.conf.beat_schedule = {**app.conf.beat_schedule, **beat_schedule()}
+# Write the CELERY_-namespaced key, NOT app.conf.beat_schedule: under
+# config_from_object(namespace='CELERY') Celery resolves beat_schedule from
+# CELERY_BEAT_SCHEDULE in Django settings first, so a plain
+# `app.conf.beat_schedule = ...` assignment is accepted and then silently
+# ignored. `manage.py check` reports the tasks as unscheduled
+# (django_logic.W002) if this goes wrong.
+app.conf['CELERY_BEAT_SCHEDULE'] = {
+    **(app.conf.beat_schedule or {}),
+    **beat_schedule(),
+}
 ```
 
 (A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.recover_stranded_states`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)

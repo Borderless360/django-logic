@@ -85,7 +85,16 @@ def beat_schedule(
     so the safety net cannot be forgotten or routed to the wrong queue::
 
         from django_logic.background import beat_schedule
-        app.conf.beat_schedule = {**app.conf.beat_schedule, **beat_schedule()}
+        app.conf['CELERY_BEAT_SCHEDULE'] = {
+            **(app.conf.beat_schedule or {}),
+            **beat_schedule(),
+        }
+
+    Write the ``CELERY_``-namespaced key, not ``app.conf.beat_schedule``:
+    under ``config_from_object(namespace='CELERY')`` Celery resolves
+    ``beat_schedule`` from ``CELERY_BEAT_SCHEDULE`` in Django settings
+    first, so a plain attribute assignment is accepted and then silently
+    ignored. ``django_logic.W002`` catches that.
 
     The intervals are overridable per task; the defaults match the
     README's recommended schedule.

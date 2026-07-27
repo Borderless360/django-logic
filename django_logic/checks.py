@@ -153,3 +153,61 @@ def check_background_database_routing(app_configs, **kwargs):
                 id='django_logic.E002',
             ))
     return findings
+
+
+@checks.register('django_logic')
+def check_safety_net_is_scheduled(app_configs, **kwargs):
+    """In celery mode, the periodic safety-net tasks must actually be in the
+    running app's beat schedule (``django_logic.W002``).
+
+    They are the durability half of ``BACKGROUND_EXECUTION='celery'``: without
+    them a lost phase-2 message is never re-dispatched, an attempt that dies
+    without raising is never terminalized, and completed rows are never pruned.
+    Nothing else notices — a consumer ran seven weeks with all five silently
+    unscheduled, accumulating 36 stranded rows, because
+    ``app.conf.beat_schedule = {...}`` is ignored when the project also defines
+    the ``CELERY_``-namespaced setting (Celery resolves the namespaced key
+    first). Assign ``app.conf['CELERY_BEAT_SCHEDULE']`` instead.
+
+    Matched by task name, not entry key, so renamed entries still pass.
+    """
+    from django_logic.background import settings as bg_settings
+
+    if bg_settings.background_execution() != bg_settings.EXECUTION_CELERY:
+        return []
+    try:
+        from celery import current_app
+    except ImportError:  # pragma: no cover - celery is a hard dependency
+        return []
+    try:
+        scheduled = current_app.conf.beat_schedule or {}
+    except Exception:
+        # No usable Celery configuration in this process (a management
+        # command in a project that configures Celery lazily). Not our
+        # place to fail the check run over it.
+        return []
+
+    shipped = {entry['task'] for entry in bg_settings.beat_schedule().values()}
+    present = {
+        entry.get('task') for entry in scheduled.values()
+        if isinstance(entry, dict)
+    }
+    missing = sorted(shipped - present)
+    if not missing:
+        return []
+    return [checks.Warning(
+        "BACKGROUND_EXECUTION='celery' but these periodic safety-net tasks "
+        "are not in the Celery beat schedule: %s. Lost phase-2 messages will "
+        "never be re-dispatched and completed rows will never be pruned."
+        % ', '.join(missing),
+        hint="Install them with "
+             "app.conf['CELERY_BEAT_SCHEDULE'] = "
+             "{**(app.conf.beat_schedule or {}), **beat_schedule()} — note the "
+             "CELERY_-namespaced key: a plain app.conf.beat_schedule "
+             "assignment is silently ignored when the project defines "
+             "CELERY_BEAT_SCHEDULE in Django settings. If you schedule them "
+             "elsewhere (django-celery-beat's database scheduler, an external "
+             "cron), silence this with "
+             "SILENCED_SYSTEM_CHECKS = ['django_logic.W002'].",
+        id='django_logic.W002',
+    )]
