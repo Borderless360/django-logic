@@ -1,8 +1,9 @@
 # Background Transition — Design & Failure Analysis
 
-> Design document for `BackgroundTransition` / `BackgroundAction` in
-> Django Logic v0.3.0. Read `PLAN.md` section 4 first; this file is the
-> rationale and the crash-by-crash analysis behind the chosen design.
+> Design document for `BackgroundTransition` / `BackgroundAction`, first
+> shipped in Django Logic v0.3.0. This file is the rationale and the
+> crash-by-crash analysis behind the chosen design; the README documents the
+> resulting API.
 
 ---
 
@@ -45,7 +46,7 @@ broker required — see §6.
 │      │                                                                   │
 │      ▼                                                                   │
 │  atomic {                                                                │
-│      set_state(in_progress_state)              ── DB + RedisState        │
+│      set_state(in_progress_state)              ── DB                      │
 │      TransitionMessage.objects.create(                                   │
 │          app_label, model_name, instance_id,                             │
 │          process_name, transition_name,                                  │

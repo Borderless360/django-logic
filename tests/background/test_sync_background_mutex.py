@@ -28,16 +28,10 @@ from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 from tests.background.models import Widget
+from tests import dl_settings
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 
 def _make_tm(widget, process_name='process', is_completed=False):

@@ -21,15 +21,7 @@ from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 from django_logic.transition import Action, Transition
 from tests.models import Invoice
-
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+from tests import dl_settings
 
 SIDE_EFFECT_CALLS = []
 
@@ -42,7 +34,6 @@ def raise_boom(instance, **kwargs):
     raise ValueError('boom')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class TransitionLockRevalidationTests(TestCase):
     """D1 — persisted-state revalidation under the lock."""
 
@@ -116,7 +107,6 @@ class TransitionLockRevalidationTests(TestCase):
         self.assertFalse(self.state.is_locked())
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class ActionFailedStateLockGuardTests(TestCase):
     """D3 — Action skips its failed_state write under a foreign lock."""
 

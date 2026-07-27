@@ -19,6 +19,7 @@ from django_logic.coverage import (
 from django_logic.process import Process, ProcessManager, transition_observers
 from django_logic.transition import Transition
 from tests.models import Invoice
+from tests import dl_settings
 
 
 def is_never_available(instance):
@@ -194,14 +195,7 @@ class TransitionObserverAndCoverageTests(TestCase):
         self.assertEqual(seen, ['approve'])
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 _BG_FAIL = {'on': False}
 
@@ -363,34 +357,6 @@ class NamesakeDeclarationIdentityTests(TestCase):
         self.assertEqual([u['target'] for u in remaining_ship],
                          ['shipped_slow'])
 
-    def test_legacy_two_field_log_line_covers_all_namesakes(self):
-        proc = self.process_class
-        legacy_line = f'{proc.__module__}.{proc.__qualname__}\tship'
-        report = coverage_report(executed=[legacy_line])
-        ours = self._ours(report)
-        # Both ship declarations covered (old semantics); both exports not.
-        self.assertEqual({u['action'] for u in ours}, {'export'})
-        self.assertEqual(len(ours), 2)
-
-    def test_prior_090_four_field_line_covers_its_full_declaration(self):
-        # A 0.9.0 recorder wrote 4-field keys (no conditions fingerprint):
-        # class \t action \t kind \t sources>target. Such a line must still
-        # cover the 0.9.1 declaration sharing that prefix — including the
-        # empty-conditions trailing-tab round-trip for a no-condition
-        # transition — so a coverage log persisted across the 0.9.0→0.9.1
-        # upgrade does not spuriously report driven transitions uncovered.
-        # Unlike the 0.8 line it is precise at the sources→target level:
-        # the fast-lane declaration only, not every 'ship' namesake.
-        proc = self.process_class
-        prior_line = (f'{proc.__module__}.{proc.__qualname__}'
-                      f'\tship\tsync\tfast_lane>shipped_fast')
-        report = coverage_report(executed=[prior_line])
-        ours = self._ours(report)
-        targets = {(u['action'], u['target']) for u in ours}
-        self.assertNotIn(('ship', 'shipped_fast'), targets)  # covered
-        self.assertIn(('ship', 'shipped_slow'), targets)     # distinct prefix
-        self.assertEqual(len(ours), 3)
-
 
 def _cond_received(instance, **kwargs):
     return instance.customer_received
@@ -452,15 +418,3 @@ class ConditionOnlyNamesakeIdentityTests(TestCase):
         remaining = self._ours(cov.report())
         self.assertEqual(len(remaining), 1)
 
-    def test_prior_090_line_covers_all_condition_only_namesakes(self):
-        # 0.9.0 collapsed condition-only namesakes into ONE 4-field key, so
-        # it cannot say which variant ran: a 0.9.0 line for this
-        # sources→target must cover BOTH 0.9.1 condition variants (cover-all
-        # one level up, mirroring the 0.8 legacy rule). This is the exact
-        # false-"uncovered" gap the conditions fingerprint would otherwise
-        # open on a pre-0.9.1 log — Bugbot #153 finding.
-        proc = self.process_class
-        prior_line = (f'{proc.__module__}.{proc.__qualname__}'
-                      f'\tship\tsync\tready>shipped')
-        report = coverage_report(executed=[prior_line])
-        self.assertEqual(self._ours(report), [])

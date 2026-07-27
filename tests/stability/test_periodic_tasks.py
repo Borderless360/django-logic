@@ -22,7 +22,7 @@ from django.core.cache import cache
 from django.test import tag
 from django.utils import timezone
 
-from django_logic.state import State, RedisState
+from django_logic.state import State
 
 from tests.stability.base import StabilityTestCase
 from tests.stability.models import Order, OrderProcess

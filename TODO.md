@@ -4,33 +4,31 @@ Planned changes for upcoming versions of django-logic.
 
 ---
 
-## 0.3.0 — COMPLETE
-
-- [x] Remove legacy logging (`LogType`, `AbstractLogger`, `DefaultLogger`, `NullLogger`, `get_logger()`)
-- [x] Remove `DJANGO_LOGIC_DISABLE_LOGGING` / `DJANGO_LOGIC_CUSTOM_LOGGER` settings
-- [x] Remove all `self.logger` references from commands, transitions, process
-- [x] DRF and Celery as optional extras
-- [x] Remove `background_mode` / `run_in_background` from base `Transition`
-- [x] Ship `django_logic.background` (`BackgroundTransition`, `BackgroundAction`)
-- [x] TransitionMessage model + migrations, partial unique constraint, retry/cleanup periodic tasks
-- [x] Sync execution mode + `sync_execution()` context manager
-- [x] Class-time validation: required `queue=`, unique `in_progress_state` within a Process
-- [x] Move in-tree demo to the `django-logic-demo` repo
-- [x] `TransitionMessage` timing fields (`started_at`, `completed_at`, `duration_ms`) + watchdog index
-- [x] Configurable per-transition timeouts (`BackgroundTransition(timeout=N)` + `watchdog_stale_attempts`)
-- [x] Primary-key-agnostic background path (`instance_id` stored as text; UUID/Char/big-int PKs)
-- [x] Bug fix: unrestorable TMs no longer retry forever (mark-complete hoisted out of the rolled-back atomic block)
-- [x] Remove PR #75 scaffolding: `Transition.get_task_kwargs`, `django_logic.utils`, `ProcessManager.bind_state_fields`, `ignore_sources`, `queryset_name`, `TransitionEventType.BACKGROUND_MODE`
-
 ## 1.0.0
 
-- [x] Scenario-based testing framework (`django_logic.testing`): `ProcessScenario`, snapshot/replay, AI-readable failure output — shipped early, in 0.4.0
 - [ ] Admin + DRF integration modules
 - [ ] `manage.py transition_status` management command
 - [ ] Better error messages (include current state + available transitions)
 - [ ] Automated PyPI publishing on tag push
 - [ ] Full type annotations (`mypy --strict`)
 - [ ] Docs site (MkDocs Material)
+
+## Ops affordances
+
+Carried over from the Heroku validation round.
+
+- [ ] A management command to re-dispatch a specific `TransitionMessage`
+      immediately, bypassing the `RETRY_MINUTES` recency guard (incident
+      response), and to list in-progress / stuck transitions.
+- [ ] Document the Postgres **connection budget**: each in-flight task holds a
+      connection (two if the app opens a second one per task), so size
+      `concurrency × workers` against the DB limit (pgbouncer or plan cap).
+- [ ] Document a beat-liveness alert recipe — e.g. Sentry cron monitors via
+      `CeleryIntegration(monitor_beat_tasks=True)`. See also the system check
+      added for a schedule that never installed the safety-net entries.
+- [ ] Log level for handled safety-net conditions: `detect_stuck`
+      finalization, the watchdog timeout and the "cannot be restored" path log
+      at ERROR, which is Sentry noise for handled outcomes (#154).
 
 ## Later
 

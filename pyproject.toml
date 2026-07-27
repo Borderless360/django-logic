@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "0.9.1"
+version = "0.10.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -41,8 +41,12 @@ dependencies = [
     "django-model-utils>=4.5.1",
     # Celery and Redis are core dependencies, not extras. Background
     # transitions always execute through Celery in production ('sync'
-    # execution exists only for tests/CI), and django-redis provides the
-    # cross-process state lock (RedisState / the lock cache).
+    # execution exists only for tests/CI). The engine never imports
+    # django_redis — it locks through Django's cache API — but it does
+    # require a CROSS-PROCESS cache, and django-redis is the backend the
+    # README documents, so it ships installed rather than as a footgun.
+    # Whether to demote it now that Django 4.0+ has its own Redis backend
+    # is a separate call: see issue #173.
     "celery>=5.0",
     "django-redis>=5.0.0",
 ]
@@ -56,10 +60,7 @@ drf = [
     "djangorestframework>=3.14.0",
 ]
 dev = [
-    "djangorestframework>=3.14.0",
     "coverage>=7.0",
-    "pytest>=8.0",
-    "pytest-django>=4.8",
     # Driver for the PostgreSQL stability suite (make stability-*) and the
     # Postgres concurrency tests. Without it, `uv sync --extra dev` runs the
     # SQLite suite but not tests.stability.

@@ -36,16 +36,10 @@ from tests.background.models import (
     ConversationProcess,
     Widget,
 )
+from tests import dl_settings
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 _GMAIL = 'tests.background.models.GmailConversationProcess'
 _DUMMY = 'tests.background.models.DummyConversationProcess'
@@ -267,14 +261,7 @@ class FindTransitionDisambiguationTests(TestCase):
         self.assertEqual(found.in_progress_state, 'nested_fulfilling')
 
 
-_CELERY_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'celery',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_CELERY_SETTINGS = dl_settings(BACKGROUND_EXECUTION='celery', TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 _APPLY_ASYNC = (
     'django_logic.background.tasks.run_background_transition_task.apply_async'

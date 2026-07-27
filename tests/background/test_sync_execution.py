@@ -11,16 +11,10 @@ from django_logic.background import sync_execution
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from tests.background.models import Widget
+from tests import dl_settings
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

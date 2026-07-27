@@ -153,3 +153,114 @@ def check_background_database_routing(app_configs, **kwargs):
                 id='django_logic.E002',
             ))
     return findings
+
+
+@checks.register('django_logic')
+def check_safety_net_is_scheduled(app_configs, **kwargs):
+    """In celery mode, the periodic safety-net tasks must actually be in the
+    running app's beat schedule (``django_logic.W002``).
+
+    They are the durability half of ``BACKGROUND_EXECUTION='celery'``: without
+    them a lost phase-2 message is never re-dispatched, an attempt that dies
+    without raising is never terminalized, and completed rows are never pruned.
+    Nothing else notices — a consumer ran seven weeks with all five silently
+    unscheduled, accumulating 36 stranded rows, because
+    ``app.conf.beat_schedule = {...}`` is ignored when the project also defines
+    the ``CELERY_``-namespaced setting (Celery resolves the namespaced key
+    first). Assign ``app.conf['CELERY_BEAT_SCHEDULE']`` instead.
+
+    Matched by task name, not entry key, so renamed entries still pass.
+    """
+    from django.apps import apps
+
+    # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
+    # checks too, so without this an install that never added the background
+    # app would get a false warning on every `manage.py check` — and fail any
+    # CI running `check --fail-level WARNING`. Same gate as E002.
+    if not apps.is_installed('django_logic.background'):
+        return []
+
+    from django_logic.background import settings as bg_settings
+
+    if bg_settings.background_execution() != bg_settings.EXECUTION_CELERY:
+        return []
+    try:
+        from celery import current_app
+    except ImportError:  # pragma: no cover - celery is a hard dependency
+        return []
+    try:
+        scheduled = current_app.conf.beat_schedule or {}
+    except Exception:
+        # No usable Celery configuration in this process (a management
+        # command in a project that configures Celery lazily). Not our
+        # place to fail the check run over it.
+        return []
+
+    shipped = {entry['task'] for entry in bg_settings.beat_schedule().values()}
+    present = {
+        entry.get('task') for entry in scheduled.values()
+        if isinstance(entry, dict)
+    }
+    missing = sorted(shipped - present)
+    if not missing:
+        return []
+    return [checks.Warning(
+        "BACKGROUND_EXECUTION='celery' but these periodic safety-net tasks "
+        "are not in the Celery beat schedule: %s. Lost phase-2 messages will "
+        "never be re-dispatched and completed rows will never be pruned."
+        % ', '.join(missing),
+        hint="Install them with "
+             "app.conf['CELERY_BEAT_SCHEDULE'] = "
+             "{**(app.conf.beat_schedule or {}), **beat_schedule()} — note the "
+             "CELERY_-namespaced key: a plain app.conf.beat_schedule "
+             "assignment is silently ignored when the project defines "
+             "CELERY_BEAT_SCHEDULE in Django settings. If you schedule them "
+             "elsewhere (django-celery-beat's database scheduler, an external "
+             "cron), silence this with "
+             "SILENCED_SYSTEM_CHECKS = ['django_logic.W002'].",
+        id='django_logic.W002',
+    )]
+
+
+#: Settings removed in 0.10.0, mapped to what to do instead. ``DJANGO_LOGIC``
+#: has no unknown-key rejection, so a leftover key is silently ignored — and
+#: for the two redaction knobs that means an upgrade quietly starts logging
+#: kwargs a deployment had deliberately scrubbed.
+_REMOVED_SETTINGS = {
+    'LOG_KWARGS':
+        'kwargs are always attached to log records now; scrub them with a '
+        'logging.Filter on the "django-logic.transition" logger',
+    'LOG_KWARGS_REDACTOR':
+        'kwargs are always attached to log records now; scrub them with a '
+        'logging.Filter on the "django-logic.transition" logger',
+    'PHASE2_STATE_GUARD':
+        'the phase-2 state guard always enforces; there are no modes',
+    'SENTRY_TRANSACTION_NAMING':
+        'Sentry transactions are always named per transition',
+    'PROCESS_CLASS_ALIASES':
+        'drain in-flight rows before renaming a Process class',
+}
+
+
+@checks.register('django_logic')
+def check_no_removed_settings(app_configs, **kwargs):
+    """Report ``DJANGO_LOGIC`` keys that 0.10.0 removed (``django_logic.W003``).
+
+    Without this the removals fail *open* and silently: the sharpest case is a
+    deployment that set ``LOG_KWARGS_REDACTOR`` for PII compliance, upgrades,
+    and starts writing raw kwargs to its logs with no signal anywhere.
+    """
+    from django.conf import settings
+
+    conf = getattr(settings, 'DJANGO_LOGIC', None) or {}
+    if not isinstance(conf, dict):
+        return []
+    return [
+        checks.Warning(
+            f"DJANGO_LOGIC['{key}'] was removed in django-logic 0.10.0 and is "
+            f"now ignored: {advice}.",
+            hint='Delete the key from DJANGO_LOGIC.',
+            id='django_logic.W003',
+        )
+        for key, advice in _REMOVED_SETTINGS.items() if key in conf
+    ]

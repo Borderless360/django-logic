@@ -115,15 +115,16 @@ class ProcessScopedMessageScenario(ProcessScenario):
         self.assertIsNone(message_for(widget, 'fulfil', process_name='audit_process'))
         self.assertIsNone(message_for(widget, 'audit', process_name='process'))
 
-    def test_unscoped_helpers_keep_legacy_newest_row_behaviour(self):
-        """process_name=None (the default) is the historical unscoped lookup
-        — backward compatible for direct callers."""
+    def test_helpers_require_a_process_name(self):
+        """Scoping is mandatory: an unscoped lookup on a two-process model
+        silently returned the other machine's row (#150)."""
         widget = self._two_failed_processes()
-        # The audit row is the newest for this instance.
-        self.assertEqual(uncompleted_message(widget).transition_name, 'audit')
-        self.assertEqual(latest_message(widget).transition_name, 'audit')
-        # message_for was always narrowed by action name.
-        self.assertEqual(message_for(widget, 'fulfil').process_name, 'process')
+        for call in (lambda: uncompleted_message(widget),
+                     lambda: latest_message(widget),
+                     lambda: message_for(widget, 'fulfil')):
+            with self.subTest(call=call):
+                with self.assertRaises(TypeError):
+                    call()
 
     def test_scoped_helpers_across_completed_and_uncompleted_rows(self):
         widget = self._two_failed_processes()

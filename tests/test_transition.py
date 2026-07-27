@@ -26,20 +26,14 @@ from tests.background.models import (
     WidgetContextProcess,
     WidgetSyncProcess,
 )
+from tests import dl_settings
 
 
 # ProcessScenario runs in sync mode by default (BACKGROUND_EXECUTION='sync'
 # is set per-class via override_settings where background work is involved;
 # the sync Transition/Action tests below don't touch the background engine,
 # so the default sync setting is fine).
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

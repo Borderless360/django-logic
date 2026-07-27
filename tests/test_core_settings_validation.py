@@ -24,12 +24,10 @@ from django_logic.process import Process
 from django_logic.state import State
 from django_logic.transition import Transition
 from tests.models import Invoice
-
-_BASE = {'BACKGROUND_EXECUTION': 'sync'}
-
+from tests import dl_settings
 
 def _conf(**overrides):
-    return dict(_BASE, **overrides)
+    return dl_settings(**overrides)
 
 
 class CoreSettingsValidationTests(SimpleTestCase):

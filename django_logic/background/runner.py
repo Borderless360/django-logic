@@ -340,9 +340,7 @@ def _finalize_terminal_from_watchdog(
         # finalizing a long-stranded row must not clobber a state change
         # made in the meantime (manual ops fix, external write).
         matches, expected, current = _state_guard_matches(transition, state)
-        if matches or (
-            bg_settings.phase2_state_guard() == bg_settings.STATE_GUARD_WARN
-        ):
+        if matches:
             state.set_state(transition.failed_state)
             transition_logger.info(
                 f'{source}: set failed_state={transition.failed_state} '
@@ -356,11 +354,11 @@ def _finalize_terminal_from_watchdog(
                 f'state change wins.'
             )
 
-    # Symmetric with _handle_failure: run failure_side_effects inside
-    # the atomic block (own savepoint), capture any swallowed exception
-    # on the TM.
-    fse_error = _run_failure_side_effects_isolated(
-        transition, state, exception, kwargs
+    # FailureSideEffects.execute savepoints itself inside an open
+    # transaction and returns the swallowed exception; record it on the TM
+    # so a broken cleanup path is not invisible.
+    fse_error = transition.failure_side_effects.execute(
+        state, exception=exception, **kwargs
     )
     if fse_error is not None:
         tm.record_failure_side_effect_error(fse_error)
@@ -474,19 +472,12 @@ def _run_atomic(tm_id: int) -> _Outcome:
                 f'else while this transition was pending. Side-effects '
                 f'skipped; the external state change wins.'
             )
-            if bg_settings.phase2_state_guard() == bg_settings.STATE_GUARD_ENFORCE:
-                transition_logger.error(
-                    f'{kwargs.get("tr_id")} TransitionMessage#{tm.pk} '
-                    f'{transition.action_name} {state.instance_key}: {note}'
-                )
-                tm.mark_as_superseded(note)
-                return _Outcome(terminal=True, succeeded=False)
-            transition_logger.warning(
+            transition_logger.error(
                 f'{kwargs.get("tr_id")} TransitionMessage#{tm.pk} '
-                f'{transition.action_name} {state.instance_key}: state '
-                f'guard mismatch (expected {expected}, found {current!r}) '
-                f"— PHASE2_STATE_GUARD='warn', running anyway."
+                f'{transition.action_name} {state.instance_key}: {note}'
             )
+            tm.mark_as_superseded(note)
+            return _Outcome(terminal=True, succeeded=False)
 
         # Record the start of this attempt. Overwritten on every retry so
         # the watchdog (uncompleted AND started_at < cutoff) tracks the
@@ -593,13 +584,10 @@ def _handle_failure(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
             f'{transition.failed_state}'
         )
-    # failure_side_effects run inside the atomic block, in their own
-    # savepoint — idempotent per the reliability contract. A broken
-    # cleanup path rolls back its own writes and cannot poison the outer
-    # transaction; the swallowed exception is surfaced on the TM
-    # (otherwise cleanup bugs are invisible).
-    fse_error = _run_failure_side_effects_isolated(
-        transition, state, error, kwargs
+    # As above: the bundle owns its savepoint, so a broken cleanup path
+    # rolls back its own writes without poisoning the outer transaction.
+    fse_error = transition.failure_side_effects.execute(
+        state, exception=error, **kwargs
     )
     if fse_error is not None:
         tm.record_failure_side_effect_error(fse_error)
@@ -658,41 +646,6 @@ class _RestoreError(Exception):
     """The TransitionMessage refers to a model/instance/transition that
     no longer exists. The TM is marked completed to stop the retry loop.
     """
-
-
-class _FailureSideEffectsRollback(Exception):
-    """Internal: forces the failure_side_effects savepoint to roll back.
-
-    ``FailureSideEffects.execute`` swallows the exception and *returns*
-    it, so the savepoint context manager would otherwise commit the
-    partial writes of a broken cleanup path — and, worse, a genuine
-    ``DatabaseError`` raised inside a failure side-effect would leave
-    the outer transaction poisoned. Raising this wrapper inside the
-    savepoint rolls both problems back.
-    """
-
-    def __init__(self, error: BaseException):
-        self.error = error
-
-
-def _run_failure_side_effects_isolated(transition, state, exception, kwargs):
-    """Run ``failure_side_effects`` inside a savepoint.
-
-    Returns the swallowed exception (as ``FailureSideEffects.execute``
-    does) or ``None``. On error, every write the failure side-effects
-    made is rolled back and the outer transaction stays healthy, so the
-    caller can still record the error and mark the row completed.
-    """
-    try:
-        with transaction.atomic():
-            error = transition.failure_side_effects.execute(
-                state, exception=exception, **kwargs
-            )
-            if error is not None:
-                raise _FailureSideEffectsRollback(error)
-    except _FailureSideEffectsRollback as rollback:
-        return rollback.error
-    return None
 
 
 def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
@@ -774,13 +727,7 @@ def _restore(tm: TransitionMessage):
         # never asked for. Prefer the recorded class on mismatch.
         if recorded_path:
             resolved_path = f'{type(process).__module__}.{type(process).__name__}'
-            # A rename covered by PROCESS_CLASS_ALIASES is not a mismatch:
-            # compare against the aliased path so an aliased rename doesn't
-            # warn (and doesn't force a redundant reload of the same class).
-            effective_recorded = bg_settings.process_class_aliases().get(
-                recorded_path, recorded_path
-            )
-            if resolved_path != effective_recorded:
+            if resolved_path != recorded_path:
                 transition_logger.warning(
                     f'TransitionMessage#{tm.pk}: process_name '
                     f'{tm.process_name!r} resolved to {resolved_path}, but '
@@ -795,9 +742,8 @@ def _restore(tm: TransitionMessage):
                     # Fail closed: running the attribute-resolved process
                     # instead would execute side-effects phase 1 never
                     # asked for. The row completes as unrestorable (no
-                    # side-effects, no state write) — map the old path via
-                    # DJANGO_LOGIC['PROCESS_CLASS_ALIASES'] to drain
-                    # in-flight rows across a rename.
+                    # side-effects, no state write): drain in-flight rows
+                    # before renaming a Process class.
                     raise _RestoreError(
                         f'recorded process_class {recorded_path!r} could '
                         f'not be loaded: {exc}'
@@ -813,34 +759,25 @@ def _restore(tm: TransitionMessage):
 
 
 def _load_process_from_path(instance, dotted: str, tm: TransitionMessage):
-    # PROCESS_CLASS_ALIASES first: rows recorded under a class's old
-    # dotted path stay restorable across a rename/move (#140).
-    dotted = bg_settings.process_class_aliases().get(dotted, dotted)
     module_path, class_name = dotted.rsplit('.', 1)
     module = importlib.import_module(module_path)
     process_class = getattr(module, class_name)
-    # Phase 1 records the bound field on the message (0.4+). Rows created
-    # before that fall back to inferring it from the bound process.
-    field_name = tm.field_name or _infer_field_name(instance, tm)
-    return process_class(field_name=field_name, instance=instance)
-
-
-def _infer_field_name(instance, tm: TransitionMessage) -> str:
-    # Legacy best effort for pre-0.4 rows (no recorded field_name): if the
-    # model exposes a property with process_name, pull the field name from
-    # its State. Otherwise default to 'state'.
-    try:
-        process = getattr(instance, tm.process_name)
-        return process.field_name
-    except Exception:
-        return 'state'
+    if not tm.field_name:
+        # Phase 1 has recorded the bound field since 0.4; a row without one
+        # cannot be restored to a known field, and guessing 'state' could
+        # drive the wrong machine on a multi-process model.
+        raise _RestoreError(
+            f'TransitionMessage {tm.pk} has no field_name; it predates 0.4 '
+            f'or was created by hand'
+        )
+    return process_class(field_name=tm.field_name, instance=instance)
 
 
 def _find_transition(process, tm: TransitionMessage):
     """Resolve the exact background transition a ``TransitionMessage`` refers to.
 
     Phase 1 can enqueue a background transition declared on a *nested* process
-    (the sync lookup ``get_transition_by_action_name`` recurses into
+    (the sync lookup recurses into
     ``nested_processes``), but the message records only the *bound*
     ``process_name``, so phase 2 restores the parent and must descend the
     ``nested_processes`` tree — each sub-process constructed with the parent's

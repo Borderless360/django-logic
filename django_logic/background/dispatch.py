@@ -363,10 +363,8 @@ def _recover_stranded_instance(binding, transition, pk) -> bool:
     phase-2 state guard:
 
     1. ``state.lock()`` — atomic take-ownership, using the bound
-       process's declared ``state_class`` (a ``RedisState`` stores the
-       *state value* under the lock key, so concurrent readers keep
-       seeing a truthful state for the whole recovery window). A live
-       execution holds the lock for its whole run, so a failed
+       process's declared ``state_class``. A live execution holds the
+       lock for its whole run, so a failed
        ``lock()`` means "not stranded (or another sweep got here
        first)": skip.
     2. Re-check for an uncompleted ``TransitionMessage`` for this
@@ -420,9 +418,10 @@ def _recover_stranded_instance(binding, transition, pk) -> bool:
             is_completed=False,
         ).exists():
             return False  # same-process background work — starter's job
-        # get_persisted_state, not get_db_state: the authoritative DB read
-        # (RedisState overrides get_db_state with a cached read — under
-        # the sweep's own lock that cache entry is the lock payload).
+        # The authoritative DB read, never a cached one: under the sweep's
+        # own lock a cache entry for this key is the lock payload, so a
+        # cached read here would compare the state against the lock value
+        # and could overwrite a legitimately advanced instance (b440162).
         if state.get_persisted_state() != transition.in_progress_state:
             return False  # moved under us — the other writer wins
 

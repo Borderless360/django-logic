@@ -195,21 +195,11 @@ class Process:
             }
         )
 
-    def get_available_transitions(
-        self,
-        user=None,
-        action_name=None,
-        ignore_state=False,
-    ):
-        """Yield transitions whose conditions/permissions pass.
-
-        :param ignore_state: skip the ``is_locked`` check (internal use by
-            ``get_transition_by_action_name``).
-        """
+    def get_available_transitions(self, user=None, action_name=None):
+        """Yield transitions whose conditions/permissions pass."""
         for transition, _owner in self._iter_available_with_owner(
             user=user,
             action_name=action_name,
-            ignore_state=ignore_state,
         ):
             yield transition
 
@@ -253,16 +243,11 @@ class Process:
                 ignore_state=ignore_state,
             )
 
-    def get_transition_by_action_name(self, action_name: str, user=None):
-        transition, _owner = self._resolve_transition_with_owner(action_name, user)
-        return transition
-
     def _resolve_transition_with_owner(self, action_name: str, user=None):
         """Resolve ``action_name`` to ``(transition, owning_process)``.
 
-        Same disambiguation contract as ``get_transition_by_action_name``
-        (exactly one match required, after conditions/permissions filtering
-        with ``ignore_state=True``) — it just also returns the declaring
+        Exactly one match is required, after conditions/permissions
+        filtering with ``ignore_state=True``. Also returns the declaring
         process so the caller can record the owner for phase-2 restore.
         """
         matches = list(
@@ -365,7 +350,7 @@ def _validate_unique_background_action_names(process_cls):
       — the condition-disambiguated pattern (e.g. per-integration ``Gmail`` /
       ``Dummy`` sub-processes each declaring a background
       ``send_message_via_integration`` selected by a condition on the instance).
-      Phase 1's ``get_transition_by_action_name`` resolves exactly one (the
+      Phase 1's transition resolution picks exactly one (the
       conditions are mutually exclusive); phase 2 restores that exact one via
       the recorded owner.
     * A background ``action_name`` that **coincides with a synchronous

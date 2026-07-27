@@ -36,16 +36,10 @@ from tests.background.models import (
     Widget,
     WidgetBgChainProcess,
 )
+from tests import dl_settings
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 _BG_CHAIN = 'tests.background.models.WidgetBgChainProcess'
 _GMAIL_CHAIN = 'tests.background.models.GmailChainProcess'

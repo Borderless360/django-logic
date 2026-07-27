@@ -3,8 +3,8 @@
 This repo is the **django-logic** library: declarative business logic & state
 machines for Django, with durable, queue-routed background transitions
 (`django_logic.background`). This file tells an AI how to **use the library
-correctly** when generating or reviewing code that depends on it. (Mirror of
-`.cursor/rules/django-logic.mdc`.) The rules below are distilled from a full
+correctly** when generating or reviewing code that depends on it. The rules
+below are distilled from a full
 production-style validation on Heroku (RabbitMQ + PostgreSQL + multiple
 workers + induced worker crashes, deploys, broker loss, and pgbouncer).
 
@@ -64,8 +64,8 @@ change on success) for anything slow, external, or retriable.
    work chains from terminal hooks, not mid-flight.
 7. **Manual state fixes win.** If an instance is moved externally while a
    background row is pending, phase 2 completes the row as *superseded*
-   (`'[superseded]'` in `last_error_message`) and skips side-effects
-   (`DJANGO_LOGIC['PHASE2_STATE_GUARD']`, default `'enforce'`).
+   (`'[superseded]'` in `last_error_message`) and skips side-effects. This is
+   unconditional since 0.10.0.
 
 ## Deployment the durability contract depends on
 
@@ -77,10 +77,19 @@ change on success) for anything slow, external, or retriable.
 - Crash re-delivery is built in (every django-logic task sets
   `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
   pair only for your *own* tasks. You still need a **single beat**
-  scheduling the five `django_logic.*` safety-net tasks —
-  `app.conf.beat_schedule = beat_schedule()` (from
-  `django_logic.background`) routes them to `STARTER_QUEUE` — and a worker
-  for every queue you use.
+  scheduling the five `django_logic.*` safety-net tasks — and a worker for
+  every queue you use. Install them by writing the `CELERY_`-namespaced key,
+  because a plain `app.conf.beat_schedule = …` assignment is silently ignored
+  when the project also defines `CELERY_BEAT_SCHEDULE` in Django settings:
+
+  ```python
+  from django_logic.background import beat_schedule
+  app.conf['CELERY_BEAT_SCHEDULE'] = {
+      **(app.conf.beat_schedule or {}), **beat_schedule(),
+  }
+  ```
+
+  `django_logic.W002` fails `manage.py check` if they are missing.
 - Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
   None}`, `DISABLE_SERVER_SIDE_CURSORS=True`, and no SSL on the app→pgbouncer
   hop. The concurrency guard (`select_for_update(nowait)` + partial-unique)
@@ -88,15 +97,24 @@ change on success) for anything slow, external, or retriable.
 
 ## Working IN this repo
 
-- Tests: `make test` / `pytest` (SQLite suite); PostgreSQL concurrency +
-  stability suites under `tests/stability`, `tests/background`.
+- Tests: `python tests/manage.py test` (SQLite suite, also `make test`);
+  PostgreSQL concurrency + stability suites under `tests/stability`,
+  `tests/background`. There is no pytest configuration — do not add one
+  without wiring `DJANGO_SETTINGS_MODULE`.
 - `django_logic/background/` is the durable engine: `transitions.py`,
   `dispatch.py`, `runner.py` (phase 2), `tasks.py` (Celery + periodic),
   `models.py` (`TransitionMessage`), `settings.py`.
-- Read `docs/PLAN.md`, `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, and
+- Read `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md` and
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
   background engine.
+- `CHANGELOG.md` is the record of what shipped and why; `TODO.md` holds what
+  has not. Neither is a design document — do not add planning docs that
+  duplicate them.
 
-See `docs/IMPROVEMENTS_FROM_HEROKU_VALIDATION.md` for validated-behavior notes
-and open improvement ideas.
+## Comments and docstrings: explain *why*, never narrate *what*
+
+A comment earns its place only when it captures non-obvious intent or a gotcha
+the code cannot express — and then it is terse. Do not restate the next line,
+narrate a change, or record issue archaeology: `CHANGELOG.md` owns history.
+A bare `(#NNN)` marker is enough when a guard needs provenance.

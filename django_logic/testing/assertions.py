@@ -323,7 +323,7 @@ class ScenarioAssertions:
         for i, (exp, got) in enumerate(zip(expected_steps, actual), 1):
             # Allow a plain dict for ergonomics.
             exp = exp if isinstance(exp, JourneyStep) else JourneyStep(**exp)
-            if not exp.matches(got):
+            if exp != got:
                 self._record_assert(f'assert_journey(step {i})', ok=False,
                                     detail=f'expected {exp}, got {got}')
                 self._fail(

@@ -44,41 +44,7 @@ from django_logic.conf import defer_unlock_until_commit as _defer_unlock_until_c
 from django_logic.state import State
 
 
-class BaseTransition:
-    side_effects_class = SideEffects
-    callbacks_class = Callbacks
-    failure_callbacks_class = Callbacks
-    failure_side_effects_class = FailureSideEffects
-    permissions_class = Permissions
-    conditions_class = Conditions
-    next_transition_class = NextTransition
-
-    # Class-level marker; overridden to ``True`` by ``BackgroundTransition``.
-    #
-    # Used by ``Process.__init_subclass__`` to enforce unique background
-    # ``action_name``s without importing ``BackgroundTransition`` (that
-    # would create a circular: ``process → background.transitions →
-    # transition → process``). Kept as a stable public attribute so third
-    # parties can introspect a transition without caring about concrete
-    # subclasses (e.g. admin tooling, code-gen). Duck-typed by design;
-    # ``isinstance(..., BackgroundTransition)`` is equivalent but more
-    # coupling-heavy for callers.
-    is_background: bool = False
-
-    def is_valid(self, instance, user=None) -> bool:
-        raise NotImplementedError
-
-    def change_state(self, state: State, **kwargs):
-        raise NotImplementedError
-
-    def complete_transition(self, state: State, **kwargs):
-        raise NotImplementedError
-
-    def fail_transition(self, state: State, exception: Exception, **kwargs):
-        raise NotImplementedError
-
-
-class Transition(BaseTransition):
+class Transition:
     """Synchronous transition from a source state to a target state.
 
     Execution order on success:
@@ -93,6 +59,19 @@ class Transition(BaseTransition):
          contained state), run ``failure_side_effects``, unlock, run
          ``failure_callbacks`` (and re-raise)
     """
+
+    side_effects_class = SideEffects
+    callbacks_class = Callbacks
+    permissions_class = Permissions
+    conditions_class = Conditions
+
+    #: ``True`` on ``BackgroundTransition``. A public, stable attribute
+    #: rather than an ``isinstance`` check: ``Process.__init_subclass__``
+    #: reads it to enforce unique background action names without importing
+    #: ``BackgroundTransition`` (which would close the cycle
+    #: ``process → background.transitions → transition → process``), and
+    #: consumers introspect it the same way.
+    is_background: bool = False
 
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
@@ -130,10 +109,8 @@ class Transition(BaseTransition):
             )
         # Only SideEffects dereferences its transition (to drive
         # complete/fail); the other command bundles never read it.
-        self.failure_callbacks = self.failure_callbacks_class(
-            kwargs.get('failure_callbacks', [])
-        )
-        self.failure_side_effects = self.failure_side_effects_class(
+        self.failure_callbacks = Callbacks(kwargs.get('failure_callbacks', []))
+        self.failure_side_effects = FailureSideEffects(
             kwargs.get('failure_side_effects', [])
         )
         self.side_effects = self.side_effects_class(
@@ -148,9 +125,7 @@ class Transition(BaseTransition):
         self.conditions = self.conditions_class(
             kwargs.get('conditions', [])
         )
-        self.next_transition = self.next_transition_class(
-            kwargs.get('next_transition')
-        )
+        self.next_transition = NextTransition(kwargs.get('next_transition'))
 
     def __str__(self):
         return f"Transition: {self.action_name} to {self.target}"
@@ -196,7 +171,7 @@ class Transition(BaseTransition):
         )
 
         # Revalidate under the lock. The source/condition checks in
-        # get_transition_by_action_name ran before the lock was acquired;
+        # the transition was resolved before the lock was acquired;
         # by now a concurrent transition may have won the race and moved
         # the state (validate-then-lock TOCTOU). One cheap query closes it.
         # Any failure between acquisition and the side-effect machinery —
@@ -295,37 +270,18 @@ class Transition(BaseTransition):
 
     @staticmethod
     def _release_lock(state: State, deferrable: bool = True, **kwargs):
-        """Release the state lock — now, or at commit (#141).
+        """Release the state lock — now, or at commit under
+        ``DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT']`` (#141).
 
-        Inside an outer ``transaction.atomic()`` the target/failed state
-        write is invisible to other connections until the block commits,
-        while the cache lock is not transactional. Releasing immediately
-        (the historical default) opens a window in which a second
-        transition can acquire the lock, read the OLD committed state and
-        run conflicting side-effects — the final state then depends on
-        commit ordering.
+        Deferring extends mutual exclusion over the span where a state
+        write is committed-but-invisible to other connections. The
+        trade-offs, and when to enable it, are in the README.
 
-        With ``DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] = True`` the
-        unlock is deferred to ``transaction.on_commit`` so mutual
-        exclusion covers the whole invisible span. Documented trade-offs
-        (see README):
-
-        * on rollback the hook never fires — the lock expires via its
-          TTL, a *bounded* lockout (same failure mode as a crashed
-          process). Rollback-prone flows should pair this with a
-          per-transition ``lock_timeout``;
-        * same-instance follow-ups (callbacks / ``next_transition``)
-          inside the atomic block find the state still locked and are
-          skipped (they are best-effort by contract) — chain them from
-          ``transaction.on_commit`` in the caller instead.
-
-        Only the paths that follow a successful state write defer
-        (``deferrable=True``); when nothing was written under the lock
-        there is no visibility window to protect and deferring would only
-        leak the lock until TTL on rollback — the early
-        revalidation-failure unlock in ``change_state`` and a failure
-        path that wrote no state (no ``in_progress_state``, no
-        ``failed_state``) release immediately.
+        ``deferrable`` is False on the paths where nothing was written
+        under the lock (the early revalidation-failure unlock, and a
+        failure path with neither ``in_progress_state`` nor
+        ``failed_state``): with no visibility window to protect,
+        deferring would only leak the lock until TTL on rollback.
         """
         if deferrable and _defer_unlock_until_commit():
             using = state.instance._state.db or DEFAULT_DB_ALIAS
@@ -433,8 +389,7 @@ class Action(Transition):
         ``Transition.fail_transition`` would call ``state.unlock()`` and,
         because the lock key is derived only from instance+field, delete
         the lock a concurrent ``Transition`` on the same instance/field
-        legitimately holds — and, for ``RedisState``, discard the cached
-        in-progress state stored under that same key. This mirrors the
+        legitimately holds. This mirrors the
         lock/unlock asymmetry already present in ``complete_transition``.
 
         ``failed_state`` is only written when the state is NOT currently

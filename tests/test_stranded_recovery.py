@@ -461,10 +461,9 @@ class GuardedRecoveryTests(TestCase):
         self.assertFalse(State(invoice, 'status').is_locked())
 
     def test_sweep_uses_the_process_declared_state_class(self):
-        """The sweep must lock via the bound process's state_class — a
-        RedisState stores the state VALUE under the lock key, so locking
-        with the plain base State would make concurrent readers see the
-        lock payload (True) as the state for the whole recovery window."""
+        """The sweep must lock via the bound process's declared
+        state_class, not a hardcoded State — a custom backend can store
+        more than a token under the lock key."""
         lock_calls = []
 
         class RecordingState(State):

@@ -28,7 +28,23 @@ failures across state machines.
 ```python
 from django_logic import Process, Transition
 from django_logic.background import BackgroundTransition
-from django_logic.conditions import all_related_in, any_related_in
+
+
+def all_fulfillments_in(states):
+    """Condition: every child fulfillment sits in one of ``states``."""
+    def condition(order, **kwargs):
+        return not order.fulfillments.exclude(status__in=states).exists()
+    condition.__name__ = f'all_fulfillments_in__{"_".join(sorted(states))}'
+    return condition
+
+
+def any_fulfillment_in(states):
+    """Condition: at least one child fulfillment sits in ``states``."""
+    def condition(order, **kwargs):
+        return order.fulfillments.filter(status__in=states).exists()
+    condition.__name__ = f'any_fulfillment_in__{"_".join(sorted(states))}'
+    return condition
+
 
 class FulfillmentProcess(Process):                  # the child
     transitions = [
@@ -47,10 +63,10 @@ class OrderProcess(Process):                         # the parent (synchronous)
         Transition('start', sources=['new'], target='fulfilling',
                    side_effects=[fan_out], callbacks=[recheck]),
         Transition('mark_fulfilled', sources=['fulfilling'], target='fulfilled',
-                   conditions=[all_related_in('fulfillments', 'status', {'fulfilled'})]),
+                   conditions=[all_fulfillments_in({'fulfilled'})]),
         Transition('mark_action_required', sources=['fulfilling'], target='action_required',
-                   conditions=[all_related_in('fulfillments', 'status', {'fulfilled', 'failed'}),
-                               any_related_in('fulfillments', 'status', {'failed'})],
+                   conditions=[all_fulfillments_in({'fulfilled', 'failed'}),
+                               any_fulfillment_in({'failed'})],
                    side_effects=[aggregate_errors]),
     ]
 

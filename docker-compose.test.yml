@@ -23,18 +23,3 @@ services:
       timeout: 5s
       retries: 10
 
-  stability-tests:
-    build: .
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      DJANGO_SETTINGS_MODULE: tests.settings_stability
-      DATABASE_URL: postgres://django_logic:django_logic@postgres:5432/django_logic_test
-      REDIS_URL: redis://redis:6379/0
-    command: >
-      python tests/manage.py test tests.stability
-        --verbosity=2
-        --tag=stability

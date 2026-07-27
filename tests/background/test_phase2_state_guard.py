@@ -3,15 +3,10 @@
 Phase 2 restores the transition by name and deliberately bypasses the
 source-state gate, so without a guard it would overwrite any state change
 made while the row was pending (manual ops fix, external write). These
-tests pin the guard's behaviour in both modes:
-
-* ``PHASE2_STATE_GUARD='enforce'`` (default) — the row completes as
-  *superseded* (``last_error_message`` starts with ``[superseded]``),
-  side-effects are skipped, no hooks run, nothing re-raises, and the
-  external state change wins.
-* ``PHASE2_STATE_GUARD='warn'`` — a warning is logged on
-  ``django-logic.transition`` and the transition runs anyway
-  (pre-0.4 behaviour).
+tests pin the guard's behaviour, which is unconditional since 0.10.0: the
+row completes as *superseded* (``last_error_message`` starts with
+``[superseded]``), side-effects are skipped, no hooks run, nothing re-raises,
+and the external state change wins.
 
 The same guard protects ``failed_state`` writes performed by the
 safety-net finalizers (``runner._finalize_terminal_from_watchdog``).
@@ -30,16 +25,10 @@ from django_logic.background.runner import (
     run_background_transition,
 )
 from tests.background.models import Widget
+from tests import dl_settings
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 0,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3, TRANSITION_MESSAGE_RETRY_MINUTES=0)
 
 
 def _make_tm(widget, transition_name='fulfil', queue_name='django_logic.critical',
@@ -146,39 +135,6 @@ class EnforceModeTests(TestCase):
         self.assertIn('cb,', widget.cb_log)  # success callbacks ran
 
 
-@override_settings(
-    DJANGO_LOGIC=dict(_SYNC_SETTINGS, PHASE2_STATE_GUARD='warn')
-)
-class WarnModeTests(TestCase):
-    """R4(c): 'warn' mode logs and proceeds (pre-0.4 behaviour)."""
-
-    def test_warn_mode_logs_and_runs_anyway(self):
-        # R4(c): same mismatch as the enforce-mode test, but phase 2 logs
-        # a WARNING on 'django-logic.transition' and runs the transition
-        # anyway — the widget ends in the target state.
-        widget = Widget.objects.create(status='fulfilling')
-        tm = _make_tm(widget, transition_name='fulfil')
-        widget.status = 'cancelled'
-        widget.save(update_fields=['status'])
-
-        with self.assertLogs('django-logic.transition', level='WARNING') as cm:
-            run_background_transition(tm.pk)
-        self.assertTrue(
-            any('state guard mismatch' in message for message in cm.output),
-            cm.output,
-        )
-
-        tm.refresh_from_db()
-        # Completed normally, not superseded.
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.last_error_message, '')
-        self.assertIsNotNone(tm.started_at)
-
-        widget.refresh_from_db()
-        self.assertEqual(widget.status, 'fulfilled')  # target written
-        self.assertIn('ok,', widget.se_log)  # side-effects ran
-
-
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class SafetyNetGuardTests(TestCase):
     """R4(d): the same guard protects failed_state writes made by the
@@ -220,24 +176,3 @@ class SafetyNetGuardTests(TestCase):
         self.assertEqual(widget.status, 'fulfilment_failed')
 
 
-class SettingsValidationTests(TestCase):
-    """R4(e): invalid PHASE2_STATE_GUARD values fail loudly."""
-
-    def test_bogus_state_guard_mode_raises(self):
-        # R4(e): a typo in PHASE2_STATE_GUARD must not silently fall back
-        # to either mode.
-        with override_settings(
-            DJANGO_LOGIC=dict(_SYNC_SETTINGS, PHASE2_STATE_GUARD='bogus')
-        ):
-            with self.assertRaises(ImproperlyConfigured):
-                bg_settings.phase2_state_guard()
-
-    def test_valid_modes_accepted(self):
-        # R4(e) control: both documented modes resolve, and the default
-        # is 'enforce'.
-        with override_settings(DJANGO_LOGIC=dict(_SYNC_SETTINGS)):
-            self.assertEqual(bg_settings.phase2_state_guard(), 'enforce')
-        with override_settings(
-            DJANGO_LOGIC=dict(_SYNC_SETTINGS, PHASE2_STATE_GUARD='warn')
-        ):
-            self.assertEqual(bg_settings.phase2_state_guard(), 'warn')

@@ -18,16 +18,10 @@ from django_logic.background.runner import run_background_transition
 from django_logic.background.serializers import KwargsSerializationError
 from tests.background import models as bg_models
 from tests.background.models import Widget
+from tests import dl_settings
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 _UUID = UUID('12345678-1234-5678-1234-567812345678')
 _WHEN = datetime(2026, 6, 4, 12, 30, 0)

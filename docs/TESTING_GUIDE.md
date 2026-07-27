@@ -565,9 +565,7 @@ skipped, and the exception reaches the caller. See
 ## ProcessScenario API reference
 
 Class attributes: `process_class`, `model`, `state_field` (default
-`'status'`), `process_name` (default `'process'`), `snapshot_on_failure`
-(default `False` — when `True`, assertion failures attach a reproducible
-snapshot).
+`'status'`), `process_name` (default `'process'`).
 
 **Driving the process**
 

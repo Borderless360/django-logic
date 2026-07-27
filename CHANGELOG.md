@@ -2,6 +2,135 @@
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-27
+
+An overengineering sweep. ~1,900 lines removed across the engine, its tests and
+its docs, four settings retired, and one addition: a system check for the
+failure mode that motivated the audit. Every removal below was verified to have
+no consumer — the two real consumers were searched under both import spellings
+before anything was deleted.
+
+### Removed (breaking)
+
+- **`RedisState`** and **`State.get_db_state()`**. `RedisState` was 199 of
+  `state.py`'s 326 lines and no consumer had ever set `state_class` to it;
+  measured on a live deployment of 28 bound machines / 137 transitions, all 50
+  process classes resolved to the base `State`. Use `get_persisted_state()` in
+  place of `get_db_state()`. Two hardening issues turn out to have been spent on
+  dead code — #139's token-in-key wrapper and #151's Lua compare-and-set — while
+  the base-`State` ownership token and compare-and-delete unlock stay.
+  Deliberately **no** `RedisState = State` alias: the two differ in locking
+  semantics, so an alias would change behaviour silently where an `ImportError`
+  says so plainly.
+- **`LOG_KWARGS` / `LOG_KWARGS_REDACTOR`.** Scrub with a `logging.Filter` on the
+  `django-logic.transition` logger instead. `redact_log_kwargs` keeps its
+  shallow copy, which is a real fix, not a knob.
+- **`PHASE2_STATE_GUARD = 'warn'`.** The phase-2 state guard now always
+  enforces; a stale `'warn'` is ignored. Its only purpose was restoring pre-0.4
+  behaviour.
+- **`SENTRY_TRANSACTION_NAMING`.** Transactions are always named.
+- **`PROCESS_CLASS_ALIASES`** — removed rather than fixed, because it never did
+  what it documented: the map was applied to the recorded *bound* class but
+  `_find_background_transition_in_owner` compared `owning_process_class`
+  verbatim, so renaming a *nested* owning process still yielded
+  `[unrestorable]` with a correct alias configured. **Drain in-flight rows
+  before renaming a Process class** — already the documented rule for the
+  sibling `action_name` refactor.
+- **`django_logic.conditions`** (`all_related_in`, `any_related_in`). The one
+  consumer that wanted this pattern hand-wrote it four times with different
+  empty-set semantics. `docs/recipes/nested-processes.md` now shows the closures
+  inline.
+- **`Process.get_transition_by_action_name`** and the public `ignore_state=`
+  parameter of `get_available_transitions`. Neither had a caller in the library,
+  its suite, or any consumer. To resolve one action, iterate
+  `get_available_transitions(user=..., action_name='x')` and take the single
+  match — that is what the removed method did. **Gotcha:** a stale call will not
+  raise `AttributeError` pointing at this removal, because `Process.__getattr__`
+  treats any non-underscore miss as an *action name*. Attribute access still
+  returns a callable, and calling it reports an argument problem with a
+  now-nonexistent action:
+
+  ```
+  TypeError: get_transition_by_action_name() accepts keyword arguments only
+             (got 1 positional). Pass user and other values
+  ```
+
+  Grep for the name when upgrading rather than relying on the traceback.
+- **`ProcessScenario.snapshot_on_failure`** and `format_failure(snapshot=)`,
+  never enabled by anyone in the 14 months since they shipped.
+  `snapshot()` / `from_snapshot()` are unaffected.
+- **`BaseTransition`** — folded into `Transition`, along with the
+  `conditions_class` / `failure_callbacks_class` / `failure_side_effects_class` /
+  `next_transition_class` swap hooks that had no override anywhere.
+  `Transition.is_background`, `side_effects_class`, `callbacks_class`,
+  `permissions_class`, `conditions_class` and `Process.permissions_class` all
+  stay: consumers use them.
+- **`ExecutionTracker`** is no longer re-exported from `django_logic.testing`
+  (the class remains; `track()` is the supported path).
+- **`process_name` is now required** on `latest_message`, `message_for` and
+  `uncompleted_message`. The `None` default made it possible to silently
+  reintroduce the #150 cross-process bleed by omitting an argument.
+- **`JourneyStep.matches()`** — use `==`.
+- **`coverage_report` no longer reads 0.8 or 0.9.0 log lines.** Record a fresh
+  log per run, which was always the documented practice.
+- **The non-finite-float pre-scan** in `serialize_kwargs`. The
+  `json.dumps(allow_nan=False)` round-trip rejects a superset (it also catches a
+  non-finite float in a dict *key*, which the scan could not reach); the error
+  message no longer names the offending key path.
+- **`_infer_field_name`**: a `TransitionMessage` with no `field_name` now fails
+  closed as `[unrestorable]` instead of guessing `'state'`, which could drive
+  the wrong machine on a multi-process model.
+
+### Added
+
+- **`django_logic.W002`** — under `BACKGROUND_EXECUTION='celery'`, reports any
+  shipped safety-net task missing from the running app's beat schedule. This
+  existed to catch a real incident: the README and `beat_schedule()`'s own
+  docstring recommended `app.conf.beat_schedule = {...}`, which Celery silently
+  ignores when the project also defines `CELERY_BEAT_SCHEDULE` in Django
+  settings, and a consumer consequently ran seven weeks with all five tasks
+  registered and never fired. Both now recommend
+  `app.conf['CELERY_BEAT_SCHEDULE']`.
+- **`django_logic.W003`** — reports any `DJANGO_LOGIC` key this release removed.
+  `DJANGO_LOGIC` has no unknown-key rejection, so every removal above fails
+  *open* and silently; the sharpest case is a deployment that set
+  `LOG_KWARGS_REDACTOR` for PII compliance, upgrades, and starts writing raw
+  kwargs to its logs with no signal anywhere. The warning names the replacement
+  for each key.
+
+### Fixed
+
+- `TaskCrashRedeliveryConfigTests` hardcoded five task objects and so never
+  covered `recover_stranded_states`; both `acks_late` and
+  `reject_on_worker_lost` could be stripped from it with the suite green. The
+  list is now derived from the module.
+- The duplicated failure-side-effect savepoint in `background/runner.py`: #138
+  had already moved that rule into `commands.FailureSideEffects.execute` with a
+  stronger savepoint, and both call sites already ran inside the atomic block.
+
+### Docs
+
+- Deleted five stale pre-implementation documents and the index that tiered
+  them (2,311 lines), whose rot was already realized — `docs/PLAN.md` omitted
+  five shipped settings while `CLAUDE.md` told engine-changers to read it first.
+  The two still-open items from the Heroku-validation notes moved to `TODO.md`.
+- De-duplicated the prose that `README.md` and `CHANGELOG.md` already owned, and
+  collapsed the README testing chapter's overlap with `docs/TESTING_GUIDE.md`.
+- `CLAUDE.md` now states the comment/docstring rule that reviewers had been
+  citing as though it existed.
+
+### Repo
+
+- Removed the nightly "stress" CI step (its `STABILITY_STRESS_MODE` was read by
+  nothing, so it re-ran the identical tests), an unreferenced and broken
+  `docker-compose.test.yml` service, and `.cursor/rules/` (no audience, five
+  false statements). The `dev` extra dropped `pytest`/`pytest-django` — there is
+  no pytest configuration, so collection could never have worked — and
+  `djangorestframework`, which no test imports. The `drf` extra stays.
+- Test settings: one `tests.dl_settings(**overrides)` helper replaces 26
+  hand-copied dicts, and 13 no-op `@override_settings` are gone.
+
+
 ## [0.9.1] — 2026-07-24
 
 ### Fixed

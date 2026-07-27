@@ -17,16 +17,10 @@ from django.utils import timezone
 from django_logic.background.models import TransitionMessage
 from django_logic.background.tasks import _retry_pending_inline
 from tests.background.models import Widget
+from tests import dl_settings
 
 
-_CELERY_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'celery',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 0,  # cutoff == now
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_CELERY_SETTINGS = dl_settings(BACKGROUND_EXECUTION='celery', TRANSITION_MESSAGE_MAX_ERRORS=3, TRANSITION_MESSAGE_RETRY_MINUTES=0)
 
 _APPLY_ASYNC = (
     'django_logic.background.tasks.'

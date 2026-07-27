@@ -26,16 +26,7 @@ from django_logic import Transition
 from django_logic.state import State
 from tests.background.models import ArchivableWidget, Widget
 from tests.models import Invoice
-
-
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+from tests import dl_settings
 
 
 def _boom_set_state(self, value):
@@ -93,7 +84,6 @@ class LockReleasedOnWriteFailureTests(TestCase):
         self.assertEqual(self.invoice.status, 'done')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class PositionalArgumentsRejectedTests(TestCase):
     """#87 — positional args raise instead of silently dropping user."""
 
@@ -110,7 +100,6 @@ class PositionalArgumentsRejectedTests(TestCase):
         self.assertEqual(widget.status, 'cancelled')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class BaseManagerRestoreTests(TestCase):
     """#90 — a filtered default manager cannot strand in-flight work."""
 
@@ -155,14 +144,20 @@ class TaskCrashRedeliveryConfigTests(TestCase):
     """#91 — acks_late is paired with reject_on_worker_lost per task."""
 
     def test_all_tasks_pair_acks_late_with_reject_on_worker_lost(self):
+        # Derived from the module, never hardcoded: a hardcoded list silently
+        # stopped covering recover_stranded_states when it was added, so both
+        # kwargs could be stripped from it with the suite still green.
         from django_logic.background import tasks
 
-        for task in (
-            tasks.run_background_transition_task,
-            tasks.retry_stale_transitions,
-            tasks.cleanup_completed_transitions,
-            tasks.detect_stuck_transitions,
-            tasks.watchdog_stale_attempts,
-        ):
+        found = [
+            obj for obj in vars(tasks).values()
+            if hasattr(obj, 'apply_async')
+            and str(getattr(obj, 'name', '')).startswith('django_logic.')
+        ]
+        self.assertEqual(
+            len(found), 6,
+            'expected every @shared_task in django_logic.background.tasks to '
+            'be discovered; got %s' % sorted(t.name for t in found))
+        for task in found:
             self.assertTrue(task.acks_late, task.name)
             self.assertTrue(task.reject_on_worker_lost, task.name)
