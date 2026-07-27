@@ -56,10 +56,7 @@ drf = [
     "djangorestframework>=3.14.0",
 ]
 dev = [
-    "djangorestframework>=3.14.0",
     "coverage>=7.0",
-    "pytest>=8.0",
-    "pytest-django>=4.8",
     # Driver for the PostgreSQL stability suite (make stability-*) and the
     # Postgres concurrency tests. Without it, `uv sync --extra dev` runs the
     # SQLite suite but not tests.stability.

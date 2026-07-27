@@ -19,20 +19,11 @@ from django_logic.background.settings import (
     validate_on_ready,
 )
 from django_logic.conf import lock_timeout
-
-
-_BASE = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+from tests import dl_settings
 
 
 def _conf(**overrides):
-    return dict(_BASE, **overrides)
+    return dl_settings(**overrides)
 
 
 class SettingValidationTests(SimpleTestCase):

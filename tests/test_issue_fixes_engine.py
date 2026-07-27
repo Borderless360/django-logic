@@ -26,16 +26,7 @@ from django_logic import Transition
 from django_logic.state import State
 from tests.background.models import ArchivableWidget, Widget
 from tests.models import Invoice
-
-
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+from tests import dl_settings
 
 
 def _boom_set_state(self, value):
@@ -93,7 +84,6 @@ class LockReleasedOnWriteFailureTests(TestCase):
         self.assertEqual(self.invoice.status, 'done')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class PositionalArgumentsRejectedTests(TestCase):
     """#87 — positional args raise instead of silently dropping user."""
 
@@ -110,7 +100,6 @@ class PositionalArgumentsRejectedTests(TestCase):
         self.assertEqual(widget.status, 'cancelled')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class BaseManagerRestoreTests(TestCase):
     """#90 — a filtered default manager cannot strand in-flight work."""
 

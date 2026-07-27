@@ -26,16 +26,7 @@ from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.state import State
 from tests.background.models import Widget
-
-
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+from tests import dl_settings
 
 
 def _make_inflight_process_tm(widget):
@@ -55,7 +46,6 @@ def _make_inflight_process_tm(widget):
     )
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class R5IndependentProcessesTests(TestCase):
     """R5 (a): with 'process' work in flight, the independent
     'audit_process' state machine on the same instance still runs."""
@@ -84,7 +74,6 @@ class R5IndependentProcessesTests(TestCase):
         self.assertEqual(widget.status, 'fulfilling')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class R5SameProcessDuplicateTests(TransactionTestCase):
     """R5 (b): the constraint still rejects a SECOND background
     transition on the SAME process, via AlreadyInProgress, and phase 1
@@ -128,7 +117,6 @@ class R5SameProcessDuplicateTests(TransactionTestCase):
         self.assertFalse(State(widget, 'status', 'process').is_locked())
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class R5ConstraintDbLevelTests(TransactionTestCase):
     """R5 (c): the partial unique constraint itself, pinned at the DB
     level with direct inserts (no phase-1 machinery)."""
@@ -172,7 +160,6 @@ class R5ConstraintDbLevelTests(TransactionTestCase):
         self.assertEqual(TransitionMessage.objects.count(), 2)
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class R5DefaultQueueFallbackTests(TestCase):
     """R5 (d): WidgetAuditProcess.audit declares no queue= — phase 1
     records DJANGO_LOGIC['DEFAULT_QUEUE'] on the TransitionMessage,
@@ -189,7 +176,7 @@ class R5DefaultQueueFallbackTests(TestCase):
     def test_tm_records_overridden_default_queue(self):
         widget = Widget.objects.create()
         with override_settings(
-            DJANGO_LOGIC={**_SYNC_SETTINGS, 'DEFAULT_QUEUE': 'custom.q'}
+            DJANGO_LOGIC=dl_settings(DEFAULT_QUEUE='custom.q')
         ):
             with sync_execution():
                 widget.audit_process.audit()

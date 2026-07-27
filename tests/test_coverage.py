@@ -19,6 +19,7 @@ from django_logic.coverage import (
 from django_logic.process import Process, ProcessManager, transition_observers
 from django_logic.transition import Transition
 from tests.models import Invoice
+from tests import dl_settings
 
 
 def is_never_available(instance):
@@ -194,14 +195,7 @@ class TransitionObserverAndCoverageTests(TestCase):
         self.assertEqual(seen, ['approve'])
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 3,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 _BG_FAIL = {'on': False}
 

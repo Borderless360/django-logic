@@ -18,16 +18,8 @@ from django_logic.background import BackgroundTransition, sync_execution
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
 from tests.background.models import Widget
+from tests import dl_settings
 
-
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
 
 # Module-level marker — proves WHICH process's side-effects ran.
 RAN: list = []
@@ -56,7 +48,6 @@ class RogueProcess(Process):
     ]
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class RestoreVerificationTests(TestCase):
     def setUp(self):
         RAN.clear()
@@ -142,13 +133,10 @@ class RestoreVerificationTests(TestCase):
             },
         )
 
-        with override_settings(DJANGO_LOGIC={
-            **_SYNC_SETTINGS,
-            'PROCESS_CLASS_ALIASES': {
-                'tests.old_home.RenamedRogueProcess':
-                    'tests.background.test_restore_verification.RogueProcess',
-            },
-        }):
+        with override_settings(DJANGO_LOGIC=dl_settings(PROCESS_CLASS_ALIASES={
+            'tests.old_home.RenamedRogueProcess':
+                'tests.background.test_restore_verification.RogueProcess',
+        })):
             run_background_transition(tm.pk)
 
         self.widget.refresh_from_db()
@@ -178,13 +166,10 @@ class RestoreVerificationTests(TestCase):
             },
         )
 
-        with override_settings(DJANGO_LOGIC={
-            **_SYNC_SETTINGS,
-            'PROCESS_CLASS_ALIASES': {
-                'tests.old_home.OldWidgetProcess':
-                    'tests.background.models.WidgetProcess',
-            },
-        }):
+        with override_settings(DJANGO_LOGIC=dl_settings(PROCESS_CLASS_ALIASES={
+            'tests.old_home.OldWidgetProcess':
+                'tests.background.models.WidgetProcess',
+        })):
             with self.assertNoLogs('django-logic.transition', level='WARNING'):
                 run_background_transition(tm.pk)
 
@@ -227,9 +212,8 @@ class RestoreVerificationTests(TestCase):
         self.assertIn('[unrestorable]', tm.last_error_message)
 
         # No infinite retry: the starter has nothing left to re-dispatch.
-        with override_settings(DJANGO_LOGIC={
-            **_SYNC_SETTINGS, 'TRANSITION_MESSAGE_RETRY_MINUTES': 0,
-        }):
+        with override_settings(
+                DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_RETRY_MINUTES=0)):
             self.assertEqual(_retry_pending_inline(), 0)
         tm.refresh_from_db()
         self.assertEqual(tm.errors_count, 0, 'errors must not grow')

@@ -27,17 +27,10 @@ from django_logic.background import BackgroundTransition, sync_execution
 from django_logic.background.dispatch import retry_pending
 from django_logic.background.models import TransitionMessage
 from tests.background.models import Widget
+from tests import dl_settings
 
 
-_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 2,
-    # 0 so retry_pending()'s recency guard considers every row eligible.
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 0,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
+_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=2, TRANSITION_MESSAGE_RETRY_MINUTES=0)
 
 # Module-level call log, reset per test. Lets tests assert which hooks ran
 # and lets a side-effect fail only on its first invocation.

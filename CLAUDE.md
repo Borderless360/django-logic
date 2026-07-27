@@ -3,8 +3,8 @@
 This repo is the **django-logic** library: declarative business logic & state
 machines for Django, with durable, queue-routed background transitions
 (`django_logic.background`). This file tells an AI how to **use the library
-correctly** when generating or reviewing code that depends on it. (Mirror of
-`.cursor/rules/django-logic.mdc`.) The rules below are distilled from a full
+correctly** when generating or reviewing code that depends on it. The rules
+below are distilled from a full
 production-style validation on Heroku (RabbitMQ + PostgreSQL + multiple
 workers + induced worker crashes, deploys, broker loss, and pgbouncer).
 
@@ -88,8 +88,10 @@ change on success) for anything slow, external, or retriable.
 
 ## Working IN this repo
 
-- Tests: `make test` / `pytest` (SQLite suite); PostgreSQL concurrency +
-  stability suites under `tests/stability`, `tests/background`.
+- Tests: `python tests/manage.py test` (SQLite suite, also `make test`);
+  PostgreSQL concurrency + stability suites under `tests/stability`,
+  `tests/background`. There is no pytest configuration — do not add one
+  without wiring `DJANGO_SETTINGS_MODULE`.
 - `django_logic/background/` is the durable engine: `transitions.py`,
   `dispatch.py`, `runner.py` (phase 2), `tasks.py` (Celery + periodic),
   `models.py` (`TransitionMessage`), `settings.py`.

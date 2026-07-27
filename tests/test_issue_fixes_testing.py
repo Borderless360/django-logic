@@ -20,19 +20,9 @@ from django_logic.testing.snapshot import _jsonable, from_snapshot, snapshot
 from tests.background.models import (
     RAN, Widget, WidgetChainProcess, WidgetProcess,
 )
+from tests import dl_settings
 
 
-_SYNC_SETTINGS = {
-    'LOCK_TIMEOUT': 7200,
-    'BACKGROUND_EXECUTION': 'sync',
-    'STARTER_QUEUE': 'django_logic.starter',
-    'TRANSITION_MESSAGE_MAX_ERRORS': 5,
-    'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
-    'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-}
-
-
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class InjectionMustFireTests(ProcessScenario):
     """#94 — silent injection no-ops are now loud failures."""
 
@@ -70,7 +60,6 @@ class InjectionMustFireTests(ProcessScenario):
         self.assert_error_recorded(widget, 'boom')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class TrackingCoversNextTransitionTests(ProcessScenario):
     """#96 — hooks run via next_transition are tracked."""
 
@@ -94,7 +83,6 @@ class TrackingCoversNextTransitionTests(ProcessScenario):
         self.assert_side_effects_ran(['chain_first', 'chain_followup'])
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class SnapshotFidelityTests(ProcessScenario):
     """#95 — JSONField round-trip + DB-coerced attribute types."""
 
@@ -159,7 +147,6 @@ class SnapshotFidelityTests(ProcessScenario):
         self.assertEqual(tm.field_name, 'status')
 
 
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class FailureHookAssertionsTests(ProcessScenario):
     """The failure-hook tracker sinks are assertable (review follow-up)."""
 
@@ -168,8 +155,7 @@ class FailureHookAssertionsTests(ProcessScenario):
     state_field = 'status'
     process_name = 'process'
 
-    @override_settings(DJANGO_LOGIC=dict(_SYNC_SETTINGS,
-                                         TRANSITION_MESSAGE_MAX_ERRORS=1))
+    @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=1))
     def test_failure_hooks_are_assertable(self):
         # crash_with_bad_cleanup: side-effect raises; terminal at
         # MAX_ERRORS=1; its failure_side_effect (bg_fse_boom) raises too —

@@ -19,6 +19,7 @@ from django_logic.process import Process
 from django_logic.state import State
 from django_logic.transition import Transition
 from tests.models import Invoice
+from tests import dl_settings
 
 
 def _boom(instance, **kwargs):
@@ -74,10 +75,7 @@ class _DeferProcess(Process):
     ]
 
 
-_DEFER_ON = {
-    'BACKGROUND_EXECUTION': 'sync',
-    'DEFER_UNLOCK_UNTIL_COMMIT': True,
-}
+_DEFER_ON = dl_settings(DEFER_UNLOCK_UNTIL_COMMIT=True)
 
 
 class DefaultImmediateUnlockTests(TestCase):

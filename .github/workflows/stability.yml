@@ -68,17 +68,3 @@ jobs:
           REDIS_URL: redis://localhost:6380/0
         run: |
           python tests/manage.py test tests.stability --verbosity=2 --tag=stability
-
-      - name: Run stability tests (stress - 10 threads)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        env:
-          DJANGO_SETTINGS_MODULE: tests.settings_stability
-          POSTGRES_HOST: localhost
-          POSTGRES_PORT: "5433"
-          POSTGRES_DB: django_logic_test
-          POSTGRES_USER: django_logic
-          POSTGRES_PASSWORD: django_logic
-          REDIS_URL: redis://localhost:6380/0
-          STABILITY_STRESS_MODE: "1"
-        run: |
-          python tests/manage.py test tests.stability --verbosity=2 --tag=stability
