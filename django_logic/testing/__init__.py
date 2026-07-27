@@ -19,7 +19,7 @@ and retries — as ordinary unit tests, **without a Celery broker**.
 ``snapshot()`` / ``from_snapshot()`` capture a production instance's state as
 JSON and rebuild it in a test, turning a production bug into a regression test.
 
-See ``docs/design/TESTING_SCENARIOS.md`` for the full design.
+See ``docs/TESTING_GUIDE.md`` for the full guide.
 """
 from django_logic.testing.idempotency import assert_idempotent
 from django_logic.testing.scenario import ProcessScenario, JourneyStep

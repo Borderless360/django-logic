@@ -44,7 +44,7 @@ Extras:
 ## Installation
 
 ```bash
-# Installs the current release from PyPI (0.9.0 at the time of writing).
+# Installs the current release from PyPI.
 # Celery and django-redis are installed automatically.
 pip install django-logic
 ```
@@ -1042,18 +1042,10 @@ locking all interact. `django_logic.testing` gives you a **scenario-based** test
 base class that reads like the business process itself and runs everything —
 including background transitions — **inline, with no Celery broker**.
 
-Two principles keep these tests worth writing (full rationale in
-[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md#journeys-not-mirrors)):
-
-- **Test your process, not the machinery.** Delivery, retries and durability
-  are the library's guarantees (its own regression + stability + Heroku
-  suites), so your tests never need a broker.
-- **Test the object's journey, not the wiring.** Assert what the object
-  *became* — its state trajectory, the fields the side-effects changed, and
-  what reaches the caller on failure — not merely that a hook you declared got
-  called. A test that only checks "the side-effect ran" passes even when the
-  side-effect does the wrong thing (and an AI regenerating the code regenerates
-  that test too). Journey assertions fail when behaviour regresses.
+Two principles keep these tests worth writing: **test your process, not the
+machinery**, and **assert what the object became, not that a hook ran**. Full
+rationale, and the 15-scenario catalog, in
+[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md#journeys-not-mirrors).
 
 ```python
 from django_logic.testing import ProcessScenario
@@ -1142,32 +1134,15 @@ Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transit
 
 Side-effects and callbacks are **tracked, not mocked** (identified by function `__name__`) — the real code runs; the framework just records what executed. `assert_side_effects_ran` / `assert_callbacks_ran` are *wiring* checks (a hook ran, not that it did the right thing) — pair them with `assert_changed` / `assert_related_count` / `assert_state`.
 
-**Snapshot & replay — turn a production bug into a test**
+**Snapshot & replay.** `snapshot(obj)` captures an instance's fields, state and
+`TransitionMessage` as JSON — from a shell, an admin action, Sentry or a log —
+and `self.from_snapshot('fixtures/bug_12345.json')` rebuilds it in a test, which
+turns a production bug into a regression test. See
+[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) §13.
 
-```python
-from django_logic.testing import snapshot, from_snapshot
+**AI-readable failure output.** When an assertion fails, the error includes a numbered timeline of every step and the relevant `TransitionMessage`, so a person or an agent can see where the process diverged without reading stack traces.
 
-data = snapshot(order)          # JSON-able: fields, state, TransitionMessage, process status
-```
-
-Capture it from a Django shell, admin action, Sentry, or a log, then reproduce:
-
-```python
-class TestStuckOrder(ProcessScenario):
-    process_class, model, state_field = OrderProcess, Order, 'status'
-
-    def test_reproduce_and_fix(self):
-        order = self.from_snapshot('fixtures/bug_12345.json')  # rebuilds instance + TransitionMessage
-        self.assert_state(order, 'fulfilling')
-        self.retry_transition(order)        # prove the fix
-        self.assert_state(order, 'fulfilled')
-```
-
-**AI-readable failure output.** When an assertion fails, the error includes a numbered timeline of every step, the relevant `TransitionMessage`, and (with `snapshot_on_failure = True` on the class) a reproducible snapshot — so a person or an AI agent can see exactly where the process diverged without reading stack traces.
-
-`ProcessScenario` extends `TransactionTestCase`, so it works with the durable `TransitionMessage` + atomic-block machinery. Full design: [docs/design/TESTING_SCENARIOS.md](docs/design/TESTING_SCENARIOS.md).
-
-**The full guide — [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md)** — documents every test scenario for a process (happy paths, gating, failures, retries, terminal failures, one-in-flight conflicts, superseded rows, nested processes, snapshot replay) with copy-pasteable examples, and explains the philosophy: **you test your process; the library guarantees the background machinery** (validated by its own regression suite and a production-style Heroku matrix), so your tests never need a Celery broker.
+`ProcessScenario` extends `TransactionTestCase`, so it works with the durable `TransitionMessage` + atomic-block machinery.
 
 ### Transition-execution coverage
 

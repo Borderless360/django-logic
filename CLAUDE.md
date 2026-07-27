@@ -93,10 +93,17 @@ change on success) for anything slow, external, or retriable.
 - `django_logic/background/` is the durable engine: `transitions.py`,
   `dispatch.py`, `runner.py` (phase 2), `tasks.py` (Celery + periodic),
   `models.py` (`TransitionMessage`), `settings.py`.
-- Read `docs/PLAN.md`, `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, and
+- Read `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md` and
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
   background engine.
+- `CHANGELOG.md` is the record of what shipped and why; `TODO.md` holds what
+  has not. Neither is a design document — do not add planning docs that
+  duplicate them.
 
-See `docs/IMPROVEMENTS_FROM_HEROKU_VALIDATION.md` for validated-behavior notes
-and open improvement ideas.
+## Comments and docstrings: explain *why*, never narrate *what*
+
+A comment earns its place only when it captures non-obvious intent or a gotcha
+the code cannot express — and then it is terse. Do not restate the next line,
+narrate a change, or record issue archaeology: `CHANGELOG.md` owns history.
+A bare `(#NNN)` marker is enough when a guard needs provenance.

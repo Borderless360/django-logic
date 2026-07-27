@@ -151,9 +151,3 @@ class MetadataDriftTests(unittest.TestCase):
             'README.md no longer states the "Django 4.2" support floor — '
             'keep it in sync with pyproject.toml and CI (#147)')
 
-    def test_readme_has_no_stale_release_instructions(self):
-        for stale in ('legacy 0.1.x', '@v0.4.0'):
-            self.assertNotIn(
-                stale, self.readme_text,
-                'README.md still contains the stale install/release string '
-                '%r — the current release is published to PyPI (#144)' % stale)

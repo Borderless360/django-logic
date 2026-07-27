@@ -295,37 +295,18 @@ class Transition(BaseTransition):
 
     @staticmethod
     def _release_lock(state: State, deferrable: bool = True, **kwargs):
-        """Release the state lock — now, or at commit (#141).
+        """Release the state lock — now, or at commit under
+        ``DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT']`` (#141).
 
-        Inside an outer ``transaction.atomic()`` the target/failed state
-        write is invisible to other connections until the block commits,
-        while the cache lock is not transactional. Releasing immediately
-        (the historical default) opens a window in which a second
-        transition can acquire the lock, read the OLD committed state and
-        run conflicting side-effects — the final state then depends on
-        commit ordering.
+        Deferring extends mutual exclusion over the span where a state
+        write is committed-but-invisible to other connections. The
+        trade-offs, and when to enable it, are in the README.
 
-        With ``DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] = True`` the
-        unlock is deferred to ``transaction.on_commit`` so mutual
-        exclusion covers the whole invisible span. Documented trade-offs
-        (see README):
-
-        * on rollback the hook never fires — the lock expires via its
-          TTL, a *bounded* lockout (same failure mode as a crashed
-          process). Rollback-prone flows should pair this with a
-          per-transition ``lock_timeout``;
-        * same-instance follow-ups (callbacks / ``next_transition``)
-          inside the atomic block find the state still locked and are
-          skipped (they are best-effort by contract) — chain them from
-          ``transaction.on_commit`` in the caller instead.
-
-        Only the paths that follow a successful state write defer
-        (``deferrable=True``); when nothing was written under the lock
-        there is no visibility window to protect and deferring would only
-        leak the lock until TTL on rollback — the early
-        revalidation-failure unlock in ``change_state`` and a failure
-        path that wrote no state (no ``in_progress_state``, no
-        ``failed_state``) release immediately.
+        ``deferrable`` is False on the paths where nothing was written
+        under the lock (the early revalidation-failure unlock, and a
+        failure path with neither ``in_progress_state`` nor
+        ``failed_state``): with no visibility window to protect,
+        deferring would only leak the lock until TTL on rollback.
         """
         if deferrable and _defer_unlock_until_commit():
             using = state.instance._state.db or DEFAULT_DB_ALIAS
