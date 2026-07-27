@@ -171,7 +171,7 @@ class Transition:
         )
 
         # Revalidate under the lock. The source/condition checks in
-        # get_transition_by_action_name ran before the lock was acquired;
+        # the transition was resolved before the lock was acquired;
         # by now a concurrent transition may have won the race and moved
         # the state (validate-then-lock TOCTOU). One cheap query closes it.
         # Any failure between acquisition and the side-effect machinery —

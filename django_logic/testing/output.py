@@ -1,13 +1,10 @@
 """AI-readable failure output.
 
-Formats a scenario's recorded timeline (plus the relevant TransitionMessage and,
-optionally, a reproducible snapshot) into a structured block that a human — or
-an AI agent — can read to see exactly where the process diverged, without
-parsing stack traces or Django internals.
+Formats a scenario's recorded timeline, plus the relevant TransitionMessage,
+into a structured block that a human — or an AI agent — can read to see exactly
+where the process diverged, without parsing stack traces or Django internals.
 """
 from __future__ import annotations
-
-import json
 
 
 def format_timeline(entries: list[dict]) -> str:
@@ -38,14 +35,9 @@ def format_tm(tm) -> str:
     )
 
 
-def format_failure(message: str, timeline: list[dict], *, tm=None, snapshot=None) -> str:
+def format_failure(message: str, timeline: list[dict], *, tm=None) -> str:
     parts = [message, '', format_timeline(timeline)]
     tm_block = format_tm(tm)
     if tm_block:
         parts.append(tm_block)
-    if snapshot is not None:
-        parts.append(
-            '\n  Snapshot (copy to reproduce with from_snapshot()):\n    '
-            + json.dumps(snapshot, default=str)
-        )
     return '\n'.join(parts)

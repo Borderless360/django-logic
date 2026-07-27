@@ -777,7 +777,7 @@ def _find_transition(process, tm: TransitionMessage):
     """Resolve the exact background transition a ``TransitionMessage`` refers to.
 
     Phase 1 can enqueue a background transition declared on a *nested* process
-    (the sync lookup ``get_transition_by_action_name`` recurses into
+    (the sync lookup recurses into
     ``nested_processes``), but the message records only the *bound*
     ``process_name``, so phase 2 restores the parent and must descend the
     ``nested_processes`` tree — each sub-process constructed with the parent's

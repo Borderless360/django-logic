@@ -267,7 +267,7 @@ class NextTransition:
             # as a follow-up is best-effort.
             return None
         if len(transitions) > 1:
-            # Parity with Process.get_transition_by_action_name: refuse to
+            # Parity with Process._resolve_transition_with_owner: refuse to
             # guess between ambiguous matches rather than silently running
             # whichever happens to be first in iteration order.
             transition_logger.error(

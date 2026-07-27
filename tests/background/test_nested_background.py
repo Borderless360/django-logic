@@ -1,7 +1,7 @@
 """Regression: background transitions declared on a *nested* process.
 
 Phase 1 can start a background transition that lives on a nested process —
-``get_transition_by_action_name`` descends into ``nested_processes``. The
+transition resolution descends into ``nested_processes``. The
 ``TransitionMessage`` records only the bound (parent) ``process_name``, so
 phase 2 restores the parent process and must descend into ``nested_processes``
 itself to find the transition (``runner._find_transition``).

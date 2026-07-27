@@ -78,7 +78,6 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
     model = None                # type[Model]
     state_field = 'status'
     process_name = 'process'
-    snapshot_on_failure = False
 
     def setUp(self):
         super().setUp()
@@ -105,20 +104,10 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
     def _record_assert(self, label, ok, detail=''):
         self._record(label, 'OK' if ok else 'FAILED', detail)
 
-    def _snapshot_if_enabled(self, instance):
-        if not self.snapshot_on_failure or instance is None:
-            return None
-        try:
-            return _snapshot(instance, state_field=self.state_field,
-                             process_name=self.process_name)
-        except Exception:
-            return None
-
     def _fail(self, message, instance=None):
         tm = (latest_message(instance, process_name=self.process_name)
               if instance is not None else None)
-        self.fail(format_failure(message, self._timeline, tm=tm,
-                                 snapshot=self._snapshot_if_enabled(instance)))
+        self.fail(format_failure(message, self._timeline, tm=tm))
 
     def _state(self, instance):
         return getattr(instance, self.state_field)
