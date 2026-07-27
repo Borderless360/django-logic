@@ -44,41 +44,7 @@ from django_logic.conf import defer_unlock_until_commit as _defer_unlock_until_c
 from django_logic.state import State
 
 
-class BaseTransition:
-    side_effects_class = SideEffects
-    callbacks_class = Callbacks
-    failure_callbacks_class = Callbacks
-    failure_side_effects_class = FailureSideEffects
-    permissions_class = Permissions
-    conditions_class = Conditions
-    next_transition_class = NextTransition
-
-    # Class-level marker; overridden to ``True`` by ``BackgroundTransition``.
-    #
-    # Used by ``Process.__init_subclass__`` to enforce unique background
-    # ``action_name``s without importing ``BackgroundTransition`` (that
-    # would create a circular: ``process → background.transitions →
-    # transition → process``). Kept as a stable public attribute so third
-    # parties can introspect a transition without caring about concrete
-    # subclasses (e.g. admin tooling, code-gen). Duck-typed by design;
-    # ``isinstance(..., BackgroundTransition)`` is equivalent but more
-    # coupling-heavy for callers.
-    is_background: bool = False
-
-    def is_valid(self, instance, user=None) -> bool:
-        raise NotImplementedError
-
-    def change_state(self, state: State, **kwargs):
-        raise NotImplementedError
-
-    def complete_transition(self, state: State, **kwargs):
-        raise NotImplementedError
-
-    def fail_transition(self, state: State, exception: Exception, **kwargs):
-        raise NotImplementedError
-
-
-class Transition(BaseTransition):
+class Transition:
     """Synchronous transition from a source state to a target state.
 
     Execution order on success:
@@ -93,6 +59,19 @@ class Transition(BaseTransition):
          contained state), run ``failure_side_effects``, unlock, run
          ``failure_callbacks`` (and re-raise)
     """
+
+    side_effects_class = SideEffects
+    callbacks_class = Callbacks
+    permissions_class = Permissions
+    conditions_class = Conditions
+
+    #: ``True`` on ``BackgroundTransition``. A public, stable attribute
+    #: rather than an ``isinstance`` check: ``Process.__init_subclass__``
+    #: reads it to enforce unique background action names without importing
+    #: ``BackgroundTransition`` (which would close the cycle
+    #: ``process → background.transitions → transition → process``), and
+    #: consumers introspect it the same way.
+    is_background: bool = False
 
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
@@ -130,10 +109,8 @@ class Transition(BaseTransition):
             )
         # Only SideEffects dereferences its transition (to drive
         # complete/fail); the other command bundles never read it.
-        self.failure_callbacks = self.failure_callbacks_class(
-            kwargs.get('failure_callbacks', [])
-        )
-        self.failure_side_effects = self.failure_side_effects_class(
+        self.failure_callbacks = Callbacks(kwargs.get('failure_callbacks', []))
+        self.failure_side_effects = FailureSideEffects(
             kwargs.get('failure_side_effects', [])
         )
         self.side_effects = self.side_effects_class(
@@ -148,9 +125,7 @@ class Transition(BaseTransition):
         self.conditions = self.conditions_class(
             kwargs.get('conditions', [])
         )
-        self.next_transition = self.next_transition_class(
-            kwargs.get('next_transition')
-        )
+        self.next_transition = NextTransition(kwargs.get('next_transition'))
 
     def __str__(self):
         return f"Transition: {self.action_name} to {self.target}"

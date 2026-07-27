@@ -40,7 +40,6 @@ Deliberate handling:
 from __future__ import annotations
 
 import json
-import math
 from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
@@ -73,8 +72,6 @@ _SCALAR_DECODERS = {
     'decimal': Decimal,
     'uuid': UUID,
 }
-
-
 
 
 def encode_value(value):
@@ -166,26 +163,6 @@ def _non_string_key_paths(value, path='kwargs'):
             yield from _non_string_key_paths(item, f'{path}[]')
 
 
-def _non_finite_float_paths(value, path='kwargs'):
-    """Yield ``path=value`` for every float that is NaN or +/-Infinity.
-
-    ``json.dumps`` accepts them by default — Python emits the non-standard
-    ``NaN``/``Infinity`` tokens — so they pass the phase-1 round-trip guard
-    but are not valid JSON: the failure then surfaces backend-dependently
-    (PostgreSQL rejects them opaquely at the row write). Phase 1 must
-    reject them loudly, naming the offending value.
-    """
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            yield f'{path}={value!r}'
-    elif isinstance(value, dict):
-        for k, v in value.items():
-            yield from _non_finite_float_paths(v, f'{path}[{k!r}]')
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            yield from _non_finite_float_paths(item, f'{path}[]')
-
-
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
@@ -244,23 +221,13 @@ def serialize_kwargs(kwargs: dict) -> dict:
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
 
-    bad_floats = sorted(set(_non_finite_float_paths(out)))
-    if bad_floats:
-        raise TypeError(
-            f"{out.get('tr_id')} non-finite float in background transition "
-            f"kwargs ({', '.join(bad_floats)}): NaN/Infinity pass Python's "
-            f"json.dumps but are not valid JSON, so the failure would "
-            f"surface backend-dependently at the row write. Pass None, or "
-            f"encode the sentinel explicitly."
-        )
-
     out = encode_value(out)
 
     # Round-trip through json to surface any remaining non-serializable
     # types at phase 1. Cheap on small dicts and invaluable in tests.
-    # allow_nan=False so a non-finite float the scan above could not reach
-    # (e.g. one hiding in a dict key) still fails here rather than at the
-    # row write; translated to TypeError to keep the dispatcher contract
+    # allow_nan=False: Python's json emits the non-standard NaN/Infinity
+    # tokens by default, which would then fail backend-dependently at the
+    # row write. Translated to TypeError to keep the dispatcher contract
     # (ImproperlyConfigured wraps TypeError, not ValueError).
     try:
         json.dumps(out, allow_nan=False)

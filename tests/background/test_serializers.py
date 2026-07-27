@@ -133,25 +133,25 @@ class SerializeKwargsTests(SimpleTestCase):
         with self.assertRaises(TypeError):
             serialize_kwargs({'blob': Unserializable()})
 
-    def test_nan_rejected_naming_the_offending_value(self):
-        # float('nan') passes Python's json.dumps (non-standard NaN token)
-        # but is not valid JSON — the failure would otherwise surface
+    def test_non_finite_floats_rejected(self):
+        # They pass Python's json.dumps (non-standard NaN/Infinity tokens)
+        # but are not valid JSON, so the failure would otherwise surface
         # backend-dependently at the row write.
-        with self.assertRaisesMessage(TypeError, "kwargs['rate']=nan"):
-            serialize_kwargs({'rate': float('nan')})
+        for value in (float('nan'), float('inf'), float('-inf')):
+            with self.subTest(value=value):
+                with self.assertRaisesMessage(
+                        TypeError, 'kwargs are not valid JSON'):
+                    serialize_kwargs({'rate': value})
 
-    def test_infinity_rejected_naming_the_offending_value(self):
-        with self.assertRaisesMessage(TypeError, "kwargs['rate']=inf"):
-            serialize_kwargs({'rate': float('inf')})
-
-    def test_negative_infinity_rejected(self):
-        with self.assertRaisesMessage(TypeError, "kwargs['rate']=-inf"):
-            serialize_kwargs({'rate': float('-inf')})
-
-    def test_nested_non_finite_float_rejected_with_its_path(self):
-        with self.assertRaisesMessage(
-                TypeError, "kwargs['stats']['values'][]=nan"):
+    def test_nested_non_finite_float_rejected(self):
+        with self.assertRaisesMessage(TypeError, 'kwargs are not valid JSON'):
             serialize_kwargs({'stats': {'values': [1.0, float('nan')]}})
+
+    def test_non_finite_float_in_a_dict_key_rejected(self):
+        # The reason allow_nan=False is the guard rather than a value scan:
+        # a non-finite float can also hide in a key.
+        with self.assertRaisesMessage(TypeError, 'kwargs are not valid JSON'):
+            serialize_kwargs({'stats': {float('nan'): 1}})
 
     def test_finite_floats_still_pass(self):
         self.assertEqual(serialize_kwargs({'rate': 1.5}), {'rate': 1.5})

@@ -227,9 +227,10 @@ class RestoreVerificationTests(TestCase):
         tm = TransitionMessage.objects.get(instance_id=str(self.widget.pk))
         self.assertEqual(tm.field_name, 'status')
 
-    def test_legacy_row_without_field_name_uses_inference(self):
-        # Pre-0.4 rows have field_name=''. On a name collision the recorded
-        # class must still load, inferring the field from the bound process.
+    def test_row_without_field_name_fails_closed(self):
+        # Phase 1 has recorded field_name since 0.4. A row without one is
+        # unrestorable: guessing 'state' could drive the wrong machine on a
+        # multi-process model, so it terminates instead of running hooks.
         self.widget.status = 'rogue_fulfilling'
         self.widget.save(update_fields=['status'])
         tm = TransitionMessage.objects.create(
@@ -237,7 +238,7 @@ class RestoreVerificationTests(TestCase):
             model_name='widget',
             instance_id=str(self.widget.pk),
             process_name='process',
-            field_name='',  # legacy row
+            field_name='',
             transition_name='fulfil',
             queue_name='django_logic.critical',
             kwargs={
@@ -249,7 +250,8 @@ class RestoreVerificationTests(TestCase):
         run_background_transition(tm.pk)
 
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'rogue_fulfilled')
-        self.assertEqual(RAN, ['rogue_side_effect'])
+        self.assertEqual(self.widget.status, 'rogue_fulfilling')  # untouched
+        self.assertEqual(RAN, [])                                 # no hooks ran
         tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)
+        self.assertTrue(tm.is_completed)   # completed, so the retry loop stops
+        self.assertIn('[unrestorable]', tm.last_error_message)

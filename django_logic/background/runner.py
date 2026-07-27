@@ -356,11 +356,11 @@ def _finalize_terminal_from_watchdog(
                 f'state change wins.'
             )
 
-    # Symmetric with _handle_failure: run failure_side_effects inside
-    # the atomic block (own savepoint), capture any swallowed exception
-    # on the TM.
-    fse_error = _run_failure_side_effects_isolated(
-        transition, state, exception, kwargs
+    # FailureSideEffects.execute savepoints itself inside an open
+    # transaction and returns the swallowed exception; record it on the TM
+    # so a broken cleanup path is not invisible.
+    fse_error = transition.failure_side_effects.execute(
+        state, exception=exception, **kwargs
     )
     if fse_error is not None:
         tm.record_failure_side_effect_error(fse_error)
@@ -593,13 +593,10 @@ def _handle_failure(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
             f'{transition.failed_state}'
         )
-    # failure_side_effects run inside the atomic block, in their own
-    # savepoint — idempotent per the reliability contract. A broken
-    # cleanup path rolls back its own writes and cannot poison the outer
-    # transaction; the swallowed exception is surfaced on the TM
-    # (otherwise cleanup bugs are invisible).
-    fse_error = _run_failure_side_effects_isolated(
-        transition, state, error, kwargs
+    # As above: the bundle owns its savepoint, so a broken cleanup path
+    # rolls back its own writes without poisoning the outer transaction.
+    fse_error = transition.failure_side_effects.execute(
+        state, exception=error, **kwargs
     )
     if fse_error is not None:
         tm.record_failure_side_effect_error(fse_error)
@@ -658,41 +655,6 @@ class _RestoreError(Exception):
     """The TransitionMessage refers to a model/instance/transition that
     no longer exists. The TM is marked completed to stop the retry loop.
     """
-
-
-class _FailureSideEffectsRollback(Exception):
-    """Internal: forces the failure_side_effects savepoint to roll back.
-
-    ``FailureSideEffects.execute`` swallows the exception and *returns*
-    it, so the savepoint context manager would otherwise commit the
-    partial writes of a broken cleanup path — and, worse, a genuine
-    ``DatabaseError`` raised inside a failure side-effect would leave
-    the outer transaction poisoned. Raising this wrapper inside the
-    savepoint rolls both problems back.
-    """
-
-    def __init__(self, error: BaseException):
-        self.error = error
-
-
-def _run_failure_side_effects_isolated(transition, state, exception, kwargs):
-    """Run ``failure_side_effects`` inside a savepoint.
-
-    Returns the swallowed exception (as ``FailureSideEffects.execute``
-    does) or ``None``. On error, every write the failure side-effects
-    made is rolled back and the outer transaction stays healthy, so the
-    caller can still record the error and mark the row completed.
-    """
-    try:
-        with transaction.atomic():
-            error = transition.failure_side_effects.execute(
-                state, exception=exception, **kwargs
-            )
-            if error is not None:
-                raise _FailureSideEffectsRollback(error)
-    except _FailureSideEffectsRollback as rollback:
-        return rollback.error
-    return None
 
 
 def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
@@ -819,21 +781,15 @@ def _load_process_from_path(instance, dotted: str, tm: TransitionMessage):
     module_path, class_name = dotted.rsplit('.', 1)
     module = importlib.import_module(module_path)
     process_class = getattr(module, class_name)
-    # Phase 1 records the bound field on the message (0.4+). Rows created
-    # before that fall back to inferring it from the bound process.
-    field_name = tm.field_name or _infer_field_name(instance, tm)
-    return process_class(field_name=field_name, instance=instance)
-
-
-def _infer_field_name(instance, tm: TransitionMessage) -> str:
-    # Legacy best effort for pre-0.4 rows (no recorded field_name): if the
-    # model exposes a property with process_name, pull the field name from
-    # its State. Otherwise default to 'state'.
-    try:
-        process = getattr(instance, tm.process_name)
-        return process.field_name
-    except Exception:
-        return 'state'
+    if not tm.field_name:
+        # Phase 1 has recorded the bound field since 0.4; a row without one
+        # cannot be restored to a known field, and guessing 'state' could
+        # drive the wrong machine on a multi-process model.
+        raise _RestoreError(
+            f'TransitionMessage {tm.pk} has no field_name; it predates 0.4 '
+            f'or was created by hand'
+        )
+    return process_class(field_name=tm.field_name, instance=instance)
 
 
 def _find_transition(process, tm: TransitionMessage):

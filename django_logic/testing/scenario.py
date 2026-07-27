@@ -63,16 +63,6 @@ class JourneyStep:
     # detects a swallow-vs-reraise flip.
     failed: bool = False
 
-    def matches(self, other: 'JourneyStep') -> bool:
-        return (
-            self.action == other.action
-            and self.before == other.before
-            and self.after == other.after
-            and self.side_effects == other.side_effects
-            and self.callbacks == other.callbacks
-            and self.failed == other.failed
-        )
-
 
 def _exc_names(exc) -> str:
     """Human-readable name(s) for an expected-exception type or tuple."""

@@ -44,24 +44,10 @@ name, so condition-disambiguated same-name transitions — including a sync
 conditions — count and cover separately. Two *literally identical*
 declarations still collapse (they are behaviorally indistinguishable).
 
-Cross-version log compatibility: ``coverage_report`` still accepts keys
-written by older recorders. A 0.8 line was 2-field ``class\taction`` and
-covers every same-name namesake; a 0.9.0 line was 4-field (no conditions
-fingerprint) and covers every 0.9.1 declaration sharing its
-``class\taction\tkind\tsources>target`` prefix (cover-all one level up —
-that older log cannot say which condition-variant ran). A fresh log per
-run (the documented practice) sidesteps cross-version keys entirely.
-
 No test-framework imports here: activation happens in ``AppConfig.ready``,
 which also runs in production processes.
 """
 from django_logic.process import ProcessManager, transition_observers
-
-
-def _pair(process_cls, action_name: str) -> str:
-    """The 0.8-era 2-field prefix — still the anchor legacy log lines
-    are matched against."""
-    return f'{process_cls.__module__}.{process_cls.__qualname__}\t{action_name}'
 
 
 def _key(process_cls, transition) -> str:
@@ -83,7 +69,8 @@ def _key(process_cls, transition) -> str:
         getattr(fn, '__qualname__', None) or type(fn).__name__
         for fn in getattr(transition.conditions, 'commands', None) or ()
     ))
-    return (f'{_pair(process_cls, transition.action_name)}'
+    return (f'{process_cls.__module__}.{process_cls.__qualname__}'
+            f'\t{transition.action_name}'
             f'\t{kind}\t{sources}>{target}\t{conditions}')
 
 
@@ -131,22 +118,6 @@ def coverage_report(executed=None, log_path=None) -> dict:
             # not a crash.
             pass
 
-    # Legacy 0.8 recorders wrote 2-field 'class\taction' lines, which
-    # cannot distinguish namesakes: they cover every declaration sharing
-    # the prefix (the old semantics — no false "uncovered" churn on old
-    # logs). Full keys cover exactly one declaration.
-    legacy_pairs = {key for key in executed_keys if key.count('\t') == 1}
-
-    # 0.9.0 recorders wrote 4-field 'class\taction\tkind\tsources>target'
-    # keys (3 tabs) — the per-declaration format before this release added
-    # the conditions fingerprint (making full keys 4-tab). A 0.9.0 line
-    # covers every 0.9.1 declaration sharing that 4-field prefix: the older
-    # recorder collapsed condition-only namesakes, so it genuinely cannot
-    # say which variant ran (same cover-all rule as the 0.8 legacy line,
-    # one level up). Without this, a persisted/merged pre-0.9.1 log would
-    # spuriously report every declaration uncovered after the upgrade.
-    prior_full = {key for key in executed_keys if key.count('\t') == 3}
-
     declared = {}
     for binding, process_cls, transition in iter_bound_transitions():
         entry = declared.setdefault(_key(process_cls, transition), {
@@ -156,16 +127,13 @@ def coverage_report(executed=None, log_path=None) -> dict:
             'sources': sorted(transition.sources),
             'target': transition.target or '',
             'models': set(),
-            '_pair': _pair(process_cls, transition.action_name),
         })
         entry['models'].add(binding.model._meta.label)
 
     uncovered = [
-        {k: v for k, v in {**entry, 'models': sorted(entry['models'])}.items()
-         if k != '_pair'}
+        {**entry, 'models': sorted(entry['models'])}
         for key, entry in sorted(declared.items())
-        if key not in executed_keys and entry['_pair'] not in legacy_pairs
-        and key.rsplit('\t', 1)[0] not in prior_full
+        if key not in executed_keys
     ]
     return {
         'total': len(declared),
