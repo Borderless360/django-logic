@@ -46,7 +46,7 @@ broker required — see §6.
 │      │                                                                   │
 │      ▼                                                                   │
 │  atomic {                                                                │
-│      set_state(in_progress_state)              ── DB + RedisState        │
+│      set_state(in_progress_state)              ── DB                      │
 │      TransitionMessage.objects.create(                                   │
 │          app_label, model_name, instance_id,                             │
 │          process_name, transition_name,                                  │

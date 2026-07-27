@@ -21,7 +21,7 @@ from django.core.cache import cache
 from django.test import override_settings, tag
 
 from django_logic import Transition, Process
-from django_logic.state import State, RedisState
+from django_logic.state import State
 from django_logic.exceptions import TransitionNotAllowed
 
 from tests.stability.base import StabilityTestCase

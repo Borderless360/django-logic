@@ -21,7 +21,7 @@ from django.test import override_settings, tag
 
 from django_logic import Transition
 from django_logic.exceptions import TransitionNotAllowed
-from django_logic.state import State, RedisState
+from django_logic.state import State
 
 from tests.stability.base import (
     StabilityTestCase, WorkerCrashSimulated, run_concurrent,
@@ -218,19 +218,6 @@ class TestLockTimeoutAndExpiry(StabilityTestCase):
 
         self.assertFalse(s.is_locked())
 
-    @requires_real_redis
-    @override_settings(DJANGO_LOGIC={'LOCK_TIMEOUT': 1})
-    def test_redis_state_lock_expires_after_timeout(self):
-        order = Order.objects.create(status='approved')
-        s = RedisState(order, 'status', process_name='process')
-
-        self.assertTrue(s.lock())
-        self.assertTrue(s.is_locked())
-
-        time.sleep(1.5)
-
-        self.assertFalse(s.is_locked())
-        self.assertEqual(s.get_state(), 'approved')
 
     @override_settings(DJANGO_LOGIC={'LOCK_TIMEOUT': 1})
     def test_new_transition_succeeds_after_lock_expiry(self):

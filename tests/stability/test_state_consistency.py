@@ -16,7 +16,7 @@ import time
 from django.core.cache import cache
 from django.test import tag
 
-from django_logic.state import State, RedisState
+from django_logic.state import State
 
 from tests.stability.base import StabilityTestCase, requires_real_redis
 from tests.stability.models import (
@@ -43,25 +43,6 @@ class TestStateConsistencyAfterSuccess(StabilityTestCase):
         self.assertEqual(order.status, 'fulfilled')
         self.assert_unlocked(state)
         self.assertIsNone(self.get_cache_value(state))
-
-    @requires_real_redis
-    def test_redis_state_cleared_after_success(self):
-        order = Order.objects.create(status='approved')
-        state = RedisState(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        self.assertTrue(state.lock())
-        state.set_state('fulfilling')
-        self.assertTrue(state.is_locked())
-
-        state.set_state('fulfilled')
-        state.unlock()
-
-        self.assertFalse(state.is_locked())
-        self.assertIsNone(cache.get(state._get_hash()))
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilled')
 
 
 @tag('stability')
@@ -98,63 +79,10 @@ class TestStateConsistencyAfterFailure(StabilityTestCase):
         self.assert_unlocked(state)
         self.assertIsNone(self.get_cache_value(state))
 
-    @requires_real_redis
-    def test_redis_state_cleared_after_failure(self):
-        order = Order.objects.create(status='approved')
-        state = RedisState(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        self.assertTrue(state.lock())
-        state.set_state('fulfilling')
-
-        state.set_state('fulfillment_failed')
-        state.unlock()
-
-        self.assertFalse(state.is_locked())
-        self.assertIsNone(cache.get(state._get_hash()))
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfillment_failed')
-
 
 @tag('stability')
 class TestStateConsistencyDuringTransition(StabilityTestCase):
     """During an active transition, Redis must reflect the current state."""
-
-    @requires_real_redis
-    def test_redis_state_shows_in_progress_during_side_effects(self):
-        order = Order.objects.create(status='approved')
-        observed_states = []
-
-        def observing_side_effect(instance, **kwargs):
-            s = RedisState(
-                Order.objects.get(pk=instance.pk),
-                'status', process_name='process',
-            )
-            observed_states.append(s.get_state())
-
-        state = RedisState(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        process_cls = type('ObservingProcess', (OrderProcess,), {
-            'state_class': RedisState,
-            'transitions': [
-                Transition(
-                    action_name='fulfill',
-                    sources=['approved'],
-                    target='fulfilled',
-                    in_progress_state='fulfilling',
-                    side_effects=[observing_side_effect],
-                )
-            ]
-        })
-
-        process = process_cls(field_name='status', instance=order)
-        process.fulfill()
-
-        self.assertEqual(observed_states, ['fulfilling'])
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilled')
 
 
 @tag('stability')
@@ -174,13 +102,6 @@ class TestStateConsistencyAfterLockExpiry(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfilling')
-
-    def test_redis_state_falls_back_to_db_after_expiry(self):
-        order = Order.objects.create(status='fulfilling')
-        state = RedisState(order, 'status', process_name='process')
-
-        self.assertFalse(state.is_locked())
-        self.assertEqual(state.get_state(), 'fulfilling')
 
 
 @tag('stability')

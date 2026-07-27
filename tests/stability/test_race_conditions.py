@@ -6,7 +6,6 @@ exactly one wins, the other is rejected. No duplicate state changes,
 no duplicate side-effect execution.
 
 The core mechanism is:
-  - RedisState: immediate lock visibility across processes/threads
   - DB UniqueConstraint on TransitionMessage: prevents duplicate work records
   - select_for_update(nowait=True): prevents two workers from running
     the same message concurrently
@@ -22,7 +21,7 @@ from django.db import connections
 from django.test import tag
 
 from django_logic.exceptions import TransitionNotAllowed
-from django_logic.state import State, RedisState
+from django_logic.state import State
 
 from tests.stability.base import (
     StabilityTestCase, run_concurrent, requires_real_redis,
@@ -117,90 +116,6 @@ class TestConcurrentTransitionRequests(StabilityTestCase):
     def test_ten_threads_same_transition_at_most_one_wins(self):
         """Stress test: 10 concurrent requests, exactly one wins."""
         self._assert_one_winner_under_forced_contention(10)
-
-
-@tag('stability')
-@requires_real_redis
-class TestRedisStateVisibility(StabilityTestCase):
-    """
-    2.2 -- RedisState makes in_progress_state visible immediately,
-    before the DB transaction commits.
-
-    This is the fix for the race condition documented in
-    docs/research/race-condition-issue.
-
-    NOTE: Requires real Redis. LocMemCache does not support nx=True
-    for cache.set, so RedisState.lock() behaves incorrectly.
-    """
-
-    def test_redis_state_visible_before_db_commit(self):
-        """
-        When a lock is acquired via RedisState, the state change is
-        visible to other threads immediately through Redis, even though
-        the DB transaction hasn't committed yet.
-        """
-        order = Order.objects.create(status='approved')
-        state = RedisState(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        self.assertTrue(state.lock())
-
-        state.set_state('fulfilling')
-
-        self.assertTrue(state.is_locked())
-        self.assertEqual(state.get_state(), 'fulfilling')
-
-        other_state = RedisState(
-            Order.objects.get(pk=order.pk), 'status', process_name='process'
-        )
-        self.assertTrue(other_state.is_locked())
-        self.assertEqual(other_state.get_state(), 'fulfilling')
-
-        state.unlock()
-
-    def test_redis_state_blocks_second_lock_attempt(self):
-        """After thread A locks via RedisState, thread B cannot lock."""
-        order = Order.objects.create(status='approved')
-        state_a = RedisState(order, 'status', process_name='process')
-        self.track_lock(state_a)
-
-        self.assertTrue(state_a.lock())
-
-        state_b = RedisState(
-            Order.objects.get(pk=order.pk), 'status', process_name='process'
-        )
-        self.assertFalse(state_b.lock())
-
-        state_a.unlock()
-
-    def test_concurrent_redis_lock_only_one_wins(self):
-        """Two threads try to lock the same RedisState simultaneously."""
-        order = Order.objects.create(status='approved')
-        barrier = threading.Barrier(2, timeout=5)
-        results = []
-        lock = threading.Lock()
-
-        def try_lock():
-            try:
-                s = RedisState(
-                    Order.objects.get(pk=order.pk),
-                    'status', process_name='process'
-                )
-                barrier.wait()
-                got_lock = s.lock()
-                with lock:
-                    results.append(got_lock)
-                if got_lock:
-                    time.sleep(0.05)
-                    s.unlock()
-            finally:
-                connections.close_all()
-
-        outcomes = run_concurrent(try_lock, n_threads=2)
-
-        self.assertEqual(results.count(True), 1,
-            f"Exactly one thread should acquire the lock. Results: {results}")
-        self.assertEqual(results.count(False), 1)
 
 
 @tag('stability')

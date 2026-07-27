@@ -389,8 +389,7 @@ class Action(Transition):
         ``Transition.fail_transition`` would call ``state.unlock()`` and,
         because the lock key is derived only from instance+field, delete
         the lock a concurrent ``Transition`` on the same instance/field
-        legitimately holds — and, for ``RedisState``, discard the cached
-        in-progress state stored under that same key. This mirrors the
+        legitimately holds. This mirrors the
         lock/unlock asymmetry already present in ``complete_transition``.
 
         ``failed_state`` is only written when the state is NOT currently

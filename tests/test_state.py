@@ -2,32 +2,8 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
-from django_logic.state import State, RedisState
+from django_logic.state import State
 from tests.models import Invoice
-
-
-class FakeRedisCache:
-    """In-memory cache that supports nx=True, mimicking django-redis."""
-
-    def __init__(self):
-        self._store = {}
-
-    def get(self, key):
-        return self._store.get(key)
-
-    def set(self, key, value, timeout=None, nx=False, xx=False):
-        if nx and key in self._store:
-            return False
-        if xx and key not in self._store:
-            return False
-        self._store[key] = value
-        return True
-
-    def delete(self, key):
-        self._store.pop(key, None)
-
-    def clear(self):
-        self._store.clear()
 
 
 class StateTestCase(TestCase):
@@ -37,8 +13,8 @@ class StateTestCase(TestCase):
     def test_hash_remains_the_same(self):
         self.assertEqual(self.state._get_hash(), self.state._get_hash())
 
-    def test_get_db_state(self):
-        self.assertEqual(self.state.get_db_state(), 'draft')
+    def test_get_persisted_state(self):
+        self.assertEqual(self.state.get_persisted_state(), 'draft')
 
     def test_lock(self):
         self.assertFalse(self.state.is_locked())
@@ -60,147 +36,3 @@ class StateTestCase(TestCase):
         self.assertEqual(self.state.instance.status, 'void')
 
 
-@patch('django_logic.state.cache', new_callable=FakeRedisCache)
-class RedisStateTestCase(TestCase):
-    def setUp(self) -> None:
-        self.instance = Invoice.objects.create(status='draft')
-        self.state = RedisState(self.instance, 'status')
-
-    def test_get_state_returns_instance_attr_when_unlocked(self, mock_cache):
-        self.assertEqual(self.state.get_state(), 'draft')
-
-    def test_lock_stores_current_state(self, mock_cache):
-        self.state.lock()
-        cached = mock_cache.get(self.state._get_hash())
-        self.assertEqual(self.state._read_value(cached), 'draft')
-        # The stored value also carries the ownership token (#139).
-        self.assertEqual(self.state._stored_token(cached), self.state._lock_token)
-
-    def test_lock_is_atomic(self, mock_cache):
-        self.assertTrue(self.state.lock())
-        other = RedisState(Invoice.objects.get(pk=self.instance.pk), 'status')
-        self.assertFalse(other.lock())
-
-    def test_is_locked_after_lock(self, mock_cache):
-        self.assertFalse(self.state.is_locked())
-        self.state.lock()
-        self.assertTrue(self.state.is_locked())
-
-    def test_set_state_updates_cache_and_db(self, mock_cache):
-        self.state.lock()
-        self.state.set_state('in_progress')
-
-        cached = mock_cache.get(self.state._get_hash())
-        self.assertEqual(self.state._read_value(cached), 'in_progress')
-        # A state write by the holder must preserve its ownership token.
-        self.assertEqual(self.state._stored_token(cached), self.state._lock_token)
-        self.instance.refresh_from_db()
-        self.assertEqual(self.instance.status, 'in_progress')
-
-    def test_get_state_reads_from_cache_when_locked(self, mock_cache):
-        self.state.lock()
-        self.state.set_state('in_progress')
-        self.assertEqual(self.state.get_state(), 'in_progress')
-
-    def test_get_state_visible_to_other_processes(self, mock_cache):
-        self.state.lock()
-        self.state.set_state('in_progress')
-
-        other = RedisState(Invoice.objects.get(pk=self.instance.pk), 'status')
-        self.assertEqual(other.get_state(), 'in_progress')
-
-    def test_get_db_state_prefers_cache(self, mock_cache):
-        self.state.lock()
-        self.state.set_state('in_progress')
-        self.assertEqual(self.state.get_db_state(), 'in_progress')
-
-    def test_get_db_state_falls_back_to_db(self, mock_cache):
-        self.assertEqual(self.state.get_db_state(), 'draft')
-
-    def test_unlock_removes_key(self, mock_cache):
-        self.state.lock()
-        self.state.set_state('completed')
-        self.state.unlock()
-
-        self.assertIsNone(mock_cache.get(self.state._get_hash()))
-        self.assertFalse(self.state.is_locked())
-
-    def test_get_state_falls_back_after_unlock(self, mock_cache):
-        self.state.lock()
-        self.state.set_state('completed')
-        self.state.unlock()
-
-        self.assertEqual(self.state.get_state(), 'completed')
-
-    def test_full_transition_lifecycle(self, mock_cache):
-        """lock → in_progress → target → unlock"""
-        self.assertEqual(self.state.get_state(), 'draft')
-
-        self.assertTrue(self.state.lock())
-        self.assertEqual(self.state.get_state(), 'draft')
-
-        self.state.set_state('in_progress')
-        self.assertEqual(self.state.get_state(), 'in_progress')
-
-        other = RedisState(Invoice.objects.get(pk=self.instance.pk), 'status')
-        self.assertEqual(other.get_state(), 'in_progress')
-        self.assertTrue(other.is_locked())
-        self.assertFalse(other.lock())
-
-        self.state.set_state('completed')
-        self.assertEqual(other.get_state(), 'completed')
-
-        self.state.unlock()
-        self.assertFalse(self.state.is_locked())
-        self.assertEqual(self.state.get_state(), 'completed')
-
-
-@patch('django_logic.state.cache', new_callable=FakeRedisCache)
-class RedisStateSetStateXXTestCase(TestCase):
-    """R3 — RedisState.set_state passes xx=True: a state write must never
-    CREATE the lock key. Only lock() (nx=True) creates it; set_state only
-    refreshes an existing key."""
-
-    def setUp(self) -> None:
-        self.instance = Invoice.objects.create(status='draft')
-        self.state = RedisState(self.instance, 'status')
-
-    def test_set_state_unlocked_does_not_create_lock_key_but_persists(self, mock_cache):
-        # R3: a state write outside a lock()/unlock() pair (background
-        # phase 1/2, Action.failed_state) must not implicitly create a lock
-        # that nobody will ever release.
-        self.state.set_state('approved')
-
-        self.assertIsNone(mock_cache.get(self.state._get_hash()))
-        self.assertFalse(self.state.is_locked())
-        # ...but the DB write still happens.
-        self.instance.refresh_from_db()
-        self.assertEqual(self.instance.status, 'approved')
-
-    def test_set_state_locked_updates_key_value(self, mock_cache):
-        # R3 sanity: when the key exists (state is locked), set_state still
-        # updates the cached value — the existing behavior is preserved.
-        self.state.lock()
-        self.state.set_state('approved')
-
-        cached = mock_cache.get(self.state._get_hash())
-        self.assertEqual(self.state._read_value(cached), 'approved')
-        self.instance.refresh_from_db()
-        self.assertEqual(self.instance.status, 'approved')
-
-    def test_background_write_pattern_leaves_no_stray_lock(self, mock_cache):
-        # R3 regression: the background phase-1/phase-2 write shape —
-        # lock() -> set_state(in_progress) -> unlock() -> set_state(target),
-        # where the final target write happens OUTSIDE the lock — used to
-        # re-create the lock key on that final write (cache.set without
-        # xx=True), stranding the instance locked until the TTL expired.
-        # With xx=True it must end unlocked with the target persisted.
-        self.assertTrue(self.state.lock())
-        self.state.set_state('fulfilling')
-        self.state.unlock()
-        self.state.set_state('fulfilled')
-
-        self.assertFalse(self.state.is_locked())
-        self.assertIsNone(mock_cache.get(self.state._get_hash()))
-        self.instance.refresh_from_db()
-        self.assertEqual(self.instance.status, 'fulfilled')

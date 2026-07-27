@@ -35,7 +35,7 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - Django 4.2+ (4.2, 5.1, 5.2 and 6.0 are tested in CI; 5.0 is not supported)
 - django-model-utils >= 4.5.1
 - celery >= 5.0 — **installed automatically**; background transitions are Celery tasks
-- django-redis >= 5.0.0 — **installed automatically**; provides the cross-process state lock (the lock cache / `RedisState`)
+- django-redis >= 5.0.0 — **installed automatically**; provides the cross-process state lock
 
 Extras:
 - `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; no DRF-specific code ships since 0.4)
@@ -535,15 +535,7 @@ Multiple processes trying to transition the same object can cause race condition
 - a **cache lock** (atomic set-if-absent on the `default` cache) held for a synchronous transition's whole flight and for a background transition's phase-1 critical section, with the persisted state re-validated under the lock; and
 - the **`TransitionMessage` row** — while a background transition is in flight, a second one raises `AlreadyInProgress` and a synchronous transition on the same instance + process raises `TransitionNotAllowed`.
 
-Use a cross-process cache (django-redis, installed automatically) so the lock is shared between web processes and workers. `RedisState` additionally caches the current state in the lock key for cross-process visibility, and works with background transitions:
-
-```python
-from django_logic.state import RedisState
-
-class MyProcess(Process):
-    state_class = RedisState
-    # ... rest of configuration
-```
+Use a cross-process cache (django-redis, installed automatically) so the lock is shared between web processes and workers.
 
 #### 4. Side Effects Not Rolling Back
 Side effects that modify external systems may not roll back automatically.
@@ -619,7 +611,7 @@ class AuditedState(State):
             model=self.instance.__class__.__name__,
             instance_id=self.instance.pk,
             field=self.field_name,
-            old_value=self.get_db_state(),
+            old_value=self.get_persisted_state(),
             new_value=state,
         )
         super().set_state(state)
@@ -923,7 +915,7 @@ The constraint is scoped **per process**: two independent state machines bound t
 
 Because the in-flight marker is a database row rather than a held lock, nothing leaks if the caller's surrounding transaction rolls back — the row, the `in_progress_state` write, and the dispatch all disappear together.
 
-**Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired (it just logs and leaves it intact). A `State` object that never locked keeps the historical unconditional delete as a manual force-release path. For `RedisState` the token rides inside the single value+lock key — its storage format changed in 0.9, so deploy web and workers together; keys written by 0.8 stay readable.
+**Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired (it just logs and leaves it intact). A `State` object that never locked keeps the historical unconditional delete as a manual force-release path.
 
 **Synchronous transitions inside an outer `transaction.atomic()`.** By default the lock is released as soon as the transition completes — before the outer block commits. That window is real: another connection can acquire the lock, read the *old committed* state, and run the same transition again (both side-effect runs happen; the final state depends on commit ordering). If your code drives transitions inside atomic blocks and needs exclusion to cover the whole uncommitted span, opt in:
 

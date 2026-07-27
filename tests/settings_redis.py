@@ -1,8 +1,8 @@
 """
 Django settings for running stability tests with real Redis but SQLite DB.
 
-This unlocks all RedisState tests (nx=True atomicity, lock expiry, etc.)
-while keeping the SQLite database for simplicity. Use settings_stability
+Real Redis exercises the cache-backed lock against a real backend (atomic
+add, TTL expiry) while keeping SQLite for simplicity. Use settings_stability
 for the full Postgres+Redis environment.
 """
 import os

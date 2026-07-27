@@ -133,9 +133,9 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
     # Record every persisted state write during the drive — the ordered
     # sequence of states the object passed through (in_progress -> target,
     # and any next_transition follow-ups, and failed_state on failure).
-    # RedisState.set_state delegates to super(), so wrapping the base
-    # State.set_state captures exactly one append per write for both. The
-    # wrap is restored on exit alongside the hook bundles. Patching the
+    # Wrapping the base State.set_state captures exactly one append per
+    # write. The wrap is restored on exit alongside the hook bundles.
+    # Patching the
     # class method is safe because tests are single-threaded and the patch
     # is scoped to this contextmanager.
     from django_logic.state import State as _State
