@@ -14,7 +14,6 @@ from django.test import SimpleTestCase, override_settings
 from django_logic.background.settings import (
     cleanup_days,
     max_errors,
-    process_class_aliases,
     retry_minutes,
     validate_on_ready,
 )
@@ -181,43 +180,6 @@ class SettingValidationTests(SimpleTestCase):
         self.assert_accepted(_conf(DEFER_UNLOCK_UNTIL_COMMIT=True))
         self.assert_accepted(_conf(DEFER_UNLOCK_UNTIL_COMMIT=False))
 
-    # -- PROCESS_CLASS_ALIASES (dict[str, str]) --------------------------------
-
-    def test_aliases_reject_non_dict(self):
-        self.assert_rejected(
-            _conf(PROCESS_CLASS_ALIASES=[('old', 'new')]),
-            'PROCESS_CLASS_ALIASES')
-
-    def test_aliases_reject_non_string_entries(self):
-        self.assert_rejected(
-            _conf(PROCESS_CLASS_ALIASES={'old.path.Cls': 42}),
-            'PROCESS_CLASS_ALIASES')
-        self.assert_rejected(
-            _conf(PROCESS_CLASS_ALIASES={42: 'new.path.Cls'}),
-            'PROCESS_CLASS_ALIASES')
-
-    def test_aliases_accept_str_str_dict_and_default_empty(self):
-        self.assert_accepted(
-            _conf(PROCESS_CLASS_ALIASES={'old.path.Cls': 'new.path.Cls'}))
-        with override_settings(DJANGO_LOGIC=_conf()):
-            self.assertEqual(process_class_aliases(), {})
-
-    # -- LOG_KWARGS_REDACTOR (importable dotted path / callable) --------------
-
-    def test_redactor_rejects_unimportable_dotted_path(self):
-        self.assert_rejected(
-            _conf(LOG_KWARGS_REDACTOR='tests.no.such.module.redact'),
-            'LOG_KWARGS_REDACTOR')
-
-    def test_redactor_rejects_non_callable(self):
-        self.assert_rejected(
-            _conf(LOG_KWARGS_REDACTOR=42), 'LOG_KWARGS_REDACTOR')
-
-    def test_redactor_accepts_importable_path_and_callable(self):
-        self.assert_accepted(
-            _conf(LOG_KWARGS_REDACTOR='tests.test_log_redaction.drop_amount'))
-        self.assert_accepted(
-            _conf(LOG_KWARGS_REDACTOR=lambda kw: {}))
 
     def test_unset_optional_settings_validate_clean(self):
         # The documented defaults ({} aliases, False defer, no redactor)

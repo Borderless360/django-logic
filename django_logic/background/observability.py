@@ -8,8 +8,7 @@ failing client transition. These helpers restore per-transition identity:
 * :func:`task_label` — a human-readable label used as the Celery ``shadow`` on
   dispatch, so Flower / RabbitMQ management / Celery events show a distinct
   name per transition (vendor-neutral; no dependency).
-* :func:`set_sentry_context` — if ``sentry-sdk`` is installed (and not disabled
-  via ``DJANGO_LOGIC['SENTRY_TRANSACTION_NAMING'] = False``), name the Sentry
+* :func:`set_sentry_context` — if ``sentry-sdk`` is installed, name the Sentry
   transaction and tag it per transition, so each transition is its own Sentry
   issue. Sentry groups by the Celery task *name* (not ``shadow``), so this
   explicit naming is what splits the issues.
@@ -17,8 +16,6 @@ failing client transition. These helpers restore per-transition identity:
 Both are best-effort and never affect transition execution.
 """
 from __future__ import annotations
-
-from django_logic.background import settings as bg_settings
 
 
 def task_label(tm) -> str:
@@ -28,9 +25,7 @@ def task_label(tm) -> str:
 
 def set_sentry_context(tm) -> None:
     """Name + tag the current Sentry scope per transition. No-op if sentry-sdk
-    is absent or disabled. Never raises."""
-    if not bg_settings.sentry_transaction_naming():
-        return
+    is absent. Never raises."""
     try:
         import sentry_sdk
 

@@ -664,15 +664,12 @@ DJANGO_LOGIC = {
     'BACKGROUND_EXECUTION': 'celery',   # the default; set 'sync' in test settings
     'DEFAULT_QUEUE': 'django_logic',    # queue for transitions without queue=
     'STARTER_QUEUE': 'django_logic.starter',
-    'PHASE2_STATE_GUARD': 'enforce',    # see "The phase-2 state guard"
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
     'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
     'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
-    'SENTRY_TRANSACTION_NAMING': True,  # per-transition Sentry naming (no-op without sentry-sdk)
     'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
     'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
     'DEFER_UNLOCK_UNTIL_COMMIT': False,  # True: sync unlocks ride transaction.on_commit (see "Concurrency and locking")
-    'PROCESS_CLASS_ALIASES': {},        # old dotted path -> new, for renamed processes with in-flight rows
     # 'TRANSITION_COVERAGE_LOG': '...',  # opt-in: record driven transitions to a file (see "Transition-execution coverage")
 }
 ```
@@ -944,10 +941,7 @@ Practical consequence: you **cannot** chain a background transition from another
 
 Phase 2 restores the transition by name and deliberately bypasses the source-state gate — so what happens if the instance was moved by something *else* while the row was pending (a manual ops fix in the admin, a data migration, a support script)? With retries spanning `RETRY_MINUTES × MAX_ERRORS`, that collision is a realistic production event.
 
-Before running side-effects, phase 2 verifies the persisted state still matches what phase 1 left behind (`in_progress_state`, or a declared source when the transition has none). On mismatch:
-
-- **`PHASE2_STATE_GUARD = 'enforce'`** (default) — the row is completed as **superseded**: side-effects are skipped, the external state change wins, and the reason is recorded on the row (`last_error_message` starts with `[superseded]`) and logged at ERROR.
-- **`'warn'`** — log a warning and run anyway (pre-0.4 behaviour).
+Before running side-effects, phase 2 verifies the persisted state still matches what phase 1 left behind (`in_progress_state`, or a declared source when the transition has none). On mismatch the row is completed as **superseded**: side-effects are skipped, the external state change wins, and the reason is recorded on the row (`last_error_message` starts with `[superseded]`) and logged at ERROR.
 
 The same guard protects the `failed_state` writes made by the safety-net tasks, so a watchdog finalizing a long-stranded row never clobbers a manual fix.
 

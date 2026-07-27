@@ -8,8 +8,7 @@ rename/rebind between the deploy that ran phase 1 and the one running
 phase 2. Pre-fix, phase 2 then ran the bound process's side-effects (code
 the caller never asked for) and reported success. Post-fix, ``_restore``
 verifies the resolved class against the recorded ``process_class`` and
-prefers the recorded one, using the ``field_name`` recorded on the
-message (with the legacy inference fallback for pre-0.4 rows).
+prefers the recorded one, using the ``field_name`` recorded on the message.
 """
 from django.test import TestCase, override_settings
 
@@ -114,70 +113,6 @@ class RestoreVerificationTests(TestCase):
             any('could not be loaded' in line for line in logs.output)
         )
 
-    def test_alias_map_restores_renamed_recorded_class(self):
-        # The recorded class moved; DJANGO_LOGIC['PROCESS_CLASS_ALIASES']
-        # maps the old dotted path to the new one, so the in-flight row
-        # restores the CORRECT process and its side-effects run (#140).
-        self.widget.status = 'rogue_fulfilling'
-        self.widget.save(update_fields=['status'])
-        tm = TransitionMessage.objects.create(
-            app_label='bg_tests',
-            model_name='widget',
-            instance_id=str(self.widget.pk),
-            process_name='process',
-            field_name='status',
-            transition_name='fulfil',
-            queue_name='django_logic.critical',
-            kwargs={
-                'process_class': 'tests.old_home.RenamedRogueProcess',
-            },
-        )
-
-        with override_settings(DJANGO_LOGIC=dl_settings(PROCESS_CLASS_ALIASES={
-            'tests.old_home.RenamedRogueProcess':
-                'tests.background.test_restore_verification.RogueProcess',
-        })):
-            run_background_transition(tm.pk)
-
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'rogue_fulfilled')
-        self.assertEqual(RAN, ['rogue_side_effect'])
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.last_error_message, '')
-
-    def test_aliased_rename_of_the_bound_class_does_not_log_a_mismatch(self):
-        # The recorded path is the bound class's OLD dotted path, covered
-        # by an alias. The recorded-vs-resolved comparison must apply the
-        # alias map too, so the rename neither warns nor reloads — the
-        # bound transition just runs.
-        self.widget.status = 'fulfilling'
-        self.widget.save(update_fields=['status'])
-        tm = TransitionMessage.objects.create(
-            app_label='bg_tests',
-            model_name='widget',
-            instance_id=str(self.widget.pk),
-            process_name='process',
-            field_name='status',
-            transition_name='fulfil',
-            queue_name='django_logic.critical',
-            kwargs={
-                'process_class': 'tests.old_home.OldWidgetProcess',
-            },
-        )
-
-        with override_settings(DJANGO_LOGIC=dl_settings(PROCESS_CLASS_ALIASES={
-            'tests.old_home.OldWidgetProcess':
-                'tests.background.models.WidgetProcess',
-        })):
-            with self.assertNoLogs('django-logic.transition', level='WARNING'):
-                run_background_transition(tm.pk)
-
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'fulfilled')  # bound transition ran
-        self.assertIn('ok,', self.widget.se_log)
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)
 
     def test_unimportable_path_via_attribute_error_branch_terminates(self):
         # The instance has NO attribute for the recorded process_name, so

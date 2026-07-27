@@ -140,39 +140,6 @@ class EnforceModeTests(TestCase):
         self.assertIn('cb,', widget.cb_log)  # success callbacks ran
 
 
-@override_settings(
-    DJANGO_LOGIC=dict(_SYNC_SETTINGS, PHASE2_STATE_GUARD='warn')
-)
-class WarnModeTests(TestCase):
-    """R4(c): 'warn' mode logs and proceeds (pre-0.4 behaviour)."""
-
-    def test_warn_mode_logs_and_runs_anyway(self):
-        # R4(c): same mismatch as the enforce-mode test, but phase 2 logs
-        # a WARNING on 'django-logic.transition' and runs the transition
-        # anyway — the widget ends in the target state.
-        widget = Widget.objects.create(status='fulfilling')
-        tm = _make_tm(widget, transition_name='fulfil')
-        widget.status = 'cancelled'
-        widget.save(update_fields=['status'])
-
-        with self.assertLogs('django-logic.transition', level='WARNING') as cm:
-            run_background_transition(tm.pk)
-        self.assertTrue(
-            any('state guard mismatch' in message for message in cm.output),
-            cm.output,
-        )
-
-        tm.refresh_from_db()
-        # Completed normally, not superseded.
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.last_error_message, '')
-        self.assertIsNotNone(tm.started_at)
-
-        widget.refresh_from_db()
-        self.assertEqual(widget.status, 'fulfilled')  # target written
-        self.assertIn('ok,', widget.se_log)  # side-effects ran
-
-
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class SafetyNetGuardTests(TestCase):
     """R4(d): the same guard protects failed_state writes made by the
@@ -214,24 +181,3 @@ class SafetyNetGuardTests(TestCase):
         self.assertEqual(widget.status, 'fulfilment_failed')
 
 
-class SettingsValidationTests(TestCase):
-    """R4(e): invalid PHASE2_STATE_GUARD values fail loudly."""
-
-    def test_bogus_state_guard_mode_raises(self):
-        # R4(e): a typo in PHASE2_STATE_GUARD must not silently fall back
-        # to either mode.
-        with override_settings(
-            DJANGO_LOGIC=dict(_SYNC_SETTINGS, PHASE2_STATE_GUARD='bogus')
-        ):
-            with self.assertRaises(ImproperlyConfigured):
-                bg_settings.phase2_state_guard()
-
-    def test_valid_modes_accepted(self):
-        # R4(e) control: both documented modes resolve, and the default
-        # is 'enforce'.
-        with override_settings(DJANGO_LOGIC=dict(_SYNC_SETTINGS)):
-            self.assertEqual(bg_settings.phase2_state_guard(), 'enforce')
-        with override_settings(
-            DJANGO_LOGIC=dict(_SYNC_SETTINGS, PHASE2_STATE_GUARD='warn')
-        ):
-            self.assertEqual(bg_settings.phase2_state_guard(), 'warn')

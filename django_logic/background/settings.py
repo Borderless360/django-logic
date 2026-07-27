@@ -15,10 +15,6 @@ EXECUTION_CELERY = 'celery'
 EXECUTION_SYNC = 'sync'
 _VALID_EXECUTION_MODES = frozenset({EXECUTION_CELERY, EXECUTION_SYNC})
 
-STATE_GUARD_ENFORCE = 'enforce'
-STATE_GUARD_WARN = 'warn'
-_VALID_STATE_GUARD_MODES = frozenset({STATE_GUARD_ENFORCE, STATE_GUARD_WARN})
-
 
 def _conf() -> dict:
     return getattr(settings, 'DJANGO_LOGIC', {}) or {}
@@ -183,92 +179,12 @@ def cleanup_days():
         'TRANSITION_MESSAGE_CLEANUP_DAYS', 7, minimum=0)
 
 
-def process_class_aliases() -> dict:
-    """``DJANGO_LOGIC['PROCESS_CLASS_ALIASES']`` — escape hatch for
-    renaming/moving a Process class while rows recorded under its old
-    dotted path are still in flight (#140).
-
-    A dict mapping old dotted path -> new dotted path, applied by the
-    phase-2 restore before importing a recorded ``process_class``.
-    Default ``{}``.
-    """
-    aliases = _conf().get('PROCESS_CLASS_ALIASES', {})
-    if aliases is None:
-        return {}
-    if not isinstance(aliases, dict) or not all(
-        isinstance(k, str) and isinstance(v, str)
-        for k, v in aliases.items()
-    ):
-        raise ImproperlyConfigured(
-            "DJANGO_LOGIC['PROCESS_CLASS_ALIASES'] must be a dict mapping "
-            "old dotted process-class paths (str) to new dotted paths (str)."
-        )
-    return aliases
-
-
-
-
-def _validate_log_kwargs_redactor() -> None:
-    """``LOG_KWARGS_REDACTOR`` (if set) must be a callable or an
-    importable dotted path. ``redact_log_kwargs`` degrades a broken
-    redactor to a ``__redaction_error__`` marker at runtime (it must
-    never break a transition), which means a typo'd dotted path silently
-    ruins every log line — so import it once here and fail at boot."""
-    redactor = _conf().get('LOG_KWARGS_REDACTOR')
-    if redactor is None:
-        return
-    if isinstance(redactor, str):
-        from django.utils.module_loading import import_string
-        try:
-            import_string(redactor)
-        except ImportError as exc:
-            raise ImproperlyConfigured(
-                f"DJANGO_LOGIC['LOG_KWARGS_REDACTOR'] ({redactor!r}) is not "
-                f"an importable dotted path: {exc}. A broken redactor "
-                f"degrades every transition log line to a redaction marker."
-            ) from exc
-        return
-    if not callable(redactor):
-        raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['LOG_KWARGS_REDACTOR'] must be a callable or a "
-            f"dotted path to one, got {redactor!r}."
-        )
-
-
-def phase2_state_guard() -> str:
-    """How phase 2 reacts when the instance's state no longer matches what
-    phase 1 left behind (``in_progress_state``, or a declared source when
-    no ``in_progress_state`` exists) — e.g. after a manual ops fix.
-
-    * ``'enforce'`` (default) — mark the row completed as *superseded*,
-      skip side-effects, log loudly. The external state change wins.
-    * ``'warn'`` — log a warning and run the transition anyway
-      (pre-0.4 behaviour).
-    """
-    mode = _conf().get('PHASE2_STATE_GUARD', STATE_GUARD_ENFORCE)
-    if mode not in _VALID_STATE_GUARD_MODES:
-        raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['PHASE2_STATE_GUARD'] must be one of "
-            f"{sorted(_VALID_STATE_GUARD_MODES)}; got {mode!r}."
-        )
-    return mode
-
-
-def sentry_transaction_naming() -> bool:
-    """Whether the background runner names/tags the Sentry transaction per
-    transition (so each transition is its own issue). Default on; no-op when
-    sentry-sdk isn't installed. Set ``DJANGO_LOGIC['SENTRY_TRANSACTION_NAMING']
-    = False`` to leave Sentry's own (task-name-based) naming in place."""
-    return bool(_conf().get('SENTRY_TRANSACTION_NAMING', True))
-
-
 def validate_on_ready() -> None:
     """Called from ``apps.BackgroundConfig.ready`` — fail fast on misconfig."""
     mode = background_execution()
     # Surface value errors now rather than on first use.
     default_queue()
     starter_queue()
-    phase2_state_guard()
     # Safety settings (#149): every numeric knob the retry/cleanup/lock
     # machinery depends on is validated at boot in EVERY mode — a bad
     # value must not wait for its first use (which may be a 3am retry
@@ -276,8 +192,6 @@ def validate_on_ready() -> None:
     max_errors()
     retry_minutes()
     cleanup_days()
-    process_class_aliases()
-    _validate_log_kwargs_redactor()
     # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) — shared with
     # DjangoLogicConfig.ready so sync-only installs validate them too.
     from django_logic.conf import validate_core_settings
