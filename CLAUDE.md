@@ -64,8 +64,8 @@ change on success) for anything slow, external, or retriable.
    work chains from terminal hooks, not mid-flight.
 7. **Manual state fixes win.** If an instance is moved externally while a
    background row is pending, phase 2 completes the row as *superseded*
-   (`'[superseded]'` in `last_error_message`) and skips side-effects
-   (`DJANGO_LOGIC['PHASE2_STATE_GUARD']`, default `'enforce'`).
+   (`'[superseded]'` in `last_error_message`) and skips side-effects. This is
+   unconditional since 0.10.0.
 
 ## Deployment the durability contract depends on
 
@@ -77,10 +77,19 @@ change on success) for anything slow, external, or retriable.
 - Crash re-delivery is built in (every django-logic task sets
   `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
   pair only for your *own* tasks. You still need a **single beat**
-  scheduling the five `django_logic.*` safety-net tasks —
-  `app.conf.beat_schedule = beat_schedule()` (from
-  `django_logic.background`) routes them to `STARTER_QUEUE` — and a worker
-  for every queue you use.
+  scheduling the five `django_logic.*` safety-net tasks — and a worker for
+  every queue you use. Install them by writing the `CELERY_`-namespaced key,
+  because a plain `app.conf.beat_schedule = …` assignment is silently ignored
+  when the project also defines `CELERY_BEAT_SCHEDULE` in Django settings:
+
+  ```python
+  from django_logic.background import beat_schedule
+  app.conf['CELERY_BEAT_SCHEDULE'] = {
+      **(app.conf.beat_schedule or {}), **beat_schedule(),
+  }
+  ```
+
+  `django_logic.W002` fails `manage.py check` if they are missing.
 - Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
   None}`, `DISABLE_SERVER_SIDE_CURSORS=True`, and no SSL on the app→pgbouncer
   hop. The concurrency guard (`select_for_update(nowait)` + partial-unique)

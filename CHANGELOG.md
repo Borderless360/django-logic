@@ -41,7 +41,21 @@ before anything was deleted.
   empty-set semantics. `docs/recipes/nested-processes.md` now shows the closures
   inline.
 - **`Process.get_transition_by_action_name`** and the public `ignore_state=`
-  parameter of `get_available_transitions`.
+  parameter of `get_available_transitions`. Neither had a caller in the library,
+  its suite, or any consumer. To resolve one action, iterate
+  `get_available_transitions(user=..., action_name='x')` and take the single
+  match — that is what the removed method did. **Gotcha:** a stale call will not
+  raise `AttributeError` pointing at this removal, because `Process.__getattr__`
+  treats any non-underscore miss as an *action name*. Attribute access still
+  returns a callable, and calling it reports an argument problem with a
+  now-nonexistent action:
+
+  ```
+  TypeError: get_transition_by_action_name() accepts keyword arguments only
+             (got 1 positional). Pass user and other values
+  ```
+
+  Grep for the name when upgrading rather than relying on the traceback.
 - **`ProcessScenario.snapshot_on_failure`** and `format_failure(snapshot=)`,
   never enabled by anyone in the 14 months since they shipped.
   `snapshot()` / `from_snapshot()` are unaffected.
@@ -77,6 +91,12 @@ before anything was deleted.
   settings, and a consumer consequently ran seven weeks with all five tasks
   registered and never fired. Both now recommend
   `app.conf['CELERY_BEAT_SCHEDULE']`.
+- **`django_logic.W003`** — reports any `DJANGO_LOGIC` key this release removed.
+  `DJANGO_LOGIC` has no unknown-key rejection, so every removal above fails
+  *open* and silently; the sharpest case is a deployment that set
+  `LOG_KWARGS_REDACTOR` for PII compliance, upgrades, and starts writing raw
+  kwargs to its logs with no signal anywhere. The warning names the replacement
+  for each key.
 
 ### Fixed
 

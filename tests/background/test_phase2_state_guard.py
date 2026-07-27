@@ -3,15 +3,10 @@
 Phase 2 restores the transition by name and deliberately bypasses the
 source-state gate, so without a guard it would overwrite any state change
 made while the row was pending (manual ops fix, external write). These
-tests pin the guard's behaviour in both modes:
-
-* ``PHASE2_STATE_GUARD='enforce'`` (default) — the row completes as
-  *superseded* (``last_error_message`` starts with ``[superseded]``),
-  side-effects are skipped, no hooks run, nothing re-raises, and the
-  external state change wins.
-* ``PHASE2_STATE_GUARD='warn'`` — a warning is logged on
-  ``django-logic.transition`` and the transition runs anyway
-  (pre-0.4 behaviour).
+tests pin the guard's behaviour, which is unconditional since 0.10.0: the
+row completes as *superseded* (``last_error_message`` starts with
+``[superseded]``), side-effects are skipped, no hooks run, nothing re-raises,
+and the external state change wins.
 
 The same guard protects ``failed_state`` writes performed by the
 safety-net finalizers (``runner._finalize_terminal_from_watchdog``).

@@ -35,8 +35,6 @@ arbitrary business data (amounts, emails, tokens), so scrub them in your
 logging configuration (a `logging.Filter` on the `django-logic.transition`
 logger) if the deployment is privacy-sensitive.
 
-A redactor that raises never breaks the transition or leaks the raw
-kwargs — the record falls back to `{'__redaction_error__': True}`.
 
 ## Event types
 

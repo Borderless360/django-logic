@@ -41,8 +41,12 @@ dependencies = [
     "django-model-utils>=4.5.1",
     # Celery and Redis are core dependencies, not extras. Background
     # transitions always execute through Celery in production ('sync'
-    # execution exists only for tests/CI), and django-redis provides the
-    # cross-process state lock (RedisState / the lock cache).
+    # execution exists only for tests/CI). The engine never imports
+    # django_redis — it locks through Django's cache API — but it does
+    # require a CROSS-PROCESS cache, and django-redis is the backend the
+    # README documents, so it ships installed rather than as a footgun.
+    # Whether to demote it now that Django 4.0+ has its own Redis backend
+    # is a separate call: see issue #173.
     "celery>=5.0",
     "django-redis>=5.0.0",
 ]

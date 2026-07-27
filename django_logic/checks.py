@@ -171,6 +171,15 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
 
     Matched by task name, not entry key, so renamed entries still pass.
     """
+    from django.apps import apps
+
+    # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
+    # checks too, so without this an install that never added the background
+    # app would get a false warning on every `manage.py check` — and fail any
+    # CI running `check --fail-level WARNING`. Same gate as E002.
+    if not apps.is_installed('django_logic.background'):
+        return []
+
     from django_logic.background import settings as bg_settings
 
     if bg_settings.background_execution() != bg_settings.EXECUTION_CELERY:
@@ -211,3 +220,47 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
              "SILENCED_SYSTEM_CHECKS = ['django_logic.W002'].",
         id='django_logic.W002',
     )]
+
+
+#: Settings removed in 0.10.0, mapped to what to do instead. ``DJANGO_LOGIC``
+#: has no unknown-key rejection, so a leftover key is silently ignored — and
+#: for the two redaction knobs that means an upgrade quietly starts logging
+#: kwargs a deployment had deliberately scrubbed.
+_REMOVED_SETTINGS = {
+    'LOG_KWARGS':
+        'kwargs are always attached to log records now; scrub them with a '
+        'logging.Filter on the "django-logic.transition" logger',
+    'LOG_KWARGS_REDACTOR':
+        'kwargs are always attached to log records now; scrub them with a '
+        'logging.Filter on the "django-logic.transition" logger',
+    'PHASE2_STATE_GUARD':
+        'the phase-2 state guard always enforces; there are no modes',
+    'SENTRY_TRANSACTION_NAMING':
+        'Sentry transactions are always named per transition',
+    'PROCESS_CLASS_ALIASES':
+        'drain in-flight rows before renaming a Process class',
+}
+
+
+@checks.register('django_logic')
+def check_no_removed_settings(app_configs, **kwargs):
+    """Report ``DJANGO_LOGIC`` keys that 0.10.0 removed (``django_logic.W003``).
+
+    Without this the removals fail *open* and silently: the sharpest case is a
+    deployment that set ``LOG_KWARGS_REDACTOR`` for PII compliance, upgrades,
+    and starts writing raw kwargs to its logs with no signal anywhere.
+    """
+    from django.conf import settings
+
+    conf = getattr(settings, 'DJANGO_LOGIC', None) or {}
+    if not isinstance(conf, dict):
+        return []
+    return [
+        checks.Warning(
+            f"DJANGO_LOGIC['{key}'] was removed in django-logic 0.10.0 and is "
+            f"now ignored: {advice}.",
+            hint='Delete the key from DJANGO_LOGIC.',
+            id='django_logic.W003',
+        )
+        for key, advice in _REMOVED_SETTINGS.items() if key in conf
+    ]

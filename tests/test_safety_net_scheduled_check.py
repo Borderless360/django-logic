@@ -6,7 +6,7 @@ silently unscheduled because ``app.conf.beat_schedule = {...}`` is ignored when
 the project also defines the ``CELERY_``-namespaced setting.
 """
 from celery import current_app
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, modify_settings, override_settings
 
 from django_logic.background.settings import beat_schedule
 from django_logic.checks import check_safety_net_is_scheduled
@@ -21,6 +21,15 @@ class SafetyNetScheduledCheckTests(SimpleTestCase):
     def test_sync_mode_is_not_checked(self):
         # Sync mode produces no durable rows, so there is nothing to recover.
         self.assertEqual(self._run(), [])
+
+    @modify_settings(INSTALLED_APPS={'remove': 'django_logic.background'})
+    @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='celery'))
+    def test_not_checked_without_the_background_app(self):
+        # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
+        # checks too, so an install that never added the background app must
+        # not be warned at — it has no durable rows to lose.
+        with self._beat({}):
+            self.assertEqual(self._run(), [])
 
     @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='celery'))
     def test_celery_mode_with_nothing_scheduled_warns(self):
