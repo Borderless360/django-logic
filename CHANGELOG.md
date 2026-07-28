@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-28
+
 ### Changed (breaking)
 
 - **`django-redis` is no longer a core dependency** — it moves to the `[redis]`
