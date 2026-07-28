@@ -41,12 +41,15 @@ def check_hook_signatures(app_configs, **kwargs):
 
 @checks.register('django_logic')
 def check_unambiguous_in_progress_ownership(app_configs, **kwargs):
-    """Two bound machines must not claim the same in_progress_state on
-    one (model, state_field) — a record-less stranded instance there has
-    no provenance, so automatic recovery could run the wrong transition's
-    failed_state and failure hooks (``django_logic.E001``).
-    ``recover_stranded_states`` also skips such states at runtime, but
-    the topology itself is the defect; fail loudly at check time."""
+    """Transitions sharing an in_progress_state on one
+    (model, state_field) must all recover a record-less stranded instance
+    the same way — such an instance has no provenance, so recovery picks
+    an owner, and claimants that disagree on ``failed_state`` or their
+    failure hooks make that pick wrong half the time
+    (``django_logic.E001``). Sharing is fine on its own;
+    ``recover_stranded_states`` also skips ambiguous states at runtime,
+    but the topology itself is the defect, so fail loudly at check
+    time."""
     findings = []
     for key, owners in sorted(collect_ambiguous_in_progress_states().items()):
         model_label, state_field, in_progress = key
@@ -56,12 +59,20 @@ def check_unambiguous_in_progress_ownership(app_configs, **kwargs):
         ))
         findings.append(checks.Error(
             f"in_progress_state {in_progress!r} on {model_label}."
-            f"{state_field} is claimed by more than one bound machine: "
-            f"{claimants}.",
-            hint='Give each machine a distinct in_progress_state (or bind '
-                 'the processes to distinct state fields). Stranded-state '
-                 'recovery skips ambiguous states, leaving instances '
-                 'parked until fixed manually.',
+            f"{state_field} is shared by transitions that recover "
+            f"differently: {claimants}.",
+            hint='Give them a matching failed_state and matching '
+                 'failure_side_effects/failure_callbacks, or a distinct '
+                 'in_progress_state each (or bind the processes to distinct '
+                 'state fields). Hooks are matched by object identity, so '
+                 'the claimants must reference the SAME callables — hoist a '
+                 'shared partial/lambda to a module-level name rather than '
+                 'building one per transition. Two different bound processes '
+                 'sharing a state are always ambiguous, however identically '
+                 'they recover, because each sweep only sees its own '
+                 'process_name in-flight rows. Stranded-state recovery skips '
+                 'ambiguous states, leaving instances parked until fixed '
+                 'manually.',
             obj=f'{model_label}.{state_field}',
             id='django_logic.E001',
         ))

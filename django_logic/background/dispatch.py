@@ -192,18 +192,18 @@ def recover_stranded_states() -> int:
 
     recovered = 0
     seen = set()
-    # In-progress states claimed by more than one bound machine have no
-    # provenance for a record-less stranding — recovering would guess an
-    # owner and could run the wrong failed_state/hooks. Skip them loudly;
-    # the django_logic.E001 system check flags the topology itself (#143).
+    # A record-less stranding has no provenance, so recovery picks one of
+    # the transitions claiming the state. That is only safe while they all
+    # recover identically; where they disagree, skip loudly. The
+    # django_logic.E001 system check flags the topology itself (#143).
     ambiguous = collect_ambiguous_in_progress_states()
     for key in sorted(ambiguous):
         model_label, state_field, in_progress = key
         logger.error(
             f'recover_stranded_states: in_progress_state {in_progress!r} '
-            f'on {model_label}.{state_field} is claimed by multiple bound '
-            f'machines (django_logic.E001); skipping recovery for it — '
-            f'stranded instances stay parked until the binding topology '
+            f'on {model_label}.{state_field} is shared by transitions that '
+            f'recover differently (django_logic.E001); skipping recovery '
+            f'for it — stranded instances stay parked until the topology '
             f'is fixed.'
         )
     for binding, process_cls, transition in iter_bound_transitions():
@@ -219,8 +219,15 @@ def recover_stranded_states() -> int:
         # sweep's lock until LOCK_TIMEOUT.
         if isinstance(transition, Action):
             continue
+        # Not keyed by action_name: several transitions in one process may
+        # share an in_progress_state, and a non-ambiguous key means they
+        # all recover identically, so one pass over the state is enough —
+        # sweeping per action would re-page the same candidates N times.
+        # process_name stays in the key because cross-process sharing is
+        # always ambiguous (skipped above) and each bound process scans
+        # its own in-flight rows.
         key = (binding.model._meta.label, binding.state_field,
-               in_progress, transition.action_name)
+               in_progress, binding.process_class.process_name)
         if key in seen:
             continue
         seen.add(key)

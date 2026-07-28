@@ -7,6 +7,10 @@ property while the registry kept both claims, a typo'd state_field only
 failed deep inside a transition, and two machines sharing an
 in_progress_state on one field made record-less stranded recovery guess
 an owner.
+
+Sharing an in_progress_state is legal (a UI may only know one "busy"
+value); what must hold is that every claimant recovers a record-less
+stranded instance identically — same failed_state, same failure hooks.
 """
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
@@ -47,6 +51,36 @@ class _MachineC(Process):
     ]
 
 
+def _note_failure(instance, **kwargs):
+    pass
+
+
+class _SharedRecoveryMachine(Process):
+    """Two transitions on one class sharing an in_progress_state AND the
+    recovery they would drive — the shape the old uniqueness raise forbade."""
+    process_name = 'machine_shared'
+    transitions = [
+        Transition('run_one', sources=['draft'], target='done',
+                   in_progress_state='busy', failed_state='shared_failed',
+                   failure_callbacks=[_note_failure]),
+        Transition('run_two', sources=['draft'], target='ready',
+                   in_progress_state='busy', failed_state='shared_failed',
+                   failure_callbacks=[_note_failure]),
+    ]
+
+
+class _DivergentRecoveryMachine(Process):
+    """Same in_progress_state and failed_state, different failure hooks."""
+    process_name = 'machine_divergent'
+    transitions = [
+        Transition('run_three', sources=['draft'], target='done',
+                   in_progress_state='busy', failed_state='shared_failed',
+                   failure_callbacks=[_note_failure]),
+        Transition('run_four', sources=['draft'], target='ready',
+                   in_progress_state='busy', failed_state='shared_failed'),
+    ]
+
+
 class _ActionOnlyMachine(Process):
     process_name = 'machine_action'
     transitions = [
@@ -54,8 +88,34 @@ class _ActionOnlyMachine(Process):
     ]
 
 
+# Two SEPARATE bound processes whose recovery is byte-identical (same
+# failed_state, no failure hooks at all). Recovery-signature equality alone
+# would call this unambiguous and sweep it — but each sweep only sees its own
+# process_name's in-flight rows, so the other's live transition looks
+# record-less. The bound process name is in the signature to keep this
+# ambiguous.
+class _CrossProcOne(Process):
+    process_name = 'cross_proc_one'
+    transitions = [
+        Transition('run_cross_one', sources=['draft'], target='done',
+                   in_progress_state='cross_busy',
+                   failed_state='cross_failed'),
+    ]
+
+
+class _CrossProcTwo(Process):
+    process_name = 'cross_proc_two'
+    transitions = [
+        Transition('run_cross_two', sources=['draft'], target='done',
+                   in_progress_state='cross_busy',
+                   failed_state='cross_failed'),
+    ]
+
+
 class _BindingCleanupMixin:
-    _test_processes = (_MachineA, _MachineB, _MachineC, _ActionOnlyMachine)
+    _test_processes = (_MachineA, _MachineB, _MachineC, _ActionOnlyMachine,
+                       _SharedRecoveryMachine, _DivergentRecoveryMachine,
+                       _CrossProcOne, _CrossProcTwo)
 
     def tearDown(self):
         ProcessManager.bindings = [
@@ -150,3 +210,96 @@ class AmbiguousInProgressTests(_BindingCleanupMixin, TestCase):
         # Parked, not guessed: neither a_failed nor b_failed was written.
         self.assertEqual(stranded.status, 'working')
         self.assertTrue(any('E001' in line for line in logs.output))
+
+    def test_shared_state_with_matching_recovery_is_not_ambiguous(self):
+        ProcessManager.bind_model_process(
+            Invoice, _SharedRecoveryMachine, state_field='status')
+
+        self.assertEqual(collect_ambiguous_in_progress_states(), {})
+        self.assertEqual(check_unambiguous_in_progress_ownership(None), [])
+
+    def test_shared_state_with_matching_recovery_is_swept(self):
+        ProcessManager.bind_model_process(
+            Invoice, _SharedRecoveryMachine, state_field='status')
+        cache.clear()
+        stranded = Invoice.objects.create(status='busy')
+
+        recovered = recover_stranded_states()
+
+        stranded.refresh_from_db()
+        # Either claimant drives the same recovery, so guessing is safe.
+        self.assertEqual(recovered, 1)
+        self.assertEqual(stranded.status, 'shared_failed')
+
+    def test_shared_state_with_divergent_failure_hooks_is_ambiguous(self):
+        ProcessManager.bind_model_process(
+            Invoice, _DivergentRecoveryMachine, state_field='status')
+
+        ambiguous = collect_ambiguous_in_progress_states()
+        self.assertIn(('tests.Invoice', 'status', 'busy'), ambiguous)
+        findings = check_unambiguous_in_progress_ownership(None)
+        self.assertEqual([f.id for f in findings], ['django_logic.E001'])
+        self.assertIn('recover differently', findings[0].msg)
+
+    def _bind_cross_processes(self):
+        ProcessManager.bind_model_process(
+            Invoice, _CrossProcOne, state_field='status')
+        ProcessManager.bind_model_process(
+            Invoice, _CrossProcTwo, state_field='status')
+
+    def test_two_bound_processes_sharing_a_state_stay_ambiguous(self):
+        """Identical recovery is NOT enough across bindings — each sweep
+        only sees its own process_name's in-flight rows."""
+        self._bind_cross_processes()
+
+        ambiguous = collect_ambiguous_in_progress_states()
+        self.assertIn(('tests.Invoice', 'status', 'cross_busy'), ambiguous)
+        findings = check_unambiguous_in_progress_ownership(None)
+        self.assertEqual([f.id for f in findings], ['django_logic.E001'])
+
+    def test_sibling_process_in_flight_instance_is_never_recovered(self):
+        """A live transition in one process must not be force-failed by the
+        other process's sweep (the #143 guarantee, under shared states)."""
+        from django_logic.background.models import TransitionMessage
+
+        self._bind_cross_processes()
+        cache.clear()
+        inflight = Invoice.objects.create(status='cross_busy')
+        # cross_proc_two's phase 1 ran: state written, row open, lock
+        # released while the phase-2 task waits in the queue.
+        TransitionMessage.objects.create(
+            app_label='tests', model_name='invoice',
+            instance_id=str(inflight.pk), process_name='cross_proc_two',
+            transition_name='run_cross_two', queue_name='q',
+        )
+
+        recovered = recover_stranded_states()
+
+        inflight.refresh_from_db()
+        self.assertEqual(recovered, 0)
+        self.assertEqual(inflight.status, 'cross_busy')
+
+    def test_shared_state_in_one_process_is_swept_once_not_per_action(self):
+        """Two claimants, one pass: the sweep must not re-page the same
+        candidates once per sharing transition."""
+        from django_logic.background import dispatch
+
+        ProcessManager.bind_model_process(
+            Invoice, _SharedRecoveryMachine, state_field='status')
+        cache.clear()
+        Invoice.objects.create(status='busy')
+
+        calls = []
+        original = dispatch._sweep_transition
+        try:
+            dispatch._sweep_transition = lambda b, t: (
+                calls.append(t.action_name) or original(b, t)
+            )
+            recover_stranded_states()
+        finally:
+            dispatch._sweep_transition = original
+
+        # Other test modules leave processes bound, so count only this
+        # machine's two sharing claimants.
+        shared = [a for a in calls if a in ('run_one', 'run_two')]
+        self.assertEqual(len(shared), 1, f'swept once per action: {shared}')

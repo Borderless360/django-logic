@@ -55,9 +55,9 @@ class Process:
     ``nested_processes``, ``conditions``, ``permissions``,
     ``process_name``, and ``state_class``.
 
-    Class-time validation enforces that no two transitions on the same
-    ``Process`` share the same ``in_progress_state`` — this makes
-    phase-2 background-transition lookup unambiguous.
+    Class-time validation enforces that a background transition is
+    uniquely identifiable by ``(owning process class, action_name)``,
+    which is what phase-2 restore resolves a ``TransitionMessage`` by.
     """
 
     nested_processes = []
@@ -71,7 +71,6 @@ class Process:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        _validate_unique_in_progress_states(cls)
         _validate_unique_background_action_names(cls)
 
     def __init__(self, field_name='', instance=None, state=None):
@@ -280,39 +279,6 @@ class Process:
         )
 
 
-def _validate_unique_in_progress_states(process_cls):
-    """Reject duplicate in_progress_state values across a Process AND its
-    nested processes.
-
-    Unique ``in_progress_state`` is what lets the phase-2 background
-    transition lookup work unambiguously — the in-progress state alone
-    identifies the transition that's mid-flight, without any source-state
-    search. Nested processes share the parent's state field, so the
-    uniqueness guarantee must hold across the whole tree (mirroring
-    ``_validate_unique_background_action_names``), not just the class's
-    own ``transitions``.
-    """
-    seen: dict[str, str] = {}
-    for proc_cls in _iter_process_tree(process_cls):
-        for transition in proc_cls.transitions or []:
-            in_progress = getattr(transition, 'in_progress_state', None)
-            if not in_progress:
-                continue
-            where = (
-                f'{proc_cls.__module__}.{proc_cls.__name__}.'
-                f'{transition.action_name}'
-            )
-            if in_progress in seen:
-                raise ImproperlyConfigured(
-                    f"Process {process_cls.__module__}.{process_cls.__name__} "
-                    f"(or its nested processes) has two transitions sharing "
-                    f"in_progress_state='{in_progress}': {seen[in_progress]} "
-                    f"and {where}. Every in_progress_state must be unique "
-                    f"across a Process and its nested processes."
-                )
-            seen[in_progress] = where
-
-
 def _iter_process_tree(process_cls, _seen=None):
     """Yield ``process_cls`` and every Process class reachable through
     ``nested_processes`` (depth-first), guarding against cycles.
@@ -487,26 +453,62 @@ def collect_hook_signature_offenders(process_cls) -> list:
     return offenders
 
 
-def collect_ambiguous_in_progress_states() -> dict:
-    """Cross-binding in-progress ownership map (#143).
+def _recovery_signature(transition, process_name: str) -> tuple:
+    """What ``recover_stranded_states`` would do with this transition.
 
-    Uniqueness of ``in_progress_state`` is enforced per process tree, but
-    two *bindings* on the same (model, state_field) may legally exist.
-    If their trees share an ``in_progress_state``, a record-less stranded
-    instance in that state has no provenance: automatic recovery could
-    run the wrong transition's ``failed_state`` and failure hooks.
+    Recovery is exactly ``fail_transition``, which reads only
+    ``failed_state`` and the two failure bundles; everything else it
+    touches is logging. Identity of the command objects, not equality —
+    two equal-but-distinct callables compare as different, which errs
+    toward calling a key ambiguous.
+
+    ``process_name`` is the **bound** process's name, and it is part of
+    the signature because the sweep's in-flight check is scoped by it
+    (``_sweep_transition`` filters ``TransitionMessage`` on
+    ``process_name``). A sibling process's open row is therefore
+    invisible to this process's sweep: an instance legitimately mid-flight
+    over there looks record-less here and would be force-failed. So two
+    *different* bound processes claiming one in-progress state are always
+    ambiguous, however identically they would recover — which is the
+    cross-binding case #143 has always rejected.
+    """
+    return (
+        process_name,
+        transition.failed_state,
+        tuple(id(command) for command in transition.failure_side_effects.commands),
+        tuple(id(command) for command in transition.failure_callbacks.commands),
+    )
+
+
+def collect_ambiguous_in_progress_states() -> dict:
+    """In-progress states whose stranded-recovery owner is undecidable
+    (#143).
+
+    Several transitions may share an ``in_progress_state`` on one
+    (model, state_field) — declared side by side in a process tree, or
+    reached through two *bindings*. That is only a problem for a
+    **record-less** stranded instance: it has no provenance, so recovery
+    has to pick an owner. Picking is safe when every claimant would
+    recover identically (same ``failed_state``, same failure hooks) and
+    unsafe otherwise, which is what this reports — not the sharing
+    itself.
 
     Returns ``{(model_label, state_field, in_progress_state):
-    [(process_cls, transition), ...]}`` for every key claimed by more
-    than one binding. ``Action``\\ s never write their
-    ``in_progress_state`` and are excluded (mirrors the stranded sweep).
-    Consumed by the ``django_logic.E001`` system check and by
+    [(process_cls, transition), ...]}`` for every key whose claimants
+    disagree. ``Action``\\ s never write their ``in_progress_state`` and
+    are excluded (mirrors the stranded sweep). Consumed by the
+    ``django_logic.E001`` system check and by
     ``recover_stranded_states``, which skips ambiguous keys.
     """
     from django_logic.transition import Action
 
     claims: dict = {}
+    # Signatures tracked alongside rather than recomputed from `owners`:
+    # the bound process_name is part of a signature and is not recoverable
+    # from (process_cls, transition) once a nested tree has been flattened.
+    signatures: dict = {}
     for binding in ProcessManager.bindings:
+        bound_process_name = binding.process_class.process_name
         stack = [binding.process_class]
         seen_cls = set()
         while stack:
@@ -521,13 +523,13 @@ def collect_ambiguous_in_progress_states() -> dict:
                 key = (binding.model._meta.label, binding.state_field,
                        in_progress)
                 claims.setdefault(key, []).append((process_cls, transition))
+                signatures.setdefault(key, set()).add(
+                    _recovery_signature(transition, bound_process_name)
+                )
             stack.extend(process_cls.nested_processes)
     return {
-        # The same transition object reachable through two bindings is
-        # not ambiguous — recovery drives the identical failed_state and
-        # hooks either way. Only distinct declarations conflict.
         key: owners for key, owners in claims.items()
-        if len({id(transition) for _, transition in owners}) > 1
+        if len(signatures[key]) > 1
     }
 
 

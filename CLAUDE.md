@@ -50,8 +50,14 @@ change on success) for anything slow, external, or retriable.
    completion check** on the parent, and **aggregate errors by reading child
    rows** (give the parent an explicit `action_required` partial-failure
    state). Never re-raise a child error into the parent.
-4. **`in_progress_state` is unique within a Process**; set a `failed_state` so
-   failures are contained.
+4. **Set a `failed_state`** so failures are contained. Transitions **of one
+   bound process** may share an `in_progress_state` (several actions that all
+   mean "busy" to a UI), provided they also share `failed_state` and their
+   failure hooks — the same callable objects, not merely equivalent ones.
+   Two *different* bound processes may never share one, however identically
+   they recover: each sweep only queries its own `process_name`'s in-flight
+   rows, so the sibling's live transition would look stranded and be
+   force-failed. `django_logic.E001` fails `manage.py check` either way.
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
    `sync_execution()` context manager) runs phase 2 inline with no broker and
    propagates exceptions; `retry_pending()` simulates the periodic starter.
@@ -69,11 +75,14 @@ change on success) for anything slow, external, or retriable.
 
 ## Deployment the durability contract depends on
 
-- A real broker (Redis/RabbitMQ). Celery and django-redis are core
-  dependencies of django-logic (installed automatically);
-  `BACKGROUND_EXECUTION` defaults to `'celery'`.
-- A cross-process `default` cache (django-redis) for the state lock —
-  celery mode refuses to boot with a locmem/dummy cache when `DEBUG=False`.
+- A real broker (Redis/RabbitMQ). Celery is a core dependency of
+  django-logic (installed automatically); `BACKGROUND_EXECUTION` defaults
+  to `'celery'`.
+- A cross-process `default` cache for the state lock — celery mode refuses
+  to boot with a locmem/dummy cache when `DEBUG=False`. The engine locks
+  through Django's cache API and imports no backend, so Django's built-in
+  `django.core.cache.backends.redis.RedisCache` is enough; django-redis is
+  the `[redis]` extra, not a core dependency (0.11.0).
 - Crash re-delivery is built in (every django-logic task sets
   `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
   pair only for your *own* tasks. You still need a **single beat**

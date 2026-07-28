@@ -2,6 +2,96 @@
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-28
+
+### Changed (breaking)
+
+- **`django-redis` is no longer a core dependency** — it moves to the `[redis]`
+  extra, which stops being an empty alias (#173). The engine has never imported
+  `django_redis`; the state lock goes through Django's cache API
+  (`State.lock` → `cache.add`), so what it requires is a *cross-process cache
+  backend*, and Django has shipped
+  `django.core.cache.backends.redis.RedisCache` since 4.0 (our floor is 4.2).
+
+  **Migration:** if your settings name `django_redis.cache.RedisCache`, install
+  it explicitly — `pip install django-logic[redis]`. The failure mode if you
+  miss it is *not* at boot: `django.setup()` succeeds and
+  `InvalidCacheBackendError` is raised at the first cache access. The
+  celery-mode locmem/dummy guard is backend-agnostic and unchanged.
+
+### Changed
+
+- **`in_progress_state` no longer has to be unique within a process** (#175).
+  Two transitions in one process tree sharing an `in_progress_state` used to
+  raise `ImproperlyConfigured` at class-creation time. The rule now enforced is
+  the narrower one the engine actually needs: transitions sharing an
+  `in_progress_state` on a given (model, state_field) must **recover a
+  record-less stranded instance identically** — same `failed_state`, same
+  failure hooks — and must belong to the **same bound process**. Where they
+  agree, sharing is free and `recover_stranded_states` picks any claimant;
+  where they disagree, `django_logic.E001` fails `manage.py check` and the
+  sweep skips the state (#143).
+
+  The old justification — "the in-progress state alone identifies the
+  transition that's mid-flight" — stopped being true when `owning_process_class`
+  was added to `TransitionMessage` (migration 0007): phase-2 restore resolves
+  `(owning process class, action_name)` off the row, guarded by
+  `_validate_unique_background_action_names`, and never searches by state.
+
+  This unblocks several actions on one model that all mean "busy" to a client,
+  sharing one in-progress value and one `failed_state`.
+
+  Three things to know:
+
+  - **Sharing across two different bound processes stays ambiguous.** The
+    sweep's in-flight check is scoped by `process_name`, so a sibling process's
+    open `TransitionMessage` is invisible to it — an instance legitimately
+    mid-flight there would look record-less and be force-failed into
+    `failed_state`. The recovery signature includes the bound process name so
+    this topology still reports `E001` and is still skipped.
+  - **Failure hooks are compared by object identity**, not equality: claimants
+    must reference the *same* callables. Hoist a shared `partial`/`lambda` to a
+    module-level name, or `E001` will report transitions that behave identically
+    as recovering differently.
+  - **A divergent shared state within one tree was previously impossible** — it
+    raised at import — and is now constructible, caught by `E001` at
+    `manage.py check` time. Celery workers do not run system checks, so make
+    sure your deploy pipeline does.
+
+### Fixed
+
+- **Late migration note for the 0.10.0 removal of `django_logic.conditions`.**
+  0.10.0 removed `all_related_in` / `any_related_in` (#168) as "public API with
+  no callers in any tree". That audit scanned only one consumer; the
+  `django-logic-test` validation rig imported both, and would have failed at
+  import on upgrade. Nothing changes in 0.11.0 — the module is still gone — but
+  the migration the changelog never gave is: **copy the two factories into your
+  own project.** They are queryset arithmetic with no engine coupling:
+
+  ```python
+  def all_related_in(relation, field, states):
+      wanted = set(states)
+
+      def condition(instance, **kwargs) -> bool:
+          manager = getattr(instance, relation)
+          total = manager.count()
+          if total == 0:
+              return False
+          return manager.filter(**{f'{field}__in': wanted}).count() == total
+
+      return condition
+
+
+  def any_related_in(relation, field, states):
+      wanted = set(states)
+
+      def condition(instance, **kwargs) -> bool:
+          return getattr(instance, relation).filter(
+              **{f'{field}__in': wanted}).exists()
+
+      return condition
+  ```
+
 ## [0.10.0] — 2026-07-27
 
 An overengineering sweep. ~1,900 lines removed across the engine, its tests and

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "0.10.0"
+version = "0.11.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -39,23 +39,24 @@ dependencies = [
     # No upper bound by design: the django-main CI job is the early warning.
     "django>=4.2,!=5.0.*",
     "django-model-utils>=4.5.1",
-    # Celery and Redis are core dependencies, not extras. Background
-    # transitions always execute through Celery in production ('sync'
-    # execution exists only for tests/CI). The engine never imports
-    # django_redis — it locks through Django's cache API — but it does
-    # require a CROSS-PROCESS cache, and django-redis is the backend the
-    # README documents, so it ships installed rather than as a footgun.
-    # Whether to demote it now that Django 4.0+ has its own Redis backend
-    # is a separate call: see issue #173.
+    # Celery is a core dependency, not an extra: background transitions
+    # always execute through Celery in production ('sync' execution exists
+    # only for tests/CI), and background/tasks.py imports shared_task at
+    # module level.
     "celery>=5.0",
-    "django-redis>=5.0.0",
 ]
 
 [project.optional-dependencies]
-# Kept as empty aliases so existing `pip install django-logic[celery,redis]`
-# pins keep resolving; both packages are core dependencies as of 0.4.0.
+# Celery is still a core dependency, so [celery] stays an empty alias purely
+# so existing `pip install django-logic[celery,redis]` pins keep resolving.
 celery = []
-redis = []
+# [redis] has meaning again as of 0.11.0. The engine never imports
+# django_redis — the state lock goes through Django's cache API
+# (`State.lock` → `cache.add`) — so any cross-process backend works,
+# including the `django.core.cache.backends.redis.RedisCache` Django has
+# shipped since 4.0. This extra installs the third-party backend for
+# deployments whose settings name `django_redis.cache.RedisCache`.
+redis = ["django-redis>=5.0.0"]
 drf = [
     "djangorestframework>=3.14.0",
 ]
@@ -65,6 +66,9 @@ dev = [
     # Postgres concurrency tests. Without it, `uv sync --extra dev` runs the
     # SQLite suite but not tests.stability.
     "psycopg[binary]>=3.1",
+    # Client for Django's built-in Redis cache backend, which the
+    # real-Redis and stability test settings use for the state lock.
+    "redis>=4.2",
 ]
 
 [project.urls]
