@@ -56,6 +56,40 @@
     `manage.py check` time. Celery workers do not run system checks, so make
     sure your deploy pipeline does.
 
+### Fixed
+
+- **Late migration note for the 0.10.0 removal of `django_logic.conditions`.**
+  0.10.0 removed `all_related_in` / `any_related_in` (#168) as "public API with
+  no callers in any tree". That audit scanned only one consumer; the
+  `django-logic-test` validation rig imported both, and would have failed at
+  import on upgrade. Nothing changes in 0.11.0 — the module is still gone — but
+  the migration the changelog never gave is: **copy the two factories into your
+  own project.** They are queryset arithmetic with no engine coupling:
+
+  ```python
+  def all_related_in(relation, field, states):
+      wanted = set(states)
+
+      def condition(instance, **kwargs) -> bool:
+          manager = getattr(instance, relation)
+          total = manager.count()
+          if total == 0:
+              return False
+          return manager.filter(**{f'{field}__in': wanted}).count() == total
+
+      return condition
+
+
+  def any_related_in(relation, field, states):
+      wanted = set(states)
+
+      def condition(instance, **kwargs) -> bool:
+          return getattr(instance, relation).filter(
+              **{f'{field}__in': wanted}).exists()
+
+      return condition
+  ```
+
 ## [0.10.0] — 2026-07-27
 
 An overengineering sweep. ~1,900 lines removed across the engine, its tests and
