@@ -109,9 +109,11 @@ class RestoreFailedTimingTests(TestCase):
 
         tm.refresh_from_db()
         self.assertTrue(tm.is_completed)
-        # started_at should never have been set — phase 2 aborted before
-        # mark_as_started. duration_ms stays null too.
-        self.assertIsNone(tm.started_at)
+        # started_at IS set: it is stamped (and committed) when an attempt
+        # begins, before the atomic, so the watchdog can see a hung or
+        # crashed attempt (#179). What must stay null is duration_ms —
+        # nothing was measured, because no attempt actually ran.
+        self.assertIsNotNone(tm.started_at)
         self.assertIsNone(tm.duration_ms)
         # completed_at is set so the row can be distinguished from
         # "never finished".

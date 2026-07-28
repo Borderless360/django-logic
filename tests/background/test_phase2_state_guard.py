@@ -74,8 +74,10 @@ class EnforceModeTests(TestCase):
         tm.refresh_from_db()
         self.assertTrue(tm.is_completed)
         self.assertTrue(tm.last_error_message.startswith('[superseded]'))
-        # The guard fires BEFORE mark_as_started — no attempt was recorded.
-        self.assertIsNone(tm.started_at)
+        # started_at is stamped when the attempt begins (#179), so it is
+        # set even though the guard aborted; duration_ms is what stays null,
+        # because no work was measured.
+        self.assertIsNone(tm.duration_ms)
         # Nothing failed: errors_count untouched.
         self.assertEqual(tm.errors_count, 0)
 
@@ -104,7 +106,9 @@ class EnforceModeTests(TestCase):
         tm.refresh_from_db()
         self.assertTrue(tm.is_completed)
         self.assertTrue(tm.last_error_message.startswith('[superseded]'))
-        self.assertIsNone(tm.started_at)
+        # As above: started_at marks that an attempt began (#179); the
+        # superseded row is distinguished by duration_ms staying null.
+        self.assertIsNone(tm.duration_ms)
 
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'cancelled')

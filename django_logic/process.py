@@ -71,6 +71,7 @@ class Process:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        _validate_action_names_not_shadowed(cls)
         _validate_unique_background_action_names(cls)
 
     def __init__(self, field_name='', instance=None, state=None):
@@ -125,6 +126,13 @@ class Process:
             # No engine path forwards it; only hand-built kwargs dicts do.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
+
+        # Django's template engine CALLS any callable it resolves, so
+        # ``{{ order.process.approve }}`` used to drive the state machine
+        # while rendering a page and print the tr_id (#181). ``alters_data``
+        # is the framework's opt-out — the same marker Model.save/delete
+        # carry — and makes the engine render '' instead of calling.
+        transition_method.alters_data = True
 
         return transition_method
 
@@ -207,6 +215,7 @@ class Process:
         user=None,
         action_name=None,
         ignore_state=False,
+        _seen=None,
     ):
         """Like :meth:`get_available_transitions`, but yield
         ``(transition, owning_process)`` pairs.
@@ -218,6 +227,23 @@ class Process:
         identical to ``get_available_transitions``; that method is a thin
         wrapper that drops the owner.
         """
+        # Visit each Process CLASS once per walk (#180). Without this, a
+        # nested process reachable by two paths — a diamond, or a duplicated
+        # entry in ``nested_processes`` — yielded every one of its
+        # transitions twice, and ``_resolve_transition_with_owner`` rejected
+        # the single declaration as "several transitions available", with a
+        # hint no condition could satisfy (both matches being the same
+        # object). ``get_available_actions`` set-dedupes, so the action was
+        # advertised and then failed on every call. A nested cycle recursed
+        # until RecursionError. Deduping by class preserves the supported
+        # pattern of one ``action_name`` on *distinct* nested classes
+        # disambiguated by conditions. Mirrors ``_iter_process_tree``.
+        if _seen is None:
+            _seen = set()
+        if id(type(self)) in _seen:
+            return
+        _seen.add(id(type(self)))
+
         if not self.is_valid(user):
             return
 
@@ -240,6 +266,7 @@ class Process:
                 user=user,
                 action_name=action_name,
                 ignore_state=ignore_state,
+                _seen=_seen,
             )
 
     def _resolve_transition_with_owner(self, action_name: str, user=None):
@@ -295,6 +322,34 @@ def _iter_process_tree(process_cls, _seen=None):
     yield process_cls
     for sub_process_cls in process_cls.nested_processes or []:
         yield from _iter_process_tree(sub_process_cls, _seen)
+
+
+def _validate_action_names_not_shadowed(process_cls):
+    """Reject an ``action_name`` that a real ``Process`` attribute shadows
+    (``django_logic.E003`` territory — raised at class creation, #182).
+
+    ``__getattr__`` only runs when normal attribute lookup *fails*, so a
+    transition named ``state``, ``is_valid``, ``transitions``,
+    ``process_name``… is unreachable: ``instance.process.is_valid()`` calls
+    the bound method and returns ``True`` without transitioning anything.
+    ``get_available_actions()`` still advertises the name, so the transition
+    looks live and silently does nothing — the worst possible failure mode
+    for a state machine. There is no way to reach it, so this is a
+    definition error, not a runtime concern.
+    """
+    for proc_cls in _iter_process_tree(process_cls):
+        for transition in proc_cls.transitions or []:
+            action_name = getattr(transition, 'action_name', None)
+            if not action_name or not hasattr(proc_cls, action_name):
+                continue
+            raise ImproperlyConfigured(
+                f"Process {proc_cls.__module__}.{proc_cls.__name__} declares "
+                f"a transition named {action_name!r}, which is shadowed by an "
+                f"existing {proc_cls.__name__} attribute "
+                f"({getattr(proc_cls, action_name)!r}). Attribute lookup wins "
+                f"over the lazy action dispatcher, so the transition could "
+                f"never be called — rename the action."
+            )
 
 
 def _validate_unique_background_action_names(process_cls):
@@ -389,7 +444,8 @@ def _validate_hook_signatures(process_cls) -> None:
         return
     message = _hook_signature_message(offenders)
     conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
-    if conf.get('STRICT_HOOK_SIGNATURES', False):
+    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION (#182).
+    if conf.get('STRICT_HOOK_SIGNATURES', False) is True:
         raise ImproperlyConfigured(message)
     transition_logger.warning(message)
 
@@ -589,6 +645,27 @@ class ProcessManager:
                     f"state_field {existing.state_field!r}). Give one of "
                     f"the processes a distinct process_name."
                 )
+
+        # setattr below replaces whatever descriptor the name currently
+        # holds. If it names one of the model's own fields, that field's
+        # DeferredAttribute is swapped for a read-only property and the
+        # model can no longer even be instantiated (#182). state_field is
+        # already validated for existence and concreteness; process_name
+        # was only checked against other bindings.
+        model_field_names = {
+            f.name for f in model._meta.get_fields()
+        } | {
+            f.attname for f in model._meta.concrete_fields
+        }
+        if process_class.process_name in model_field_names:
+            raise ImproperlyConfigured(
+                f"bind_model_process({model._meta.label}, "
+                f"{process_class.__name__}): process_name "
+                f"{process_class.process_name!r} collides with a field of "
+                f"the same name on {model._meta.label}. Binding would "
+                f"replace that field's descriptor and break the model. "
+                f"Give the process a distinct process_name."
+            )
 
         _validate_hook_signatures(process_class)
         cls.bindings.append(binding)

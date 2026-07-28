@@ -275,3 +275,56 @@ def check_no_removed_settings(app_configs, **kwargs):
         )
         for key, advice in _REMOVED_SETTINGS.items() if key in conf
     ]
+
+
+#: Every key the engine reads. The set is closed, so anything outside it (and
+#: outside ``_REMOVED_SETTINGS``) is a typo.
+_KNOWN_SETTINGS = frozenset({
+    'BACKGROUND_EXECUTION',
+    'DEFAULT_QUEUE',
+    'STARTER_QUEUE',
+    'LOCK_TIMEOUT',
+    'DEFER_UNLOCK_UNTIL_COMMIT',
+    'STRICT_HOOK_SIGNATURES',
+    'STRICT_KWARGS_SERIALIZATION',
+    'TRANSITION_COVERAGE_LOG',
+    'TRANSITION_MESSAGE_MAX_ERRORS',
+    'TRANSITION_MESSAGE_RETRY_MINUTES',
+    'TRANSITION_MESSAGE_CLEANUP_DAYS',
+})
+
+
+@checks.register('django_logic')
+def check_no_unknown_settings(app_configs, **kwargs):
+    """Report ``DJANGO_LOGIC`` keys the engine never reads
+    (``django_logic.W004``, #182).
+
+    ``DJANGO_LOGIC`` is a plain dict with no schema, so a typo —
+    ``TRANSITION_MESSAGE_MAX_ERROR``, ``LOCK_TIMOUT`` — is silently ignored
+    and the default silently applies. That is the failure mode behind every
+    "I set the retry limit and it did nothing" report. The known set is
+    closed and small, so reporting the complement is cheap and precise.
+
+    Removed keys are excluded here because ``W003`` already names them with
+    migration advice; flagging them twice would just be noise.
+    """
+    from django.conf import settings
+
+    conf = getattr(settings, 'DJANGO_LOGIC', None) or {}
+    if not isinstance(conf, dict):
+        return []
+    unknown = sorted(
+        set(conf) - _KNOWN_SETTINGS - set(_REMOVED_SETTINGS)
+    )
+    if not unknown:
+        return []
+    return [checks.Warning(
+        f"DJANGO_LOGIC contains {'a key' if len(unknown) == 1 else 'keys'} "
+        f"django-logic does not read: {', '.join(repr(k) for k in unknown)}. "
+        f"The value has no effect and the documented default applies.",
+        hint=f"Check for a typo against the documented settings: "
+             f"{', '.join(sorted(_KNOWN_SETTINGS))}. If you keep unrelated "
+             f"keys in DJANGO_LOGIC on purpose, silence this with "
+             f"SILENCED_SYSTEM_CHECKS = ['django_logic.W004'].",
+        id='django_logic.W004',
+    )]

@@ -201,6 +201,7 @@ def validate_on_ready() -> None:
     max_errors()
     retry_minutes()
     cleanup_days()
+    _validate_bool('STRICT_KWARGS_SERIALIZATION')
     # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) — shared with
     # DjangoLogicConfig.ready so sync-only installs validate them too.
     from django_logic.conf import validate_core_settings
@@ -278,6 +279,21 @@ def _check_lock_cache_in_celery_mode() -> None:
         raise ImproperlyConfigured(message)
 
 
+def _validate_bool(key: str) -> None:
+    """Reject a non-bool on a setting that gates behaviour (#182).
+
+    Truthiness coercion is unsafe for these: the strings 'false'/'no'/'0'
+    are all truthy, so a value meant to disable a feature enabled it.
+    """
+    value = _conf().get(key, False)
+    if not isinstance(value, bool):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC[{key!r}] must be a bool (True or False), got "
+            f"{value!r}. Strings are not accepted — 'false' would otherwise "
+            f"read as truthy and enable the very behaviour it names."
+        )
+
+
 def strict_kwargs_serialization() -> bool:
     """When True, phase-1 kwargs serialization raises on silently-droppable
     caller kwargs (``request``) instead of logging a warning.
@@ -285,5 +301,11 @@ def strict_kwargs_serialization() -> bool:
     Default False: generic API layers commonly pass ``request`` to every
     transition uniformly, so raising by default would break them. Enable
     once call sites are clean to turn the drop into a hard contract.
+
+    Only a literal ``True`` enables it (#182). It used to be
+    ``bool(...)``-coerced, so any non-empty string switched strict mode ON —
+    reading ``DL_STRICT=false`` from an env var made phase 1 start raising.
+    Mirrors ``conf.defer_unlock_until_commit``; boot validation rejects
+    non-bools and this reader stays safe where that has not run.
     """
-    return bool(_conf().get('STRICT_KWARGS_SERIALIZATION', False))
+    return _conf().get('STRICT_KWARGS_SERIALIZATION', False) is True

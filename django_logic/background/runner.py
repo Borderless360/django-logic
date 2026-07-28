@@ -76,6 +76,11 @@ def run_background_transition(transition_message_id: int) -> None:
     Designed to be call-compatible from both a Celery task and an
     inline sync dispatcher.
     """
+    # Committed BEFORE the attempt's atomic block, and deliberately not
+    # rolled back with it (#179) — see TransitionMessage.stamp_attempt_started.
+    # This is the marker the watchdog and the retry starter's recency guard
+    # read; written inside the atomic it was invisible to both.
+    TransitionMessage.stamp_attempt_started(transition_message_id)
     try:
         outcome = _run_atomic(transition_message_id)
     except _StopRetry as exc:
@@ -210,6 +215,26 @@ def abandon_timed_out_attempt(tm_id: int) -> bool:
             )
             return False
 
+        # One charge per attempt (#179). If an error has been recorded since
+        # this attempt started, the attempt already accounted for itself —
+        # it is not abandoned, and charging again would burn a retry the
+        # consumer never used. Left unguarded, the watchdog re-charged the
+        # same attempt on every tick (errors_count 1 -> 2 -> 3 -> 4 with no
+        # new attempts), so declaring timeout= made a transition strictly
+        # LESS reliable than omitting it.
+        if (
+            tm.last_error_dt is not None
+            and tm.started_at is not None
+            and tm.last_error_dt >= tm.started_at
+        ):
+            transition_logger.info(
+                f'watchdog: TransitionMessage#{tm.pk} exceeded '
+                f'timeout_seconds={tm.timeout_seconds} but its attempt '
+                f'already recorded an error at {tm.last_error_dt}; not '
+                f'charging it twice.'
+            )
+            return False
+
         transition_logger.error(
             f'watchdog: TransitionMessage#{tm.pk} '
             f'{tm.app_label}.{tm.model_name}#{tm.instance_id} '
@@ -341,11 +366,29 @@ def _finalize_terminal_from_watchdog(
         # made in the meantime (manual ops fix, external write).
         matches, expected, current = _state_guard_matches(transition, state)
         if matches:
-            state.set_state(transition.failed_state)
-            transition_logger.info(
-                f'{source}: set failed_state={transition.failed_state} '
-                f'on {state.instance_key}'
-            )
+            # Savepointed and never allowed to escape (#178): this runs
+            # inside the caller's atomic with the row locked, so a rejected
+            # write used to abort the whole finalization — leaving the row
+            # uncompleted with errors_count already at MAX_ERRORS, which
+            # detect_stuck retried on every tick forever. Completing the row
+            # is the thing that stops the loop.
+            try:
+                with transaction.atomic():
+                    state.set_state(transition.failed_state)
+            except Exception as write_error:
+                transition_logger.error(
+                    f'{source}: could not write failed_state='
+                    f'{transition.failed_state!r} on {state.instance_key}: '
+                    f'{type(write_error).__name__}: {write_error}. '
+                    f'Completing the row anyway so it stops retrying.',
+                    exc_info=True,
+                )
+                tm.record_failure_side_effect_error(write_error)
+            else:
+                transition_logger.info(
+                    f'{source}: set failed_state={transition.failed_state} '
+                    f'on {state.instance_key}'
+                )
         else:
             transition_logger.error(
                 f'{source}: NOT writing failed_state='
@@ -479,10 +522,11 @@ def _run_atomic(tm_id: int) -> _Outcome:
             tm.mark_as_superseded(note)
             return _Outcome(terminal=True, succeeded=False)
 
-        # Record the start of this attempt. Overwritten on every retry so
-        # the watchdog (uncompleted AND started_at < cutoff) tracks the
-        # current attempt, not the first one.
-        tm.mark_as_started()
+        # started_at was already stamped and committed by the caller
+        # (stamp_attempt_started), so the row loaded above carries it and
+        # the watchdog can see this attempt while it runs. Nothing to write
+        # here — writing it inside this atomic is exactly what made the
+        # marker invisible (#179).
         token = _transition_context.set(
             {
                 'root_id': kwargs.get('root_id'),
@@ -518,6 +562,24 @@ def _run_atomic(tm_id: int) -> _Outcome:
                             f'{getattr(command, "__name__", repr(command))}'
                         )
                         command(instance, **kwargs)
+                    # The target write belongs INSIDE the attempt savepoint
+                    # (#178). It is part of the attempt, so a write the
+                    # database rejects — CHECK constraint, pre_save receiver,
+                    # save() override, column length — must roll the attempt
+                    # back and be accounted like any other failure. Outside
+                    # it, the exception escaped the outer atomic and took
+                    # record_error with it: errors_count stayed 0, so the row
+                    # was re-dispatched forever, its side-effects re-ran
+                    # forever, and no safety net could terminate it.
+                    # Keeping it here also preserves the all-or-nothing
+                    # per-attempt contract the savepoint promises.
+                    if not isinstance(transition, BackgroundAction):
+                        state.set_state(transition.target)
+                        transition_logger.info(
+                            f'{kwargs.get("tr_id")} '
+                            f'{TransitionEventType.SET_STATE.value} '
+                            f'{transition.target}'
+                        )
             except Exception as error:
                 return _handle_failure(tm, transition, state, kwargs, error)
             else:
@@ -532,12 +594,9 @@ def _handle_success(
     state,
     kwargs: dict,
 ) -> _Outcome:
-    if not isinstance(transition, BackgroundAction):
-        state.set_state(transition.target)
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-            f'{transition.target}'
-        )
+    # The target write happens inside the attempt savepoint in _run_atomic
+    # (#178), so by here the state is already committed-pending and this
+    # only has to close the row out.
     tm.mark_as_completed()
     transition_logger.info(
         f'{kwargs.get("tr_id")} {TransitionEventType.COMPLETE.value}'
@@ -578,12 +637,35 @@ def _handle_failure(
         )
 
     # Terminal failure: write failed_state (if any) and mark completed.
+    #
+    # Savepointed, and never allowed to escape (#178). This write comes
+    # AFTER record_error, so letting it propagate rolled that error back and
+    # pinned errors_count one below MAX_ERRORS forever — the row could never
+    # terminalise and retried indefinitely. Completing the row is what stops
+    # the retry loop, so a rejected failed_state must not prevent it: log it,
+    # record it where an operator will see it, and carry on to
+    # mark_as_completed. The instance is then left in its in_progress_state
+    # for recover_stranded_states, which is a recoverable end state rather
+    # than an infinite loop.
     if transition.failed_state:
-        state.set_state(transition.failed_state)
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-            f'{transition.failed_state}'
-        )
+        try:
+            with transaction.atomic():
+                state.set_state(transition.failed_state)
+        except Exception as write_error:
+            transition_logger.error(
+                f'{kwargs.get("tr_id")} could not write failed_state '
+                f'{transition.failed_state!r} on {state.instance_key}: '
+                f'{type(write_error).__name__}: {write_error}. Completing the '
+                f'row anyway so it stops retrying; the instance stays in '
+                f'{transition.in_progress_state!r} for stranded recovery.',
+                exc_info=True,
+            )
+            tm.record_failure_side_effect_error(write_error)
+        else:
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                f'{transition.failed_state}'
+            )
     # As above: the bundle owns its savepoint, so a broken cleanup path
     # rolls back its own writes without poisoning the outer transaction.
     fse_error = transition.failure_side_effects.execute(

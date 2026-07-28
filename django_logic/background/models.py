@@ -119,15 +119,36 @@ class TransitionMessage(TimeStampedModel):
             f'{self.transition_name} on {self.queue_name}'
         )
 
-    def mark_as_started(self) -> None:
-        """Record the start of a phase-2 attempt.
+    @classmethod
+    def stamp_attempt_started(cls, tm_id: int) -> None:
+        """Mark an attempt as beginning, in its own committed statement.
 
-        Called on every attempt, including retries — ``started_at`` is
-        overwritten so the watchdog sees the current attempt's start,
-        not the first one.
+        Deliberately called from *outside* the attempt's ``atomic`` block
+        (#179). ``started_at`` is the only field that must be visible to
+        other connections *while* the attempt runs, and must survive the
+        attempt rolling back:
+
+        * A hung attempt holds its transaction open, so a ``started_at``
+          written inside it is invisible to the watchdog — which filtered
+          on ``started_at__isnull=False`` and therefore could never see the
+          attempts it exists to abandon.
+        * A crashed worker rolls its transaction back, taking the marker
+          with it, so the crash was invisible too.
+
+        The consequence was that the watchdog only ever matched rows whose
+        attempt had already *committed* a failure — rows that had already
+        charged themselves an error — and then charged them again on every
+        tick. Written here it survives both cases, which is what makes
+        ``timeout=`` mean anything.
+
+        Re-stamping a row another worker is already running only pushes the
+        watchdog's floor forward, so it can delay an abandon but never
+        trigger one early.
         """
-        self.started_at = timezone.now()
-        self.save(update_fields=['started_at', 'modified'])
+        now = timezone.now()
+        cls.objects.filter(pk=tm_id, is_completed=False).update(
+            started_at=now, modified=now,
+        )
 
     def mark_as_completed(self, measure_duration: bool = True) -> None:
         """Mark the row completed and (optionally) record ``duration_ms``.
