@@ -1,5 +1,7 @@
 """Class-time validation: queue optional but non-empty when given,
-in_progress_state unique, background action_names unique within a Process."""
+background action_names unique within a Process. Sharing an
+in_progress_state is legal — the recovery-ownership rule that replaced the
+old uniqueness raise lives in tests/test_binding_validation.py."""
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, override_settings
 
@@ -50,36 +52,35 @@ class QueueValidationTests(SimpleTestCase):
         self.assertIn('cannot declare in_progress_state', str(ctx.exception))
 
 
-class UniqueInProgressStateTests(SimpleTestCase):
-    def test_duplicate_in_progress_state_rejected(self):
-        with self.assertRaises(ImproperlyConfigured) as ctx:
-            class _BadProcess(Process):
-                process_name = 'bad'
-                transitions = [
-                    BackgroundTransition(
-                        action_name='a',
-                        sources=['s'],
-                        target='t1',
-                        in_progress_state='processing',
-                        queue='q',
-                    ),
-                    BackgroundTransition(
-                        action_name='b',
-                        sources=['s'],
-                        target='t2',
-                        in_progress_state='processing',
-                        queue='q',
-                    ),
-                ]
-        msg = str(ctx.exception)
-        self.assertIn("in_progress_state='processing'", msg)
-        self.assertIn('_BadProcess.a', msg)
-        self.assertIn('_BadProcess.b', msg)
+class SharedInProgressStateTests(SimpleTestCase):
+    def test_duplicate_in_progress_state_accepted(self):
+        class _SharedProcess(Process):
+            process_name = 'shared'
+            transitions = [
+                BackgroundTransition(
+                    action_name='a',
+                    sources=['s'],
+                    target='t1',
+                    in_progress_state='processing',
+                    failed_state='oops',
+                    queue='q',
+                ),
+                BackgroundTransition(
+                    action_name='b',
+                    sources=['s'],
+                    target='t2',
+                    in_progress_state='processing',
+                    failed_state='oops',
+                    queue='q',
+                ),
+            ]
 
-    def test_duplicate_in_progress_state_across_nested_tree_rejected(self):
-        # Issue #88: nested processes share the parent's state field, so the
-        # uniqueness guarantee must hold across the whole tree — previously
-        # only the class's own transitions were checked.
+        self.assertEqual(
+            {t.in_progress_state for t in _SharedProcess.transitions},
+            {'processing'},
+        )
+
+    def test_duplicate_in_progress_state_across_nested_tree_accepted(self):
         class _NestedChild(Process):
             process_name = 'child'
             transitions = [
@@ -92,23 +93,20 @@ class UniqueInProgressStateTests(SimpleTestCase):
                 ),
             ]
 
-        with self.assertRaises(ImproperlyConfigured) as ctx:
-            class _BadParent(Process):
-                process_name = 'bad_parent'
-                nested_processes = [_NestedChild]
-                transitions = [
-                    BackgroundTransition(
-                        action_name='parent_act',
-                        sources=['s'],
-                        target='t2',
-                        in_progress_state='processing',
-                        queue='q',
-                    ),
-                ]
-        msg = str(ctx.exception)
-        self.assertIn("in_progress_state='processing'", msg)
-        self.assertIn('parent_act', msg)
-        self.assertIn('child_act', msg)
+        class _SharedParent(Process):
+            process_name = 'shared_parent'
+            nested_processes = [_NestedChild]
+            transitions = [
+                BackgroundTransition(
+                    action_name='parent_act',
+                    sources=['s'],
+                    target='t2',
+                    in_progress_state='processing',
+                    queue='q',
+                ),
+            ]
+
+        self.assertEqual(_SharedParent.nested_processes, [_NestedChild])
 
     def test_unique_in_progress_states_accepted(self):
         class _GoodProcess(Process):

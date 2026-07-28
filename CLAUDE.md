@@ -50,8 +50,11 @@ change on success) for anything slow, external, or retriable.
    completion check** on the parent, and **aggregate errors by reading child
    rows** (give the parent an explicit `action_required` partial-failure
    state). Never re-raise a child error into the parent.
-4. **`in_progress_state` is unique within a Process**; set a `failed_state` so
-   failures are contained.
+4. **Set a `failed_state`** so failures are contained. Transitions may share an
+   `in_progress_state` (several actions that all mean "busy" to a UI), provided
+   they also share `failed_state` and their failure hooks — otherwise recovery of
+   a record-less stranded instance would guess, and `django_logic.E001` fails
+   `manage.py check`.
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
    `sync_execution()` context manager) runs phase 2 inline with no broker and
    propagates exceptions; `retry_pending()` simulates the periodic starter.

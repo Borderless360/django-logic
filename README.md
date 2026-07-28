@@ -768,7 +768,7 @@ class GmailConversationProcess(Process):
         BackgroundTransition(
             action_name='send_message_via_integration',
             sources=['open'], target='open',
-            in_progress_state='gmail_sending',     # must be unique across the tree
+            in_progress_state='gmail_sending',     # distinct here: different failure hooks
             conditions=[is_gmail],
             side_effects=[send_via_gmail],
         ),
@@ -811,8 +811,11 @@ phase 2 restores that exact transition from the recorded owner — it does not
 re-evaluate the condition, so routing is deterministic even if the instance
 changes mid-flight. Constraints: a background `action_name` must only be
 **unique within a single process class** (two in one class are
-indistinguishable at restore), and every `in_progress_state` must be unique
-across the whole tree. A background `action_name` *may* coincide with a
+indistinguishable at restore). `in_progress_state` may be shared by several
+transitions — useful when a UI only knows one "busy" value — provided they
+agree on `failed_state` and their failure hooks, since a record-less stranded
+instance in that state has no owner to recover under; `django_logic.E001`
+fails `manage.py check` when they disagree. A background `action_name` *may* coincide with a
 synchronous transition of the same name (phase 2 restores only background
 transitions; phase 1 routes the call by condition) — so a synchronous fast-path
 and a durable background slow-path can share one `action_name`.

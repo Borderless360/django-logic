@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-07-28
+
+### Changed
+
+- **`in_progress_state` no longer has to be unique.** Declaring two transitions
+  in one process tree with the same `in_progress_state` used to raise
+  `ImproperlyConfigured` at class-creation time. The rule the engine actually
+  needs is narrower, and it is now the only one enforced: every transition
+  claiming an `in_progress_state` on a given (model, state_field) must **recover
+  a record-less stranded instance identically** — same `failed_state`, same
+  `failure_side_effects`, same `failure_callbacks`. Where they agree, sharing is
+  free and `recover_stranded_states` picks any claimant; where they disagree,
+  `django_logic.E001` fails `manage.py check` and the sweep skips the state, as
+  it already did across bindings (#143).
+
+  The old justification — "the in-progress state alone identifies the
+  transition that's mid-flight" — has not been true since 0.6 added
+  `owning_process_class` to `TransitionMessage` (migration 0007): phase-2 restore
+  resolves `(owning process class, action_name)` off the row, guarded by
+  `_validate_unique_background_action_names`, and never searches by state.
+  `_state_guard_matches` compares against the transition it already restored.
+
+  This unblocks the legitimate shape the raise forbade: several actions on one
+  model that all mean "busy" to a client, sharing one in-progress value and one
+  `failed_state`. Consumers previously forced to synthesize a per-action state
+  (and map it back for the API) can collapse it back to one.
+
+  `E001`'s message and hint changed accordingly; nothing else in the public API
+  moved, and a topology that was valid before is still valid.
+
 ## [0.10.0] — 2026-07-27
 
 An overengineering sweep. ~1,900 lines removed across the engine, its tests and

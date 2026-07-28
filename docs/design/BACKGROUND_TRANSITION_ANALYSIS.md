@@ -134,11 +134,12 @@ Three properties this gives you, effectively for free:
 
 Two smaller rules keep the design honest:
 
-- **`in_progress_state` is unique within a Process.** Validated at
-  class-creation time. Phase 2 can then find its transition by the
-  in-progress state alone, without the `ignore_sources=True` hack.
-  Operational bonus: a glance at `state='fulfilling'` tells you
-  exactly which transition is mid-flight.
+- **`in_progress_state` need not be unique.** Phase 2 restores its
+  transition from the owner recorded on the `TransitionMessage`, not
+  from the state, so sharing costs nothing there. The one consumer that
+  needs an owner is stranded recovery of a *record-less* instance, which
+  is why claimants must agree on `failed_state` and failure hooks
+  (`django_logic.E001`) rather than on the state name.
 - **`BackgroundAction` uses the same durable path.** No state change
   on success, but same `TransitionMessage` row, same retry, same
   concurrency guard. A background action that bypassed the DB record
