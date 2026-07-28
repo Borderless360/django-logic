@@ -377,20 +377,33 @@ class Order(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     is_paid = models.BooleanField(default=False)
+    shipping_address = models.TextField(blank=True)
     tracking_number = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+class Product(models.Model):
+    name = models.CharField(max_length=100)
+    stock = models.PositiveIntegerField(default=0)
+
+class OrderItem(models.Model):
+    order = models.ForeignKey(Order, related_name='items', on_delete=models.CASCADE)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    quantity = models.PositiveIntegerField(default=1)
+
 # conditions.py
+#
+# A condition that raises propagates out of both the action call AND
+# get_available_actions(), so keep them cheap and total — read fields that
+# always exist, and let a missing value mean False rather than an exception.
 def has_stock_available(instance):
-    # Check if all order items are in stock
     return all(item.product.stock >= item.quantity for item in instance.items.all())
 
 def is_payment_verified(instance):
     return instance.is_paid
 
 def has_shipping_address(instance):
-    return hasattr(instance, 'shipping_address') and instance.shipping_address is not None
+    return bool(instance.shipping_address)
 
 # permissions.py
 def is_customer(instance, user):
@@ -441,6 +454,7 @@ class OrderProcess(Process):
             action_name='pay',
             sources=['pending'],
             target='paid',
+            conditions=[is_payment_verified],
             side_effects=[process_payment],
             callbacks=[send_order_confirmation_email],
             next_transition='process',
@@ -617,6 +631,16 @@ class AuditedState(State):
         )
         super().set_state(state)
 ```
+
+Install it with `state_class` on the process — without this the subclass is never used:
+
+```python
+class OrderProcess(Process):
+    state_class = AuditedState
+    transitions = [...]
+```
+
+Every state read and write for that process then goes through your class, including the ones the background engine performs (phase-1's `in_progress_state`, phase-2's target, `failed_state`, and stranded recovery). Two rules: `get_persisted_state()` must keep reading the database row — the under-the-lock revalidation and the phase-2 state guard rely on it being authoritative, so never override it with a cached read — and `set_state` must call `super()`.
 
 ### Context Passing
 Pass data between side effects and callbacks:
@@ -906,7 +930,7 @@ BackgroundTransition(
 )
 ```
 
-`watchdog_stale_attempts` scans in-flight rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. Because the watchdog cannot tell a crashed attempt from a merely slow one, a re-dispatched attempt may run side-effects again while the original is still executing — **side-effects must be idempotent against external systems** (their database writes are per-attempt atomic and roll back on failure, but an external API call made by both attempts happens twice).
+`watchdog_stale_attempts` scans in-flight rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. An attempt is charged **at most once**: if it has already recorded an error of its own since it started, the watchdog leaves it alone rather than spending a second retry on it. `started_at` is written in its own committed statement before the attempt begins, precisely so it stays visible while the attempt runs and survives a worker dying mid-flight — which is what makes a hung or crashed attempt observable at all. Because the watchdog cannot tell a crashed attempt from a merely slow one, a re-dispatched attempt may run side-effects again while the original is still executing — **side-effects must be idempotent against external systems** (their database writes are per-attempt atomic and roll back on failure, but an external API call made by both attempts happens twice).
 
 ### Concurrency and locking
 
@@ -1189,9 +1213,10 @@ report = coverage_report(log_path='/tmp/fsm_coverage.log')
 A pair is recorded at *initiation* (direct calls, `next_transition`
 follow-ups, background phase 1); phase-2 restore and retries don't re-notify.
 Diffing `report['uncovered']` in CI catches transitions that silently stop
-being exercised. Logs written by 0.8 recorders (2-field `class\taction`
-lines) are still accepted with their original semantics — a legacy line
-covers every same-name namesake. The observer list is public — consumers can
+being exercised. Logs written by 0.8/0.9.0 recorders are **no longer read** —
+0.10.0 removed the cross-version readers, so a log in an older format reports
+everything as uncovered. Re-measure against the current release rather than
+carrying an old log forward. The observer list is public — consumers can
 register their own hooks (metrics, tracing), called as
 `observer(owning_process_cls, action_name, instance, transition)` (the
 resolved declaration object was added as a fourth argument in 0.9); a raising

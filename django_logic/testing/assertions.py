@@ -179,6 +179,16 @@ class ScenarioAssertions:
         instance.refresh_from_db()
         problems = []
         for field, pair in expected.items():
+            # Say what the shape is, rather than letting the unpack below
+            # fail with "too many values to unpack (expected 2)" — which
+            # gives no clue that {field: (old, new)} is what's wanted.
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise TypeError(
+                    f"assert_changed expects {{field: (old, new)}}; "
+                    f"{field!r} maps to {pair!r}. Pass the value it held "
+                    f"before and the value it should hold now, e.g. "
+                    f"{{{field!r}: ('draft', 'approved')}}."
+                )
             old, new = pair
             was = before.get(field)
             now = getattr(instance, field)

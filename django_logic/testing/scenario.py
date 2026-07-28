@@ -77,7 +77,11 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
     process_class = None        # type[Process]
     model = None                # type[Model]
     state_field = 'status'
-    process_name = 'process'
+    #: Accessor the process is bound under. Leave it alone: it defaults to
+    #: ``process_class.process_name``, so a process with a custom name needs
+    #: no second declaration here. Set it only when the scenario drives a
+    #: process bound under a name that differs from its own ``process_name``.
+    process_name = None
 
     def setUp(self):
         super().setUp()
@@ -95,8 +99,22 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     # --- internals -------------------------------------------------------
 
+    @property
+    def _process_name(self) -> str:
+        """``process_name`` if the subclass set one, else the process's own.
+
+        It used to default to the literal ``'process'``, which duplicated
+        ``process_class.process_name`` and diverged silently: a scenario for a
+        process bound as ``order_flow`` that forgot to repeat the name failed
+        with a bare ``AttributeError: 'Order' object has no attribute
+        'process'`` from inside an assertion.
+        """
+        if self.process_name is not None:
+            return self.process_name
+        return getattr(self.process_class, 'process_name', 'process')
+
     def _process(self, instance):
-        return getattr(instance, self.process_name)
+        return getattr(instance, self._process_name)
 
     def _record(self, label, outcome, detail=''):
         self._timeline.append({'label': label, 'outcome': outcome, 'detail': detail})
@@ -105,7 +123,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         self._record(label, 'OK' if ok else 'FAILED', detail)
 
     def _fail(self, message, instance=None):
-        tm = (latest_message(instance, process_name=self.process_name)
+        tm = (latest_message(instance, process_name=self._process_name)
               if instance is not None else None)
         self.fail(format_failure(message, self._timeline, tm=tm))
 
@@ -133,7 +151,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def snapshot(self, instance):
         return _snapshot(instance, state_field=self.state_field,
-                         process_name=self.process_name)
+                         process_name=self._process_name)
 
     # --- driving the process --------------------------------------------
 
@@ -173,7 +191,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                          expect_raises=None):
         """Re-run the instance's uncompleted transition inline — what the
         periodic starter would do."""
-        tm = uncompleted_message(instance, process_name=self.process_name)
+        tm = uncompleted_message(instance, process_name=self._process_name)
         if tm is None:
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
             self._fail('retry_transition(): no uncompleted TransitionMessage for '
@@ -216,7 +234,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                    fail_with=fail_with) as tracker:
             if background:
                 raised = self._call(
-                    lambda: run_background_sync(instance, self.process_name, action, kwargs))
+                    lambda: run_background_sync(instance, self._process_name, action, kwargs))
             else:
                 raised = self._call(
                     lambda: getattr(self._process(instance), action)(**kwargs))

@@ -2,6 +2,125 @@
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-28
+
+A correctness release. A full review of 0.11.0 turned up five engine defects,
+three of them capable of losing or corrupting work; every one was reproduced
+before the fix and is now pinned by a regression test
+(`tests/test_issue_fixes_0_12.py`). No feature was added beyond the checks that
+make two of the defects impossible to reintroduce silently.
+
+### Fixed
+
+- **A failing state write no longer escapes phase-2 error accounting**
+  (#178). The side-effect loop was savepointed so "the error bookkeeping below
+  always works", but both `set_state` calls sat outside any savepoint. A write
+  the database rejected — CHECK constraint, `pre_save` receiver, `save()`
+  override, column length — escaped the outer atomic and **took `record_error`
+  with it**: `errors_count` stayed 0, so `retry_stale_transitions`
+  re-dispatched the row on every tick and its side-effects, including
+  non-idempotent external calls, re-ran forever. `detect_stuck_transitions`
+  never saw it (errors below `MAX_ERRORS`), `recover_stranded_states` skipped
+  it (an uncompleted row existed), and the instance sat in its
+  `in_progress_state` permanently. The terminal branch was worse: it rolled
+  back the `record_error` immediately preceding it, pinning `errors_count` one
+  below `MAX_ERRORS` for good — and the safety-net finalizer had the identical
+  unguarded write, so nothing could rescue the row.
+
+  The target write now happens **inside** the attempt savepoint, which also
+  restores the documented all-or-nothing-per-attempt contract. Both
+  `failed_state` writes are savepointed and never allowed to escape: completing
+  the row is what stops the retry loop, so a rejected `failed_state` is logged
+  and recorded on the row rather than preventing completion, leaving the
+  instance for stranded recovery instead of an infinite loop.
+
+- **The timeout watchdog works, and charges an attempt at most once** (#179).
+  `mark_as_started` ran inside the attempt's `atomic`, so `started_at` was
+  invisible to other connections *while* the attempt ran and was rolled back
+  when a worker died — the watchdog could never see the attempts it exists to
+  abandon. The only rows it matched were ones whose attempt had already
+  committed a failure, and it re-charged them on every tick: one real attempt
+  plus three ticks took `errors_count` from 1 to 4 with no new work, and a
+  fourth terminalised the row, discarding every remaining retry. It also
+  overwrote the real error message with a synthetic timeout. **Declaring
+  `timeout=` made a transition strictly less reliable than omitting it.**
+
+  `started_at` is now written in its own committed statement before the attempt
+  and deliberately survives the attempt rolling back, so a hung or crashed
+  attempt is observable; and the watchdog skips any attempt that has recorded
+  an error since it started. `started_at` is therefore set on paths that exit
+  early (superseded, unrestorable) — `duration_ms` remains the field that
+  distinguishes "no work was measured".
+
+- **A nested `Process` reachable by two paths is callable again** (#180).
+  `_iter_available_with_owner` was the only tree walker without a visited set,
+  so a diamond — or the same class listed twice in `nested_processes` — yielded
+  each of its transitions twice and resolution rejected the single declaration
+  as "several transitions available", with a hint no condition could satisfy.
+  `get_available_actions()` set-dedupes, so the action was advertised and then
+  failed on every call. A nested cycle recursed to `RecursionError`. The walk
+  now visits each Process class once, which preserves the supported pattern of
+  one `action_name` on distinct nested classes disambiguated by conditions.
+
+- **Rendering `{{ obj.process.action }}` no longer executes the transition**
+  (#181). Django calls any callable a template resolves, so referencing a
+  transition instead of listing `get_available_actions` drove the state machine
+  during rendering and printed the `tr_id` into the page. The dispatcher now
+  carries `alters_data`, the marker `Model.save`/`delete` use; templates render
+  `''` instead.
+
+- **Four definitions the engine accepted but could not honour are now
+  rejected** (#182):
+  - An `action_name` shadowed by a real `Process` attribute (`state`,
+    `is_valid`, `transitions`…) was advertised by `get_available_actions()` and
+    silently did nothing, because `__getattr__` only runs when attribute lookup
+    *fails*. Rejected at class creation.
+  - A `process_name` colliding with one of the model's own fields replaced that
+    field's descriptor with a read-only property, after which the model could
+    not be instantiated at all. Rejected at bind time.
+  - `STRICT_KWARGS_SERIALIZATION` was `bool()`-coerced, so the string
+    `'false'` — an environment variable read straight through — switched strict
+    mode **on**. Only a literal `True` enables it now, validated at boot;
+    `STRICT_HOOK_SIGNATURES` gets the same treatment.
+
+- `ProcessScenario.process_name` defaults to `process_class.process_name`
+  instead of the literal `'process'`. A scenario for a process bound under a
+  custom name no longer has to repeat it, and forgetting no longer surfaced as
+  a bare `AttributeError` from inside an assertion. `assert_changed` explains
+  the `{field: (old, new)}` shape instead of failing with "too many values to
+  unpack".
+
+### Added
+
+- **`django_logic.W004`** reports `DJANGO_LOGIC` keys the engine never reads
+  (#182). The settings dict has no schema, so a typo — `LOCK_TIMOUT`,
+  `TRANSITION_MESSAGE_MAX_ERROR` — was silently ignored and the default
+  silently applied. Removed keys are left to `W003`, which already names them
+  with migration advice.
+
+### Documentation
+
+- The **Complete Example is runnable as printed**. Its conditions called
+  `instance.items.all()` and read `instance.shipping_address` on a model that
+  declared neither, so copying it verbatim raised an uncaught `AttributeError`
+  — a 500, since the example's own view only catches `TransitionNotAllowed` —
+  and the Troubleshooting section's recommended `get_available_actions()`
+  diagnostic raised the same thing. The example now declares `Product`,
+  `OrderItem` and `shipping_address`, wires up the previously-unused
+  `is_payment_verified`, and notes that conditions must be total.
+- **"Custom State Classes" says how to install one.** It showed a `State`
+  subclass but never mentioned `Process.state_class`, the attribute that makes
+  a process use it, so the recipe had no effect as written.
+- The watchdog and coverage sections match the code: `started_at` is described
+  as what it now is, and the claim that 0.8/0.9.0 coverage logs are still read
+  is corrected — 0.10.0 removed those readers.
+- `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, which `CLAUDE.md` tells
+  engine-changers to read first, no longer marks `STARTER_QUEUE` "Required" or
+  claims every `BackgroundTransition` must carry a queue.
+- Removed `docs/research/race-condition-issue` — an extensionless, unlinked
+  13KB traceback referencing API deleted in 0.10.0.
+
+
 ## [0.11.0] — 2026-07-28
 
 ### Changed (breaking)

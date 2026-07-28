@@ -319,21 +319,29 @@ celery -A myapp worker -Q django_logic.critical.high,django_logic.critical.norma
 
 ## 7. Settings reference
 
+The README's settings block is the reference; it lists every key with its
+default and is checked against the code. Only the background-specific
+defaults are repeated here, with the values the code actually applies:
+
 ```python
 DJANGO_LOGIC = {
     'LOCK_TIMEOUT': 7200,
-
-    # Required. Framework's own periodic tasks run here.
+    # Optional, like every key here — the default below applies when unset.
+    # The framework's own periodic tasks run on this queue.
     'STARTER_QUEUE': 'django_logic.starter',
-
+    'DEFAULT_QUEUE': 'django_logic',
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
     'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
     'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
 }
 ```
 
-No `CELERY_QUEUE` default. Every `BackgroundTransition` carries its own
-queue.
+`queue=` is optional on a `BackgroundTransition`: one declared without it
+routes to `DEFAULT_QUEUE`.
+
+`manage.py check` reports a key this list does not contain
+(`django_logic.W004`) and a key an earlier release removed
+(`django_logic.W003`), so a typo is not silently ignored.
 
 ---
 
