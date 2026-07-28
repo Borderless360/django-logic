@@ -69,11 +69,14 @@ change on success) for anything slow, external, or retriable.
 
 ## Deployment the durability contract depends on
 
-- A real broker (Redis/RabbitMQ). Celery and django-redis are core
-  dependencies of django-logic (installed automatically);
-  `BACKGROUND_EXECUTION` defaults to `'celery'`.
-- A cross-process `default` cache (django-redis) for the state lock —
-  celery mode refuses to boot with a locmem/dummy cache when `DEBUG=False`.
+- A real broker (Redis/RabbitMQ). Celery is a core dependency of
+  django-logic (installed automatically); `BACKGROUND_EXECUTION` defaults
+  to `'celery'`.
+- A cross-process `default` cache for the state lock — celery mode refuses
+  to boot with a locmem/dummy cache when `DEBUG=False`. The engine locks
+  through Django's cache API and imports no backend, so Django's built-in
+  `django.core.cache.backends.redis.RedisCache` is enough; django-redis is
+  the `[redis]` extra, not a core dependency (0.11.0).
 - Crash re-delivery is built in (every django-logic task sets
   `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
   pair only for your *own* tasks. You still need a **single beat**

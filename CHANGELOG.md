@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **`django-redis` is no longer a core dependency** — it moves to the
+  `[redis]` extra, which stops being an empty alias (#173). The engine has
+  never imported `django_redis`: the state lock goes through Django's cache
+  API (`State.lock` → `cache.add`), so what it actually requires is a
+  *cross-process cache backend*, not a particular package. Django has shipped
+  `django.core.cache.backends.redis.RedisCache` since 4.0 and our floor is
+  4.2, so the documented setup no longer needs a third-party package.
+
+  Verified: with `django-redis` uninstalled and the built-in backend
+  configured, two separate OS processes contend correctly on the same lock —
+  the second `lock()` returns `False`, `is_locked()` is `True`, and the key
+  is released on `unlock()`. The locmem control shows both processes
+  acquiring, which is the failure the boot guard exists to prevent.
+
+  **Migration:** if your settings name `django_redis.cache.RedisCache`,
+  install it explicitly — `pip install django-logic[redis]`, or add
+  `django-redis` to your own dependencies. Both known consumers already
+  declare it directly and are unaffected. Note the failure mode if you miss
+  this is *not* at boot: `django.setup()` succeeds and
+  `InvalidCacheBackendError` is raised at the first cache access, because
+  the celery-mode guard only string-matches the backend path against
+  locmem/dummy and never instantiates the cache.
+
+  Not affected: the boot guard itself, which is backend-agnostic and still
+  refuses locmem/dummy in celery mode when `DEBUG=False`.
+
 ## [0.10.0] — 2026-07-27
 
 An overengineering sweep. ~1,900 lines removed across the engine, its tests and

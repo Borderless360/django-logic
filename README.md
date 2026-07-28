@@ -35,17 +35,18 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - Django 4.2+ (4.2, 5.1, 5.2 and 6.0 are tested in CI; 5.0 is not supported)
 - django-model-utils >= 4.5.1
 - celery >= 5.0 — **installed automatically**; background transitions are Celery tasks
-- django-redis >= 5.0.0 — **installed automatically**; provides the cross-process state lock
+- A **cross-process `default` cache** for the state lock — *not* a package dependency. The engine locks through Django's cache API, so any cross-process backend works, including `django.core.cache.backends.redis.RedisCache`, built into Django since 4.0. Celery mode refuses to boot on a locmem/dummy cache when `DEBUG=False`.
 
 Extras:
+- `pip install django-logic[redis]` — installs `django-redis`, for deployments whose settings name `django_redis.cache.RedisCache`. It stopped being a core dependency in 0.11.0: the engine has never imported it.
 - `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; no DRF-specific code ships since 0.4)
-- `[celery]` and `[redis]` remain as **empty aliases**, so existing `pip install django-logic[celery,redis]` pins keep resolving — both packages are core dependencies since 0.4
+- `[celery]` remains an **empty alias**, so existing `pip install django-logic[celery,redis]` pins keep resolving — celery is a core dependency since 0.4
 
 ## Installation
 
 ```bash
-# Installs the current release from PyPI.
-# Celery and django-redis are installed automatically.
+# Installs the current release from PyPI. Celery is installed automatically.
+# Add [redis] if your settings name django_redis.cache.RedisCache.
 pip install django-logic
 ```
 
@@ -535,7 +536,7 @@ Multiple processes trying to transition the same object can cause race condition
 - a **cache lock** (atomic set-if-absent on the `default` cache) held for a synchronous transition's whole flight and for a background transition's phase-1 critical section, with the persisted state re-validated under the lock; and
 - the **`TransitionMessage` row** — while a background transition is in flight, a second one raises `AlreadyInProgress` and a synchronous transition on the same instance + process raises `TransitionNotAllowed`.
 
-Use a cross-process cache (django-redis, installed automatically) so the lock is shared between web processes and workers.
+Use a cross-process cache so the lock is shared between web processes and workers.
 
 #### 4. Side Effects Not Rolling Back
 Side effects that modify external systems may not roll back automatically.
@@ -681,7 +682,9 @@ At boot, celery mode fails fast on two misconfigurations that would silently bre
 ```python
 CACHES = {
     'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
+        # Built into Django since 4.0; needs the `redis` client package.
+        # `django_redis.cache.RedisCache` also works — `pip install django-logic[redis]`.
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
         'LOCATION': os.environ['REDIS_URL'],
     }
 }
