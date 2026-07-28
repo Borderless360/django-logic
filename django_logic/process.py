@@ -453,7 +453,7 @@ def collect_hook_signature_offenders(process_cls) -> list:
     return offenders
 
 
-def _recovery_signature(transition) -> tuple:
+def _recovery_signature(transition, process_name: str) -> tuple:
     """What ``recover_stranded_states`` would do with this transition.
 
     Recovery is exactly ``fail_transition``, which reads only
@@ -461,8 +461,19 @@ def _recovery_signature(transition) -> tuple:
     touches is logging. Identity of the command objects, not equality —
     two equal-but-distinct callables compare as different, which errs
     toward calling a key ambiguous.
+
+    ``process_name`` is the **bound** process's name, and it is part of
+    the signature because the sweep's in-flight check is scoped by it
+    (``_sweep_transition`` filters ``TransitionMessage`` on
+    ``process_name``). A sibling process's open row is therefore
+    invisible to this process's sweep: an instance legitimately mid-flight
+    over there looks record-less here and would be force-failed. So two
+    *different* bound processes claiming one in-progress state are always
+    ambiguous, however identically they would recover — which is the
+    cross-binding case #143 has always rejected.
     """
     return (
+        process_name,
         transition.failed_state,
         tuple(id(command) for command in transition.failure_side_effects.commands),
         tuple(id(command) for command in transition.failure_callbacks.commands),
@@ -492,7 +503,12 @@ def collect_ambiguous_in_progress_states() -> dict:
     from django_logic.transition import Action
 
     claims: dict = {}
+    # Signatures tracked alongside rather than recomputed from `owners`:
+    # the bound process_name is part of a signature and is not recoverable
+    # from (process_cls, transition) once a nested tree has been flattened.
+    signatures: dict = {}
     for binding in ProcessManager.bindings:
+        bound_process_name = binding.process_class.process_name
         stack = [binding.process_class]
         seen_cls = set()
         while stack:
@@ -507,10 +523,13 @@ def collect_ambiguous_in_progress_states() -> dict:
                 key = (binding.model._meta.label, binding.state_field,
                        in_progress)
                 claims.setdefault(key, []).append((process_cls, transition))
+                signatures.setdefault(key, set()).add(
+                    _recovery_signature(transition, bound_process_name)
+                )
             stack.extend(process_cls.nested_processes)
     return {
         key: owners for key, owners in claims.items()
-        if len({_recovery_signature(t) for _, t in owners}) > 1
+        if len(signatures[key]) > 1
     }
 
 

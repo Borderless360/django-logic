@@ -267,8 +267,9 @@ def _check_lock_cache_in_celery_mode() -> None:
         f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' but the 'default' "
         f"cache backend is {backend!r}, which is per-process. The state "
         f"lock will not be shared between web processes and Celery "
-        f"workers. Use a cross-process cache (django-redis is installed "
-        f"as a django-logic dependency) for the 'default' cache."
+        f"workers. Use a cross-process cache for the 'default' cache — "
+        f"e.g. 'django.core.cache.backends.redis.RedisCache', or "
+        f"django-redis via `pip install django-logic[redis]`."
     )
     if getattr(settings, 'DEBUG', False):
         from django_logic.logger import logger

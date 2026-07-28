@@ -219,8 +219,15 @@ def recover_stranded_states() -> int:
         # sweep's lock until LOCK_TIMEOUT.
         if isinstance(transition, Action):
             continue
+        # Not keyed by action_name: several transitions in one process may
+        # share an in_progress_state, and a non-ambiguous key means they
+        # all recover identically, so one pass over the state is enough —
+        # sweeping per action would re-page the same candidates N times.
+        # process_name stays in the key because cross-process sharing is
+        # always ambiguous (skipped above) and each bound process scans
+        # its own in-flight rows.
         key = (binding.model._meta.label, binding.state_field,
-               in_progress, transition.action_name)
+               in_progress, binding.process_class.process_name)
         if key in seen:
             continue
         seen.add(key)

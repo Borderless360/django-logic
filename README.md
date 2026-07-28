@@ -35,17 +35,18 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 - Django 4.2+ (4.2, 5.1, 5.2 and 6.0 are tested in CI; 5.0 is not supported)
 - django-model-utils >= 4.5.1
 - celery >= 5.0 — **installed automatically**; background transitions are Celery tasks
-- django-redis >= 5.0.0 — **installed automatically**; provides the cross-process state lock
+- A **cross-process `default` cache** for the state lock — *not* a package dependency. The engine locks through Django's cache API, so any cross-process backend works, including `django.core.cache.backends.redis.RedisCache`, built into Django since 4.0. Celery mode refuses to boot on a locmem/dummy cache when `DEBUG=False`.
 
 Extras:
+- `pip install django-logic[redis]` — installs `django-redis`, for deployments whose settings name `django_redis.cache.RedisCache`. It stopped being a core dependency in 0.11.0: the engine has never imported it.
 - `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; no DRF-specific code ships since 0.4)
-- `[celery]` and `[redis]` remain as **empty aliases**, so existing `pip install django-logic[celery,redis]` pins keep resolving — both packages are core dependencies since 0.4
+- `[celery]` remains an **empty alias**, so existing `pip install django-logic[celery,redis]` pins keep resolving — celery is a core dependency since 0.4
 
 ## Installation
 
 ```bash
-# Installs the current release from PyPI.
-# Celery and django-redis are installed automatically.
+# Installs the current release from PyPI. Celery is installed automatically.
+# Add [redis] if your settings name django_redis.cache.RedisCache.
 pip install django-logic
 ```
 
@@ -535,7 +536,7 @@ Multiple processes trying to transition the same object can cause race condition
 - a **cache lock** (atomic set-if-absent on the `default` cache) held for a synchronous transition's whole flight and for a background transition's phase-1 critical section, with the persisted state re-validated under the lock; and
 - the **`TransitionMessage` row** — while a background transition is in flight, a second one raises `AlreadyInProgress` and a synchronous transition on the same instance + process raises `TransitionNotAllowed`.
 
-Use a cross-process cache (django-redis, installed automatically) so the lock is shared between web processes and workers.
+Use a cross-process cache so the lock is shared between web processes and workers.
 
 #### 4. Side Effects Not Rolling Back
 Side effects that modify external systems may not roll back automatically.
@@ -681,7 +682,9 @@ At boot, celery mode fails fast on two misconfigurations that would silently bre
 ```python
 CACHES = {
     'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
+        # Built into Django since 4.0; needs the `redis` client package.
+        # `django_redis.cache.RedisCache` also works — `pip install django-logic[redis]`.
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
         'LOCATION': os.environ['REDIS_URL'],
     }
 }
@@ -812,10 +815,14 @@ re-evaluate the condition, so routing is deterministic even if the instance
 changes mid-flight. Constraints: a background `action_name` must only be
 **unique within a single process class** (two in one class are
 indistinguishable at restore). `in_progress_state` may be shared by several
-transitions — useful when a UI only knows one "busy" value — provided they
-agree on `failed_state` and their failure hooks, since a record-less stranded
-instance in that state has no owner to recover under; `django_logic.E001`
-fails `manage.py check` when they disagree. A background `action_name` *may* coincide with a
+transitions **of the same bound process** — useful when a UI only knows one
+"busy" value — provided they agree on `failed_state` and their failure hooks
+(matched by object identity, so reference the same callables rather than
+equivalent ones), since a record-less stranded instance in that state has no
+owner to recover under. Two *different* bound processes sharing a state is
+always rejected, however identically they recover: each sweep only sees its own
+`process_name`'s in-flight rows, so the other's live transition would look
+stranded. `django_logic.E001` fails `manage.py check` in both cases. A background `action_name` *may* coincide with a
 synchronous transition of the same name (phase 2 restores only background
 transitions; phase 1 routes the call by condition) — so a synchronous fast-path
 and a durable background slow-path can share one `action_name`.

@@ -64,8 +64,15 @@ def check_unambiguous_in_progress_ownership(app_configs, **kwargs):
             hint='Give them a matching failed_state and matching '
                  'failure_side_effects/failure_callbacks, or a distinct '
                  'in_progress_state each (or bind the processes to distinct '
-                 'state fields). Stranded-state recovery skips ambiguous '
-                 'states, leaving instances parked until fixed manually.',
+                 'state fields). Hooks are matched by object identity, so '
+                 'the claimants must reference the SAME callables — hoist a '
+                 'shared partial/lambda to a module-level name rather than '
+                 'building one per transition. Two different bound processes '
+                 'sharing a state are always ambiguous, however identically '
+                 'they recover, because each sweep only sees its own '
+                 'process_name in-flight rows. Stranded-state recovery skips '
+                 'ambiguous states, leaving instances parked until fixed '
+                 'manually.',
             obj=f'{model_label}.{state_field}',
             id='django_logic.E001',
         ))
