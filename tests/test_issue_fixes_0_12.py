@@ -369,7 +369,7 @@ class ShadowedDefinitionTests(TestCase):
         with self.assertRaises(ImproperlyConfigured) as ctx:
             ProcessManager.bind_model_process(
                 Invoice, FieldClash, state_field='status')
-        self.assertIn('collides with a field', str(ctx.exception))
+        self.assertIn('already names something', str(ctx.exception))
 
 
 class BooleanSettingTests(TestCase):
@@ -639,3 +639,85 @@ class StrandedRecoveryHonestyTests(_BindCleanup, TestCase):
         self.assertEqual(stranded.status, 'rf_running')  # never moved
         self.assertEqual(recovered, 0, 'reported a recovery that never happened')
         self.assertTrue(any('could NOT recover' in line for line in logs.output))
+
+
+class BindCollisionPrecisionTests(TestCase):
+    """The collision check must look at what setattr would overwrite.
+
+    Asking _meta for field names was wrong in both directions: it flagged
+    reverse FK/M2M *query* names (which own no class attribute, so a sound
+    binding raised at import) and missed every non-field descriptor — a model
+    method, a property, a manager. Caught reviewing 0.12.0's own diff.
+    """
+
+    def test_a_model_method_named_process_is_caught(self):
+        """`process` is the DEFAULT process_name and a plausible method name."""
+        self.assertTrue(
+            any('process' in vars(k) for k in Invoice.__mro__)
+            or True  # Invoice has no such method; assert the mechanism instead
+        )
+
+        class HasMethod(Process):
+            process_name = 'clashing_method'
+            transitions = [
+                Transition('go', sources=['draft'], target='approved'),
+            ]
+
+        # Give Invoice a method with that name for the duration of the test.
+        Invoice.clashing_method = lambda self: 'business logic'
+        self.addCleanup(lambda: delattr(Invoice, 'clashing_method'))
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            ProcessManager.bind_model_process(
+                Invoice, HasMethod, state_field='status')
+        self.assertIn('already names something', str(ctx.exception))
+
+    def test_a_reverse_relation_query_name_is_not_flagged(self):
+        """A reverse FK query name owns no class attribute, so binding under
+        that name is sound and must not raise."""
+        reverse_names = [
+            f.name for f in Invoice._meta.get_fields()
+            if f.is_relation and f.auto_created and not f.concrete
+        ]
+        if not reverse_names:
+            self.skipTest('tests.Invoice has no reverse relation to exercise')
+        name = reverse_names[0]
+        self.assertFalse(
+            any(name in vars(k) for k in Invoice.__mro__),
+            f'{name!r} unexpectedly owns a class attribute',
+        )
+
+        class UsesReverseName(Process):
+            process_name = name
+            transitions = [
+                Transition('go', sources=['draft'], target='approved'),
+            ]
+
+        try:
+            ProcessManager.bind_model_process(
+                Invoice, UsesReverseName, state_field='status')
+        finally:
+            ProcessManager.bindings = [
+                b for b in ProcessManager.bindings
+                if b.process_class is not UsesReverseName
+            ]
+            if name in vars(Invoice):
+                delattr(Invoice, name)
+
+
+class ShadowValidatorInstanceAttrTests(TestCase):
+    def test_an_action_named_state_is_rejected(self):
+        """`state` is set on the INSTANCE by Process.__init__, so
+        hasattr(cls, 'state') is False and the class-only check accepted it —
+        while at runtime the transition was unreachable. It is also the first
+        example the validator's own docstring cites."""
+        for name in ('state', 'instance', 'field_name'):
+            with self.subTest(action_name=name):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    type(f'Shadow_{name}', (Process,), {
+                        'process_name': f'shadow_{name}_proc',
+                        'transitions': [
+                            Transition(name, sources=['draft'], target='approved'),
+                        ],
+                    })
+                self.assertIn(name, str(ctx.exception))

@@ -163,6 +163,24 @@ def _non_string_key_paths(value, path='kwargs'):
             yield from _non_string_key_paths(item, f'{path}[]')
 
 
+def _unstorable_text_paths(value, path='kwargs'):
+    """Yield paths to strings a Postgres jsonb column would reject."""
+    if isinstance(value, str):
+        if '\x00' in value:
+            yield path
+        else:
+            try:
+                value.encode('utf-8')
+            except UnicodeEncodeError:
+                yield path
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _unstorable_text_paths(v, f'{path}[{k!r}]')
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            yield from _unstorable_text_paths(v, f'{path}[{i}]')
+
+
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
@@ -225,6 +243,20 @@ def serialize_kwargs(kwargs: dict) -> dict:
     for key in _CONTEXT_KEYS:
         if key in out and out[key] is not None:
             out[key] = str(out[key])
+
+    # PostgreSQL jsonb rejects NUL and lone surrogates, which json.dumps
+    # happily encodes — the same class of value as the non-finite floats
+    # rejected below, and with the same consequence: phase 1 would die with a
+    # raw backend DataError at the row write instead of a named TypeError here.
+    unstorable = sorted(set(_unstorable_text_paths(out)))
+    if unstorable:
+        raise KwargsSerializationError(
+            f"{out.get('tr_id')} background transition kwargs contain "
+            f"characters the database cannot store "
+            f"({', '.join(unstorable)}): NUL (U+0000) and lone surrogates are "
+            f"rejected by PostgreSQL jsonb. Strip or escape them before "
+            f"passing the value."
+        )
 
     bad_keys = sorted(set(_non_string_key_paths(out)))
     if bad_keys:

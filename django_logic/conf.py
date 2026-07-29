@@ -52,6 +52,19 @@ def validate_core_settings() -> None:
             f"of seconds (it is the lock TTL and the liveness signal for "
             f"stranded-state recovery), got {value!r}."
         )
+    # Both strict flags are read with `is True`, so truthy garbage disables
+    # them rather than enabling — silent in the UNSAFE direction. Validated
+    # here (not in background/settings) because STRICT_HOOK_SIGNATURES is a
+    # core setting read from process.py at bind time, with no background app
+    # involved, so a sync-only install must be covered too.
+    for key in ('DEFER_UNLOCK_UNTIL_COMMIT', 'STRICT_HOOK_SIGNATURES'):
+        value = _conf().get(key, False)
+        if not isinstance(value, bool):
+            raise ImproperlyConfigured(
+                f"DJANGO_LOGIC[{key!r}] must be a bool (True or False), got "
+                f"{value!r}. Strings are not accepted — 'false' would "
+                f"otherwise read as truthy."
+            )
     value = _conf().get('DEFER_UNLOCK_UNTIL_COMMIT', False)
     if not isinstance(value, bool):
         raise ImproperlyConfigured(

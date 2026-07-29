@@ -441,11 +441,16 @@ def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
 
 def _run_atomic(tm_id: int) -> _Outcome:
     # Invariant: everything that must survive together lives inside this
-    # atomic block — row lock, mark_as_started, side-effects, and either
-    # mark_as_completed (on success / terminal failure) or errors_count
-    # increment (on retryable failure). Moving any of them out, in
-    # particular the mark_as_* calls, is what broke the unrestorable-row
+    # atomic block — row lock, side-effects, the target state write, and
+    # either mark_as_completed (on success / terminal failure) or the
+    # errors_count increment (on retryable failure). Moving any of the
+    # mark_as_* / record_error calls out is what broke the unrestorable-row
     # path (see _StopRetry). Don't do it.
+    #
+    # started_at is the deliberate exception (#179): it is a MARKER, not
+    # accounting, and it has to be visible to other connections while the
+    # attempt runs and to survive the attempt rolling back — so it is stamped
+    # and committed by the caller before this block opens.
     with transaction.atomic():
         try:
             tm = (

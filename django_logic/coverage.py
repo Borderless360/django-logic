@@ -50,6 +50,35 @@ which also runs in production processes.
 from django_logic.process import ProcessManager, transition_observers
 
 
+def _condition_fingerprint(fn) -> str:
+    """A stable, distinguishing name for one condition callable.
+
+    ``getattr(fn, '__qualname__', ...)`` alone degenerated exactly where the
+    fingerprint matters most: ``functools.partial`` objects carry no
+    ``__qualname__`` (so every partial fingerprinted as the literal
+    ``'partial'``), and instances of callable condition classes do not inherit
+    one either (``__qualname__`` is a descriptor on ``type``). Both are the
+    idiomatic way to write the per-variant conditions this key exists to keep
+    apart, so distinct declarations collapsed into one key and reported false
+    coverage.
+    """
+    qualname = getattr(fn, '__qualname__', None)
+    if qualname:
+        return qualname
+    func = getattr(fn, 'func', None)          # functools.partial
+    if func is not None:
+        inner = getattr(func, '__qualname__', None) or type(func).__name__
+        args = getattr(fn, 'args', ()) or ()
+        keywords = getattr(fn, 'keywords', None) or {}
+        bound = ','.join(
+            [repr(a) for a in args]
+            + [f'{k}={v!r}' for k, v in sorted(keywords.items())]
+        )
+        return f'partial({inner}({bound}))'
+    cls = type(fn)
+    return f'{cls.__module__}.{cls.__qualname__}'
+
+
 def _key(process_cls, transition) -> str:
     """Stable per-declaration identity: class, action, kind, the declared
     shape, and a conditions fingerprint. Independent of declaration order
@@ -60,13 +89,15 @@ def _key(process_cls, transition) -> str:
     pattern: same-class namesakes that share sources→target and differ
     ONLY by conditions (per-courier variants) must not collapse. It uses
     the condition callables' qualnames — two anonymous lambdas can still
-    collide, but named condition functions (the norm) stay distinct.
+    collide, but named condition functions (the norm) stay distinct, and so
+    do ``functools.partial`` and callable-instance conditions (see
+    ``_condition_fingerprint``).
     """
     kind = 'bg' if getattr(transition, 'is_background', False) else 'sync'
     sources = '|'.join(sorted(transition.sources))
     target = transition.target or ''
     conditions = ','.join(sorted(
-        getattr(fn, '__qualname__', None) or type(fn).__name__
+        _condition_fingerprint(fn)
         for fn in getattr(transition.conditions, 'commands', None) or ()
     ))
     return (f'{process_cls.__module__}.{process_cls.__qualname__}'

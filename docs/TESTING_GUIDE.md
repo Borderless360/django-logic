@@ -166,7 +166,7 @@ class OrderScenario(ProcessScenario):
     process_class = OrderProcess
     model = Order
     state_field = 'status'      # default 'status'
-    process_name = 'process'    # default 'process'
+    process_name = 'process'    # optional; defaults to process_class.process_name
 ```
 
 ### 1. Happy path through several transitions
@@ -565,7 +565,7 @@ skipped, and the exception reaches the caller. See
 ## ProcessScenario API reference
 
 Class attributes: `process_class`, `model`, `state_field` (default
-`'status'`), `process_name` (default `'process'`).
+`'status'`), `process_name` (optional — defaults to `process_class.process_name`).
 
 **Driving the process**
 

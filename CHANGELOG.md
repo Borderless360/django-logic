@@ -10,6 +10,31 @@ before the fix and is now pinned by a regression test
 (`tests/test_issue_fixes_0_12.py`). No feature was added beyond the checks that
 make two of the defects impossible to reintroduce silently.
 
+### Changed (breaking)
+
+Three definitions the engine used to accept now raise, because it could never
+honour them. Each is a defect in the *declaration*, so a project hitting one was
+already broken — but it will now fail at import or bind time rather than
+silently doing nothing:
+
+- an `action_name` shadowed by a `Process` attribute *or* by one of the
+  attributes `Process.__init__` sets (`state`, `instance`, `field_name`) —
+  `ImproperlyConfigured` at class creation;
+- a `process_name` that already names something on the model's MRO (a field's
+  descriptor, a method, a property, a manager) — `ImproperlyConfigured` at
+  `bind_model_process`. Reverse FK/M2M *query* names are deliberately not
+  flagged: they own no class attribute, so binding under one is sound;
+- `sources` passed as a bare string — `ImproperlyConfigured`, since
+  `list('draft')` silently became `['d','r','a','f','t']`.
+
+`STRICT_KWARGS_SERIALIZATION` and `STRICT_HOOK_SIGNATURES` now require a real
+bool and are validated at boot; a project passing the *string* `'false'` had
+strict mode silently ON and will now get `ImproperlyConfigured` naming the key.
+
+`django_logic.W004` is a new warning, so a project that keeps unrelated keys in
+`DJANGO_LOGIC` and runs `manage.py check --fail-level WARNING` will need
+`SILENCED_SYSTEM_CHECKS`.
+
 ### Fixed
 
 - **A failing state write no longer escapes phase-2 error accounting**

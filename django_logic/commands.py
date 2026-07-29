@@ -82,26 +82,44 @@ def _run_in_savepoint(using: str, fn):
     conn = transaction.get_connection(using)
     registry = _deferred_unlocks(conn)
     before = len(registry)
+    rolled_back = False
     try:
         with transaction.atomic(using=using):
-            return fn()
+            result = fn()
+            # A savepoint also rolls back with NO exception propagating:
+            # Atomic.__exit__ takes the rollback branch on
+            # `exc_type is None and connection.needs_rollback`, and
+            # needs_rollback is set by mark_for_rollback_on_error — which
+            # Model.save_base wraps every write in — whenever a database error
+            # is raised inside the block, even if the hook caught it. That
+            # silent rollback strips the same on_commit hooks, so the deferred
+            # unlocks it discards must be released here too.
+            rolled_back = bool(conn.needs_rollback)
     except BaseException:
-        dropped = registry[before:]
-        del registry[before:]
-        for state in dropped:
-            # Each release is contained: one cache blip must not skip the
-            # remaining sibling unlocks or replace the hook's original
-            # exception (a missed release degrades to the TTL-bounded
-            # leak; the loop and the re-raise both continue).
-            try:
-                state.unlock()
-            except Exception:
-                transition_logger.exception(
-                    f'failed to release a deferred unlock for '
-                    f'{state.instance_key} after a savepoint rollback; '
-                    f'the lock expires via its TTL.'
-                )
+        rolled_back = True
+        _release_dropped(registry, before)
         raise
+    if rolled_back:
+        _release_dropped(registry, before)
+    return result
+
+
+def _release_dropped(registry, before) -> None:
+    """Release the deferred unlocks registered inside a rolled-back window."""
+    dropped = registry[before:]
+    del registry[before:]
+    for state in dropped:
+        # Each release is contained: one cache blip must not skip the
+        # remaining sibling unlocks or replace the hook's original exception
+        # (a missed release degrades to the TTL-bounded leak).
+        try:
+            state.unlock()
+        except Exception:
+            transition_logger.exception(
+                f'failed to release a deferred unlock for '
+                f'{state.instance_key} after a savepoint rollback; '
+                f'the lock expires via its TTL.'
+            )
 
 
 class BaseCommand:
@@ -180,12 +198,16 @@ class Callbacks(BaseCommand):
         )
         using, in_transaction = _in_open_transaction(state.instance)
         for command in self.commands:
-            command_name = getattr(command, '__name__', repr(command))
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
-                f'{command_name}'
-            )
             try:
+                # Inside the try, matching SideEffects / FailureSideEffects: a
+                # callable whose repr() raises would otherwise escape the
+                # swallow contract from the LOG line and replace the original
+                # failure exception (Callbacks backs failure_callbacks too).
+                command_name = getattr(command, '__name__', None) or object.__repr__(command)
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
+                    f'{command_name}'
+                )
                 if in_transaction:
                     _run_in_savepoint(
                         using, lambda: command(state.instance, **kwargs))

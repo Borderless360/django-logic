@@ -19,6 +19,32 @@ from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
 
+#: Characters PostgreSQL text/jsonb columns cannot store, however happily
+#: Python and SQLite carry them. An exception message that echoes back bytes,
+#: scraped HTML or a CSV cell can contain either.
+def db_safe_text(value: str, limit: int = 10_000) -> str:
+    """Make ``value`` storable in a Postgres text column.
+
+    NUL (U+0000) and lone surrogates are rejected by PostgreSQL, so writing an
+    exception message that contains one raises ``DataError`` *from the
+    accounting write itself* — which used to escape ``_handle_failure``, roll
+    back ``errors_count`` and ``mark_as_completed`` with it, and leave the row
+    retrying forever with the instance permanently blocked. The bookkeeping
+    must never be the thing that fails, so the characters are escaped rather
+    than passed through.
+    """
+    text = str(value)
+    if '\x00' in text:
+        text = text.replace('\x00', '\\x00')
+    # Lone surrogates survive in Python strings (e.g. from surrogateescape
+    # decoding) but cannot be encoded to UTF-8 for the wire.
+    try:
+        text.encode('utf-8')
+    except UnicodeEncodeError:
+        text = text.encode('utf-8', 'replace').decode('utf-8')
+    return text[:limit]
+
+
 class TransitionMessage(TimeStampedModel):
     is_completed = models.BooleanField(default=False)
     errors_count = models.PositiveIntegerField(default=0)
@@ -223,13 +249,15 @@ class TransitionMessage(TimeStampedModel):
         the reason is recorded on ``last_error_message`` for the audit
         trail. ``errors_count`` is NOT incremented — nothing failed.
         """
-        self.last_error_message = note[:10_000]
+        self.last_error_message = db_safe_text(note)
         self.last_error_dt = timezone.now()
         self.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
         self.mark_as_completed(measure_duration=False)
 
     def record_error(self, exception: BaseException) -> None:
-        self.last_error_message = str(exception)[:10_000]
+        # db_safe_text, not a bare slice: the accounting write must never be
+        # the statement that fails (see its docstring).
+        self.last_error_message = db_safe_text(exception)
         self.last_error_dt = timezone.now()
         # Increment on the DB side (F expression) rather than a
         # read-modify-write on a possibly-stale in-memory errors_count, so
@@ -264,11 +292,11 @@ class TransitionMessage(TimeStampedModel):
 
         ``label`` names which of them it was.
         """
-        note = f'{type(exception).__name__}: {exception}'
+        note = db_safe_text(f'{type(exception).__name__}: {exception}')
         if label:
             note = f'{label}: {note}'
         existing = self.failure_side_effect_error
-        self.failure_side_effect_error = (
+        self.failure_side_effect_error = db_safe_text(
             f'{existing}; {note}' if existing else note
-        )[:10_000]
+        )
         self.save(update_fields=['failure_side_effect_error', 'modified'])

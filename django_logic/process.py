@@ -53,6 +53,11 @@ def _notify_transition_observers(owning_process, action_name, instance, transiti
 #: caller that passes one gets it silently overwritten, so they are documented
 #: as reserved rather than refused — the engine cannot distinguish its own
 #: forwarding from a caller's at that layer.
+#: Attributes ``Process.__init__`` sets on the instance. They shadow
+#: ``__getattr__`` exactly as class attributes do, but ``hasattr(cls, name)``
+#: cannot see them.
+_PROCESS_INSTANCE_ATTRS = frozenset({'state', 'instance', 'field_name'})
+
 _RESERVED_KWARGS = frozenset({
     'tr_id', 'root_id', 'parent_id', 'process_class', 'owning_process_class',
 })
@@ -355,15 +360,26 @@ def _validate_action_names_not_shadowed(process_cls):
     for proc_cls in _iter_process_tree(process_cls):
         for transition in proc_cls.transitions or []:
             action_name = getattr(transition, 'action_name', None)
-            if not action_name or not hasattr(proc_cls, action_name):
+            if not action_name:
                 continue
+            # The names that shadow __getattr__ are the class attributes UNION
+            # the attributes __init__ sets on the instance. hasattr(cls, ...)
+            # alone missed `state`, `instance` and `field_name` — and `state`
+            # is the very first example this validator's own docstring cites.
+            if not (action_name in _PROCESS_INSTANCE_ATTRS
+                    or hasattr(proc_cls, action_name)):
+                continue
+            shadowed_by = (
+                f'an attribute Process.__init__ sets ({action_name})'
+                if action_name in _PROCESS_INSTANCE_ATTRS
+                else repr(getattr(proc_cls, action_name))
+            )
             raise ImproperlyConfigured(
                 f"Process {proc_cls.__module__}.{proc_cls.__name__} declares "
-                f"a transition named {action_name!r}, which is shadowed by an "
-                f"existing {proc_cls.__name__} attribute "
-                f"({getattr(proc_cls, action_name)!r}). Attribute lookup wins "
-                f"over the lazy action dispatcher, so the transition could "
-                f"never be called — rename the action."
+                f"a transition named {action_name!r}, which is shadowed by "
+                f"{shadowed_by}. Attribute lookup wins over the lazy action "
+                f"dispatcher, so the transition could never be called — "
+                f"rename the action."
             )
 
 
@@ -655,24 +671,28 @@ class ProcessManager:
                 )
 
         # setattr below replaces whatever descriptor the name currently
-        # holds. If it names one of the model's own fields, that field's
-        # DeferredAttribute is swapped for a read-only property and the
-        # model can no longer even be instantiated (#182). state_field is
-        # already validated for existence and concreteness; process_name
-        # was only checked against other bindings.
-        model_field_names = {
-            f.name for f in model._meta.get_fields()
-        } | {
-            f.attname for f in model._meta.concrete_fields
-        }
-        if process_class.process_name in model_field_names:
+        # holds, so check what would ACTUALLY be overwritten: any attribute
+        # defined anywhere on the model's MRO. Asking _meta for field names
+        # instead got this wrong in both directions — it flagged reverse
+        # FK/M2M *query* names, which own no class attribute at all (so a
+        # sound binding raised at import), and it missed every non-field
+        # descriptor: a model method, a property, a cached_property, a
+        # manager. `process` — the DEFAULT process_name — is a very plausible
+        # method name on a model.
+        clashing = next(
+            (klass for klass in model.__mro__
+             if process_class.process_name in vars(klass)),
+            None,
+        )
+        if clashing is not None:
+            existing = vars(clashing)[process_class.process_name]
             raise ImproperlyConfigured(
                 f"bind_model_process({model._meta.label}, "
                 f"{process_class.__name__}): process_name "
-                f"{process_class.process_name!r} collides with a field of "
-                f"the same name on {model._meta.label}. Binding would "
-                f"replace that field's descriptor and break the model. "
-                f"Give the process a distinct process_name."
+                f"{process_class.process_name!r} already names something on "
+                f"{clashing.__name__} ({existing!r}). Binding would replace "
+                f"it and break the model. Give the process a distinct "
+                f"process_name."
             )
 
         _validate_hook_signatures(process_class)
