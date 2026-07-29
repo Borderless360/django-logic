@@ -3,7 +3,7 @@
 Each assertion reads from the DB / the last tracked transition and, on failure,
 raises with the AI-readable timeline (and optionally a snapshot) attached.
 Mixed into ``ProcessScenario``; relies on the host providing ``state_field``,
-``process_name``, ``_timeline``, ``_last_tracker``, ``_fail`` and ``_process``.
+``process_class``, ``_timeline``, ``_last_tracker``, ``_fail`` and ``_process``.
 """
 from __future__ import annotations
 
@@ -11,6 +11,21 @@ from django_logic.testing.runner import latest_message, message_for
 
 
 class ScenarioAssertions:
+    @property
+    def _process_name(self) -> str:
+        """The accessor the process is bound under.
+
+        Never read the raw ``process_name`` here: its default is ``None`` (it
+        derives from ``process_class.process_name``), so a direct read passed
+        ``process_name=None`` into the message lookups below, which then found
+        no row and made the assertion pass or fail for the wrong reason.
+        """
+        explicit = getattr(self, 'process_name', None)
+        if explicit is not None:
+            return explicit
+        return getattr(
+            getattr(self, 'process_class', None), 'process_name', 'process')
+
     # --- state -----------------------------------------------------------
 
     def assert_state(self, instance, expected):
@@ -126,7 +141,7 @@ class ScenarioAssertions:
     # --- background error state ------------------------------------------
 
     def assert_error_recorded(self, instance, contains):
-        tm = latest_message(instance, process_name=self.process_name)
+        tm = latest_message(instance, process_name=self._process_name)
         if tm is None or contains not in (tm.last_error_message or ''):
             self._record_assert(f'assert_error_recorded({contains!r})', ok=False)
             self._fail(
@@ -138,7 +153,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_error_recorded({contains!r})', ok=True)
 
     def assert_error_count(self, instance, expected):
-        tm = latest_message(instance, process_name=self.process_name)
+        tm = latest_message(instance, process_name=self._process_name)
         actual = None if tm is None else tm.errors_count
         if actual != expected:
             self._record_assert(f'assert_error_count({expected})', ok=False)
@@ -356,10 +371,10 @@ class ScenarioAssertions:
         """
         if transition_name is not None:
             tm = message_for(instance, transition_name,
-                             process_name=self.process_name)
+                             process_name=self._process_name)
             label = f'assert_transition_owner({transition_name!r}, {owner!r})'
         else:
-            tm = latest_message(instance, process_name=self.process_name)
+            tm = latest_message(instance, process_name=self._process_name)
             label = f'assert_transition_owner({owner!r})'
         actual = None if tm is None else tm.owning_process_class
         if actual != owner:

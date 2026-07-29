@@ -14,7 +14,7 @@ flight.
 """
 from __future__ import annotations
 
-from django.db import models
+from django.db import OperationalError, models, transaction
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
@@ -120,7 +120,7 @@ class TransitionMessage(TimeStampedModel):
         )
 
     @classmethod
-    def stamp_attempt_started(cls, tm_id: int) -> None:
+    def stamp_attempt_started(cls, tm_id: int) -> bool:
         """Mark an attempt as beginning, in its own committed statement.
 
         Deliberately called from *outside* the attempt's ``atomic`` block
@@ -141,14 +141,55 @@ class TransitionMessage(TimeStampedModel):
         tick. Written here it survives both cases, which is what makes
         ``timeout=`` mean anything.
 
-        Re-stamping a row another worker is already running only pushes the
-        watchdog's floor forward, so it can delay an abandon but never
-        trigger one early.
+        Durability is mode-dependent, as for
+        ``runner._mark_unrestorable_completed``:
+
+        * **Celery mode** — phase 2 is the top-level unit of work with no
+          surrounding transaction, so this UPDATE autocommits and is visible
+          to the watchdog immediately. Verified against real PostgreSQL from
+          a second connection. This is the mode the watchdog exists for.
+        * **Sync mode inside a caller's ``atomic()``** — it is part of the
+          caller's transaction and invisible to other connections until the
+          caller commits. Harmless: the phase-1 INSERT that created the row
+          is in that same transaction, so on rollback there is no surviving
+          row to abandon, and on commit the row and this marker become
+          visible together. There is also no worker to abandon — the
+          "attempt" is the caller's own thread, which a watchdog could not
+          rescue anyway.
+
+        Acquires the row lock with ``nowait`` first and gives up if another
+        attempt holds it. That is not an optimisation — a bare ``UPDATE``
+        here BLOCKS on PostgreSQL, and because this runs before
+        ``_run_atomic``'s ``select_for_update(nowait=True)`` it defeated the
+        whole skip-if-locked design: a duplicate dispatch waited out the
+        entire live attempt and then ran it again, with no retry backoff.
+        (``tests/background/test_concurrency_pg.py`` pins this.) A held row
+        means an attempt is already live and has already stamped itself, so
+        there is nothing to record and ``_run_atomic`` will skip anyway.
+
+        Because a losing dispatcher never writes, ``started_at`` only ever
+        moves forward, and ``duration_ms`` cannot absorb lock wait.
+
+        Returns True if the marker was written.
         """
         now = timezone.now()
-        cls.objects.filter(pk=tm_id, is_completed=False).update(
-            started_at=now, modified=now,
-        )
+        try:
+            with transaction.atomic():
+                held = (
+                    cls.objects
+                    .select_for_update(nowait=True)
+                    .filter(pk=tm_id, is_completed=False)
+                    .exists()
+                )
+                if not held:
+                    return False
+                cls.objects.filter(pk=tm_id, is_completed=False).update(
+                    started_at=now, modified=now,
+                )
+        except OperationalError:
+            # Locked by a live attempt: it owns the marker.
+            return False
+        return True
 
     def mark_as_completed(self, measure_duration: bool = True) -> None:
         """Mark the row completed and (optionally) record ``duration_ms``.
@@ -205,15 +246,29 @@ class TransitionMessage(TimeStampedModel):
         # comparison sees the true count, not the stale snapshot.
         self.refresh_from_db(fields=['errors_count', 'modified'])
 
-    def record_failure_side_effect_error(self, exception: BaseException) -> None:
-        """Record an exception raised from ``failure_side_effects``.
+    def record_failure_side_effect_error(
+        self, exception: BaseException, *, label: str = '',
+    ) -> None:
+        """Record an exception raised while finalizing a terminal failure.
 
         Separate from ``record_error`` because the original side-effect
         error (which triggered the failure branch) must stay visible in
         ``last_error_message`` — we just annotate that the cleanup path
         also broke.
+
+        **Appends** rather than replaces. The terminal path can now record two
+        independent problems on the same row — a rejected ``failed_state``
+        write and a broken ``failure_side_effects`` bundle — and overwriting
+        meant whichever came second silently erased the other, leaving an
+        operator with half the story.
+
+        ``label`` names which of them it was.
         """
+        note = f'{type(exception).__name__}: {exception}'
+        if label:
+            note = f'{label}: {note}'
+        existing = self.failure_side_effect_error
         self.failure_side_effect_error = (
-            f'{type(exception).__name__}: {exception}'
+            f'{existing}; {note}' if existing else note
         )[:10_000]
         self.save(update_fields=['failure_side_effect_error', 'modified'])

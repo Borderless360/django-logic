@@ -291,10 +291,15 @@ class Transition:
                     )
                 else:
                     wrote_state = True
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                    f'{self.failed_state}'
-                )
+                    # Inside the else: a rejected write must NOT log
+                    # SET_STATE. The line is the state-change record the
+                    # trace and log-based assertions read, so emitting it
+                    # for a write that did not land would be a false entry.
+                    transition_logger.info(
+                        f'{kwargs.get("tr_id")} '
+                        f'{TransitionEventType.SET_STATE.value} '
+                        f'{self.failed_state}'
+                    )
 
             self.failure_side_effects.execute(state, exception=exception, **kwargs)
         finally:
@@ -442,10 +447,27 @@ class Action(Transition):
                     f'transition and an Action holds no lock.'
                 )
             else:
-                state.set_state(self.failed_state)
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                    f'{self.failed_state}'
-                )
+                # Savepointed like Transition.fail_transition (#178): a
+                # rejected write must not replace the original side-effect
+                # exception on its way out, and must not log a SET_STATE line
+                # for a write that never landed.
+                try:
+                    with transaction.atomic():
+                        state.set_state(self.failed_state)
+                except Exception as write_error:
+                    transition_logger.error(
+                        f'{kwargs.get("tr_id")} Action {self.action_name!r}: '
+                        f'could not write failed_state '
+                        f'{self.failed_state!r} on {state.instance_key}: '
+                        f'{type(write_error).__name__}: {write_error}. The '
+                        f'original failure is re-raised unchanged.',
+                        exc_info=True,
+                    )
+                else:
+                    transition_logger.info(
+                        f'{kwargs.get("tr_id")} '
+                        f'{TransitionEventType.SET_STATE.value} '
+                        f'{self.failed_state}'
+                    )
         self.failure_side_effects.execute(state, exception=exception, **kwargs)
         self.failure_callbacks.execute(state, exception=exception, **kwargs)

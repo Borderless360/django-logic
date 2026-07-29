@@ -51,8 +51,14 @@ def note_deferred_unlock(using: str, state: State) -> None:
         for entry in getattr(conn, 'run_on_commit', ()) or ()
     )
     if not queued:
-        registry.clear()
-
+        # Re-register only. Do NOT clear here, however stale the entries look:
+        # ``_run_in_savepoint`` tracks its own entries by INDEX WINDOW
+        # (``before = len(registry)`` … ``registry[before:]``), so clearing
+        # mid-transaction shifts those indices and would drop deferred unlocks
+        # an enclosing window is still responsible for releasing — leaking the
+        # exact locks this registry exists to release. The hook registered
+        # below drains everything at the next successful commit, which is
+        # bounded and cannot interleave with an active window.
         def _clear():
             registry.clear()
 

@@ -386,7 +386,8 @@ def _finalize_terminal_from_watchdog(
                     f'Completing the row anyway so it stops retrying.',
                     exc_info=True,
                 )
-                tm.record_failure_side_effect_error(write_error)
+                tm.record_failure_side_effect_error(
+                    write_error, label='failed_state write')
             else:
                 transition_logger.info(
                     f'{source}: set failed_state={transition.failed_state} '
@@ -407,7 +408,8 @@ def _finalize_terminal_from_watchdog(
         state, exception=exception, **kwargs
     )
     if fse_error is not None:
-        tm.record_failure_side_effect_error(fse_error)
+        tm.record_failure_side_effect_error(
+            fse_error, label='failure_side_effects')
     # A safety-net finalization is not a worker attempt; started_at points
     # at the abandoned attempt, so don't let it inflate duration_ms.
     tm.mark_as_completed(measure_duration=False)
@@ -663,7 +665,8 @@ def _handle_failure(
                 f'{transition.in_progress_state!r} for stranded recovery.',
                 exc_info=True,
             )
-            tm.record_failure_side_effect_error(write_error)
+            tm.record_failure_side_effect_error(
+                write_error, label='failed_state write')
         else:
             transition_logger.info(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
@@ -675,7 +678,8 @@ def _handle_failure(
         state, exception=error, **kwargs
     )
     if fse_error is not None:
-        tm.record_failure_side_effect_error(fse_error)
+        tm.record_failure_side_effect_error(
+            fse_error, label='failure_side_effects')
     tm.mark_as_completed()
     return _Outcome(
         terminal=True,

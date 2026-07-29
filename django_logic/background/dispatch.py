@@ -451,6 +451,21 @@ def _recover_stranded_instance(binding, transition, pk) -> bool:
             # silently skipped.
             context={},
         )
+        # Verify the state actually moved before claiming a recovery. #178
+        # made fail_transition SWALLOW a rejected failed_state write (so the
+        # lock is always released and the original cause always propagates),
+        # which means "returned without raising" no longer implies "the state
+        # changed". Without this check the sweep counted and logged a recovery
+        # that never happened, and the instance stayed stranded silently —
+        # the worst possible outcome for a safety net.
+        if state.get_persisted_state() == transition.in_progress_state:
+            logger.error(
+                f'recover_stranded_states: could NOT recover {label} — the '
+                f'{transition.failed_state!r} write did not land (see the '
+                f'failed_state error logged above); the instance is still in '
+                f'{transition.in_progress_state!r}.'
+            )
+            return False
         logger.error(
             f'recover_stranded_states: recovered {label} -> '
             f'{transition.failed_state!r}'
