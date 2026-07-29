@@ -8,7 +8,7 @@ from django.core.cache import cache
 from django.db.models.signals import pre_save
 from django.template import Context
 from django.template.engine import Engine
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
@@ -417,3 +417,109 @@ class UnknownSettingsCheckTests(TestCase):
         """W003 already names removed keys with migration advice; W004 must
         not duplicate the report."""
         self.assertEqual(check_no_unknown_settings(None), [])
+
+
+# --- the low-severity sweep -----------------------------------------------
+
+class BareStringSourcesTests(TestCase):
+    def test_sources_as_a_bare_string_is_rejected(self):
+        """`list('draft')` is ['d','r','a','f','t'], which matches no state:
+        the transition became invisible to get_available_actions() and calling
+        it reported a missing action rather than a bad declaration."""
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            Transition('go', sources='draft', target='approved')
+        self.assertIn('iterated per character', str(ctx.exception))
+
+    def test_a_list_of_one_state_is_still_fine(self):
+        t = Transition('go', sources=['draft'], target='approved')
+        self.assertEqual(t.sources, ['draft'])
+
+
+class DeferredUnlockRegistryTests(TransactionTestCase):
+    """The registry registered its on_commit clear only while it was empty. A
+    rollback discards the hook but keeps the entries, so it was never empty
+    again and never cleared — growing for the life of the connection."""
+
+    def test_registry_clears_after_a_rollback_then_commits(self):
+        from django.db import transaction
+        from django_logic.commands import _deferred_unlocks, note_deferred_unlock
+        from django_logic.state import State
+
+        inv = Invoice.objects.create(status='draft')
+        conn = transaction.get_connection('default')
+        _deferred_unlocks(conn).clear()
+
+        # A transaction that rolls back: its clear hook is discarded.
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                note_deferred_unlock('default', State(inv, 'status'))
+                raise RuntimeError('rollback')
+
+        # Every subsequent committing transaction must leave it empty.
+        for _ in range(3):
+            with transaction.atomic():
+                note_deferred_unlock('default', State(inv, 'status'))
+            self.assertEqual(len(_deferred_unlocks(conn)), 0)
+
+
+class ReservedUserIdKwargTests(TestCase):
+    def test_caller_supplied_user_id_is_dropped_loudly(self):
+        """restore_user popped it in phase 2 and replaced it with a live user,
+        so the hook never saw the caller's value — and the same call behaved
+        correctly in sync mode, a parity break only visible in production."""
+        from django_logic.background.serializers import serialize_kwargs
+
+        with self.assertLogs('django-logic', level='WARNING') as logs:
+            out = serialize_kwargs({'user_id': 'my-own-data', 'other': 1})
+        self.assertNotIn('user_id', out)
+        self.assertEqual(out['other'], 1)
+        self.assertTrue(any('user_id' in line for line in logs.output))
+
+    @override_settings(DJANGO_LOGIC={
+        'BACKGROUND_EXECUTION': 'sync',
+        'STRICT_KWARGS_SERIALIZATION': True,
+    })
+    def test_strict_mode_raises_instead(self):
+        from django_logic.background.serializers import (
+            KwargsSerializationError, serialize_kwargs,
+        )
+
+        with self.assertRaises(KwargsSerializationError):
+            serialize_kwargs({'user_id': 'my-own-data'})
+
+
+class PublicSurfaceTests(TestCase):
+    def test_star_import_exposes_only_the_documented_names(self):
+        """Without __all__, `from django_logic import *` leaked whichever
+        submodules happened to be imported, so the namespace varied with
+        INSTALLED_APPS."""
+        import django_logic
+
+        self.assertEqual(sorted(django_logic.__all__), [
+            'Action', 'Callbacks', 'Conditions', 'FailureSideEffects',
+            'Permissions', 'Process', 'ProcessManager', 'SideEffects',
+            'Transition',
+        ])
+        for name in django_logic.__all__:
+            self.assertTrue(hasattr(django_logic, name), name)
+
+
+class FailureBundleSwapTests(TestCase):
+    def test_failure_bundles_are_swappable_like_the_other_four(self):
+        """They were hardcoded, which left FailureSideEffects a top-level
+        export with no way to substitute it."""
+        from django_logic.commands import Callbacks, FailureSideEffects
+
+        class LoudFailureSideEffects(FailureSideEffects):
+            pass
+
+        class LoudFailureCallbacks(Callbacks):
+            pass
+
+        class Custom(Transition):
+            failure_side_effects_class = LoudFailureSideEffects
+            failure_callbacks_class = LoudFailureCallbacks
+
+        t = Custom('go', sources=['draft'], target='approved')
+        self.assertIsInstance(t.failure_side_effects, LoudFailureSideEffects)
+        self.assertIsInstance(t.failure_callbacks, LoudFailureCallbacks)

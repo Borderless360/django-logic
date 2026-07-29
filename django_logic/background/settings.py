@@ -123,7 +123,6 @@ def _validated_number(
     default,
     *,
     minimum,
-    allow_zero: bool = True,
     integral: bool = False,
 ):
     """Read ``DJANGO_LOGIC[key]`` and validate it is a sane number.
@@ -132,10 +131,7 @@ def _validated_number(
     value. ``bool`` is rejected explicitly (it subclasses ``int``, so
     ``True`` would otherwise pass as ``1``); non-finite floats (``nan``,
     ``inf``) are rejected; ``integral=True`` additionally rejects
-    non-integral floats and returns an ``int``.
-
-    ``allow_zero=False`` makes the bound strict: the value must be
-    ``> minimum`` rather than ``>= minimum``.
+    non-integral floats and returns an ``int``. ``minimum`` is inclusive.
     """
     value = _conf().get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -150,14 +146,9 @@ def _validated_number(
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC[{key!r}] must be a whole number, got {value!r}."
         )
-    if allow_zero:
-        if value < minimum:
-            raise ImproperlyConfigured(
-                f"DJANGO_LOGIC[{key!r}] must be >= {minimum}, got {value!r}."
-            )
-    elif value <= minimum:
+    if value < minimum:
         raise ImproperlyConfigured(
-            f"DJANGO_LOGIC[{key!r}] must be > {minimum}, got {value!r}."
+            f"DJANGO_LOGIC[{key!r}] must be >= {minimum}, got {value!r}."
         )
     if integral:
         return int(value)

@@ -166,8 +166,9 @@ def _non_string_key_paths(value, path='kwargs'):
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
-    Drops ``request`` (warning, or ``TypeError`` under
-    ``STRICT_KWARGS_SERIALIZATION``). Replaces ``user`` with ``user_id``.
+    Drops ``request`` and a caller-supplied ``user_id`` (warning, or
+    ``KwargsSerializationError`` under ``STRICT_KWARGS_SERIALIZATION``) —
+    both are reserved. Replaces ``user`` with ``user_id``.
     Tag-encodes non-JSON-native values so phase 2 restores real types.
     Non-string dict keys are stringified by JSON persistence and cannot
     round-trip — flagged with a warning (or ``TypeError`` under the strict
@@ -189,6 +190,23 @@ def serialize_kwargs(kwargs: dict) -> dict:
         if bg_settings.strict_kwargs_serialization():
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
+    # ``user_id`` is the engine's own wire form for ``user`` (restored in
+    # phase 2 by restore_user). A caller passing it as ordinary data used to
+    # be silently consumed: restore_user popped it and replaced it with a
+    # live ``user``, so the hook never saw the value — and the same call ran
+    # correctly in sync mode, a parity break that only showed up in
+    # production. Treated like ``request``: reserved, dropped loudly.
+    if 'user_id' in out:
+        out.pop('user_id')
+        message = (
+            f"{out.get('tr_id')} 'user_id' dropped at kwargs serialization "
+            f"— it is the engine's wire form for 'user' and phase 2 replaces "
+            f"it with a live user object, so a caller-supplied value could "
+            f"never reach a hook. Pass it under a different name."
+        )
+        if bg_settings.strict_kwargs_serialization():
+            raise KwargsSerializationError(message)
+        transition_logger.warning(message)
     out.pop('context', None)  # rebuilt in phase 2
     # Persisted on its own TransitionMessage column, not in the kwargs JSON:
     # phase 2 reads it from the column, and it must not leak into the kwargs
@@ -196,7 +214,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
     out.pop('owning_process_class', None)
 
     user = out.pop('user', None)
-    if user is not None and 'user_id' not in out:
+    if user is not None:
         # Read .pk (not .id) to match the phase-2 restore (get(pk=user_id))
         # and to support custom user models whose primary key isn't named
         # 'id'. AnonymousUser (pk is None) is dropped, as before.

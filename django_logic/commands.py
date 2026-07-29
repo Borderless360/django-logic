@@ -37,12 +37,27 @@ def note_deferred_unlock(using: str, state: State) -> None:
     on_commit hook."""
     conn = transaction.get_connection(using)
     registry = _deferred_unlocks(conn)
-    if not registry:
-        # First deferral this transaction: clear at commit so stale
-        # State objects don't accumulate on a long-lived connection
-        # (entries below a wrapper's window are never popped, so a
-        # missed clear after a rollback is inert, just retained).
-        transaction.on_commit(registry.clear, using=using)
+    # Re-register the clear unless ours is still queued. Keying on
+    # ``not registry`` leaked: a rollback discards the on_commit hook (Django
+    # drops run_on_commit) but leaves the entries on the connection, so the
+    # registry was never empty again, no further clear was ever registered,
+    # and the list grew for the life of the connection — pinning every State
+    # it held. Asking Django whether our hook is still queued makes this
+    # self-healing, and anything left when it is NOT queued is stale by
+    # definition (its hook was discarded), so it is safe to drop.
+    queued = any(
+        any(getattr(item, '_dl_deferred_clear', False)
+            for item in entry if callable(item))
+        for entry in getattr(conn, 'run_on_commit', ()) or ()
+    )
+    if not queued:
+        registry.clear()
+
+        def _clear():
+            registry.clear()
+
+        _clear._dl_deferred_clear = True
+        transaction.on_commit(_clear, using=using)
     registry.append(state)
 
 

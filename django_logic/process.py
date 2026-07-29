@@ -48,6 +48,16 @@ def _notify_transition_observers(owning_process, action_name, instance, transiti
             )
 
 
+#: Kwarg names the engine sets on every drive, and forwards through
+#: ``__getattr__`` itself when chaining a ``next_transition`` follow-up. A
+#: caller that passes one gets it silently overwritten, so they are documented
+#: as reserved rather than refused — the engine cannot distinguish its own
+#: forwarding from a caller's at that layer.
+_RESERVED_KWARGS = frozenset({
+    'tr_id', 'root_id', 'parent_id', 'process_class', 'owning_process_class',
+})
+
+
 class Process:
     """Declarative container of transitions and nested processes.
 
@@ -124,6 +134,11 @@ class Process:
             # would otherwise collide with _get_transition_method's first
             # parameter ("multiple values for argument 'action_name'").
             # No engine path forwards it; only hand-built kwargs dicts do.
+            # The other reserved names (_RESERVED_KWARGS) are NOT refused
+            # here: next_transition chaining forwards tr_id / root_id /
+            # parent_id / process_class through this very path to propagate
+            # lineage, so the engine cannot tell its own forwarding from a
+            # caller's. They are documented as reserved in the README instead.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 
@@ -565,13 +580,7 @@ def collect_ambiguous_in_progress_states() -> dict:
     signatures: dict = {}
     for binding in ProcessManager.bindings:
         bound_process_name = binding.process_class.process_name
-        stack = [binding.process_class]
-        seen_cls = set()
-        while stack:
-            process_cls = stack.pop()
-            if process_cls in seen_cls:
-                continue
-            seen_cls.add(process_cls)
+        for process_cls in _iter_process_tree(binding.process_class):
             for transition in process_cls.transitions or []:
                 in_progress = getattr(transition, 'in_progress_state', None)
                 if not in_progress or isinstance(transition, Action):
@@ -582,7 +591,6 @@ def collect_ambiguous_in_progress_states() -> dict:
                 signatures.setdefault(key, set()).add(
                     _recovery_signature(transition, bound_process_name)
                 )
-            stack.extend(process_cls.nested_processes)
     return {
         key: owners for key, owners in claims.items()
         if len(signatures[key]) > 1

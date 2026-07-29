@@ -432,14 +432,6 @@ def _recover_stranded_instance(binding, transition, pk) -> bool:
         if state.get_persisted_state() != transition.in_progress_state:
             return False  # moved under us — the other writer wins
 
-        if not transition.failed_state:
-            # Unreachable from recover_stranded_states (the transition
-            # loop skips no-failed_state transitions before any lock is
-            # taken, warning once per process — see
-            # _warn_once_about_missing_failed_state); kept as a silent
-            # guard for direct callers.
-            return False
-
         # Ownership transfer: fail_transition ALWAYS releases the lock in
         # its own finally (even when a hook raises), so from here on the
         # sweep must not unlock again.

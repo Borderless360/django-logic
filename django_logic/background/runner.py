@@ -96,7 +96,10 @@ def run_background_transition(transition_message_id: int) -> None:
     if outcome.terminal and outcome.succeeded and outcome.transition is not None:
         _run_success_hooks(outcome)
     elif outcome.terminal and not outcome.succeeded and outcome.transition is not None:
-        _run_failure_hooks(outcome)
+        _run_failure_callbacks(
+            outcome.transition, outcome.state_obj,
+            outcome.kwargs, outcome.exception,
+        )
 
     if outcome.exception is not None:
         # Sync mode propagates the exception so the inline caller / tests
@@ -257,7 +260,7 @@ def abandon_timed_out_attempt(tm_id: int) -> bool:
     # Run failure_callbacks after the atomic commits and the row lock is
     # released (phase 3, best-effort) — see _run_failure_callbacks.
     if hooks is not None:
-        _run_failure_callbacks(hooks)
+        _run_failure_callbacks(*hooks)
     return True
 
 
@@ -307,7 +310,7 @@ def finalize_stuck_attempt(tm_id: int) -> bool:
 
     # Run failure_callbacks after the atomic commits (phase 3, best-effort).
     if hooks is not None:
-        _run_failure_callbacks(hooks)
+        _run_failure_callbacks(*hooks)
     return True
 
 
@@ -411,17 +414,17 @@ def _finalize_terminal_from_watchdog(
     return (transition, state, kwargs, exception)
 
 
-def _run_failure_callbacks(hooks) -> None:
+def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
     """Run a terminal row's ``failure_callbacks`` best-effort, *after* the
     finalizing atomic block has committed and released the row lock.
 
-    Mirrors ``_run_failure_hooks`` for rows finalized by the watchdog /
-    detect_stuck tasks, so ``failure_callbacks`` fire on terminal failure
-    regardless of whether the row hit MAX_ERRORS in-task or via a
-    safety-net task. ``Callbacks.execute`` already swallows exceptions; the
-    extra guard here is belt-and-suspenders against a malformed hook list.
+    The single implementation for every terminal-failure path: a row that hit
+    MAX_ERRORS in-task, and one finalized by the watchdog / detect_stuck
+    tasks. (There used to be a second copy taking an ``_Outcome`` instead of
+    these four values, with a byte-identical body and log line.)
+    ``Callbacks.execute`` already swallows exceptions; the guard here is
+    belt-and-suspenders against a malformed hook list.
     """
-    transition, state, kwargs, exception = hooks
     try:
         transition.failure_callbacks.execute(
             state, exception=exception, **(kwargs or {})
@@ -703,22 +706,6 @@ def _run_success_hooks(outcome: _Outcome) -> None:
     except Exception as e:
         transition_logger.error(
             f'{(outcome.kwargs or {}).get("tr_id")} next_transition failed '
-            f'(best-effort, swallowed): {e}',
-            exc_info=True,
-        )
-
-
-def _run_failure_hooks(outcome: _Outcome) -> None:
-    assert outcome.transition is not None
-    try:
-        outcome.transition.failure_callbacks.execute(
-            outcome.state_obj,
-            exception=outcome.exception,
-            **(outcome.kwargs or {}),
-        )
-    except Exception as e:
-        transition_logger.error(
-            f'{(outcome.kwargs or {}).get("tr_id")} failure_callbacks failed '
             f'(best-effort, swallowed): {e}',
             exc_info=True,
         )

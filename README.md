@@ -39,7 +39,6 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 
 Extras:
 - `pip install django-logic[redis]` — installs `django-redis`, for deployments whose settings name `django_redis.cache.RedisCache`. It stopped being a core dependency in 0.11.0: the engine has never imported it.
-- `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; no DRF-specific code ships since 0.4)
 - `[celery]` remains an **empty alias**, so existing `pip install django-logic[celery,redis]` pins keep resolving — celery is a core dependency since 0.4
 
 ## Installation
@@ -227,7 +226,13 @@ Then drive it from request/task/method bodies via `invoice.process.<action>(...)
 
 
 ### 5. Advance your process with conditions, side-effects, and callbacks
-Use next_transition to automatically continue the process. 
+Use next_transition to automatically continue the process.
+
+> `next_transition` chains from a **completion**, so a synchronous `Action`
+> ignores it — an Action changes no state and has no completion to chain from.
+> (A `BackgroundAction` *does* run it, from phase 2.) Drive the follow-up from
+> a callback instead, or use a `Transition`.
+
 ```python 
 # Define permission and condition functions
 def is_accountant(instance, user):
@@ -645,6 +650,21 @@ Every state read and write for that process then goes through your class, includ
 ### Context Passing
 Pass data between side effects and callbacks:
 
+> **Reserved kwarg names.** The engine sets `tr_id`, `root_id`, `parent_id`,
+> `process_class` and `owning_process_class` on every drive (they carry
+> transition identity and lineage, and are forwarded to `next_transition`
+> follow-ups), replaces `user` with `user_id` on the background wire, and
+> rebuilds `context` in phase 2. Passing any of those as your own data means
+> the engine overwrites it. Use different names.
+
+> `context` is scoped to **one execution**, not persisted. A caller-supplied
+> `context=` reaches a synchronous transition's hooks, but for a *background*
+> transition phase 1 drops it and phase 2 rebuilds an empty one — it is a
+> channel between hooks within a run, not a way to pass data across the queue.
+> Anything phase 2 must see belongs in ordinary kwargs (which are serialized)
+> or on the instance.
+
+
 ```python
 def calculate_total(instance, context, **kwargs):
     total = sum(item.price for item in instance.items.all())
@@ -859,7 +879,7 @@ and a durable background slow-path can share one `action_name`.
 > it without running its side-effects (safe, but the work won't run). Rows
 > enqueued after the upgrade always record their owner.
 
-### Testing your processes
+### Testing background transitions
 
 Set `BACKGROUND_EXECUTION='sync'` in your test settings — the global default is `'celery'`, so this opt-in is required — and every `instance.process.fulfil(...)` call runs phase 1 **and** phase 2 inline, no broker involved:
 
@@ -946,7 +966,7 @@ The constraint is scoped **per process**: two independent state machines bound t
 
 Because the in-flight marker is a database row rather than a held lock, nothing leaks if the caller's surrounding transaction rolls back — the row, the `in_progress_state` write, and the dispatch all disappear together.
 
-**Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired (it just logs and leaves it intact). A `State` object that never locked keeps the historical unconditional delete as a manual force-release path.
+**Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired — the token no longer matches, so it leaves it intact and returns silently. A `State` object that never locked keeps the historical unconditional delete as a manual force-release path.
 
 **Synchronous transitions inside an outer `transaction.atomic()`.** By default the lock is released as soon as the transition completes — before the outer block commits. That window is real: another connection can acquire the lock, read the *old committed* state, and run the same transition again (both side-effect runs happen; the final state depends on commit ordering). If your code drives transitions inside atomic blocks and needs exclusion to cover the whole uncommitted span, opt in:
 
@@ -1073,7 +1093,7 @@ including background transitions — **inline, with no Celery broker**.
 
 Two principles keep these tests worth writing: **test your process, not the
 machinery**, and **assert what the object became, not that a hook ran**. Full
-rationale, and the 15-scenario catalog, in
+rationale, and the 18-scenario catalog, in
 [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md#journeys-not-mirrors).
 
 ```python

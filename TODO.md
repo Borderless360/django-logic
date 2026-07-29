@@ -6,7 +6,7 @@ Planned changes for upcoming versions of django-logic.
 
 ## 1.0.0
 
-- [ ] Admin + DRF integration modules
+- [ ] Admin integration module
 - [ ] `manage.py transition_status` management command
 - [ ] Better error messages (include current state + available transitions)
 - [ ] Automated PyPI publishing on tag push

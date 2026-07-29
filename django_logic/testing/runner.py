@@ -23,19 +23,13 @@ def all_transitions(process_class) -> list:
     drive. A drive can execute more than the named action (``next_transition``
     follow-ups, callback-triggered transitions), so tracking must cover the
     whole tree for the side-effect assertions to be truthful."""
-    found = []
-    seen = set()
+    from django_logic.process import _iter_process_tree
 
-    def walk(cls):
-        if id(cls) in seen:
-            return
-        seen.add(id(cls))
-        found.extend(getattr(cls, 'transitions', None) or [])
-        for sub in getattr(cls, 'nested_processes', None) or []:
-            walk(sub)
-
-    walk(process_class)
-    return found
+    return [
+        transition
+        for process_cls in _iter_process_tree(process_class)
+        for transition in getattr(process_cls, 'transitions', None) or []
+    ]
 
 
 def run_background_sync(instance, process_name, action_name, kwargs):

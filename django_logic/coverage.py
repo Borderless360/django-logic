@@ -81,17 +81,12 @@ def iter_bound_transitions():
     A process class nested under several bindings is yielded once per
     binding — key on ``(owning class, action_name)`` to deduplicate.
     """
+    from django_logic.process import _iter_process_tree
+
     for binding in ProcessManager.bindings:
-        stack = [binding.process_class]
-        seen = set()
-        while stack:
-            process_cls = stack.pop()
-            if process_cls in seen:
-                continue
-            seen.add(process_cls)
-            for transition in process_cls.transitions:
+        for process_cls in _iter_process_tree(binding.process_class):
+            for transition in process_cls.transitions or []:
                 yield binding, process_cls, transition
-            stack.extend(process_cls.nested_processes)
 
 
 def coverage_report(executed=None, log_path=None) -> dict:

@@ -98,6 +98,58 @@ make two of the defects impossible to reintroduce silently.
   silently applied. Removed keys are left to `W003`, which already names them
   with migration advice.
 
+### Removed
+
+- **The `[drf]` extra.** It installed `djangorestframework` and nothing in the
+  library has referenced `rest_framework` since 0.4. A DRF integration module
+  is still on the roadmap; it can bring its own extra back when it exists.
+- **The nested-process tree walk existed five times.** Four class-level
+  re-implementations — in `checks.py`, `coverage.py`, `testing/runner.py` and
+  `collect_ambiguous_in_progress_states` — now call the canonical
+  `_iter_process_tree`. This was not cosmetic: the fifth copy, the one on the
+  runtime path, was the only one without a visited set, which is #180. The two
+  remaining walks build *instances* (each sub-process sharing the parent's
+  state), so they are genuinely different and stay.
+- A duplicate failure-callback runner (two functions, byte-identical bodies and
+  log lines, differing only in argument shape), `_validated_number`'s
+  `allow_zero` parameter (never passed, its branch unreachable), and a
+  defensive branch in `_recover_stranded_instance` whose own comment said it
+  could not be reached.
+- `ProcessScenario`'s `expect_raises=` no longer re-implements the three
+  caller-boundary predicates; it routes through `assert_raised` /
+  `assert_not_raised`, so the contract is pinned in one place instead of two.
+
+### Fixed (from the same review — lower severity)
+
+- **`sources` passed as a bare string is rejected.** `sources='draft'` became
+  `['d','r','a','f','t']`, matching no state: the transition was invisible to
+  `get_available_actions()` and calling it reported a missing action rather
+  than a bad declaration.
+- **A rejected `failed_state` write no longer masks the original failure** on
+  the synchronous path. `fail_transition`'s docstring promised "the original
+  side-effect exception keeps propagating either way"; the write's own
+  exception used to win, losing the real cause. (The background equivalents are
+  #178.)
+- **The `DEFER_UNLOCK_UNTIL_COMMIT` registry clears again after a rollback.**
+  It registered its `on_commit` clear only while empty; a rollback discards the
+  hook but leaves the entries, so the registry was never empty again, no
+  further clear was ever registered, and the list grew for the life of the
+  connection — pinning every `State` it held.
+- **A caller-supplied `user_id` kwarg is dropped loudly** instead of being
+  silently consumed. `user_id` is the engine's wire form for `user`, so phase 2
+  replaced the caller's value with a live user object and the hook never saw
+  it — while the identical call behaved correctly in sync mode, a parity break
+  that only appeared in production.
+- `django_logic/__init__.py` defines `__all__`, so `from django_logic import *`
+  no longer leaks whichever submodules happened to be imported (the namespace
+  varied with `INSTALLED_APPS`). The six command bundles are now all swappable:
+  `failure_side_effects_class` and `failure_callbacks_class` join the four that
+  already existed, which had left `FailureSideEffects` a top-level export with
+  no way to substitute it.
+- `ProcessScenario.process_name` derives from `process_class.process_name`, and
+  `assert_changed` explains the `{field: (old, new)}` shape rather than failing
+  with "too many values to unpack".
+
 ### Documentation
 
 - The **Complete Example is runnable as printed**. Its conditions called
@@ -117,6 +169,17 @@ make two of the defects impossible to reintroduce silently.
 - `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, which `CLAUDE.md` tells
   engine-changers to read first, no longer marks `STARTER_QUEUE` "Required" or
   claims every `BackgroundTransition` must carry a queue.
+- Documented three behaviours that were silently true: a synchronous `Action`
+  ignores `next_transition` (it has no completion to chain from, while a
+  `BackgroundAction` does run it); `context` is scoped to one execution and is
+  rebuilt empty in phase 2, so it cannot carry caller data across the queue;
+  and `tr_id` / `root_id` / `parent_id` / `process_class` /
+  `owning_process_class` are reserved names the engine overwrites.
+- Corrected four smaller claims: `State.unlock` leaves a successor's lock
+  intact silently (it logs nothing), the testing guide's catalog is 18
+  scenarios not 15, its "(opt-in) snapshot" on assertion failure was removed in
+  0.10.0, and two headings that slugified to the same anchor made three
+  in-document links land on the wrong section.
 - Removed `docs/research/race-condition-issue` — an extensionless, unlinked
   13KB traceback referencing API deleted in 0.10.0.
 

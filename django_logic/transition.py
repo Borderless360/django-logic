@@ -62,6 +62,8 @@ class Transition:
 
     side_effects_class = SideEffects
     callbacks_class = Callbacks
+    failure_side_effects_class = FailureSideEffects
+    failure_callbacks_class = Callbacks
     permissions_class = Permissions
     conditions_class = Conditions
 
@@ -76,6 +78,16 @@ class Transition:
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
         self.target = target
+        if isinstance(sources, str):
+            # list('draft') is ['d','r','a','f','t'], which matches no state:
+            # the transition becomes invisible to get_available_actions() and
+            # calling it reports a missing action rather than a bad
+            # declaration. Fail at declaration time instead.
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: sources must be a list of "
+                f"states, not the bare string {sources!r} — a string is "
+                f"iterated per character. Use sources=[{sources!r}]."
+            )
         self.sources = list(sources)
         self.in_progress_state = kwargs.get('in_progress_state')
         if self.in_progress_state and self.in_progress_state not in self.sources:
@@ -109,8 +121,14 @@ class Transition:
             )
         # Only SideEffects dereferences its transition (to drive
         # complete/fail); the other command bundles never read it.
-        self.failure_callbacks = Callbacks(kwargs.get('failure_callbacks', []))
-        self.failure_side_effects = FailureSideEffects(
+        # Built through class attributes like the other four, so all six
+        # bundles are swappable — the two failure bundles used to be
+        # hardcoded, which made FailureSideEffects a top-level export with
+        # no way to substitute it.
+        self.failure_callbacks = self.failure_callbacks_class(
+            kwargs.get('failure_callbacks', [])
+        )
+        self.failure_side_effects = self.failure_side_effects_class(
             kwargs.get('failure_side_effects', [])
         )
         self.side_effects = self.side_effects_class(
@@ -255,8 +273,24 @@ class Transition:
         wrote_state = bool(self.in_progress_state)
         try:
             if self.failed_state:
-                state.set_state(self.failed_state)
-                wrote_state = True
+                # Savepointed so a rejected failed_state write cannot replace
+                # the original side-effect exception on its way out. The
+                # docstring above promised "the original exception keeps
+                # propagating either way"; without this the write's own
+                # exception won and the real cause was lost.
+                try:
+                    with transaction.atomic():
+                        state.set_state(self.failed_state)
+                except Exception as write_error:
+                    transition_logger.error(
+                        f'{kwargs.get("tr_id")} could not write failed_state '
+                        f'{self.failed_state!r} on {state.instance_key}: '
+                        f'{type(write_error).__name__}: {write_error}. The '
+                        f'original failure is re-raised unchanged.',
+                        exc_info=True,
+                    )
+                else:
+                    wrote_state = True
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                     f'{self.failed_state}'

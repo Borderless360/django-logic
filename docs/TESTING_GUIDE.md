@@ -632,7 +632,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_journey([JourneyStep(...)])` | Each drive's full observable transformation — action, before → after, side-effects, callbacks, and `failed` (an exception reached the caller). Import `JourneyStep` from `django_logic.testing`. |
 
 On failure, every assertion raises with a numbered timeline of each step the
-test took, the relevant `TransitionMessage`, and (opt-in) a snapshot — built
+test took and the relevant `TransitionMessage` — built
 for humans *and* AI agents to diagnose without re-running.
 
 ---

@@ -57,9 +57,6 @@ celery = []
 # shipped since 4.0. This extra installs the third-party backend for
 # deployments whose settings name `django_redis.cache.RedisCache`.
 redis = ["django-redis>=5.0.0"]
-drf = [
-    "djangorestframework>=3.14.0",
-]
 dev = [
     "coverage>=7.0",
     # Driver for the PostgreSQL stability suite (make stability-*) and the

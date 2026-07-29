@@ -83,17 +83,13 @@ def _process_tree_has_background_transition(process_class) -> bool:
     """Does ``process_class`` (or any process nested under it) declare a
     background transition? Duck-typed via ``is_background`` so the check
     never imports the background package for the walk itself."""
-    stack, seen = [process_class], set()
-    while stack:
-        process_cls = stack.pop()
-        if process_cls in seen:
-            continue
-        seen.add(process_cls)
-        for transition in process_cls.transitions:
-            if getattr(transition, 'is_background', False):
-                return True
-        stack.extend(process_cls.nested_processes or [])
-    return False
+    from django_logic.process import _iter_process_tree
+
+    return any(
+        getattr(transition, 'is_background', False)
+        for process_cls in _iter_process_tree(process_class)
+        for transition in process_cls.transitions or []
+    )
 
 
 @checks.register('django_logic')

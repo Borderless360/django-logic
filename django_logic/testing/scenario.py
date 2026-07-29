@@ -268,32 +268,25 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # FailureSideEffects swallow (the caller sees nothing). A failure test
         # that does not declare which it expects cannot tell the two apart —
         # the exact blind spot that let the 0.1.6->0.2.0 swallow flip pass.
+        # The predicates live in assert_raised / assert_not_raised — this
+        # used to re-implement all three (raised-is-None, isinstance,
+        # raised-is-not-None) with its own copies of the failure messages, so
+        # the contract was pinned by two independent code paths reading the
+        # same self._last_raised. Only the timeline record is local, because
+        # it carries the drive label the assertions do not know about.
         if expect_raises is not None and expect_raises is not False:
             if raised is None:
                 self._record(label, 'FAILED',
                              f'expected {_exc_names(expect_raises)} to reach caller')
-                self._fail(
-                    f'{label}: expected {_exc_names(expect_raises)} to '
-                    f'propagate to the caller, but the drive completed without '
-                    f'raising. Either a failure that the contract says must '
-                    f're-raise was swallowed, or no failure occurred.',
-                    instance=instance)
             elif not isinstance(raised, expect_raises):
                 self._record(label, 'FAILED',
                              f'{type(raised).__name__} != {_exc_names(expect_raises)}')
-                self._fail(
-                    f'{label}: expected {_exc_names(expect_raises)} to '
-                    f'propagate to the caller, but got '
-                    f'{type(raised).__name__}: {raised}.', instance=instance)
+            self.assert_raised(expect_raises)
         elif expect_raises is False:
             if raised is not None:
                 self._record(label, 'FAILED',
                              f'{type(raised).__name__} propagated (expected swallow)')
-                self._fail(
-                    f'{label}: expected the failure to be SWALLOWED at the '
-                    f'caller boundary (best-effort callback / follow-up / '
-                    f'failure side-effect), but {type(raised).__name__} '
-                    f'propagated to the caller: {raised}.', instance=instance)
+            self.assert_not_raised()
         else:
             # Legacy default: an injected exception is expected (absorbed
             # silently); anything else is a real, unexpected failure and fails
