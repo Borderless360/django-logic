@@ -238,7 +238,11 @@ def recover_stranded_states() -> int:
         # and warn once per process lifetime (per-candidate-per-run
         # warnings were pure noise, and each one took the state lock
         # first).
-        if not transition.failed_state:
+        # getattr-guarded for the same reason as _recovery_signature: a
+        # duck-typed custom transition need not carry failed_state, and one
+        # exotic binding must not raise before the containment below and kill
+        # the sweep for the whole deployment on every beat tick.
+        if not getattr(transition, 'failed_state', None):
             _warn_once_about_missing_failed_state(binding, transition)
             continue
         # Contained per transition: one misbehaving model/binding must

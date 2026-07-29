@@ -98,7 +98,9 @@ change on success) for anything slow, external, or retriable.
   }
   ```
 
-  `django_logic.W002` fails `manage.py check` if they are missing.
+  `django_logic.W002` reports missing entries on `manage.py check` — a
+  *warning*, so it does not fail the command unless you run
+  `check --fail-level WARNING`.
 - Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
   None}`, `DISABLE_SERVER_SIDE_CURSORS=True`, and no SSL on the app→pgbouncer
   hop. The concurrency guard (`select_for_update(nowait)` + partial-unique)

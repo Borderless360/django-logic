@@ -44,6 +44,32 @@ from django_logic.conf import defer_unlock_until_commit as _defer_unlock_until_c
 from django_logic.state import State
 
 
+#: Names of the engine's OWN method parameters on the state-change path.
+#: A caller kwarg carrying one of these reaches an engine call that already
+#: passes it positionally — ``fail_transition(state, error, **kwargs)``,
+#: ``_release_lock(state, deferrable=…, **kwargs)`` — and raises TypeError
+#: there, on the failure path, *after* the lock was taken: ``failed_state``
+#: was never applied, the real exception was replaced by the TypeError, and
+#: the lock leaked until its TTL (hours). Refused up front instead, before
+#: anything is acquired. Distinct from ``process._RESERVED_KWARGS`` (lineage
+#: names the engine forwards itself, so it cannot tell its own forwarding from
+#: a caller's — those are documented, not refused).
+_ENGINE_PARAM_KWARGS = frozenset({'state', 'exception', 'deferrable'})
+
+
+def _refuse_engine_param_kwargs(action_name: str, kwargs: dict) -> None:
+    clashing = sorted(_ENGINE_PARAM_KWARGS & kwargs.keys())
+    if clashing:
+        raise TypeError(
+            f"{action_name}() received {', '.join(repr(k) for k in clashing)}, "
+            f"which name the engine's own parameters on the state-change path. "
+            f"Passing them breaks the failure path (no failed_state, the real "
+            f"exception replaced, and the state lock held until its TTL). "
+            f"Rename the value, or nest it — e.g. "
+            f"{action_name}(payload={{'exception': …}})."
+        )
+
+
 class Transition:
     """Synchronous transition from a source state to a target state.
 
@@ -101,6 +127,21 @@ class Transition:
             # at listing time.
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
+        if self.failed_state and self.failed_state == self.in_progress_state:
+            # Recovery reads the state field to decide what happened, so the
+            # two states must be distinguishable. Identical, "failed" and
+            # "still running" are the same value: recover_stranded_states
+            # writes failed_state, re-reads the same in_progress_state, and
+            # concludes the recovery did not land — re-running the failure
+            # hooks on every sweep tick, forever, while the instance stays a
+            # permanent sweep candidate.
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: failed_state and "
+                f"in_progress_state are both {self.failed_state!r}. A failed "
+                f"instance would be indistinguishable from a running one, so "
+                f"stranded recovery can never settle. Give the failure its "
+                f"own state."
+            )
         # Per-transition override of the global LOCK_TIMEOUT for the
         # synchronous execution path — for transitions whose side-effects
         # legitimately run long (report generation, large exports). The
@@ -158,6 +199,8 @@ class Transition:
         )
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
+        # Before the lock: a clash here must not become a leaked lock.
+        _refuse_engine_param_kwargs(self.action_name, kwargs)
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
         transition_logger.info(
@@ -421,6 +464,9 @@ class Action(Transition):
         return f"Action: {self.action_name}"
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
+        # An Action takes no lock, so there is none to leak — but the failure
+        # path still loses failed_state and the original exception.
+        _refuse_engine_param_kwargs(self.action_name, kwargs)
         self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
         return kwargs.get('tr_id')

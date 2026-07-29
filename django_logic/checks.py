@@ -92,6 +92,47 @@ def _process_tree_has_background_transition(process_class) -> bool:
     )
 
 
+def _models_bound_to_background_transitions() -> list:
+    """Sorted labels of the models bound to a process whose tree declares a
+    background transition."""
+    return sorted({
+        binding.model._meta.label for binding in ProcessManager.bindings
+        if _process_tree_has_background_transition(binding.process_class)
+    })
+
+
+@checks.register('django_logic')
+def check_background_app_is_installed(app_configs, **kwargs):
+    """A bound ``BackgroundTransition`` needs ``django_logic.background`` in
+    ``INSTALLED_APPS`` (``django_logic.E003``).
+
+    The app owns the ``TransitionMessage`` table and its migrations. Without
+    it, phase 1 has nowhere to write the outbox row, so the first background
+    transition dies with a raw ``OperationalError: no such table`` from deep
+    inside the engine — and the other background checks (E002, W002) gate on
+    the very same missing app, so ``manage.py check`` said nothing at all.
+    """
+    from django.apps import apps
+
+    if apps.is_installed('django_logic.background'):
+        return []
+    offenders = _models_bound_to_background_transitions()
+    if not offenders:
+        return []
+    return [checks.Error(
+        "Background transitions are bound on %s, but "
+        "'django_logic.background' is not in INSTALLED_APPS. The app owns "
+        "the TransitionMessage table those transitions write in phase 1, so "
+        "the first background transition fails with a missing-table "
+        "database error." % ', '.join(offenders),
+        hint="Add 'django_logic.background' to INSTALLED_APPS and run "
+             "manage.py migrate. There is no table-less mode: use plain "
+             "synchronous Transitions where the durable outbox is not "
+             "wanted.",
+        id='django_logic.E003',
+    )]
+
+
 @checks.register('django_logic')
 def check_background_database_routing(app_configs, **kwargs):
     """Database routers must not split the background engine across
@@ -108,9 +149,16 @@ def check_background_database_routing(app_configs, **kwargs):
     prevent. The supported topology is ``TransitionMessage`` and every
     background-bound model on the shared ``default`` alias; anything else
     is refused here at check time.
+
+    Static routing only: a router that decides from ``hints`` (an
+    ``instance``, a ``model_name``) can answer ``default`` to the
+    model-class questions asked here and still send a real write elsewhere,
+    so passing this check is not proof the invariant holds at runtime.
     """
     from django.apps import apps
 
+    # Nothing to route without the app; a bound background transition with
+    # the app missing is django_logic.E003, not a routing finding.
     if not apps.is_installed('django_logic.background'):
         return []
 
@@ -183,7 +231,8 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
     # checks too, so without this an install that never added the background
     # app would get a false warning on every `manage.py check` — and fail any
-    # CI running `check --fail-level WARNING`. Same gate as E002.
+    # CI running `check --fail-level WARNING`. Same gate as E002; an install
+    # that *does* bind background transitions without the app is E003.
     if not apps.is_installed('django_logic.background'):
         return []
 

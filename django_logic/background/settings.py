@@ -10,14 +10,15 @@ import math
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
+# The core reader, shared rather than re-implemented: it validates that
+# DJANGO_LOGIC is a dict, which every ``.get()`` below assumes — a string or
+# a list used to surface as a bare AttributeError raised from whichever
+# ready() hook read a setting first, naming nothing.
+from django_logic.conf import _conf
 
 EXECUTION_CELERY = 'celery'
 EXECUTION_SYNC = 'sync'
 _VALID_EXECUTION_MODES = frozenset({EXECUTION_CELERY, EXECUTION_SYNC})
-
-
-def _conf() -> dict:
-    return getattr(settings, 'DJANGO_LOGIC', {}) or {}
 
 
 def background_execution() -> str:

@@ -5,6 +5,8 @@ side-effects, callbacks, failure side-effects, failure callbacks — is
 represented by a ``BaseCommand`` subclass that owns a list of callables
 and knows how to run them.
 """
+import logging
+
 from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.logger import (
@@ -122,6 +124,30 @@ def _release_dropped(registry, before) -> None:
             )
 
 
+def _log_hook_error(message: str, error: BaseException, **log_kwargs) -> None:
+    """Log a hook failure at ERROR — or WARNING when it is the engine's own
+    concurrency guard firing (#154).
+
+    ``AlreadyInProgress`` and ``SourceStateChanged`` mean "another flight owns
+    this instance right now": the designed outcome of two drives racing, and
+    the common shape when a background transition is invoked from another
+    transition's side-effects. At ERROR they page an on-call for healthy
+    contention. Every other exception stays at ERROR.
+    """
+    level = logging.ERROR
+    try:
+        from django_logic.background.exceptions import (
+            AlreadyInProgress, SourceStateChanged,
+        )
+    except ImportError:
+        # Sync-only install: no background exceptions exist to special-case.
+        pass
+    else:
+        if isinstance(error, (AlreadyInProgress, SourceStateChanged)):
+            level = logging.WARNING
+    transition_logger.log(level, message, **log_kwargs)
+
+
 class BaseCommand:
     """Base class for command bundles (Pattern: Command)."""
 
@@ -171,7 +197,7 @@ class SideEffects(BaseCommand):
                 )
                 command(state.instance, **kwargs)
         except Exception as error:
-            transition_logger.error(f'{kwargs.get("tr_id")} {error}')
+            _log_hook_error(f'{kwargs.get("tr_id")} {error}', error)
             self._transition.fail_transition(state, error, **kwargs)
             raise
         else:
@@ -217,9 +243,10 @@ class Callbacks(BaseCommand):
                 else:
                     command(state.instance, **kwargs)
             except Exception as error:
-                transition_logger.error(
+                _log_hook_error(
                     f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
                     f'{command_name}: {error}',
+                    error,
                     exc_info=True,
                     extra={'kwargs': redact_log_kwargs(kwargs)},
                 )
@@ -346,4 +373,9 @@ class NextTransition:
                     lambda: getattr(process, self._next_transition)(**kwargs))
             return getattr(process, self._next_transition)(**kwargs)
         except Exception as error:
-            transition_logger.error(error)
+            _log_hook_error(
+                f"{kwargs.get('tr_id')} "
+                f"{TransitionEventType.NEXT_TRANSITION.value} "
+                f"'{self._next_transition}' failed (swallowed): {error}",
+                error,
+            )

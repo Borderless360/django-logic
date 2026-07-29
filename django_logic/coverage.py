@@ -38,8 +38,9 @@ One footgun worth knowing:
 
 Declaration identity (#146, #153): keys carry the declaration's kind
 (sync/background), shape (sources → target), and a conditions fingerprint
-(the condition callables' sorted qualnames) besides the class and action
-name, so condition-disambiguated same-name transitions — including a sync
+(the condition callables' sorted qualnames, plus the *configuration* of
+partials and callable instances) besides the class and action name, so
+condition-disambiguated same-name transitions — including a sync
 + background namesake pair, and per-courier variants differing only by
 conditions — count and cover separately. Two *literally identical*
 declarations still collapse (they are behaviorally indistinguishable).
@@ -47,7 +48,75 @@ declarations still collapse (they are behaviorally indistinguishable).
 No test-framework imports here: activation happens in ``AppConfig.ready``,
 which also runs in production processes.
 """
+import datetime
+import decimal
+import functools
+import uuid
+
 from django_logic.process import ProcessManager, transition_observers
+
+
+# Types whose ``repr`` is derived from the value alone — safe to embed in a
+# key that is compared across processes.
+_STABLE_REPR_TYPES = (
+    str, bytes, bool, int, float, complex, type(None),
+    decimal.Decimal, uuid.UUID,
+    datetime.datetime, datetime.date, datetime.time, datetime.timedelta,
+)
+
+
+def _stable_repr(value) -> str:
+    """Render one piece of condition *configuration* process-independently.
+
+    Keys are compared ACROSS processes — spawn-based workers append to one log
+    and a separate process merges and diffs it — so a plain ``repr`` is
+    unusable: ``<CourierIs object at 0x10f3a2b50>`` differs per process and per
+    run, and every key carrying one would look uncovered forever. Values whose
+    repr *is* the value are kept verbatim (that is what tells ``'ups'`` from
+    ``'dhl'``); anything else degrades to its class path, which still separates
+    declarations configured with different TYPES.
+    """
+    if isinstance(value, _STABLE_REPR_TYPES):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        inner = ','.join(_stable_repr(item) for item in value)
+        return f'[{inner}]' if isinstance(value, list) else f'({inner})'
+    if isinstance(value, (set, frozenset)):
+        # Set iteration order varies with the (salted) string hash, i.e. per
+        # process — sort the rendered items.
+        return '{' + ','.join(sorted(_stable_repr(item) for item in value)) + '}'
+    if isinstance(value, dict):
+        return '{' + ','.join(sorted(
+            f'{_stable_repr(key)}:{_stable_repr(item)}'
+            for key, item in value.items())) + '}'
+    qualname = getattr(value, '__qualname__', None)   # functions, classes
+    if qualname:
+        return f'{getattr(value, "__module__", "?")}.{qualname}'
+    cls = type(value)
+    return f'{cls.__module__}.{cls.__qualname__}'
+
+
+def _instance_config(instance) -> str:
+    """The stably-rendered attribute state of a callable condition instance.
+
+    ``CourierIs('ups')`` and ``CourierIs('dhl')`` are two different
+    declarations; without their state in the fingerprint they share one key and
+    driving either marks both covered — a gate that greenlights a transition no
+    test ever drove.
+    """
+    state = getattr(instance, '__dict__', None)
+    if state is None:
+        # ``__slots__`` classes have no ``__dict__``; read the declared slots
+        # (walking the MRO) and fall back to the bare class path if there are
+        # none to read.
+        names = []
+        for cls in type(instance).__mro__:
+            slots = getattr(cls, '__slots__', ()) or ()
+            names.extend([slots] if isinstance(slots, str) else list(slots))
+        state = {name: getattr(instance, name)
+                 for name in names if hasattr(instance, name)}
+    return ','.join(f'{name}={_stable_repr(value)}'
+                    for name, value in sorted(state.items()))
 
 
 def _condition_fingerprint(fn) -> str:
@@ -60,23 +129,25 @@ def _condition_fingerprint(fn) -> str:
     one either (``__qualname__`` is a descriptor on ``type``). Both are the
     idiomatic way to write the per-variant conditions this key exists to keep
     apart, so distinct declarations collapsed into one key and reported false
-    coverage.
+    coverage. Their *configuration* (bound args, instance attributes) is part
+    of the fingerprint for the same reason, rendered via :func:`_stable_repr`
+    so the key survives the cross-process merge.
     """
     qualname = getattr(fn, '__qualname__', None)
     if qualname:
         return qualname
-    func = getattr(fn, 'func', None)          # functools.partial
-    if func is not None:
-        inner = getattr(func, '__qualname__', None) or type(func).__name__
-        args = getattr(fn, 'args', ()) or ()
-        keywords = getattr(fn, 'keywords', None) or {}
+    if isinstance(fn, functools.partial):
+        inner = _condition_fingerprint(fn.func)
         bound = ','.join(
-            [repr(a) for a in args]
-            + [f'{k}={v!r}' for k, v in sorted(keywords.items())]
+            [_stable_repr(a) for a in fn.args or ()]
+            + [f'{k}={_stable_repr(v)}'
+               for k, v in sorted((fn.keywords or {}).items())]
         )
         return f'partial({inner}({bound}))'
     cls = type(fn)
-    return f'{cls.__module__}.{cls.__qualname__}'
+    path = f'{cls.__module__}.{cls.__qualname__}'
+    config = _instance_config(fn)
+    return f'{path}({config})' if config else path
 
 
 def _key(process_cls, transition) -> str:
@@ -90,8 +161,8 @@ def _key(process_cls, transition) -> str:
     ONLY by conditions (per-courier variants) must not collapse. It uses
     the condition callables' qualnames — two anonymous lambdas can still
     collide, but named condition functions (the norm) stay distinct, and so
-    do ``functools.partial`` and callable-instance conditions (see
-    ``_condition_fingerprint``).
+    do ``functools.partial`` and callable-instance conditions *including their
+    per-variant configuration* (see ``_condition_fingerprint``).
     """
     kind = 'bg' if getattr(transition, 'is_background', False) else 'sync'
     sources = '|'.join(sorted(transition.sources))

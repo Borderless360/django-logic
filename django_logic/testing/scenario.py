@@ -208,12 +208,30 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def _drive(self, instance, action, *, background, fail_side_effect, fail_with,
                expect_raises, kwargs):
-        if not transitions_for(self.process_class, action):
+        declared = transitions_for(self.process_class, action)
+        if not declared:
             self._record(f'{"background_" if background else ""}transition({action!r})',
                          'FAILED', 'no such transition')
             self._fail(f'No transition named {action!r} on '
                        f'{self.process_class.__name__} (or its nested processes).',
                        instance=instance)
+        # Only every declaration being background makes this the wrong
+        # entrypoint — a sync+background namesake pair is legitimately driven
+        # by transition() (it resolves the sync one).
+        if not background and all(
+                getattr(t, 'is_background', False) for t in declared):
+            self._record(f'transition({action!r})', 'FAILED',
+                         'background transition')
+            self._fail(
+                f'transition({action!r}) drives a BackgroundTransition — use '
+                f'background_transition({action!r}), which runs phase 1 and '
+                f'phase 2 inline. Under the global default '
+                f"BACKGROUND_EXECUTION='celery' this call only ENQUEUES a "
+                f'Celery task (no worker runs it here), so the drive returns '
+                f'with the instance in its in_progress_state, an uncompleted '
+                f'TransitionMessage left behind, and the real failure surfaces '
+                f'later as a wrong-state or already-in-flight error.',
+                instance=instance)
         before = self._state(instance)
         # Track the WHOLE process tree, not just the named action — one drive
         # can also execute next_transition follow-ups and callback-triggered
@@ -290,17 +308,25 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # test into a happy-path run (issue #94). track() already rejects
         # names that exist nowhere; this catches a hook that exists but did
         # not execute during this drive (e.g. wrong action, gated earlier).
+        # An exception that DID propagate is no evidence the injection fired:
+        # only identity with tracker.injected_exception is, and the tracker
+        # records that moment as failed_side_effect. A different hook raising
+        # the expect_raises type used to buy the injection an alibi.
         if (tracker.requested_fail_side_effect is not None
-                and tracker.failed_side_effect is None and raised is None):
+                and tracker.failed_side_effect is None):
             self._record(label, 'FAILED',
                          f'fail_side_effect={tracker.requested_fail_side_effect!r} '
                          f'never fired')
+            elsewhere = ('' if raised is None else
+                         f' The {type(raised).__name__} that reached the caller '
+                         f'came from another hook, not from the injection.')
             self._fail(
                 f'{label}: fail_side_effect='
                 f'{tracker.requested_fail_side_effect!r} never fired — no '
                 f'side-effect with that name executed during this drive, so '
                 f'the transition completed as a happy path instead of the '
-                f'failure scenario this test intends.', instance=instance)
+                f'failure scenario this test intends.{elsewhere}',
+                instance=instance)
         self._record(label, 'OK' if raised is None else 'FAILED(injected)', detail)
         # Record the journey step: the observable transformation this drive
         # applied to the object. For a background chain the follow-up runs

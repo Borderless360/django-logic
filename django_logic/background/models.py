@@ -22,7 +22,12 @@ from model_utils.models import TimeStampedModel
 #: Characters PostgreSQL text/jsonb columns cannot store, however happily
 #: Python and SQLite carry them. An exception message that echoes back bytes,
 #: scraped HTML or a CSV cell can contain either.
-def db_safe_text(value: str, limit: int = 10_000) -> str:
+#: Ceiling for the text columns this module writes (``last_error_message``,
+#: ``failure_side_effect_error``).
+_TEXT_LIMIT = 10_000
+
+
+def db_safe_text(value: str, limit: int = _TEXT_LIMIT) -> str:
     """Make ``value`` storable in a Postgres text column.
 
     NUL (U+0000) and lone surrogates are rejected by PostgreSQL, so writing an
@@ -296,6 +301,13 @@ class TransitionMessage(TimeStampedModel):
         if label:
             note = f'{label}: {note}'
         existing = self.failure_side_effect_error
+        if existing:
+            # Budget for the note FIRST: db_safe_text truncates the head, so
+            # once the accumulated text approaches the limit, appending and
+            # re-truncating silently dropped the note just added — the newest
+            # and most relevant diagnostic. Trim the older text instead.
+            room = _TEXT_LIMIT - len(note) - 2
+            existing = existing[:room] if room > 0 else ''
         self.failure_side_effect_error = db_safe_text(
             f'{existing}; {note}' if existing else note
         )

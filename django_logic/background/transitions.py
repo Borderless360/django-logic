@@ -24,7 +24,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 
 from django_logic.background import settings as bg_settings
-from django_logic.background.exceptions import AlreadyInProgress
+from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
     KwargsSerializationError,
@@ -37,7 +37,7 @@ from django_logic.logger import (
     TransitionEventType,
 )
 from django_logic.state import State
-from django_logic.transition import Transition
+from django_logic.transition import Transition, _refuse_engine_param_kwargs
 
 
 class BackgroundTransition(Transition):
@@ -100,6 +100,9 @@ class BackgroundTransition(Transition):
         return self.queue or bg_settings.default_queue()
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
+        # Before the lock, and before the kwargs are serialized into a row that
+        # phase 2 would fail on for the same reason.
+        _refuse_engine_param_kwargs(self.action_name, kwargs)
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
         queue_name = self.get_queue_name()
@@ -225,7 +228,7 @@ class BackgroundTransition(Transition):
             current = state.get_persisted_state()
             if current not in self.sources:
                 # The atomic block rolls the TM row back.
-                raise TransitionNotAllowed(
+                raise SourceStateChanged(
                     f"BackgroundTransition '{self.action_name}' is not "
                     f"allowed: the persisted state moved to {current!r} "
                     f"while phase 1 waited on a finishing flight — it is "

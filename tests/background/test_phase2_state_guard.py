@@ -144,27 +144,37 @@ class SafetyNetGuardTests(TestCase):
     """R4(d): the same guard protects failed_state writes made by the
     safety-net finalizers (finalize_stuck_attempt / detect_stuck)."""
 
-    def test_finalize_stuck_skips_failed_state_after_ops_fix(self):
+    def test_finalize_stuck_supersedes_after_ops_fix(self):
         # R4(d): a row stuck at MAX_ERRORS whose widget was manually moved
         # to 'cancelled'. Finalization still completes the row (retries
-        # stop) but must NOT clobber the ops fix with failed_state.
+        # stop), and the manual fix wins WHOLE: no failed_state, and no
+        # failure hooks either. Guarding only the write meant the safety net
+        # still ran failure_side_effects and failure_callbacks against an
+        # instance an operator had already resolved, and completed the row
+        # with no marker explaining why (found reviewing 0.12.0's own diff).
         widget = Widget.objects.create(status='fulfilling')
         tm = _make_tm(widget, transition_name='fulfil', errors=3)  # >= MAX_ERRORS
+        tm.record_error(ValueError('the original cause'))
         widget.status = 'cancelled'  # manual ops fix
         widget.save(update_fields=['status'])
 
         with self.assertLogs('django-logic.transition', level='ERROR') as cm:
             self.assertTrue(finalize_stuck_attempt(tm.pk))
         self.assertTrue(
-            any('NOT writing failed_state' in message for message in cm.output),
-            cm.output,
+            any('[superseded]' in message for message in cm.output), cm.output,
         )
 
         tm.refresh_from_db()
         self.assertTrue(tm.is_completed)
+        self.assertTrue(tm.last_error_message.startswith('[superseded]'))
+        # The cause that burned the retries stays legible on the row.
+        self.assertIn('the original cause', tm.last_error_message)
         widget.refresh_from_db()
-        # failed_state ('fulfilment_failed') was NOT written.
+        # failed_state ('fulfilment_failed') was NOT written...
         self.assertEqual(widget.status, 'cancelled')
+        # ...and neither failure bundle ran against the fixed instance.
+        self.assertEqual(widget.se_log, '')
+        self.assertEqual(widget.cb_log, '')
 
     def test_finalize_stuck_writes_failed_state_when_state_matches(self):
         # R4(d) control: the widget still sits in the in_progress_state

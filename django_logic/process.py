@@ -355,8 +355,8 @@ def _iter_process_tree(process_cls, _seen=None):
 
 
 def _validate_action_names_not_shadowed(process_cls):
-    """Reject an ``action_name`` that a real ``Process`` attribute shadows
-    (``django_logic.E003`` territory — raised at class creation, #182).
+    """Reject an ``action_name`` that a real attribute of the ROOT process
+    shadows (raised at class creation, #182).
 
     ``__getattr__`` only runs when normal attribute lookup *fails*, so a
     transition named ``state``, ``is_valid``, ``transitions``,
@@ -366,30 +366,33 @@ def _validate_action_names_not_shadowed(process_cls):
     looks live and silently does nothing — the worst possible failure mode
     for a state machine. There is no way to reach it, so this is a
     definition error, not a runtime concern.
+
+    Only the root's own attributes can shadow, because dispatch enters
+    through the BOUND process's ``__getattr__`` — a nested class is never
+    the lookup target. Checking every class in the tree instead rejected a
+    working topology: a sibling nested process holding a helper (say a
+    staticmethod) named like some other branch's transition. Nothing is
+    lost by looking at the root alone — every ``Process`` subclass is
+    validated as its own root when it is defined, so each class is covered
+    for the bindings that use it as the entry point.
     """
-    tree = list(_iter_process_tree(process_cls))
-    for proc_cls in tree:
+    for proc_cls in _iter_process_tree(process_cls):
         for transition in proc_cls.transitions or []:
             action_name = getattr(transition, 'action_name', None)
             if not action_name:
                 continue
-            # Check against EVERY class in the tree, not just the declaring
-            # one. A nested transition is called through the BOUND process
-            # (``instance.process.nested_action()``), so an attribute on the
-            # bound class shadows it just as effectively — and checking only
-            # the nested class missed that entirely.
+            # Transitions of the whole tree, attributes of the root only:
+            # a nested transition is called through the bound (root) class,
+            # so that is the class whose attributes shadow it.
             if action_name in _PROCESS_INSTANCE_ATTRS:
                 shadowed_by = (
                     f'an attribute Process.__init__ sets ({action_name})')
-                owner = proc_cls
-            else:
-                owner = next(
-                    (k for k in tree if hasattr(k, action_name)), None)
-                if owner is None:
-                    continue
+            elif hasattr(process_cls, action_name):
                 shadowed_by = (
-                    f'{owner.__name__}.{action_name} '
-                    f'({getattr(owner, action_name)!r})')
+                    f'{process_cls.__name__}.{action_name} '
+                    f'({getattr(process_cls, action_name)!r})')
+            else:
+                continue
             raise ImproperlyConfigured(
                 f"Process {proc_cls.__module__}.{proc_cls.__name__} declares "
                 f"a transition named {action_name!r}, which is shadowed by "
@@ -484,15 +487,14 @@ def _validate_hook_signatures(process_cls) -> None:
     ``DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] = True`` raises
     ``ImproperlyConfigured`` instead.
     """
-    from django.conf import settings
+    from django_logic.conf import strict_hook_signatures
 
     offenders = collect_hook_signature_offenders(process_cls)
     if not offenders:
         return
     message = _hook_signature_message(offenders)
-    conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
     # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION (#182).
-    if conf.get('STRICT_HOOK_SIGNATURES', False) is True:
+    if strict_hook_signatures():
         raise ImproperlyConfigured(message)
     transition_logger.warning(message)
 
@@ -575,11 +577,23 @@ def _recovery_signature(transition, process_name: str) -> tuple:
     ambiguous, however identically they would recover — which is the
     cross-binding case #143 has always rejected.
     """
+    # getattr-guarded like collect_hook_signature_offenders: a duck-typed
+    # custom transition can declare in_progress_state and none of the
+    # failure attributes, and must not crash the E001 check nor the stranded
+    # sweep that calls this. A missing attribute reads as "recovers with
+    # nothing", which is what fail_transition would do with it anyway.
     return (
         process_name,
-        transition.failed_state,
-        tuple(id(command) for command in transition.failure_side_effects.commands),
-        tuple(id(command) for command in transition.failure_callbacks.commands),
+        getattr(transition, 'failed_state', None),
+        _command_ids(transition, 'failure_side_effects'),
+        _command_ids(transition, 'failure_callbacks'),
+    )
+
+
+def _command_ids(transition, attr: str) -> tuple:
+    wrapper = getattr(transition, attr, None)
+    return tuple(
+        id(command) for command in getattr(wrapper, 'commands', None) or []
     )
 
 
@@ -596,11 +610,18 @@ def collect_ambiguous_in_progress_states() -> dict:
     unsafe otherwise, which is what this reports — not the sharing
     itself.
 
+    Claimants are grouped by the *physical column* the state lives in, not
+    by the bound model: an MTI child and its parent (or a proxy and its
+    concrete model) write one inherited column, so two processes bound
+    across that pair share a state even though their model labels differ.
+
     Returns ``{(model_label, state_field, in_progress_state):
     [(process_cls, transition), ...]}`` for every key whose claimants
-    disagree. ``Action``\\ s never write their ``in_progress_state`` and
-    are excluded (mirrors the stranded sweep). Consumed by the
-    ``django_logic.E001`` system check and by
+    disagree — one entry per *bound* model label sharing the column, so a
+    consumer keyed by its own binding (the stranded sweep) still finds it,
+    each mapped to the full claimant list. ``Action``\\ s never write their
+    ``in_progress_state`` and are excluded (mirrors the stranded sweep).
+    Consumed by the ``django_logic.E001`` system check and by
     ``recover_stranded_states``, which skips ambiguous keys.
     """
     from django_logic.transition import Action
@@ -610,23 +631,52 @@ def collect_ambiguous_in_progress_states() -> dict:
     # the bound process_name is part of a signature and is not recoverable
     # from (process_cls, transition) once a nested tree has been flattened.
     signatures: dict = {}
+    # Which bound (model, state_field) pairs each storage key was reached
+    # through — the keys callers look themselves up by.
+    reported: dict = {}
     for binding in ProcessManager.bindings:
         bound_process_name = binding.process_class.process_name
+        storage_label = _state_storage_label(binding.model, binding.state_field)
         for process_cls in _iter_process_tree(binding.process_class):
             for transition in process_cls.transitions or []:
                 in_progress = getattr(transition, 'in_progress_state', None)
                 if not in_progress or isinstance(transition, Action):
                     continue
-                key = (binding.model._meta.label, binding.state_field,
-                       in_progress)
+                key = (storage_label, binding.state_field, in_progress)
                 claims.setdefault(key, []).append((process_cls, transition))
                 signatures.setdefault(key, set()).add(
                     _recovery_signature(transition, bound_process_name)
                 )
+                reported.setdefault(key, set()).add(
+                    (binding.model._meta.label, binding.state_field,
+                     in_progress)
+                )
     return {
-        key: owners for key, owners in claims.items()
-        if len(signatures[key]) > 1
+        reported_key: owners
+        for key, owners in claims.items() if len(signatures[key]) > 1
+        for reported_key in sorted(reported[key])
     }
+
+
+def _state_storage_label(model, state_field: str) -> str:
+    """Label of the model whose TABLE holds ``state_field``.
+
+    Two bindings only collide if they write the same physical column, and
+    the bound model's own label does not identify one: an MTI child shares
+    its parent's table for an inherited field, and a proxy shares its
+    concrete model's table for every field. Keying on the bound label let
+    such a pair claim one ``in_progress_state`` with different recovery and
+    never be reported. ``field.model`` is the class that declared the field;
+    ``concrete_model`` resolves a proxy declarer to the table owner.
+    """
+    try:
+        field = model._meta.get_field(state_field)
+    except FieldDoesNotExist:
+        # bind_model_process rejects an unknown state_field, but a
+        # hand-built binding (consumer tooling, a test fixture) bypasses it
+        # and must not crash a system check.
+        return model._meta.label
+    return field.model._meta.concrete_model._meta.label
 
 
 #: One record per ``bind_model_process`` call.
@@ -731,3 +781,44 @@ class ProcessManager:
             process_class.process_name,
             _ProcessAccessor(make_process_getter(state_field, process_class)),
         )
+
+    @classmethod
+    def unbind_model_process(
+        cls, model, process_class=None, state_field: str | None = None,
+    ) -> None:
+        """Inverse of :meth:`bind_model_process`: drop the registry entries
+        and the model accessor they installed.
+
+        Exists for teardown — a consumer (and this library's own suite)
+        binding a throwaway process in a test otherwise has to rewrite
+        ``ProcessManager.bindings`` and ``delattr`` the accessor by hand,
+        and every copy of that gets the multi-binding cases wrong.
+        ``process_class`` / ``state_field`` narrow which of the model's
+        bindings to remove; omitting both removes all of them. Unbinding
+        something that was never bound is a no-op.
+        """
+        removed = [
+            binding for binding in cls.bindings
+            if binding.model is model
+            and (process_class is None or binding.process_class is process_class)
+            and (state_field is None or binding.state_field == state_field)
+        ]
+        if not removed:
+            return
+        cls.bindings = [b for b in cls.bindings if b not in removed]
+
+        # One model can carry several accessors (one per process_name, e.g.
+        # a second state_field's machine), so only the names no surviving
+        # binding of this model still claims may go — and only when
+        # django-logic owns them: an MTI child inherits its parent's
+        # accessor, which is the parent binding's to remove, not ours.
+        still_bound = {
+            binding.process_class.process_name for binding in cls.bindings
+            if binding.model is model
+        }
+        for binding in removed:
+            name = binding.process_class.process_name
+            if name in still_bound:
+                continue
+            if isinstance(vars(model).get(name), _ProcessAccessor):
+                delattr(model, name)

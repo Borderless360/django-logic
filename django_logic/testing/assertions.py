@@ -10,6 +10,26 @@ from __future__ import annotations
 from django_logic.testing.runner import latest_message, message_for
 
 
+def _names(value, assertion: str, argument: str = 'names') -> list:
+    """Normalise a collection-of-names argument, rejecting a bare string.
+
+    ``assert_not_available(obj, 'approve')`` iterates ``'approve'`` per
+    character, so every "is it in the available actions?" test is against
+    ``'a'``, ``'p'``, ... — none of which is ever an action name, and the
+    assertion passes VACUOUSLY (the ``not_ran`` / ``not_available`` variants
+    silently assert nothing at all). Same failure mode, same loud rejection as
+    a bare-string ``sources`` on a Transition.
+    """
+    if isinstance(value, str):
+        raise TypeError(
+            f"{assertion}: {argument} must be a list of names, not the bare "
+            f"string {value!r} — a string is iterated per character, which "
+            f"makes the assertion pass without checking anything. Use "
+            f"[{value!r}]."
+        )
+    return list(value)
+
+
 class ScenarioAssertions:
     @property
     def _process_name(self) -> str:
@@ -51,6 +71,7 @@ class ScenarioAssertions:
         return self._process(instance).get_available_actions(user=user)
 
     def assert_available(self, instance, actions, user=None):
+        actions = _names(actions, 'assert_available', 'actions')
         avail = self._available(instance, user=user)
         missing = [a for a in actions if a not in avail]
         if missing:
@@ -64,6 +85,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_available({actions})', ok=True)
 
     def assert_not_available(self, instance, actions, user=None):
+        actions = _names(actions, 'assert_not_available', 'actions')
         avail = self._available(instance, user=user)
         present = [a for a in actions if a in avail]
         if present:
@@ -90,6 +112,7 @@ class ScenarioAssertions:
         domain change. Pair it with assert_changed / assert_unchanged /
         assert_related_count (or a direct DB assertion) to pin the OUTCOME the
         side-effect is supposed to produce (issue #103)."""
+        names = _names(names, 'assert_side_effects_ran')
         ran = self._tracker().side_effects_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -99,6 +122,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_side_effects_ran({names})', ok=True)
 
     def assert_side_effects_not_ran(self, names):
+        names = _names(names, 'assert_side_effects_not_ran')
         ran = self._tracker().side_effects_ran
         present = [n for n in names if n in ran]
         if present:
@@ -112,6 +136,7 @@ class ScenarioAssertions:
         did the right thing. For a callback whose whole purpose is a domain
         effect (e.g. deleting related rows), also assert the effect with
         assert_related_count / assert_changed (issue #103)."""
+        names = _names(names, 'assert_callbacks_ran')
         ran = self._tracker().callbacks_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -121,6 +146,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_callbacks_ran({names})', ok=True)
 
     def assert_failure_side_effects_ran(self, names):
+        names = _names(names, 'assert_failure_side_effects_ran')
         ran = self._tracker().failure_side_effects_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -130,6 +156,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_failure_side_effects_ran({names})', ok=True)
 
     def assert_failure_callbacks_ran(self, names):
+        names = _names(names, 'assert_failure_callbacks_ran')
         ran = self._tracker().failure_callbacks_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -176,7 +203,7 @@ class ScenarioAssertions:
         *became*, not merely that a hook ran. ``capture`` records the "before"
         so the "after" delta is checkable.
         """
-        fields = list(fields)
+        fields = _names(fields, 'capture', 'fields')
         fresh = type(instance)._base_manager.get(pk=instance.pk)
         snap = {f: getattr(fresh, f) for f in fields}
         self._record('capture', 'OK', f'{fields} = {snap}')
@@ -223,6 +250,7 @@ class ScenarioAssertions:
         """Assert the named fields still hold their ``before`` values — the
         drive must NOT have touched them (e.g. a failed transition must leave
         business fields intact). Refreshes ``instance`` from the DB first."""
+        fields = _names(fields, 'assert_unchanged', 'fields')
         instance.refresh_from_db()
         problems = []
         for field in fields:

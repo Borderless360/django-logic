@@ -11,6 +11,7 @@ function as part of its full safety gate (both paths are idempotent —
 pure reads, no state).
 """
 import math
+import os
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -19,7 +20,20 @@ LOCK_TIMEOUT_DEFAULT = 7200
 
 
 def _conf() -> dict:
-    return getattr(settings, 'DJANGO_LOGIC', {}) or {}
+    conf = getattr(settings, 'DJANGO_LOGIC', None)
+    if conf is None:
+        # Unset — every reader falls back to its documented default.
+        return {}
+    if not isinstance(conf, dict):
+        # Every reader does conf.get(...), so a string or a list of keys
+        # used to surface as a bare AttributeError from whichever reader
+        # ran first — during AppConfig.ready(), with no mention of the
+        # setting that was wrong.
+        raise ImproperlyConfigured(
+            f'DJANGO_LOGIC must be a dict, got '
+            f'{type(conf).__name__} ({conf!r}).'
+        )
+    return conf
 
 
 def lock_timeout():
@@ -35,6 +49,19 @@ def defer_unlock_until_commit() -> bool:
     boot validation rejects non-bools, and this reader stays safe even
     where that validation has not run."""
     return _conf().get('DEFER_UNLOCK_UNTIL_COMMIT', False) is True
+
+
+def strict_hook_signatures() -> bool:
+    """Strict reader for ``STRICT_HOOK_SIGNATURES`` — literal ``True`` only,
+    same reasoning as :func:`defer_unlock_until_commit`. Read at bind time
+    by ``process._validate_hook_signatures``."""
+    return _conf().get('STRICT_HOOK_SIGNATURES', False) is True
+
+
+def transition_coverage_log():
+    """Path the transition-coverage recorder appends to, or ``None`` when
+    recording is off. Validated by :func:`validate_core_settings`."""
+    return _conf().get('TRANSITION_COVERAGE_LOG') or None
 
 
 def validate_core_settings() -> None:
@@ -65,3 +92,16 @@ def validate_core_settings() -> None:
                 f"{value!r}. Strings are not accepted — 'false' would "
                 f"otherwise read as truthy."
             )
+    # The coverage log goes straight to open(path, 'a'), where a bool is not
+    # a type error: open(True) writes to file descriptor 1, so
+    # TRANSITION_COVERAGE_LOG = True silently appends coverage lines to
+    # stdout. Anything that is not a path is refused at boot, where it is
+    # attributable, rather than per transition inside a swallowed observer
+    # exception.
+    value = _conf().get('TRANSITION_COVERAGE_LOG')
+    if value is not None and not isinstance(value, (str, os.PathLike)):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['TRANSITION_COVERAGE_LOG'] must be a filesystem "
+            f"path (str or os.PathLike), or None to disable recording, got "
+            f"{value!r}."
+        )

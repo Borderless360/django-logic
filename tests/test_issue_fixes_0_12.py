@@ -22,6 +22,7 @@ from django_logic.background.tasks import (
     watchdog_stale_attempts,
 )
 from django_logic.checks import check_no_unknown_settings
+from django_logic.logger import TransitionEventType
 from tests.models import Invoice, MtiChild, MtiParent
 
 
@@ -47,13 +48,20 @@ class _BindCleanup:
 
 # --- #178: a failing state write must be accounted ----------------------
 
+def _write_a_sibling_row(instance, **kwargs):
+    """A side-effect with an observable database write, so the attempt
+    savepoint's rollback can actually be asserted (a ``_noop`` side-effect
+    leaves nothing to roll back, which made this pin vacuous)."""
+    Invoice.objects.create(status='sibling')
+
+
 class RejectedTargetWriteProcess(Process):
     process_name = 'rejected_target_proc'
     transitions = [
         BackgroundTransition(
             'go', sources=['draft'], target='rejected_target',
             in_progress_state='rt_running', failed_state='rt_failed',
-            side_effects=[_noop],
+            side_effects=[_write_a_sibling_row],
         ),
     ]
 
@@ -111,13 +119,25 @@ class RejectedStateWriteTests(_BindCleanup, TestCase):
     })
     def test_target_write_rolls_back_its_own_attempt(self):
         """The write lives inside the attempt savepoint, so a rejected write
-        leaves no partial state behind."""
+        leaves no partial state behind.
+
+        The side-effect's own row is the witness: asserting only on the
+        instance's state proved nothing, because the veto blocks the target
+        write whether or not a savepoint contains it (caught by a mutation
+        that moved the write back out of the savepoint and still passed).
+        """
         inv = Invoice.objects.create(status='draft')
         with self.assertRaises(ValueError):
             inv.rejected_target_proc.go()
         inv.refresh_from_db()
         # Never the target; still the in-progress state phase 1 wrote.
         self.assertEqual(inv.status, 'rt_running')
+        # The attempt was all-or-nothing: the side-effect's write is gone.
+        self.assertFalse(
+            Invoice.objects.filter(status='sibling').exists(),
+            'the failed attempt left a side-effect write behind — the target '
+            'write is not inside the attempt savepoint',
+        )
 
 
 # --- #179: the timeout watchdog --------------------------------------------
@@ -566,9 +586,14 @@ class FailedStateWriteHonestyTests(_BindCleanup, TestCase):
 
         # The ORIGINAL failure propagates, not the write's own exception.
         self.assertEqual(str(ctx.exception), 'slow boom')
+        # TransitionEventType.SET_STATE.value, not a hand-typed 'Set state':
+        # the engine logs 'Set State', so the lowercase literal matched
+        # nothing and this assertion passed against an empty list however
+        # false the log was (caught by Cursor Bugbot on this very PR — the
+        # same "test that proves nothing" shape as the fake MTI test).
         set_state_lines = [
             line for line in logs.output
-            if 'rf_refused' in line and 'Set state' in line
+            if 'rf_refused' in line and TransitionEventType.SET_STATE.value in line
         ]
         self.assertEqual(set_state_lines, [], f'false SET_STATE: {set_state_lines}')
         # And the failure was reported.

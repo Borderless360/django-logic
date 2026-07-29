@@ -444,6 +444,16 @@ def send_shipping_notification(instance, **kwargs):
 # process.py
 from django_logic import Process, Transition
 
+from .conditions import has_stock_available, has_shipping_address, is_payment_verified
+from .permissions import is_customer, is_staff_member
+from .side_effects import (
+    generate_tracking_number,
+    process_payment,
+    reserve_stock,
+    send_order_confirmation_email,
+    send_shipping_notification,
+)
+
 class OrderProcess(Process):
     process_name = 'order_process'
     
@@ -459,16 +469,21 @@ class OrderProcess(Process):
             action_name='pay',
             sources=['pending'],
             target='paid',
-            conditions=[is_payment_verified],
             side_effects=[process_payment],
             callbacks=[send_order_confirmation_email],
             next_transition='process',
         ),
+        # The automated follow-up 'pay' chains into. It carries no
+        # permission: next_transition forwards the ORIGINAL caller's user, so
+        # gating this on staff would silently stop the chain for the customer
+        # who paid (a rejected follow-up is swallowed — callbacks and chained
+        # transitions are best-effort). Its condition is the payment check,
+        # which 'pay' itself has just satisfied.
         Transition(
             action_name='process',
             sources=['paid'],
             target='processing',
-            permissions=[is_staff_member],
+            conditions=[is_payment_verified],
         ),
         Transition(
             action_name='ship',
@@ -514,6 +529,8 @@ class ShopConfig(AppConfig):
 from django.shortcuts import render, redirect
 from django.contrib import messages
 from django_logic.exceptions import TransitionNotAllowed
+
+from .models import Order
 
 def submit_order(request, order_id):
     order = Order.objects.get(pk=order_id, user=request.user)
