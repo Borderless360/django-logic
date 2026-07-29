@@ -80,7 +80,21 @@ def run_background_transition(transition_message_id: int) -> None:
     # rolled back with it (#179) — see TransitionMessage.stamp_attempt_started.
     # This is the marker the watchdog and the retry starter's recency guard
     # read; written inside the atomic it was invisible to both.
-    TransitionMessage.stamp_attempt_started(transition_message_id)
+    if not TransitionMessage.stamp_attempt_started(transition_message_id):
+        # Refused: the row is held by a live attempt, or already completed /
+        # gone. Both are the documented "exit silently" cases. Proceeding
+        # anyway used to run a full attempt whose started_at belonged to the
+        # PREVIOUS one whenever the holder committed in the window before
+        # _run_atomic took its own lock — duration_ms then reported the old
+        # attempt's age, the retry starter's recency guard was defeated for
+        # that attempt's whole life, and the watchdog's one-charge-per-attempt
+        # guard was already satisfied by the previous error. The periodic
+        # starter re-dispatches, so nothing is lost by skipping.
+        transition_logger.info(
+            f'TransitionMessage#{transition_message_id}: another attempt holds '
+            f'the row (or it is already completed); skipping this dispatch.'
+        )
+        return
     try:
         outcome = _run_atomic(transition_message_id)
     except _StopRetry as exc:

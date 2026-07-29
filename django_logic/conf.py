@@ -65,9 +65,3 @@ def validate_core_settings() -> None:
                 f"{value!r}. Strings are not accepted — 'false' would "
                 f"otherwise read as truthy."
             )
-    value = _conf().get('DEFER_UNLOCK_UNTIL_COMMIT', False)
-    if not isinstance(value, bool):
-        raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] must be a bool, "
-            f"got {value!r}."
-        )

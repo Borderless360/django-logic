@@ -99,19 +99,9 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     # --- internals -------------------------------------------------------
 
-    @property
-    def _process_name(self) -> str:
-        """``process_name`` if the subclass set one, else the process's own.
-
-        It used to default to the literal ``'process'``, which duplicated
-        ``process_class.process_name`` and diverged silently: a scenario for a
-        process bound as ``order_flow`` that forgot to repeat the name failed
-        with a bare ``AttributeError: 'Order' object has no attribute
-        'process'`` from inside an assertion.
-        """
-        if self.process_name is not None:
-            return self.process_name
-        return getattr(self.process_class, 'process_name', 'process')
+    # ``_process_name`` lives on ScenarioAssertions — one implementation, not
+    # two. A copy here would shadow the mixin's via the MRO, leaving the one
+    # the assertions were written against dead code.
 
     def _process(self, instance):
         return getattr(instance, self._process_name)

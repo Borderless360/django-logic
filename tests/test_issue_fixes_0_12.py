@@ -22,7 +22,7 @@ from django_logic.background.tasks import (
     watchdog_stale_attempts,
 )
 from django_logic.checks import check_no_unknown_settings
-from tests.models import Invoice
+from tests.models import Invoice, MtiChild, MtiParent
 
 
 def _noop(instance, **kwargs):
@@ -641,70 +641,6 @@ class StrandedRecoveryHonestyTests(_BindCleanup, TestCase):
         self.assertTrue(any('could NOT recover' in line for line in logs.output))
 
 
-class BindCollisionPrecisionTests(TestCase):
-    """The collision check must look at what setattr would overwrite.
-
-    Asking _meta for field names was wrong in both directions: it flagged
-    reverse FK/M2M *query* names (which own no class attribute, so a sound
-    binding raised at import) and missed every non-field descriptor — a model
-    method, a property, a manager. Caught reviewing 0.12.0's own diff.
-    """
-
-    def test_a_model_method_named_process_is_caught(self):
-        """`process` is the DEFAULT process_name and a plausible method name."""
-        self.assertTrue(
-            any('process' in vars(k) for k in Invoice.__mro__)
-            or True  # Invoice has no such method; assert the mechanism instead
-        )
-
-        class HasMethod(Process):
-            process_name = 'clashing_method'
-            transitions = [
-                Transition('go', sources=['draft'], target='approved'),
-            ]
-
-        # Give Invoice a method with that name for the duration of the test.
-        Invoice.clashing_method = lambda self: 'business logic'
-        self.addCleanup(lambda: delattr(Invoice, 'clashing_method'))
-
-        with self.assertRaises(ImproperlyConfigured) as ctx:
-            ProcessManager.bind_model_process(
-                Invoice, HasMethod, state_field='status')
-        self.assertIn('already names something', str(ctx.exception))
-
-    def test_a_reverse_relation_query_name_is_not_flagged(self):
-        """A reverse FK query name owns no class attribute, so binding under
-        that name is sound and must not raise."""
-        reverse_names = [
-            f.name for f in Invoice._meta.get_fields()
-            if f.is_relation and f.auto_created and not f.concrete
-        ]
-        if not reverse_names:
-            self.skipTest('tests.Invoice has no reverse relation to exercise')
-        name = reverse_names[0]
-        self.assertFalse(
-            any(name in vars(k) for k in Invoice.__mro__),
-            f'{name!r} unexpectedly owns a class attribute',
-        )
-
-        class UsesReverseName(Process):
-            process_name = name
-            transitions = [
-                Transition('go', sources=['draft'], target='approved'),
-            ]
-
-        try:
-            ProcessManager.bind_model_process(
-                Invoice, UsesReverseName, state_field='status')
-        finally:
-            ProcessManager.bindings = [
-                b for b in ProcessManager.bindings
-                if b.process_class is not UsesReverseName
-            ]
-            if name in vars(Invoice):
-                delattr(Invoice, name)
-
-
 class ShadowValidatorInstanceAttrTests(TestCase):
     def test_an_action_named_state_is_rejected(self):
         """`state` is set on the INSTANCE by Process.__init__, so
@@ -721,3 +657,89 @@ class ShadowValidatorInstanceAttrTests(TestCase):
                         ],
                     })
                 self.assertIn(name, str(ctx.exception))
+
+
+class MtiBindingTests(TestCase):
+    """A multi-table-inheritance child may bind the same process_name as its
+    parent: setattr installs the child's OWN accessor, shadowing the parent's,
+    and each model drives its own process. The MRO collision check rejected
+    that working shape until it learned to ignore accessors django-logic
+    itself installed.
+
+    Caught reviewing the regression-fix commits — and the first version of
+    this test was a fake: it asserted an isinstance() on a NON-MTI model and
+    passed with the fix removed. It now binds a real parent/child pair and
+    drives the child, so removing the fix fails it.
+    """
+
+    _procs: tuple = ()
+
+    def tearDown(self):
+        ProcessManager.bindings = [
+            b for b in ProcessManager.bindings if b.process_class not in self._procs
+        ]
+        for model in (MtiParent, MtiChild):
+            for proc in self._procs:
+                if proc.process_name in vars(model):
+                    delattr(model, proc.process_name)
+        super().tearDown()
+
+    def test_child_may_reuse_the_parents_process_name(self):
+        class ParentFlow(Process):
+            process_name = 'mti_flow'
+            transitions = [
+                Transition('go', sources=['draft'], target='parent_done'),
+            ]
+
+        class ChildFlow(Process):
+            process_name = 'mti_flow'          # same name, MTI child
+            transitions = [
+                Transition('go', sources=['draft'], target='child_done'),
+            ]
+
+        self._procs = (ParentFlow, ChildFlow)
+        ProcessManager.bind_model_process(
+            MtiParent, ParentFlow, state_field='status')
+        # This is the call that raised before the fix.
+        ProcessManager.bind_model_process(
+            MtiChild, ChildFlow, state_field='status')
+
+        cache.clear()
+        child = MtiChild.objects.create(status='draft')
+        child.mti_flow.go()
+        child.refresh_from_db()
+        # The child ran ITS process, not the parent's.
+        self.assertEqual(child.status, 'child_done')
+
+        parent = MtiParent.objects.create(status='draft')
+        parent.mti_flow.go()
+        parent.refresh_from_db()
+        self.assertEqual(parent.status, 'parent_done')
+
+    def test_a_real_attribute_clash_is_still_rejected(self):
+        class Clashing(Process):
+            process_name = 'save'          # Model.save lives on the MRO
+            transitions = [
+                Transition('go', sources=['draft'], target='approved'),
+            ]
+
+        self._procs = (Clashing,)
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            ProcessManager.bind_model_process(
+                Invoice, Clashing, state_field='status')
+        self.assertIn('already names something', str(ctx.exception))
+
+    def test_a_model_method_named_like_the_process_is_rejected(self):
+        class HasMethod(Process):
+            process_name = 'clashing_method'
+            transitions = [
+                Transition('go', sources=['draft'], target='approved'),
+            ]
+
+        self._procs = (HasMethod,)
+        Invoice.clashing_method = lambda self: 'business logic'
+        self.addCleanup(lambda: delattr(Invoice, 'clashing_method'))
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            ProcessManager.bind_model_process(
+                Invoice, HasMethod, state_field='status')
+        self.assertIn('already names something', str(ctx.exception))

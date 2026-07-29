@@ -53,6 +53,16 @@ def _notify_transition_observers(owning_process, action_name, instance, transiti
 #: caller that passes one gets it silently overwritten, so they are documented
 #: as reserved rather than refused — the engine cannot distinguish its own
 #: forwarding from a caller's at that layer.
+class _ProcessAccessor(property):
+    """The model property ``bind_model_process`` installs.
+
+    A distinct subclass purely so a later binding can tell "django-logic put
+    this here" from "the model owns this attribute" — ``property`` objects
+    cannot carry a marker attribute. See the collision check in
+    ``bind_model_process``.
+    """
+
+
 #: Attributes ``Process.__init__`` sets on the instance. They shadow
 #: ``__getattr__`` exactly as class attributes do, but ``hasattr(cls, name)``
 #: cannot see them.
@@ -357,23 +367,29 @@ def _validate_action_names_not_shadowed(process_cls):
     for a state machine. There is no way to reach it, so this is a
     definition error, not a runtime concern.
     """
-    for proc_cls in _iter_process_tree(process_cls):
+    tree = list(_iter_process_tree(process_cls))
+    for proc_cls in tree:
         for transition in proc_cls.transitions or []:
             action_name = getattr(transition, 'action_name', None)
             if not action_name:
                 continue
-            # The names that shadow __getattr__ are the class attributes UNION
-            # the attributes __init__ sets on the instance. hasattr(cls, ...)
-            # alone missed `state`, `instance` and `field_name` — and `state`
-            # is the very first example this validator's own docstring cites.
-            if not (action_name in _PROCESS_INSTANCE_ATTRS
-                    or hasattr(proc_cls, action_name)):
-                continue
-            shadowed_by = (
-                f'an attribute Process.__init__ sets ({action_name})'
-                if action_name in _PROCESS_INSTANCE_ATTRS
-                else repr(getattr(proc_cls, action_name))
-            )
+            # Check against EVERY class in the tree, not just the declaring
+            # one. A nested transition is called through the BOUND process
+            # (``instance.process.nested_action()``), so an attribute on the
+            # bound class shadows it just as effectively — and checking only
+            # the nested class missed that entirely.
+            if action_name in _PROCESS_INSTANCE_ATTRS:
+                shadowed_by = (
+                    f'an attribute Process.__init__ sets ({action_name})')
+                owner = proc_cls
+            else:
+                owner = next(
+                    (k for k in tree if hasattr(k, action_name)), None)
+                if owner is None:
+                    continue
+                shadowed_by = (
+                    f'{owner.__name__}.{action_name} '
+                    f'({getattr(owner, action_name)!r})')
             raise ImproperlyConfigured(
                 f"Process {proc_cls.__module__}.{proc_cls.__name__} declares "
                 f"a transition named {action_name!r}, which is shadowed by "
@@ -679,9 +695,18 @@ class ProcessManager:
         # descriptor: a model method, a property, a cached_property, a
         # manager. `process` — the DEFAULT process_name — is a very plausible
         # method name on a model.
+        # Skip accessors django-logic itself installed. A multi-table-
+        # inheritance child legitimately binds the same process_name as its
+        # parent — setattr puts its own accessor on the child, shadowing the
+        # parent's, and each model drives its own process. Flagging the
+        # ancestor's accessor rejected that working shape. An identical rebind
+        # returns early above, and a same-model name reuse is caught by the
+        # duplicate-binding check, so nothing is lost by ignoring them here.
         clashing = next(
             (klass for klass in model.__mro__
-             if process_class.process_name in vars(klass)),
+             if process_class.process_name in vars(klass)
+             and not isinstance(
+                 vars(klass)[process_class.process_name], _ProcessAccessor)),
             None,
         )
         if clashing is not None:
@@ -704,5 +729,5 @@ class ProcessManager:
         setattr(
             model,
             process_class.process_name,
-            property(make_process_getter(state_field, process_class)),
+            _ProcessAccessor(make_process_getter(state_field, process_class)),
         )

@@ -279,7 +279,15 @@ class Transition:
                 # propagating either way"; without this the write's own
                 # exception won and the real cause was lost.
                 try:
-                    with transaction.atomic():
+                    # The instance's alias, not DEFAULT: set_state routes its
+                    # write with hints={'instance': ...}, so a savepoint opened
+                    # on DEFAULT would guard the wrong connection — no
+                    # savepoint around the actual write, and a stray
+                    # BEGIN/RELEASE on a connection that was not doing
+                    # anything.
+                    with transaction.atomic(
+                        using=state.instance._state.db or DEFAULT_DB_ALIAS
+                    ):
                         state.set_state(self.failed_state)
                 except Exception as write_error:
                     transition_logger.error(
@@ -452,7 +460,15 @@ class Action(Transition):
                 # exception on its way out, and must not log a SET_STATE line
                 # for a write that never landed.
                 try:
-                    with transaction.atomic():
+                    # The instance's alias, not DEFAULT: set_state routes its
+                    # write with hints={'instance': ...}, so a savepoint opened
+                    # on DEFAULT would guard the wrong connection — no
+                    # savepoint around the actual write, and a stray
+                    # BEGIN/RELEASE on a connection that was not doing
+                    # anything.
+                    with transaction.atomic(
+                        using=state.instance._state.db or DEFAULT_DB_ALIAS
+                    ):
                         state.set_state(self.failed_state)
                 except Exception as write_error:
                     transition_logger.error(

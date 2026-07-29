@@ -175,7 +175,13 @@ def _unstorable_text_paths(value, path='kwargs'):
                 yield path
     elif isinstance(value, dict):
         for k, v in value.items():
+            # Keys too: a NUL in a key breaks the write exactly as a NUL in a
+            # value does, and json.dumps encodes both happily.
+            yield from _unstorable_text_paths(k, f'{path} key {k!r}')
             yield from _unstorable_text_paths(v, f'{path}[{k!r}]')
+    elif isinstance(value, (set, frozenset)):
+        for v in value:
+            yield from _unstorable_text_paths(v, f'{path}{{...}}')
     elif isinstance(value, (list, tuple)):
         for i, v in enumerate(value):
             yield from _unstorable_text_paths(v, f'{path}[{i}]')

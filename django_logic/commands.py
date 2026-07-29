@@ -198,12 +198,15 @@ class Callbacks(BaseCommand):
         )
         using, in_transaction = _in_open_transaction(state.instance)
         for command in self.commands:
+            # object.__repr__ cannot raise for any object (it is just the type
+            # name and id), so the except handler below always has a label.
+            # The friendlier __name__ lookup happens inside the try, because a
+            # pathological __getattr__ can raise — and a label that escaped
+            # the swallow contract would replace the original failure
+            # exception (Callbacks backs failure_callbacks too).
+            command_name = object.__repr__(command)
             try:
-                # Inside the try, matching SideEffects / FailureSideEffects: a
-                # callable whose repr() raises would otherwise escape the
-                # swallow contract from the LOG line and replace the original
-                # failure exception (Callbacks backs failure_callbacks too).
-                command_name = getattr(command, '__name__', None) or object.__repr__(command)
+                command_name = getattr(command, '__name__', None) or command_name
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.CALLBACK.value} '
                     f'{command_name}'
