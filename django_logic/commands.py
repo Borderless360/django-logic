@@ -69,7 +69,18 @@ def note_deferred_unlock(using: str, state: State) -> None:
     registry.append(state)
 
 
-def _run_in_savepoint(using: str, fn):
+class _SilentRollback(Exception):
+    """Internal: the savepoint rolled back with NO exception propagating.
+
+    Raised only for callers that pass ``require_commit`` — those whose next
+    step reports the work as done. Without it "``fn`` returned" reads as
+    "``fn``'s writes committed", which is false on this path: the writes are
+    gone and nothing raised, so the caller commits its own bookkeeping on top
+    of an attempt that never happened.
+    """
+
+
+def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
     """Run ``fn`` inside a savepoint, without losing deferred unlocks.
 
     When the savepoint rolls back, Django discards every
@@ -80,7 +91,11 @@ def _run_in_savepoint(using: str, fn):
     until TTL *while the outer transaction commits successfully*.
     On rollback, release exactly the unlocks registered within this
     savepoint's window (``unlock()`` is a token compare-and-delete, so
-    this can never race a lock that was legitimately re-acquired)."""
+    this can never race a lock that was legitimately re-acquired).
+
+    ``require_commit`` turns the silent rollback below into a raised
+    ``_SilentRollback`` — for callers whose next act is to record the work
+    as done."""
     conn = transaction.get_connection(using)
     registry = _deferred_unlocks(conn)
     before = len(registry)
@@ -103,6 +118,17 @@ def _run_in_savepoint(using: str, fn):
         raise
     if rolled_back:
         _release_dropped(registry, before)
+        # Worth a line even where the caller tolerates it (best-effort hook
+        # bundles): the writes are gone and nothing raised, so their absence
+        # is the only other trace anyone gets.
+        note = (
+            'a savepoint rolled back with no exception propagating — a '
+            'database error inside it was raised and then suppressed, so '
+            'every write it made was discarded.'
+        )
+        transition_logger.warning(note)
+        if require_commit:
+            raise _SilentRollback(note)
     return result
 
 

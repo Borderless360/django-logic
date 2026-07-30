@@ -461,7 +461,45 @@ documented practice. Named-function conditions keep their keys.
   with nine fixes that had no pinning test anywhere — including #178's terminal
   path, the headline of this release.
 
+### Fixed (fifth review pass — reviewing the branch for release)
+
+- **A phase-2 attempt whose writes were silently discarded was reported as a
+  success.** A side-effect that raises a database error and suppresses it —
+  `try: obj.save() except IntegrityError: pass` without the nested `atomic()`
+  that idiom needs — leaves Django's `needs_rollback` set, so `Atomic.__exit__`
+  discards every write in the attempt savepoint with *no exception
+  propagating*. `_run_in_savepoint` already detected that case (it releases the
+  deferred unlocks the rollback dropped) but returned normally, and phase 2
+  reads "returned" as "committed": the row was marked completed with
+  `errors_count=0` and the success callbacks and `next_transition` ran on top of
+  work that no longer existed. It is now accounted as the failure it is, so the
+  attempt retries and terminalises to `failed_state` like any other. Reachable
+  on a `BackgroundAction`, which writes no state — a `BackgroundTransition` is
+  protected by accident, because its target `set_state` is the last statement in
+  the attempt and raises `TransactionManagementError` on the poisoned
+  connection. **Pre-existing, not new in 0.12.0** (0.11.0 behaves identically
+  for an action, and *worse* for a transition: it advanced the instance to
+  `target` and completed the row). Correctly-written consumer code — the
+  suppression wrapped in its own `atomic()` — is unaffected, and is pinned as
+  such. A silent rollback now also logs a WARNING wherever it happens,
+  including in the best-effort hook bundles that tolerate it, since otherwise
+  the missing writes are the only trace. (Reported by Cursor Bugbot; its
+  conclusion for the target-writing case did not reproduce.)
+
 ### Documentation
+
+- Four statements retired by this release's own design cut, still shipping in
+  the release: the deployment section promised `beat_schedule()` "routes all
+  **five** tasks … stranded 300s" two lines under a heading that correctly says
+  four (and named a `stranded_seconds=` keyword that no longer exists, so
+  copying it raises `TypeError`); `BackgroundTransition`'s docstring still made
+  a shared `in_progress_state` conditional on matching failure hooks and pointed
+  at the deleted `django_logic.E001`, which the README and `CLAUDE.md` correctly
+  describe as retired; three operator-facing log lines sent whoever read them to
+  `recover_stranded_states`, deleted in the same commit; and the
+  `failed_state == in_progress_state` error still justified itself by
+  "stranded recovery can never settle". The prose and comments were updated with
+  the cut — the runtime strings were not.
 
 - The **Complete Example is runnable as printed**. Its conditions called
   `instance.items.all()` and read `instance.shipping_address` on a model that

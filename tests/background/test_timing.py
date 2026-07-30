@@ -93,8 +93,10 @@ class NonTerminalFailureTimingTests(TestCase):
 class RestoreFailedTimingTests(TestCase):
     def test_restore_failure_marks_completed_without_timing(self):
         widget = Widget.objects.create()
-        # TM pointing at a transition that doesn't exist on the process —
-        # _restore raises _RestoreError before mark_as_started runs.
+        # TM pointing at a transition that doesn't exist on the process, so
+        # _restore raises _RestoreError. stamp_attempt_started deliberately
+        # runs BEFORE restore (#179), so started_at is set and duration_ms
+        # stays null.
         tm = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',

@@ -164,8 +164,8 @@ class Transition:
             raise ImproperlyConfigured(
                 f"Transition {action_name!r}: failed_state and "
                 f"in_progress_state are both {self.failed_state!r}. A failed "
-                f"instance would be indistinguishable from a running one, so "
-                f"stranded recovery can never settle. Give the failure its "
+                f"instance would be indistinguishable from a running one, and "
+                f"the terminal write a silent no-op. Give the failure its "
                 f"own state."
             )
         # Per-transition override of the global LOCK_TIMEOUT for the

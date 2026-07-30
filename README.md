@@ -1056,7 +1056,7 @@ Celery mode has three things you **must** wire up, or the durability guarantees 
 
 **2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, the timeout watchdog, and cleanup never run** — a single lost broker message then leaves an instance waiting forever.
 
-Use the ready-made schedule — it routes all five tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, stranded 300s, cleanup daily), each overridable by keyword:
+Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, cleanup daily), each overridable by keyword:
 
 ```python
 # celery.py — after the app is configured

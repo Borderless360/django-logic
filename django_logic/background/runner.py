@@ -401,7 +401,9 @@ def _finalize_terminal_from_watchdog(
         transition_logger.error(
             f'{source}: TransitionMessage#{tm.pk} could not be restored '
             f'({type(exc).__name__}: {exc}); completing it so the safety net '
-            f'stops retrying. The instance is left for stranded recovery.',
+            f'stops retrying. The instance is left parked in its '
+            f'in_progress_state, which is an implicit source of the same '
+            f'transition — re-drive it to move it on.',
             exc_info=True,
         )
         tm.mark_as_completed(measure_duration=False)
@@ -698,8 +700,19 @@ def _run_atomic(tm_id: int) -> _Outcome:
                 # an instance whose state write was rolled back, until its TTL.
                 # Every hook bundle already routes through this helper; the
                 # attempt savepoint was the one raw atomic left.
+                #
+                # require_commit, because _handle_success below records the
+                # work as done: a side-effect that raises a database error and
+                # suppresses it (`try: obj.save() except IntegrityError: pass`
+                # without a nested atomic) makes Django discard the savepoint
+                # with nothing propagating. The attempt then "returns
+                # successfully" having committed none of its writes — a
+                # completed row, success callbacks and next_transition on top
+                # of work that was thrown away. Accounted as a failure
+                # instead, which is what it is.
                 _run_in_savepoint(
                     instance._state.db or DEFAULT_DB_ALIAS, _attempt,
+                    require_commit=True,
                 )
             except Exception as error:
                 return _handle_failure(tm, transition, state, kwargs, error)
@@ -717,11 +730,11 @@ def _handle_restore_failure(
     There is no transition object to fail through, so this is deliberately
     thinner than ``_handle_failure``: record the error, retry while retries
     remain, and at ``MAX_ERRORS`` complete the row loudly so the retry loop
-    stops. No ``failed_state`` is written (nothing restored to write it on) —
-    the instance is left in its ``in_progress_state`` for
-    re-drivable (``in_progress_state`` is an implicit source of its own
-    transition) — a visible parked state rather than an infinite loop, with
-    the reason on the completed row.
+    stops. No ``failed_state`` is written (nothing restored to write it on),
+    so the instance is left parked in its ``in_progress_state`` — which is an
+    implicit source of the same transition, so it stays re-drivable: a visible
+    parked state rather than an infinite loop, with the reason on the completed
+    row.
     """
     tm.record_error(error)
     transition_logger.error(
@@ -735,7 +748,8 @@ def _handle_restore_failure(
     transition_logger.error(
         f'TransitionMessage#{tm.pk} restore failed {tm.errors_count} times; '
         f'completing the row so it stops retrying. No failed_state could be '
-        f'written — the instance is left for stranded recovery.'
+        f'written — the instance is left parked in its in_progress_state, '
+        f're-drivable via the implicit source.'
     )
     tm.mark_as_completed(measure_duration=False)
     return _Outcome(terminal=True, succeeded=False, exception=error)
@@ -813,8 +827,9 @@ def _handle_failure(
                 f'{kwargs.get("tr_id")} could not write failed_state '
                 f'{transition.failed_state!r} on {state.instance_key}: '
                 f'{type(write_error).__name__}: {write_error}. Completing the '
-                f'row anyway so it stops retrying; the instance stays in '
-                f'{transition.in_progress_state!r} for stranded recovery.',
+                f'row anyway so it stops retrying; the instance stays parked '
+                f'in {transition.in_progress_state!r}, re-drivable via the '
+                f'implicit source.',
                 exc_info=True,
             )
             tm.record_failure_side_effect_error(

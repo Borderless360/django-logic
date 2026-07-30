@@ -54,9 +54,10 @@ class BackgroundTransition(Transition):
         - ``in_progress_state`` — if omitted, the state field does not
           change until phase 2 finishes. Providing it is strongly
           recommended so concurrent readers see "in progress" rather
-          than the pre-transition state. Transitions may share one, as
-          long as they also share a ``failed_state`` and failure hooks —
-          see ``django_logic.E001``.
+          than the pre-transition state. Transitions may share one
+          freely: it is written atomically with the ``TransitionMessage``
+          row, which names the exact transition in flight, so nothing has
+          to infer an owner from the state value.
     """
 
     is_background = True
