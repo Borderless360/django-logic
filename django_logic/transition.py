@@ -225,10 +225,22 @@ class Transition:
             else state.lock(self.lock_timeout)
         )
         if not locked:
+            # Logged BEFORE the raise, or a permanently frozen instance is
+            # indistinguishable from a healthy start: both emit one Start line
+            # and nothing else (#188 — seven instances re-driven for ten days
+            # produced ~1400 Start lines and zero indication a leaked lock was
+            # the cause). INFO, not ERROR: losing the lock race is an expected
+            # concurrency outcome (#154); it is the *pattern* of failed
+            # acquisitions with no interleaved Unlock that signals a leak.
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+                f'failed {state.instance_key} — state is locked'
+            )
             raise TransitionNotAllowed("State is locked")
 
         transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value}'
+            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+            f'{state.instance_key}'
         )
 
         # Revalidate under the lock. The source/condition checks in
@@ -250,6 +262,12 @@ class Transition:
                 )
         except Exception:
             state.unlock()
+            # Without this line the per-instance lifecycle (#188) shows a Lock
+            # with no Unlock — a revalidation failure reading as a leak.
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
+                f'{state.instance_key} after revalidation failure'
+            )
             raise
 
         self._init_transition_context(kwargs)
@@ -383,12 +401,17 @@ class Transition:
                 note_deferred_unlock(using, state)
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
-                    f'deferred until commit'
+                    f'{state.instance_key} deferred until commit'
                 )
                 return
         state.unlock()
+        # instance_key on the lifecycle lines (#188): Start used to be the only
+        # line carrying it, so a per-instance log filter could not show whether
+        # the lock was ever taken or released — the absence of a Lock line was
+        # invisible without a tr_id self-join.
         transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
+            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
+            f'{state.instance_key}'
         )
 
     @staticmethod

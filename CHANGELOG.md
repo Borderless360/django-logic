@@ -356,6 +356,25 @@ documented practice. Named-function conditions keep their keys.
   the head, so once the accumulated text approached the 10k limit, the note just
   appended — the most recent diagnostic — was what got cut.
 
+- **A failed lock acquisition is logged before the raise** (#188). A frozen
+  instance (leaked lock) and a healthy start were indistinguishable: both
+  emitted one `Start` line and nothing else, because `change_state` raised
+  `TransitionNotAllowed("State is locked")` before logging anything. In the
+  incident that surfaced this, seven instances re-driven every 20 minutes for
+  ten days produced ~1400 `Start` lines and zero indication a lock was the
+  cause — and the wrong conclusion ("the worker drops it") made it into a bug
+  report. Both call sites now log `Lock failed <instance_key> — state is
+  locked` at INFO (not ERROR — losing the lock race is expected concurrency,
+  per #154) before raising; the background phase-1 conditions/permissions
+  rejection gets the same treatment. The `Lock`/`Unlock` lifecycle lines now
+  carry `instance_key`, so a per-instance log filter shows whether the lock
+  was ever taken or released without a `tr_id` self-join — previously `Start`
+  was the only line naming the instance, which made the *absence* of a `Lock`
+  line invisible during triage. The revalidation-failure release also logs
+  (`Unlock <instance_key> after revalidation failure`) so it cannot read as a
+  leak. Log-format note for anything parsing these lines: `Lock` and `Unlock`
+  gained a trailing `instance_key` argument.
+
 - **An expected concurrency guard is no longer logged at ERROR** (#154). Phase
   1's post-create source recheck raises `SourceStateChanged` (a
   `TransitionNotAllowed` subclass, so existing `except` clauses are unaffected),

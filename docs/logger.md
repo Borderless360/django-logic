@@ -55,14 +55,34 @@ tr_id <Event> ...args
 
 ```
 tr_id Start ProcessName action_name instance_key root_id parent_id
-tr_id Lock
+tr_id Lock instance_key
 tr_id Set State in_progress_state          (only if in_progress_state is declared)
 tr_id SideEffect reserve_stock
 tr_id SideEffect generate_labels           (a new SideEffect line means the previous one finished)
 tr_id Set State target
-tr_id Unlock
+tr_id Unlock instance_key
 tr_id Callback send_confirmation_email
 ```
+
+`Lock` and `Unlock` carry the `instance_key` (0.12.0, #188) so a per-instance
+log filter shows the whole lock lifecycle — previously only `Start` named the
+instance, so the *absence* of a `Lock` line was invisible without a `tr_id`
+self-join.
+
+A **failed acquisition is logged, at INFO, before the raise** (0.12.0, #188):
+
+```
+tr_id Lock failed instance_key — state is locked
+```
+
+Without it, a permanently frozen instance (leaked lock) and a healthy start
+were indistinguishable: both emitted one `Start` line and nothing else. It is
+INFO, not ERROR, because losing the lock race is an expected concurrency
+outcome (#154) — the *pattern* of repeated `Lock failed` lines with no
+interleaved `Unlock` for that instance is the leak signal. Under
+`DEFER_UNLOCK_UNTIL_COMMIT` the release line reads
+`Unlock instance_key deferred until commit`; a revalidation failure releases
+with `Unlock instance_key after revalidation failure`.
 
 (`Complete` is a background-only event — the synchronous path ends with the
 `Unlock` + `Callback` lines.)
@@ -88,10 +108,10 @@ All side-effects **and** the target-state write run inside a single Celery task
 
 ```
 tr_id Start ProcessName fulfil instance_key root_id parent_id [background queue=django_logic.critical]
-tr_id Lock
+tr_id Lock instance_key
 tr_id Set State fulfilling
 tr_id TransitionMessage#42 created (queue=django_logic.critical)
-tr_id Unlock
+tr_id Unlock instance_key
 ... worker picks up the task ...
 tr_id Phase2 Start fulfil instance_key queue=django_logic.critical
 tr_id SideEffect reserve_stock
@@ -108,15 +128,15 @@ not explicitly forwarded.
 
 ```
 tr_a Start ProcessName outer instance_key root_id parent_a
-tr_a Lock
+tr_a Lock instance_key
 tr_a SideEffect invoke_inner
 
 tr_b Start ProcessName inner instance_key root_id parent_a
-tr_b Lock
-tr_b Unlock
+tr_b Lock instance_key
+tr_b Unlock instance_key
 tr_b Complete
 
-tr_a Unlock
+tr_a Unlock instance_key
 tr_a Complete
 ```
 

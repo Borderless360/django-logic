@@ -115,6 +115,12 @@ class BackgroundTransition(Transition):
         )
 
         if not self.is_valid(state.instance, kwargs.get('user')):
+            # Same observability rule as the failed lock below (#188): a
+            # rejection with no log line leaves a Start with no explanation.
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {self.action_name} '
+                f'{state.instance_key} rejected by conditions or permissions'
+            )
             raise TransitionNotAllowed(
                 f"BackgroundTransition '{self.action_name}' rejected by "
                 f"its conditions or permissions."
@@ -129,9 +135,17 @@ class BackgroundTransition(Transition):
         # does not roll back with the database), and a DB row needs no TTL
         # refresh across long retries.
         if not state.lock():
+            # See Transition.change_state (#188): logged before the raise, at
+            # INFO per #154, with the instance key — a frozen instance must
+            # not read as "the transition starts and the worker drops it".
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+                f'failed {state.instance_key} — state is locked'
+            )
             raise TransitionNotAllowed("State is locked")
         transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value}'
+            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+            f'{state.instance_key}'
         )
         try:
             # Same under-the-lock revalidation as the synchronous path:
@@ -141,7 +155,8 @@ class BackgroundTransition(Transition):
         finally:
             state.unlock()
             transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
+                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
+                f'{state.instance_key}'
             )
 
         from django_logic.background.dispatch import dispatch_transition
