@@ -76,8 +76,8 @@ def validate_core_settings() -> None:
     ):
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC['LOCK_TIMEOUT'] must be a positive finite number "
-            f"of seconds (it is the lock TTL and the liveness signal for "
-            f"stranded-state recovery), got {value!r}."
+            f"of seconds (it is the state lock's TTL, so it bounds how long a "
+            f"crashed run can keep an instance locked), got {value!r}."
         )
     # Both strict flags are read with `is True`, so truthy garbage disables
     # them rather than enabling — silent in the UNSAFE direction. Validated

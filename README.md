@@ -975,7 +975,7 @@ The periodic starter re-dispatches stale transitions back to their own queue —
 
 ### Safety-net tasks
 
-Five periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
+Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
 
 - `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
