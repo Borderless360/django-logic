@@ -3,14 +3,49 @@
 Each assertion reads from the DB / the last tracked transition and, on failure,
 raises with the AI-readable timeline (and optionally a snapshot) attached.
 Mixed into ``ProcessScenario``; relies on the host providing ``state_field``,
-``process_name``, ``_timeline``, ``_last_tracker``, ``_fail`` and ``_process``.
+``process_class``, ``_timeline``, ``_last_tracker``, ``_fail`` and ``_process``.
 """
 from __future__ import annotations
 
 from django_logic.testing.runner import latest_message, message_for
 
 
+def _names(value, assertion: str, argument: str = 'names') -> list:
+    """Normalise a collection-of-names argument, rejecting a bare string.
+
+    ``assert_not_available(obj, 'approve')`` iterates ``'approve'`` per
+    character, so every "is it in the available actions?" test is against
+    ``'a'``, ``'p'``, ... — none of which is ever an action name, and the
+    assertion passes VACUOUSLY (the ``not_ran`` / ``not_available`` variants
+    silently assert nothing at all). Same failure mode, same loud rejection as
+    a bare-string ``sources`` on a Transition.
+    """
+    if isinstance(value, str):
+        raise TypeError(
+            f"{assertion}: {argument} must be a list of names, not the bare "
+            f"string {value!r} — a string is iterated per character, which "
+            f"makes the assertion pass without checking anything. Use "
+            f"[{value!r}]."
+        )
+    return list(value)
+
+
 class ScenarioAssertions:
+    @property
+    def _process_name(self) -> str:
+        """The accessor the process is bound under.
+
+        Never read the raw ``process_name`` here: its default is ``None`` (it
+        derives from ``process_class.process_name``), so a direct read passed
+        ``process_name=None`` into the message lookups below, which then found
+        no row and made the assertion pass or fail for the wrong reason.
+        """
+        explicit = getattr(self, 'process_name', None)
+        if explicit is not None:
+            return explicit
+        return getattr(
+            getattr(self, 'process_class', None), 'process_name', 'process')
+
     # --- state -----------------------------------------------------------
 
     def assert_state(self, instance, expected):
@@ -36,6 +71,7 @@ class ScenarioAssertions:
         return self._process(instance).get_available_actions(user=user)
 
     def assert_available(self, instance, actions, user=None):
+        actions = _names(actions, 'assert_available', 'actions')
         avail = self._available(instance, user=user)
         missing = [a for a in actions if a not in avail]
         if missing:
@@ -49,6 +85,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_available({actions})', ok=True)
 
     def assert_not_available(self, instance, actions, user=None):
+        actions = _names(actions, 'assert_not_available', 'actions')
         avail = self._available(instance, user=user)
         present = [a for a in actions if a in avail]
         if present:
@@ -75,6 +112,7 @@ class ScenarioAssertions:
         domain change. Pair it with assert_changed / assert_unchanged /
         assert_related_count (or a direct DB assertion) to pin the OUTCOME the
         side-effect is supposed to produce (issue #103)."""
+        names = _names(names, 'assert_side_effects_ran')
         ran = self._tracker().side_effects_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -84,6 +122,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_side_effects_ran({names})', ok=True)
 
     def assert_side_effects_not_ran(self, names):
+        names = _names(names, 'assert_side_effects_not_ran')
         ran = self._tracker().side_effects_ran
         present = [n for n in names if n in ran]
         if present:
@@ -97,6 +136,7 @@ class ScenarioAssertions:
         did the right thing. For a callback whose whole purpose is a domain
         effect (e.g. deleting related rows), also assert the effect with
         assert_related_count / assert_changed (issue #103)."""
+        names = _names(names, 'assert_callbacks_ran')
         ran = self._tracker().callbacks_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -106,6 +146,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_callbacks_ran({names})', ok=True)
 
     def assert_failure_side_effects_ran(self, names):
+        names = _names(names, 'assert_failure_side_effects_ran')
         ran = self._tracker().failure_side_effects_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -115,6 +156,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_failure_side_effects_ran({names})', ok=True)
 
     def assert_failure_callbacks_ran(self, names):
+        names = _names(names, 'assert_failure_callbacks_ran')
         ran = self._tracker().failure_callbacks_ran
         missing = [n for n in names if n not in ran]
         if missing:
@@ -126,7 +168,7 @@ class ScenarioAssertions:
     # --- background error state ------------------------------------------
 
     def assert_error_recorded(self, instance, contains):
-        tm = latest_message(instance, process_name=self.process_name)
+        tm = latest_message(instance, process_name=self._process_name)
         if tm is None or contains not in (tm.last_error_message or ''):
             self._record_assert(f'assert_error_recorded({contains!r})', ok=False)
             self._fail(
@@ -138,7 +180,7 @@ class ScenarioAssertions:
         self._record_assert(f'assert_error_recorded({contains!r})', ok=True)
 
     def assert_error_count(self, instance, expected):
-        tm = latest_message(instance, process_name=self.process_name)
+        tm = latest_message(instance, process_name=self._process_name)
         actual = None if tm is None else tm.errors_count
         if actual != expected:
             self._record_assert(f'assert_error_count({expected})', ok=False)
@@ -161,7 +203,7 @@ class ScenarioAssertions:
         *became*, not merely that a hook ran. ``capture`` records the "before"
         so the "after" delta is checkable.
         """
-        fields = list(fields)
+        fields = _names(fields, 'capture', 'fields')
         fresh = type(instance)._base_manager.get(pk=instance.pk)
         snap = {f: getattr(fresh, f) for f in fields}
         self._record('capture', 'OK', f'{fields} = {snap}')
@@ -179,6 +221,16 @@ class ScenarioAssertions:
         instance.refresh_from_db()
         problems = []
         for field, pair in expected.items():
+            # Say what the shape is, rather than letting the unpack below
+            # fail with "too many values to unpack (expected 2)" — which
+            # gives no clue that {field: (old, new)} is what's wanted.
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise TypeError(
+                    f"assert_changed expects {{field: (old, new)}}; "
+                    f"{field!r} maps to {pair!r}. Pass the value it held "
+                    f"before and the value it should hold now, e.g. "
+                    f"{{{field!r}: ('draft', 'approved')}}."
+                )
             old, new = pair
             was = before.get(field)
             now = getattr(instance, field)
@@ -198,6 +250,7 @@ class ScenarioAssertions:
         """Assert the named fields still hold their ``before`` values — the
         drive must NOT have touched them (e.g. a failed transition must leave
         business fields intact). Refreshes ``instance`` from the DB first."""
+        fields = _names(fields, 'assert_unchanged', 'fields')
         instance.refresh_from_db()
         problems = []
         for field in fields:
@@ -346,10 +399,10 @@ class ScenarioAssertions:
         """
         if transition_name is not None:
             tm = message_for(instance, transition_name,
-                             process_name=self.process_name)
+                             process_name=self._process_name)
             label = f'assert_transition_owner({transition_name!r}, {owner!r})'
         else:
-            tm = latest_message(instance, process_name=self.process_name)
+            tm = latest_message(instance, process_name=self._process_name)
             label = f'assert_transition_owner({owner!r})'
         actual = None if tm is None else tm.owning_process_class
         if actual != owner:

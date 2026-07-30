@@ -24,7 +24,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 
 from django_logic.background import settings as bg_settings
-from django_logic.background.exceptions import AlreadyInProgress
+from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
     KwargsSerializationError,
@@ -37,7 +37,7 @@ from django_logic.logger import (
     TransitionEventType,
 )
 from django_logic.state import State
-from django_logic.transition import Transition
+from django_logic.transition import Transition, _refuse_engine_param_kwargs
 
 
 class BackgroundTransition(Transition):
@@ -54,9 +54,10 @@ class BackgroundTransition(Transition):
         - ``in_progress_state`` — if omitted, the state field does not
           change until phase 2 finishes. Providing it is strongly
           recommended so concurrent readers see "in progress" rather
-          than the pre-transition state. Transitions may share one, as
-          long as they also share a ``failed_state`` and failure hooks —
-          see ``django_logic.E001``.
+          than the pre-transition state. Transitions may share one
+          freely: it is written atomically with the ``TransitionMessage``
+          row, which names the exact transition in flight, so nothing has
+          to infer an owner from the state value.
     """
 
     is_background = True
@@ -100,6 +101,9 @@ class BackgroundTransition(Transition):
         return self.queue or bg_settings.default_queue()
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
+        # Before the lock, and before the kwargs are serialized into a row that
+        # phase 2 would fail on for the same reason.
+        _refuse_engine_param_kwargs(self.action_name, kwargs)
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
         queue_name = self.get_queue_name()
@@ -112,6 +116,12 @@ class BackgroundTransition(Transition):
         )
 
         if not self.is_valid(state.instance, kwargs.get('user')):
+            # Same observability rule as the failed lock below (#188): a
+            # rejection with no log line leaves a Start with no explanation.
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {self.action_name} '
+                f'{state.instance_key} rejected by conditions or permissions'
+            )
             raise TransitionNotAllowed(
                 f"BackgroundTransition '{self.action_name}' rejected by "
                 f"its conditions or permissions."
@@ -126,9 +136,17 @@ class BackgroundTransition(Transition):
         # does not roll back with the database), and a DB row needs no TTL
         # refresh across long retries.
         if not state.lock():
+            # See Transition.change_state (#188): logged before the raise, at
+            # INFO per #154, with the instance key — a frozen instance must
+            # not read as "the transition starts and the worker drops it".
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+                f'failed {state.instance_key} — state is locked'
+            )
             raise TransitionNotAllowed("State is locked")
         transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value}'
+            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+            f'{state.instance_key}'
         )
         try:
             # Same under-the-lock revalidation as the synchronous path:
@@ -138,7 +156,8 @@ class BackgroundTransition(Transition):
         finally:
             state.unlock()
             transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value}'
+                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
+                f'{state.instance_key}'
             )
 
         from django_logic.background.dispatch import dispatch_transition
@@ -225,7 +244,7 @@ class BackgroundTransition(Transition):
             current = state.get_persisted_state()
             if current not in self.sources:
                 # The atomic block rolls the TM row back.
-                raise TransitionNotAllowed(
+                raise SourceStateChanged(
                     f"BackgroundTransition '{self.action_name}' is not "
                     f"allowed: the persisted state moved to {current!r} "
                     f"while phase 1 waited on a finishing flight — it is "

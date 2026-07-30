@@ -77,7 +77,11 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
     process_class = None        # type[Process]
     model = None                # type[Model]
     state_field = 'status'
-    process_name = 'process'
+    #: Accessor the process is bound under. Leave it alone: it defaults to
+    #: ``process_class.process_name``, so a process with a custom name needs
+    #: no second declaration here. Set it only when the scenario drives a
+    #: process bound under a name that differs from its own ``process_name``.
+    process_name = None
 
     def setUp(self):
         super().setUp()
@@ -95,8 +99,12 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     # --- internals -------------------------------------------------------
 
+    # ``_process_name`` lives on ScenarioAssertions — one implementation, not
+    # two. A copy here would shadow the mixin's via the MRO, leaving the one
+    # the assertions were written against dead code.
+
     def _process(self, instance):
-        return getattr(instance, self.process_name)
+        return getattr(instance, self._process_name)
 
     def _record(self, label, outcome, detail=''):
         self._timeline.append({'label': label, 'outcome': outcome, 'detail': detail})
@@ -105,7 +113,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         self._record(label, 'OK' if ok else 'FAILED', detail)
 
     def _fail(self, message, instance=None):
-        tm = (latest_message(instance, process_name=self.process_name)
+        tm = (latest_message(instance, process_name=self._process_name)
               if instance is not None else None)
         self.fail(format_failure(message, self._timeline, tm=tm))
 
@@ -133,7 +141,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def snapshot(self, instance):
         return _snapshot(instance, state_field=self.state_field,
-                         process_name=self.process_name)
+                         process_name=self._process_name)
 
     # --- driving the process --------------------------------------------
 
@@ -173,7 +181,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                          expect_raises=None):
         """Re-run the instance's uncompleted transition inline — what the
         periodic starter would do."""
-        tm = uncompleted_message(instance, process_name=self.process_name)
+        tm = uncompleted_message(instance, process_name=self._process_name)
         if tm is None:
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
             self._fail('retry_transition(): no uncompleted TransitionMessage for '
@@ -200,12 +208,30 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def _drive(self, instance, action, *, background, fail_side_effect, fail_with,
                expect_raises, kwargs):
-        if not transitions_for(self.process_class, action):
+        declared = transitions_for(self.process_class, action)
+        if not declared:
             self._record(f'{"background_" if background else ""}transition({action!r})',
                          'FAILED', 'no such transition')
             self._fail(f'No transition named {action!r} on '
                        f'{self.process_class.__name__} (or its nested processes).',
                        instance=instance)
+        # Only every declaration being background makes this the wrong
+        # entrypoint — a sync+background namesake pair is legitimately driven
+        # by transition() (it resolves the sync one).
+        if not background and all(
+                getattr(t, 'is_background', False) for t in declared):
+            self._record(f'transition({action!r})', 'FAILED',
+                         'background transition')
+            self._fail(
+                f'transition({action!r}) drives a BackgroundTransition — use '
+                f'background_transition({action!r}), which runs phase 1 and '
+                f'phase 2 inline. Under the global default '
+                f"BACKGROUND_EXECUTION='celery' this call only ENQUEUES a "
+                f'Celery task (no worker runs it here), so the drive returns '
+                f'with the instance in its in_progress_state, an uncompleted '
+                f'TransitionMessage left behind, and the real failure surfaces '
+                f'later as a wrong-state or already-in-flight error.',
+                instance=instance)
         before = self._state(instance)
         # Track the WHOLE process tree, not just the named action — one drive
         # can also execute next_transition follow-ups and callback-triggered
@@ -216,7 +242,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                    fail_with=fail_with) as tracker:
             if background:
                 raised = self._call(
-                    lambda: run_background_sync(instance, self.process_name, action, kwargs))
+                    lambda: run_background_sync(instance, self._process_name, action, kwargs))
             else:
                 raised = self._call(
                     lambda: getattr(self._process(instance), action)(**kwargs))
@@ -250,32 +276,25 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # FailureSideEffects swallow (the caller sees nothing). A failure test
         # that does not declare which it expects cannot tell the two apart —
         # the exact blind spot that let the 0.1.6->0.2.0 swallow flip pass.
+        # The predicates live in assert_raised / assert_not_raised — this
+        # used to re-implement all three (raised-is-None, isinstance,
+        # raised-is-not-None) with its own copies of the failure messages, so
+        # the contract was pinned by two independent code paths reading the
+        # same self._last_raised. Only the timeline record is local, because
+        # it carries the drive label the assertions do not know about.
         if expect_raises is not None and expect_raises is not False:
             if raised is None:
                 self._record(label, 'FAILED',
                              f'expected {_exc_names(expect_raises)} to reach caller')
-                self._fail(
-                    f'{label}: expected {_exc_names(expect_raises)} to '
-                    f'propagate to the caller, but the drive completed without '
-                    f'raising. Either a failure that the contract says must '
-                    f're-raise was swallowed, or no failure occurred.',
-                    instance=instance)
             elif not isinstance(raised, expect_raises):
                 self._record(label, 'FAILED',
                              f'{type(raised).__name__} != {_exc_names(expect_raises)}')
-                self._fail(
-                    f'{label}: expected {_exc_names(expect_raises)} to '
-                    f'propagate to the caller, but got '
-                    f'{type(raised).__name__}: {raised}.', instance=instance)
+            self.assert_raised(expect_raises)
         elif expect_raises is False:
             if raised is not None:
                 self._record(label, 'FAILED',
                              f'{type(raised).__name__} propagated (expected swallow)')
-                self._fail(
-                    f'{label}: expected the failure to be SWALLOWED at the '
-                    f'caller boundary (best-effort callback / follow-up / '
-                    f'failure side-effect), but {type(raised).__name__} '
-                    f'propagated to the caller: {raised}.', instance=instance)
+            self.assert_not_raised()
         else:
             # Legacy default: an injected exception is expected (absorbed
             # silently); anything else is a real, unexpected failure and fails
@@ -289,17 +308,25 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # test into a happy-path run (issue #94). track() already rejects
         # names that exist nowhere; this catches a hook that exists but did
         # not execute during this drive (e.g. wrong action, gated earlier).
+        # An exception that DID propagate is no evidence the injection fired:
+        # only identity with tracker.injected_exception is, and the tracker
+        # records that moment as failed_side_effect. A different hook raising
+        # the expect_raises type used to buy the injection an alibi.
         if (tracker.requested_fail_side_effect is not None
-                and tracker.failed_side_effect is None and raised is None):
+                and tracker.failed_side_effect is None):
             self._record(label, 'FAILED',
                          f'fail_side_effect={tracker.requested_fail_side_effect!r} '
                          f'never fired')
+            elsewhere = ('' if raised is None else
+                         f' The {type(raised).__name__} that reached the caller '
+                         f'came from another hook, not from the injection.')
             self._fail(
                 f'{label}: fail_side_effect='
                 f'{tracker.requested_fail_side_effect!r} never fired — no '
                 f'side-effect with that name executed during this drive, so '
                 f'the transition completed as a happy path instead of the '
-                f'failure scenario this test intends.', instance=instance)
+                f'failure scenario this test intends.{elsewhere}',
+                instance=instance)
         self._record(label, 'OK' if raised is None else 'FAILED(injected)', detail)
         # Record the journey step: the observable transformation this drive
         # applied to the object. For a background chain the follow-up runs

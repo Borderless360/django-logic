@@ -2,6 +2,7 @@ from hashlib import blake2b
 from uuid import uuid4
 
 from django.core.cache import cache
+from django.db import DEFAULT_DB_ALIAS
 
 from django_logic.conf import lock_timeout as _get_lock_timeout
 
@@ -24,8 +25,16 @@ class State(object):
         an existing row raise ``DoesNotExist`` mid-transition.
         """
         model = type(self.instance)
+        # Route to the instance's own connection. Every WRITE path is already
+        # instance-aware (Model.save and refresh_from_db pass
+        # hints={'instance': ...}; _release_lock reads instance._state.db), but
+        # this read was unrouted, so on a non-default alias the under-lock
+        # revalidation and the phase-2 state guard compared against whatever
+        # row the DEFAULT database happened to hold.
+        using = self.instance._state.db or DEFAULT_DB_ALIAS
         return (
             model._base_manager
+            .using(using)
             .values_list(self.field_name, flat=True)
             .get(pk=self.instance.pk)
         )
@@ -38,8 +47,19 @@ class State(object):
         re-reads the state column — any side-effect mutations on other
         attributes survive.
         """
+        previous = getattr(self.instance, self.field_name)
         setattr(self.instance, self.field_name, state)
-        self.instance.save(update_fields=[self.field_name])
+        try:
+            self.instance.save(update_fields=[self.field_name])
+        except Exception:
+            # Restore the attribute the database refused. setattr happens
+            # before the write, so a rejected save used to leave the instance
+            # holding a value the database never had — harmless while the
+            # exception escaped everything, but the failure paths now swallow
+            # a rejected state write, so this phantom instance reaches
+            # failure_side_effects, failure_callbacks and the sync caller.
+            setattr(self.instance, self.field_name, previous)
+            raise
         self.instance.refresh_from_db(fields=[self.field_name])
 
     @property

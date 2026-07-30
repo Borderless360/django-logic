@@ -10,14 +10,15 @@ import math
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
+# The core reader, shared rather than re-implemented: it validates that
+# DJANGO_LOGIC is a dict, which every ``.get()`` below assumes — a string or
+# a list used to surface as a bare AttributeError raised from whichever
+# ready() hook read a setting first, naming nothing.
+from django_logic.conf import _conf
 
 EXECUTION_CELERY = 'celery'
 EXECUTION_SYNC = 'sync'
 _VALID_EXECUTION_MODES = frozenset({EXECUTION_CELERY, EXECUTION_SYNC})
-
-
-def _conf() -> dict:
-    return getattr(settings, 'DJANGO_LOGIC', {}) or {}
 
 
 def background_execution() -> str:
@@ -76,9 +77,8 @@ def beat_schedule(
     detect_stuck_seconds: float = 300.0,
     watchdog_seconds: float = 120.0,
     cleanup_seconds: float = 86_400.0,
-    stranded_seconds: float = 300.0,
 ) -> dict:
-    """Ready-made Celery beat entries for the five safety-net tasks,
+    """Ready-made Celery beat entries for the four safety-net tasks,
     routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
     Use it from your project's ``celery.py`` (after the app is configured)
@@ -111,8 +111,6 @@ def beat_schedule(
             'django_logic.detect_stuck_transitions', detect_stuck_seconds),
         'django-logic-watchdog': entry(
             'django_logic.watchdog_stale_attempts', watchdog_seconds),
-        'django-logic-recover-stranded': entry(
-            'django_logic.recover_stranded_states', stranded_seconds),
         'django-logic-cleanup': entry(
             'django_logic.cleanup_completed_transitions', cleanup_seconds),
     }
@@ -123,7 +121,6 @@ def _validated_number(
     default,
     *,
     minimum,
-    allow_zero: bool = True,
     integral: bool = False,
 ):
     """Read ``DJANGO_LOGIC[key]`` and validate it is a sane number.
@@ -132,10 +129,7 @@ def _validated_number(
     value. ``bool`` is rejected explicitly (it subclasses ``int``, so
     ``True`` would otherwise pass as ``1``); non-finite floats (``nan``,
     ``inf``) are rejected; ``integral=True`` additionally rejects
-    non-integral floats and returns an ``int``.
-
-    ``allow_zero=False`` makes the bound strict: the value must be
-    ``> minimum`` rather than ``>= minimum``.
+    non-integral floats and returns an ``int``. ``minimum`` is inclusive.
     """
     value = _conf().get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -150,14 +144,9 @@ def _validated_number(
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC[{key!r}] must be a whole number, got {value!r}."
         )
-    if allow_zero:
-        if value < minimum:
-            raise ImproperlyConfigured(
-                f"DJANGO_LOGIC[{key!r}] must be >= {minimum}, got {value!r}."
-            )
-    elif value <= minimum:
+    if value < minimum:
         raise ImproperlyConfigured(
-            f"DJANGO_LOGIC[{key!r}] must be > {minimum}, got {value!r}."
+            f"DJANGO_LOGIC[{key!r}] must be >= {minimum}, got {value!r}."
         )
     if integral:
         return int(value)
@@ -201,6 +190,7 @@ def validate_on_ready() -> None:
     max_errors()
     retry_minutes()
     cleanup_days()
+    _validate_bool('STRICT_KWARGS_SERIALIZATION')
     # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) — shared with
     # DjangoLogicConfig.ready so sync-only installs validate them too.
     from django_logic.conf import validate_core_settings
@@ -278,6 +268,21 @@ def _check_lock_cache_in_celery_mode() -> None:
         raise ImproperlyConfigured(message)
 
 
+def _validate_bool(key: str) -> None:
+    """Reject a non-bool on a setting that gates behaviour (#182).
+
+    Truthiness coercion is unsafe for these: the strings 'false'/'no'/'0'
+    are all truthy, so a value meant to disable a feature enabled it.
+    """
+    value = _conf().get(key, False)
+    if not isinstance(value, bool):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC[{key!r}] must be a bool (True or False), got "
+            f"{value!r}. Strings are not accepted — 'false' would otherwise "
+            f"read as truthy and enable the very behaviour it names."
+        )
+
+
 def strict_kwargs_serialization() -> bool:
     """When True, phase-1 kwargs serialization raises on silently-droppable
     caller kwargs (``request``) instead of logging a warning.
@@ -285,5 +290,11 @@ def strict_kwargs_serialization() -> bool:
     Default False: generic API layers commonly pass ``request`` to every
     transition uniformly, so raising by default would break them. Enable
     once call sites are clean to turn the drop into a hard contract.
+
+    Only a literal ``True`` enables it (#182). It used to be
+    ``bool(...)``-coerced, so any non-empty string switched strict mode ON —
+    reading ``DL_STRICT=false`` from an env var made phase 1 start raising.
+    Mirrors ``conf.defer_unlock_until_commit``; boot validation rejects
+    non-bools and this reader stays safe where that has not run.
     """
-    return bool(_conf().get('STRICT_KWARGS_SERIALIZATION', False))
+    return _conf().get('STRICT_KWARGS_SERIALIZATION', False) is True

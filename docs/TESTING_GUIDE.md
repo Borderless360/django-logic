@@ -166,7 +166,7 @@ class OrderScenario(ProcessScenario):
     process_class = OrderProcess
     model = Order
     state_field = 'status'      # default 'status'
-    process_name = 'process'    # default 'process'
+    process_name = 'process'    # optional; defaults to process_class.process_name
 ```
 
 ### 1. Happy path through several transitions
@@ -565,7 +565,7 @@ skipped, and the exception reaches the caller. See
 ## ProcessScenario API reference
 
 Class attributes: `process_class`, `model`, `state_field` (default
-`'status'`), `process_name` (default `'process'`).
+`'status'`), `process_name` (optional — defaults to `process_class.process_name`).
 
 **Driving the process**
 
@@ -632,7 +632,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_journey([JourneyStep(...)])` | Each drive's full observable transformation — action, before → after, side-effects, callbacks, and `failed` (an exception reached the caller). Import `JourneyStep` from `django_logic.testing`. |
 
 On failure, every assertion raises with a numbered timeline of each step the
-test took, the relevant `TransitionMessage`, and (opt-in) a snapshot — built
+test took and the relevant `TransitionMessage` — built
 for humans *and* AI agents to diagnose without re-running.
 
 ---

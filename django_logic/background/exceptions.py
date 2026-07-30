@@ -18,3 +18,15 @@ class AlreadyInProgress(TransitionNotAllowed):
         dispatching, clear it inside the side-effect, and re-dispatch from
         a success callback when it is still set.
     """
+
+
+class SourceStateChanged(TransitionNotAllowed):
+    """Raised by phase 1's post-create recheck when the persisted state left
+    the transition's sources while the insert waited on a finishing flight.
+
+    A named subclass because this is an *expected* concurrency outcome — the
+    guard doing its job, the same class of event as ``AlreadyInProgress`` — and
+    the hook runner logs it at WARNING rather than ERROR on that basis (#154).
+    Consumers that treat it distinctly can catch it by type; everything
+    catching ``TransitionNotAllowed`` keeps working.
+    """

@@ -40,16 +40,6 @@ class LockReleasedOnWriteFailureTests(TestCase):
         self.invoice = Invoice.objects.create(status='draft')
         self.state = State(self.invoice, 'status', 'process')
 
-    def test_failed_in_progress_write_releases_the_lock(self):
-        transition = Transition(
-            'go', sources=['draft'], target='done', in_progress_state='doing'
-        )
-        with patch.object(State, 'set_state', _boom_set_state):
-            with self.assertRaises(RuntimeError):
-                transition.change_state(self.state)
-        self.assertFalse(self.state.is_locked(),
-                         'in_progress write failure leaked the lock')
-
     def test_failed_target_write_releases_the_lock(self):
         transition = Transition('go', sources=['draft'], target='done')
         with patch.object(State, 'set_state', _boom_set_state):
@@ -144,9 +134,9 @@ class TaskCrashRedeliveryConfigTests(TestCase):
     """#91 — acks_late is paired with reject_on_worker_lost per task."""
 
     def test_all_tasks_pair_acks_late_with_reject_on_worker_lost(self):
-        # Derived from the module, never hardcoded: a hardcoded list silently
-        # stopped covering recover_stranded_states when it was added, so both
-        # kwargs could be stripped from it with the suite still green.
+        # Derived from the module, never hardcoded: a hardcoded list once
+        # silently stopped covering a newly added task, so both kwargs could
+        # be stripped from it with the suite still green.
         from django_logic.background import tasks
 
         found = [
@@ -155,7 +145,7 @@ class TaskCrashRedeliveryConfigTests(TestCase):
             and str(getattr(obj, 'name', '')).startswith('django_logic.')
         ]
         self.assertEqual(
-            len(found), 6,
+            len(found), 5,
             'expected every @shared_task in django_logic.background.tasks to '
             'be discovered; got %s' % sorted(t.name for t in found))
         for task in found:

@@ -48,6 +48,31 @@ def _notify_transition_observers(owning_process, action_name, instance, transiti
             )
 
 
+#: Kwarg names the engine sets on every drive, and forwards through
+#: ``__getattr__`` itself when chaining a ``next_transition`` follow-up. A
+#: caller that passes one gets it silently overwritten, so they are documented
+#: as reserved rather than refused — the engine cannot distinguish its own
+#: forwarding from a caller's at that layer.
+class _ProcessAccessor(property):
+    """The model property ``bind_model_process`` installs.
+
+    A distinct subclass purely so a later binding can tell "django-logic put
+    this here" from "the model owns this attribute" — ``property`` objects
+    cannot carry a marker attribute. See the collision check in
+    ``bind_model_process``.
+    """
+
+
+#: Attributes ``Process.__init__`` sets on the instance. They shadow
+#: ``__getattr__`` exactly as class attributes do, but ``hasattr(cls, name)``
+#: cannot see them.
+_PROCESS_INSTANCE_ATTRS = frozenset({'state', 'instance', 'field_name'})
+
+_RESERVED_KWARGS = frozenset({
+    'tr_id', 'root_id', 'parent_id', 'process_class', 'owning_process_class',
+})
+
+
 class Process:
     """Declarative container of transitions and nested processes.
 
@@ -71,6 +96,7 @@ class Process:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        _validate_action_names_not_shadowed(cls)
         _validate_unique_background_action_names(cls)
 
     def __init__(self, field_name='', instance=None, state=None):
@@ -123,8 +149,20 @@ class Process:
             # would otherwise collide with _get_transition_method's first
             # parameter ("multiple values for argument 'action_name'").
             # No engine path forwards it; only hand-built kwargs dicts do.
+            # The other reserved names (_RESERVED_KWARGS) are NOT refused
+            # here: next_transition chaining forwards tr_id / root_id /
+            # parent_id / process_class through this very path to propagate
+            # lineage, so the engine cannot tell its own forwarding from a
+            # caller's. They are documented as reserved in the README instead.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
+
+        # Django's template engine CALLS any callable it resolves, so
+        # ``{{ order.process.approve }}`` used to drive the state machine
+        # while rendering a page and print the tr_id (#181). ``alters_data``
+        # is the framework's opt-out — the same marker Model.save/delete
+        # carry — and makes the engine render '' instead of calling.
+        transition_method.alters_data = True
 
         return transition_method
 
@@ -207,6 +245,7 @@ class Process:
         user=None,
         action_name=None,
         ignore_state=False,
+        _seen=None,
     ):
         """Like :meth:`get_available_transitions`, but yield
         ``(transition, owning_process)`` pairs.
@@ -218,6 +257,23 @@ class Process:
         identical to ``get_available_transitions``; that method is a thin
         wrapper that drops the owner.
         """
+        # Visit each Process CLASS once per walk (#180). Without this, a
+        # nested process reachable by two paths — a diamond, or a duplicated
+        # entry in ``nested_processes`` — yielded every one of its
+        # transitions twice, and ``_resolve_transition_with_owner`` rejected
+        # the single declaration as "several transitions available", with a
+        # hint no condition could satisfy (both matches being the same
+        # object). ``get_available_actions`` set-dedupes, so the action was
+        # advertised and then failed on every call. A nested cycle recursed
+        # until RecursionError. Deduping by class preserves the supported
+        # pattern of one ``action_name`` on *distinct* nested classes
+        # disambiguated by conditions. Mirrors ``_iter_process_tree``.
+        if _seen is None:
+            _seen = set()
+        if id(type(self)) in _seen:
+            return
+        _seen.add(id(type(self)))
+
         if not self.is_valid(user):
             return
 
@@ -240,6 +296,7 @@ class Process:
                 user=user,
                 action_name=action_name,
                 ignore_state=ignore_state,
+                _seen=_seen,
             )
 
     def _resolve_transition_with_owner(self, action_name: str, user=None):
@@ -295,6 +352,54 @@ def _iter_process_tree(process_cls, _seen=None):
     yield process_cls
     for sub_process_cls in process_cls.nested_processes or []:
         yield from _iter_process_tree(sub_process_cls, _seen)
+
+
+def _validate_action_names_not_shadowed(process_cls):
+    """Reject an ``action_name`` that a real attribute of the ROOT process
+    shadows (raised at class creation, #182).
+
+    ``__getattr__`` only runs when normal attribute lookup *fails*, so a
+    transition named ``state``, ``is_valid``, ``transitions``,
+    ``process_name``… is unreachable: ``instance.process.is_valid()`` calls
+    the bound method and returns ``True`` without transitioning anything.
+    ``get_available_actions()`` still advertises the name, so the transition
+    looks live and silently does nothing — the worst possible failure mode
+    for a state machine. There is no way to reach it, so this is a
+    definition error, not a runtime concern.
+
+    Only the root's own attributes can shadow, because dispatch enters
+    through the BOUND process's ``__getattr__`` — a nested class is never
+    the lookup target. Checking every class in the tree instead rejected a
+    working topology: a sibling nested process holding a helper (say a
+    staticmethod) named like some other branch's transition. Nothing is
+    lost by looking at the root alone — every ``Process`` subclass is
+    validated as its own root when it is defined, so each class is covered
+    for the bindings that use it as the entry point.
+    """
+    for proc_cls in _iter_process_tree(process_cls):
+        for transition in proc_cls.transitions or []:
+            action_name = getattr(transition, 'action_name', None)
+            if not action_name:
+                continue
+            # Transitions of the whole tree, attributes of the root only:
+            # a nested transition is called through the bound (root) class,
+            # so that is the class whose attributes shadow it.
+            if action_name in _PROCESS_INSTANCE_ATTRS:
+                shadowed_by = (
+                    f'an attribute Process.__init__ sets ({action_name})')
+            elif hasattr(process_cls, action_name):
+                shadowed_by = (
+                    f'{process_cls.__name__}.{action_name} '
+                    f'({getattr(process_cls, action_name)!r})')
+            else:
+                continue
+            raise ImproperlyConfigured(
+                f"Process {proc_cls.__module__}.{proc_cls.__name__} declares "
+                f"a transition named {action_name!r}, which is shadowed by "
+                f"{shadowed_by}. Attribute lookup wins over the lazy action "
+                f"dispatcher, so the transition could never be called — "
+                f"rename the action."
+            )
 
 
 def _validate_unique_background_action_names(process_cls):
@@ -382,14 +487,14 @@ def _validate_hook_signatures(process_cls) -> None:
     ``DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] = True`` raises
     ``ImproperlyConfigured`` instead.
     """
-    from django.conf import settings
+    from django_logic.conf import strict_hook_signatures
 
     offenders = collect_hook_signature_offenders(process_cls)
     if not offenders:
         return
     message = _hook_signature_message(offenders)
-    conf = getattr(settings, 'DJANGO_LOGIC', {}) or {}
-    if conf.get('STRICT_HOOK_SIGNATURES', False):
+    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION (#182).
+    if strict_hook_signatures():
         raise ImproperlyConfigured(message)
     transition_logger.warning(message)
 
@@ -453,84 +558,12 @@ def collect_hook_signature_offenders(process_cls) -> list:
     return offenders
 
 
-def _recovery_signature(transition, process_name: str) -> tuple:
-    """What ``recover_stranded_states`` would do with this transition.
-
-    Recovery is exactly ``fail_transition``, which reads only
-    ``failed_state`` and the two failure bundles; everything else it
-    touches is logging. Identity of the command objects, not equality —
-    two equal-but-distinct callables compare as different, which errs
-    toward calling a key ambiguous.
-
-    ``process_name`` is the **bound** process's name, and it is part of
-    the signature because the sweep's in-flight check is scoped by it
-    (``_sweep_transition`` filters ``TransitionMessage`` on
-    ``process_name``). A sibling process's open row is therefore
-    invisible to this process's sweep: an instance legitimately mid-flight
-    over there looks record-less here and would be force-failed. So two
-    *different* bound processes claiming one in-progress state are always
-    ambiguous, however identically they would recover — which is the
-    cross-binding case #143 has always rejected.
-    """
-    return (
-        process_name,
-        transition.failed_state,
-        tuple(id(command) for command in transition.failure_side_effects.commands),
-        tuple(id(command) for command in transition.failure_callbacks.commands),
-    )
-
-
-def collect_ambiguous_in_progress_states() -> dict:
-    """In-progress states whose stranded-recovery owner is undecidable
-    (#143).
-
-    Several transitions may share an ``in_progress_state`` on one
-    (model, state_field) — declared side by side in a process tree, or
-    reached through two *bindings*. That is only a problem for a
-    **record-less** stranded instance: it has no provenance, so recovery
-    has to pick an owner. Picking is safe when every claimant would
-    recover identically (same ``failed_state``, same failure hooks) and
-    unsafe otherwise, which is what this reports — not the sharing
-    itself.
-
-    Returns ``{(model_label, state_field, in_progress_state):
-    [(process_cls, transition), ...]}`` for every key whose claimants
-    disagree. ``Action``\\ s never write their ``in_progress_state`` and
-    are excluded (mirrors the stranded sweep). Consumed by the
-    ``django_logic.E001`` system check and by
-    ``recover_stranded_states``, which skips ambiguous keys.
-    """
-    from django_logic.transition import Action
-
-    claims: dict = {}
-    # Signatures tracked alongside rather than recomputed from `owners`:
-    # the bound process_name is part of a signature and is not recoverable
-    # from (process_cls, transition) once a nested tree has been flattened.
-    signatures: dict = {}
-    for binding in ProcessManager.bindings:
-        bound_process_name = binding.process_class.process_name
-        stack = [binding.process_class]
-        seen_cls = set()
-        while stack:
-            process_cls = stack.pop()
-            if process_cls in seen_cls:
-                continue
-            seen_cls.add(process_cls)
-            for transition in process_cls.transitions or []:
-                in_progress = getattr(transition, 'in_progress_state', None)
-                if not in_progress or isinstance(transition, Action):
-                    continue
-                key = (binding.model._meta.label, binding.state_field,
-                       in_progress)
-                claims.setdefault(key, []).append((process_cls, transition))
-                signatures.setdefault(key, set()).add(
-                    _recovery_signature(transition, bound_process_name)
-                )
-            stack.extend(process_cls.nested_processes)
-    return {
-        key: owners for key, owners in claims.items()
-        if len(signatures[key]) > 1
-    }
+# The stranded-recovery ownership cluster (_recovery_signature,
+# collect_ambiguous_in_progress_states, _state_storage_label — feeding
+# django_logic.E001 and recover_stranded_states) was retired in 0.12.0:
+# in_progress_state is background-only now, written atomically with the
+# TransitionMessage row, so recovery is TM-scoped and no record-less
+# stranded instance can exist for an owner to be picked for.
 
 
 #: One record per ``bind_model_process`` call.
@@ -590,6 +623,40 @@ class ProcessManager:
                     f"the processes a distinct process_name."
                 )
 
+        # setattr below replaces whatever descriptor the name currently
+        # holds, so check what would ACTUALLY be overwritten: any attribute
+        # defined anywhere on the model's MRO. Asking _meta for field names
+        # instead got this wrong in both directions — it flagged reverse
+        # FK/M2M *query* names, which own no class attribute at all (so a
+        # sound binding raised at import), and it missed every non-field
+        # descriptor: a model method, a property, a cached_property, a
+        # manager. `process` — the DEFAULT process_name — is a very plausible
+        # method name on a model.
+        # Skip accessors django-logic itself installed. A multi-table-
+        # inheritance child legitimately binds the same process_name as its
+        # parent — setattr puts its own accessor on the child, shadowing the
+        # parent's, and each model drives its own process. Flagging the
+        # ancestor's accessor rejected that working shape. An identical rebind
+        # returns early above, and a same-model name reuse is caught by the
+        # duplicate-binding check, so nothing is lost by ignoring them here.
+        clashing = next(
+            (klass for klass in model.__mro__
+             if process_class.process_name in vars(klass)
+             and not isinstance(
+                 vars(klass)[process_class.process_name], _ProcessAccessor)),
+            None,
+        )
+        if clashing is not None:
+            existing = vars(clashing)[process_class.process_name]
+            raise ImproperlyConfigured(
+                f"bind_model_process({model._meta.label}, "
+                f"{process_class.__name__}): process_name "
+                f"{process_class.process_name!r} already names something on "
+                f"{clashing.__name__} ({existing!r}). Binding would replace "
+                f"it and break the model. Give the process a distinct "
+                f"process_name."
+            )
+
         _validate_hook_signatures(process_class)
         cls.bindings.append(binding)
 
@@ -599,5 +666,46 @@ class ProcessManager:
         setattr(
             model,
             process_class.process_name,
-            property(make_process_getter(state_field, process_class)),
+            _ProcessAccessor(make_process_getter(state_field, process_class)),
         )
+
+    @classmethod
+    def unbind_model_process(
+        cls, model, process_class=None, state_field: str | None = None,
+    ) -> None:
+        """Inverse of :meth:`bind_model_process`: drop the registry entries
+        and the model accessor they installed.
+
+        Exists for teardown — a consumer (and this library's own suite)
+        binding a throwaway process in a test otherwise has to rewrite
+        ``ProcessManager.bindings`` and ``delattr`` the accessor by hand,
+        and every copy of that gets the multi-binding cases wrong.
+        ``process_class`` / ``state_field`` narrow which of the model's
+        bindings to remove; omitting both removes all of them. Unbinding
+        something that was never bound is a no-op.
+        """
+        removed = [
+            binding for binding in cls.bindings
+            if binding.model is model
+            and (process_class is None or binding.process_class is process_class)
+            and (state_field is None or binding.state_field == state_field)
+        ]
+        if not removed:
+            return
+        cls.bindings = [b for b in cls.bindings if b not in removed]
+
+        # One model can carry several accessors (one per process_name, e.g.
+        # a second state_field's machine), so only the names no surviving
+        # binding of this model still claims may go — and only when
+        # django-logic owns them: an MTI child inherits its parent's
+        # accessor, which is the parent binding's to remove, not ours.
+        still_bound = {
+            binding.process_class.process_name for binding in cls.bindings
+            if binding.model is model
+        }
+        for binding in removed:
+            name = binding.process_class.process_name
+            if name in still_bound:
+                continue
+            if isinstance(vars(model).get(name), _ProcessAccessor):
+                delattr(model, name)

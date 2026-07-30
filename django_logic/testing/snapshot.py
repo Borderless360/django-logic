@@ -81,6 +81,17 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
                 'last_error_message': tm.last_error_message,
                 'timeout_seconds': tm.timeout_seconds,
                 'kwargs': tm.kwargs,
+                # The retry/watchdog clock. Without these a snapshot of a hung
+                # or timed-out production row replays as a pristine row: the
+                # retry backoff, the stale-attempt watchdog and the
+                # stuck-transition detector all read them, so the very
+                # behaviour the snapshot was taken to reproduce could not be
+                # reproduced.
+                'last_error_dt': _jsonable(tm.last_error_dt),
+                'failure_side_effect_error': tm.failure_side_effect_error,
+                'started_at': _jsonable(tm.started_at),
+                'completed_at': _jsonable(tm.completed_at),
+                'duration_ms': tm.duration_ms,
             }
     except Exception:
         pass
@@ -111,6 +122,18 @@ def _load(data_or_path):
         return json.load(fh)
 
 
+def _restore_dt(value):
+    """ISO string (as captured) -> ``datetime``. The DB adapter would coerce
+    the string too, but the created row is read back by callers, so keep the
+    in-memory attributes real field types (issue #95's lesson)."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        from django.utils.dateparse import parse_datetime
+        return parse_datetime(value)
+    return value
+
+
 def from_snapshot(data_or_path, *, model=None):
     """Rebuild an instance (and its TransitionMessage, if captured) from a
     snapshot. Returns the saved instance."""
@@ -120,12 +143,23 @@ def from_snapshot(data_or_path, *, model=None):
         from django.apps import apps
         model = apps.get_model(data['model'])
 
+    recorded = data.get('model')
+    if recorded and recorded.lower() != model._meta.label.lower():
+        # Field names of a different model mostly do not overlap, so restoring
+        # into the wrong one used to drop them silently (below) and hand back a
+        # corrupted instance that "reproduces" nothing.
+        raise ValueError(
+            f'snapshot: captured from {recorded!r} but restoring into '
+            f'{model._meta.label!r}. Pass the model the snapshot came from '
+            f'(or a scenario whose ``model`` is {recorded!r}).'
+        )
+
     instance = model()
     for attname, value in (data.get('fields') or {}).items():
-        try:
-            setattr(instance, attname, value)
-        except Exception:
-            pass
+        # No try/except: ``fields`` comes from the model's own concrete fields,
+        # so a name that does not exist means the snapshot does not belong to
+        # this model — which the label check above already rejects loudly.
+        setattr(instance, attname, value)
     # Ensure the state field reflects the snapshot even if it wasn't a concrete
     # field name match.
     state_field = data.get('state_field', 'status')
@@ -145,11 +179,23 @@ def from_snapshot(data_or_path, *, model=None):
     if tm_data:
         from django_logic.background.models import TransitionMessage
         from django_logic.background import settings as bg_settings
+        tm_process_name = tm_data.get('process_name', 'process')
+        # The snapshot IS this instance+process's background state. Leaving an
+        # existing row behind either replays a stale orphan (the older row wins
+        # every lookup ordered by id... or loses, unpredictably) or trips the
+        # uncompleted-per-(instance, process) unique constraint with a cryptic
+        # IntegrityError instead of restoring.
+        TransitionMessage.objects.filter(
+            app_label=instance._meta.app_label,
+            model_name=instance._meta.model_name,
+            instance_id=str(instance.pk),
+            process_name=tm_process_name,
+        ).delete()
         TransitionMessage.objects.create(
             app_label=instance._meta.app_label,
             model_name=instance._meta.model_name,
             instance_id=str(instance.pk),
-            process_name=tm_data.get('process_name', 'process'),
+            process_name=tm_process_name,
             # Restore the recorded field so phase 2 takes the same
             # recorded-field path the production row would have used
             # ('' = legacy pre-0.4 row, inference fallback).
@@ -165,6 +211,18 @@ def from_snapshot(data_or_path, *, model=None):
             last_error_message=tm_data.get('last_error_message', ''),
             timeout_seconds=tm_data.get('timeout_seconds'),
             kwargs=tm_data.get('kwargs') or {},
+            # Restore the retry/watchdog clock so a hung or timed-out
+            # production row replays as hung, not pristine. Without
+            # started_at in particular, the watchdog's filter
+            # (started_at__isnull=False) can never match a replayed row, so a
+            # snapshot of the exact row a timeout incident produced could not
+            # reproduce the timeout.
+            last_error_dt=_restore_dt(tm_data.get('last_error_dt')),
+            failure_side_effect_error=tm_data.get(
+                'failure_side_effect_error', ''),
+            started_at=_restore_dt(tm_data.get('started_at')),
+            completed_at=_restore_dt(tm_data.get('completed_at')),
+            duration_ms=tm_data.get('duration_ms'),
         )
 
     return instance

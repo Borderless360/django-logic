@@ -38,31 +38,21 @@ class TestPeriodicStarterContract(StabilityTestCase):
       - Using their stored queue_name for dispatch
     """
 
-    def test_stale_in_progress_state_is_detectable(self):
+    def test_a_crashed_sync_run_leaves_the_instance_at_its_source(self):
+        """A hard-killed synchronous run leaves no trace (0.12.0): the
+        marker is background-only, so the instance stays at its source
+        state — re-drivable once the lock TTL expires, with nothing for a
+        sweep to find. (The stranded sweep this class used to pin was
+        retired with the marker.)
         """
-        An instance stuck in in_progress_state with no lock is a signal
-        that the worker crashed and the periodic starter should act.
-        """
-        order = Order.objects.create(status='fulfilling')
-        state = State(order, 'status', process_name='process')
-
-        self.assertFalse(state.is_locked())
-        self.assertEqual(
-            Order.objects.filter(status='fulfilling').count(), 1
-        )
-
-    def test_locked_in_progress_should_not_be_retried(self):
-        """
-        If the lock is still held, the worker is likely still running.
-        The periodic starter should skip these.
-        """
-        order = Order.objects.create(status='fulfilling')
+        order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
         self.track_lock(state)
-
+        # The crashed run's only residue is its lock.
         self.assertTrue(state.lock())
-        self.assertTrue(state.is_locked())
 
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'approved')
         state.unlock()
         self._tracked_cache_keys.discard(state._get_hash())
 
@@ -73,12 +63,10 @@ class TestPeriodicStarterContract(StabilityTestCase):
             state = State(order, 'status', process_name='process')
             self.assertFalse(state.is_locked())
 
-    def test_fulfill_transition_available_from_in_progress_state(self):
-        """The 'fulfill' transition has ``in_progress_state='fulfilling'``,
-        which is appended to its sources — so phase 2 / retry paths can
-        look it up even when the instance is already in-flight.
-        """
-        order = Order.objects.create(status='fulfilling')
+    def test_fulfill_transition_available_from_its_source(self):
+        """Sync transitions resolve from their declared sources only —
+        there is no implicit in-progress source anymore (0.12.0)."""
+        order = Order.objects.create(status='approved')
         process = OrderProcess(field_name='status', instance=order)
 
         transitions = list(
@@ -99,21 +87,14 @@ class TestStuckTransitionDetection(StabilityTestCase):
     and is_completed=False, log an alert, and optionally set failed_state.
     """
 
-    def test_stuck_instance_identifiable_by_state(self):
-        """
-        An instance stuck in in_progress_state for a long time with no
-        lock is potentially stuck. The detection task should flag these.
-        """
-        order = Order.objects.create(status='fulfilling')
+    def test_stuck_rows_are_identified_by_the_message_not_the_state(self):
+        """Stuck detection is TM-scoped (0.12.0): a row at MAX_ERRORS and
+        uncompleted is the signal; the instance's state field carries no
+        in-progress marker for sync work anymore."""
+        order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
         self.assertFalse(state.is_locked())
-
-        stuck_orders = Order.objects.filter(
-            status='fulfilling'
-        ).exclude(
-            pk__in=[]
-        )
-        self.assertEqual(stuck_orders.count(), 1)
+        self.assertEqual(Order.objects.filter(status='approved').count(), 1)
 
 
 @tag('stability')
@@ -132,12 +113,12 @@ class TestCleanupContract(StabilityTestCase):
         """Terminal states can be queried for cleanup."""
         Order.objects.create(status='fulfilled')
         Order.objects.create(status='fulfillment_failed')
-        Order.objects.create(status='fulfilling')
+        Order.objects.create(status='approved')
 
         terminal = Order.objects.filter(
             status__in=['fulfilled', 'fulfillment_failed', 'cancelled', 'completed']
         )
-        in_progress = Order.objects.filter(status='fulfilling')
+        pending = Order.objects.filter(status='approved')
 
         self.assertEqual(terminal.count(), 2)
-        self.assertEqual(in_progress.count(), 1)
+        self.assertEqual(pending.count(), 1)

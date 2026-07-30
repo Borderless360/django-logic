@@ -60,7 +60,7 @@ class SafetyNetScheduledCheckTests(SimpleTestCase):
     @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='celery'))
     def test_a_partial_schedule_names_only_what_is_missing(self):
         shipped = beat_schedule()
-        dropped = 'django-logic-recover-stranded'
+        dropped = 'django-logic-watchdog'
         partial = {k: v for k, v in shipped.items() if k != dropped}
 
         with self._beat(partial):

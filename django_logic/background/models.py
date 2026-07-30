@@ -14,9 +14,40 @@ flight.
 """
 from __future__ import annotations
 
-from django.db import models
+from django.db import OperationalError, models, transaction
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
+
+
+#: Characters PostgreSQL text/jsonb columns cannot store, however happily
+#: Python and SQLite carry them. An exception message that echoes back bytes,
+#: scraped HTML or a CSV cell can contain either.
+#: Ceiling for the text columns this module writes (``last_error_message``,
+#: ``failure_side_effect_error``).
+_TEXT_LIMIT = 10_000
+
+
+def db_safe_text(value: str, limit: int = _TEXT_LIMIT) -> str:
+    """Make ``value`` storable in a Postgres text column.
+
+    NUL (U+0000) and lone surrogates are rejected by PostgreSQL, so writing an
+    exception message that contains one raises ``DataError`` *from the
+    accounting write itself* — which used to escape ``_handle_failure``, roll
+    back ``errors_count`` and ``mark_as_completed`` with it, and leave the row
+    retrying forever with the instance permanently blocked. The bookkeeping
+    must never be the thing that fails, so the characters are escaped rather
+    than passed through.
+    """
+    text = str(value)
+    if '\x00' in text:
+        text = text.replace('\x00', '\\x00')
+    # Lone surrogates survive in Python strings (e.g. from surrogateescape
+    # decoding) but cannot be encoded to UTF-8 for the wire.
+    try:
+        text.encode('utf-8')
+    except UnicodeEncodeError:
+        text = text.encode('utf-8', 'replace').decode('utf-8')
+    return text[:limit]
 
 
 class TransitionMessage(TimeStampedModel):
@@ -119,15 +150,77 @@ class TransitionMessage(TimeStampedModel):
             f'{self.transition_name} on {self.queue_name}'
         )
 
-    def mark_as_started(self) -> None:
-        """Record the start of a phase-2 attempt.
+    @classmethod
+    def stamp_attempt_started(cls, tm_id: int) -> bool:
+        """Mark an attempt as beginning, in its own committed statement.
 
-        Called on every attempt, including retries — ``started_at`` is
-        overwritten so the watchdog sees the current attempt's start,
-        not the first one.
+        Deliberately called from *outside* the attempt's ``atomic`` block
+        (#179). ``started_at`` is the only field that must be visible to
+        other connections *while* the attempt runs, and must survive the
+        attempt rolling back:
+
+        * A hung attempt holds its transaction open, so a ``started_at``
+          written inside it is invisible to the watchdog — which filtered
+          on ``started_at__isnull=False`` and therefore could never see the
+          attempts it exists to abandon.
+        * A crashed worker rolls its transaction back, taking the marker
+          with it, so the crash was invisible too.
+
+        The consequence was that the watchdog only ever matched rows whose
+        attempt had already *committed* a failure — rows that had already
+        charged themselves an error — and then charged them again on every
+        tick. Written here it survives both cases, which is what makes
+        ``timeout=`` mean anything.
+
+        Durability is mode-dependent, as for
+        ``runner._mark_unrestorable_completed``:
+
+        * **Celery mode** — phase 2 is the top-level unit of work with no
+          surrounding transaction, so this UPDATE autocommits and is visible
+          to the watchdog immediately. Verified against real PostgreSQL from
+          a second connection. This is the mode the watchdog exists for.
+        * **Sync mode inside a caller's ``atomic()``** — it is part of the
+          caller's transaction and invisible to other connections until the
+          caller commits. Harmless: the phase-1 INSERT that created the row
+          is in that same transaction, so on rollback there is no surviving
+          row to abandon, and on commit the row and this marker become
+          visible together. There is also no worker to abandon — the
+          "attempt" is the caller's own thread, which a watchdog could not
+          rescue anyway.
+
+        Acquires the row lock with ``nowait`` first and gives up if another
+        attempt holds it. That is not an optimisation — a bare ``UPDATE``
+        here BLOCKS on PostgreSQL, and because this runs before
+        ``_run_atomic``'s ``select_for_update(nowait=True)`` it defeated the
+        whole skip-if-locked design: a duplicate dispatch waited out the
+        entire live attempt and then ran it again, with no retry backoff.
+        (``tests/background/test_concurrency_pg.py`` pins this.) A held row
+        means an attempt is already live and has already stamped itself, so
+        there is nothing to record and ``_run_atomic`` will skip anyway.
+
+        Because a losing dispatcher never writes, ``started_at`` only ever
+        moves forward, and ``duration_ms`` cannot absorb lock wait.
+
+        Returns True if the marker was written.
         """
-        self.started_at = timezone.now()
-        self.save(update_fields=['started_at', 'modified'])
+        now = timezone.now()
+        try:
+            with transaction.atomic():
+                held = (
+                    cls.objects
+                    .select_for_update(nowait=True)
+                    .filter(pk=tm_id, is_completed=False)
+                    .exists()
+                )
+                if not held:
+                    return False
+                cls.objects.filter(pk=tm_id, is_completed=False).update(
+                    started_at=now, modified=now,
+                )
+        except OperationalError:
+            # Locked by a live attempt: it owns the marker.
+            return False
+        return True
 
     def mark_as_completed(self, measure_duration: bool = True) -> None:
         """Mark the row completed and (optionally) record ``duration_ms``.
@@ -161,13 +254,15 @@ class TransitionMessage(TimeStampedModel):
         the reason is recorded on ``last_error_message`` for the audit
         trail. ``errors_count`` is NOT incremented — nothing failed.
         """
-        self.last_error_message = note[:10_000]
+        self.last_error_message = db_safe_text(note)
         self.last_error_dt = timezone.now()
         self.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
         self.mark_as_completed(measure_duration=False)
 
     def record_error(self, exception: BaseException) -> None:
-        self.last_error_message = str(exception)[:10_000]
+        # db_safe_text, not a bare slice: the accounting write must never be
+        # the statement that fails (see its docstring).
+        self.last_error_message = db_safe_text(exception)
         self.last_error_dt = timezone.now()
         # Increment on the DB side (F expression) rather than a
         # read-modify-write on a possibly-stale in-memory errors_count, so
@@ -184,15 +279,36 @@ class TransitionMessage(TimeStampedModel):
         # comparison sees the true count, not the stale snapshot.
         self.refresh_from_db(fields=['errors_count', 'modified'])
 
-    def record_failure_side_effect_error(self, exception: BaseException) -> None:
-        """Record an exception raised from ``failure_side_effects``.
+    def record_failure_side_effect_error(
+        self, exception: BaseException, *, label: str = '',
+    ) -> None:
+        """Record an exception raised while finalizing a terminal failure.
 
         Separate from ``record_error`` because the original side-effect
         error (which triggered the failure branch) must stay visible in
         ``last_error_message`` — we just annotate that the cleanup path
         also broke.
+
+        **Appends** rather than replaces. The terminal path can now record two
+        independent problems on the same row — a rejected ``failed_state``
+        write and a broken ``failure_side_effects`` bundle — and overwriting
+        meant whichever came second silently erased the other, leaving an
+        operator with half the story.
+
+        ``label`` names which of them it was.
         """
-        self.failure_side_effect_error = (
-            f'{type(exception).__name__}: {exception}'
-        )[:10_000]
+        note = db_safe_text(f'{type(exception).__name__}: {exception}')
+        if label:
+            note = f'{label}: {note}'
+        existing = self.failure_side_effect_error
+        if existing:
+            # Budget for the note FIRST: db_safe_text truncates the head, so
+            # once the accumulated text approaches the limit, appending and
+            # re-truncating silently dropped the note just added — the newest
+            # and most relevant diagnostic. Trim the older text instead.
+            room = _TEXT_LIMIT - len(note) - 2
+            existing = existing[:room] if room > 0 else ''
+        self.failure_side_effect_error = db_safe_text(
+            f'{existing}; {note}' if existing else note
+        )
         self.save(update_fields=['failure_side_effect_error', 'modified'])

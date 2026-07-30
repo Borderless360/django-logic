@@ -163,11 +163,36 @@ def _non_string_key_paths(value, path='kwargs'):
             yield from _non_string_key_paths(item, f'{path}[]')
 
 
+def _unstorable_text_paths(value, path='kwargs'):
+    """Yield paths to strings a Postgres jsonb column would reject."""
+    if isinstance(value, str):
+        if '\x00' in value:
+            yield path
+        else:
+            try:
+                value.encode('utf-8')
+            except UnicodeEncodeError:
+                yield path
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            # Keys too: a NUL in a key breaks the write exactly as a NUL in a
+            # value does, and json.dumps encodes both happily.
+            yield from _unstorable_text_paths(k, f'{path} key {k!r}')
+            yield from _unstorable_text_paths(v, f'{path}[{k!r}]')
+    elif isinstance(value, (set, frozenset)):
+        for v in value:
+            yield from _unstorable_text_paths(v, f'{path}{{...}}')
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            yield from _unstorable_text_paths(v, f'{path}[{i}]')
+
+
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
-    Drops ``request`` (warning, or ``TypeError`` under
-    ``STRICT_KWARGS_SERIALIZATION``). Replaces ``user`` with ``user_id``.
+    Drops ``request`` and a caller-supplied ``user_id`` (warning, or
+    ``KwargsSerializationError`` under ``STRICT_KWARGS_SERIALIZATION``) —
+    both are reserved. Replaces ``user`` with ``user_id``.
     Tag-encodes non-JSON-native values so phase 2 restores real types.
     Non-string dict keys are stringified by JSON persistence and cannot
     round-trip — flagged with a warning (or ``TypeError`` under the strict
@@ -189,6 +214,23 @@ def serialize_kwargs(kwargs: dict) -> dict:
         if bg_settings.strict_kwargs_serialization():
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
+    # ``user_id`` is the engine's own wire form for ``user`` (restored in
+    # phase 2 by restore_user). A caller passing it as ordinary data used to
+    # be silently consumed: restore_user popped it and replaced it with a
+    # live ``user``, so the hook never saw the value — and the same call ran
+    # correctly in sync mode, a parity break that only showed up in
+    # production. Treated like ``request``: reserved, dropped loudly.
+    if 'user_id' in out:
+        out.pop('user_id')
+        message = (
+            f"{out.get('tr_id')} 'user_id' dropped at kwargs serialization "
+            f"— it is the engine's wire form for 'user' and phase 2 replaces "
+            f"it with a live user object, so a caller-supplied value could "
+            f"never reach a hook. Pass it under a different name."
+        )
+        if bg_settings.strict_kwargs_serialization():
+            raise KwargsSerializationError(message)
+        transition_logger.warning(message)
     out.pop('context', None)  # rebuilt in phase 2
     # Persisted on its own TransitionMessage column, not in the kwargs JSON:
     # phase 2 reads it from the column, and it must not leak into the kwargs
@@ -196,7 +238,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
     out.pop('owning_process_class', None)
 
     user = out.pop('user', None)
-    if user is not None and 'user_id' not in out:
+    if user is not None:
         # Read .pk (not .id) to match the phase-2 restore (get(pk=user_id))
         # and to support custom user models whose primary key isn't named
         # 'id'. AnonymousUser (pk is None) is dropped, as before.
@@ -207,6 +249,20 @@ def serialize_kwargs(kwargs: dict) -> dict:
     for key in _CONTEXT_KEYS:
         if key in out and out[key] is not None:
             out[key] = str(out[key])
+
+    # PostgreSQL jsonb rejects NUL and lone surrogates, which json.dumps
+    # happily encodes — the same class of value as the non-finite floats
+    # rejected below, and with the same consequence: phase 1 would die with a
+    # raw backend DataError at the row write instead of a named TypeError here.
+    unstorable = sorted(set(_unstorable_text_paths(out)))
+    if unstorable:
+        raise KwargsSerializationError(
+            f"{out.get('tr_id')} background transition kwargs contain "
+            f"characters the database cannot store "
+            f"({', '.join(unstorable)}): NUL (U+0000) and lone surrogates are "
+            f"rejected by PostgreSQL jsonb. Strip or escape them before "
+            f"passing the value."
+        )
 
     bad_keys = sorted(set(_non_string_key_paths(out)))
     if bad_keys:

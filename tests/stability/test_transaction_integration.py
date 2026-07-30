@@ -38,7 +38,7 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
     on_commit fires only when the OUTER transaction commits.
 
     If the outer transaction rolls back, the state change must also
-    roll back (no orphan in_progress states in DB).
+    roll back (no orphan state writes in the DB).
     """
 
     def test_state_change_inside_outer_atomic_persists_on_commit(self):
@@ -117,45 +117,36 @@ class TestBrokerMessageLoss(StabilityTestCase):
     """
     4.6 -- on_commit fires but Celery apply_async fails (broker down).
 
-    The transition's phase 1 completed (state changed, message row exists
-    in the planned design). The periodic starter must be able to recover.
-
-    For now (pre-BackgroundTransition), we test the lock/state behavior
-    when a hypothetical dispatch would fail.
+    A durable state write and the advisory cache lock have independent
+    lifetimes; recovery of a lost run is a plain re-drive.
     """
 
-    def test_state_persists_even_if_dispatch_would_fail(self):
-        """
-        Phase 1 completes: state set to in_progress_state, lock acquired.
-        If dispatch fails, the state and lock persist in the system.
-        """
+    def test_committed_state_write_persists_with_the_lock(self):
+        """A committed set_state persists independently of the cache lock —
+        the write is durable, the lock is advisory and TTL-bounded."""
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
         self.track_lock(state)
 
         self.assertTrue(state.lock())
-        state.set_state('fulfilling')
+        state.set_state('shipped')
 
         order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilling')
+        self.assertEqual(order.status, 'shipped')
         self.assert_locked(state)
 
         state.unlock()
         self._tracked_cache_keys.discard(state._get_hash())
 
-    def test_recovery_after_simulated_broker_failure(self):
-        """
-        Simulate: phase 1 set state to in_progress, broker lost the message.
-        Recovery: manually re-trigger the transition from in_progress_state.
-        """
-        order = Order.objects.create(status='fulfilling')
+    def test_recovery_is_a_plain_redrive_from_the_source(self):
+        """A lost run leaves the instance at its source state (0.12.0: sync
+        writes no marker), so recovery is an ordinary re-drive — no special
+        in-progress source needed."""
+        order = Order.objects.create(status='approved')
 
         process = OrderProcess(field_name='status', instance=order)
         available = list(process.get_available_transitions(action_name='fulfill'))
-
-        self.assertTrue(len(available) > 0,
-            "The 'fulfill' transition should be available from 'fulfilling' "
-            "(because in_progress_state is added to sources)")
+        self.assertTrue(len(available) > 0)
 
         process.fulfill()
 
@@ -197,7 +188,6 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     failed_state='fulfillment_failed',
                     side_effects=[db_failing_se],
                 )
@@ -213,7 +203,8 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
         self.assert_unlocked(state)
 
     def test_side_effect_db_error_without_failed_state(self):
-        """Without failed_state, the state stays at in_progress after DB error."""
+        """Without failed_state, a DB error leaves the instance at its source
+        (0.12.0: no in-progress marker) — re-drivable, not parked."""
         from django.db.utils import OperationalError
 
         order = Order.objects.create(status='approved')
@@ -229,7 +220,6 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     side_effects=[db_failing_se],
                 )
             ]
@@ -240,7 +230,7 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
             process.fulfill()
 
         order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilling')
+        self.assertEqual(order.status, 'approved')
         self.assert_unlocked(state)
 
 

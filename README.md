@@ -39,7 +39,6 @@ Django Logic is a lightweight workflow framework for Django that makes it easy t
 
 Extras:
 - `pip install django-logic[redis]` — installs `django-redis`, for deployments whose settings name `django_redis.cache.RedisCache`. It stopped being a core dependency in 0.11.0: the engine has never imported it.
-- `pip install django-logic[drf]` — pulls in `djangorestframework` (kept for projects migrating off the old DRF-coupled releases; no DRF-specific code ships since 0.4)
 - `[celery]` remains an **empty alias**, so existing `pip install django-logic[celery,redis]` pins keep resolving — celery is a core dependency since 0.4
 
 ## Installation
@@ -227,7 +226,13 @@ Then drive it from request/task/method bodies via `invoice.process.<action>(...)
 
 
 ### 5. Advance your process with conditions, side-effects, and callbacks
-Use next_transition to automatically continue the process. 
+Use next_transition to automatically continue the process.
+
+> `next_transition` chains from a **completion**, so a synchronous `Action`
+> ignores it — an Action changes no state and has no completion to chain from.
+> (A `BackgroundAction` *does* run it, from phase 2.) Drive the follow-up from
+> a callback instead, or use a `Transition`.
+
 ```python 
 # Define permission and condition functions
 def is_accountant(instance, user):
@@ -377,20 +382,33 @@ class Order(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     is_paid = models.BooleanField(default=False)
+    shipping_address = models.TextField(blank=True)
     tracking_number = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+class Product(models.Model):
+    name = models.CharField(max_length=100)
+    stock = models.PositiveIntegerField(default=0)
+
+class OrderItem(models.Model):
+    order = models.ForeignKey(Order, related_name='items', on_delete=models.CASCADE)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    quantity = models.PositiveIntegerField(default=1)
+
 # conditions.py
+#
+# A condition that raises propagates out of both the action call AND
+# get_available_actions(), so keep them cheap and total — read fields that
+# always exist, and let a missing value mean False rather than an exception.
 def has_stock_available(instance):
-    # Check if all order items are in stock
     return all(item.product.stock >= item.quantity for item in instance.items.all())
 
 def is_payment_verified(instance):
     return instance.is_paid
 
 def has_shipping_address(instance):
-    return hasattr(instance, 'shipping_address') and instance.shipping_address is not None
+    return bool(instance.shipping_address)
 
 # permissions.py
 def is_customer(instance, user):
@@ -426,6 +444,16 @@ def send_shipping_notification(instance, **kwargs):
 # process.py
 from django_logic import Process, Transition
 
+from .conditions import has_stock_available, has_shipping_address, is_payment_verified
+from .permissions import is_customer, is_staff_member
+from .side_effects import (
+    generate_tracking_number,
+    process_payment,
+    reserve_stock,
+    send_order_confirmation_email,
+    send_shipping_notification,
+)
+
 class OrderProcess(Process):
     process_name = 'order_process'
     
@@ -445,11 +473,17 @@ class OrderProcess(Process):
             callbacks=[send_order_confirmation_email],
             next_transition='process',
         ),
+        # The automated follow-up 'pay' chains into. It carries no
+        # permission: next_transition forwards the ORIGINAL caller's user, so
+        # gating this on staff would silently stop the chain for the customer
+        # who paid (a rejected follow-up is swallowed — callbacks and chained
+        # transitions are best-effort). Its condition is the payment check,
+        # which 'pay' itself has just satisfied.
         Transition(
             action_name='process',
             sources=['paid'],
             target='processing',
-            permissions=[is_staff_member],
+            conditions=[is_payment_verified],
         ),
         Transition(
             action_name='ship',
@@ -495,6 +529,8 @@ class ShopConfig(AppConfig):
 from django.shortcuts import render, redirect
 from django.contrib import messages
 from django_logic.exceptions import TransitionNotAllowed
+
+from .models import Order
 
 def submit_order(request, order_id):
     order = Order.objects.get(pk=order_id, user=request.user)
@@ -618,8 +654,33 @@ class AuditedState(State):
         super().set_state(state)
 ```
 
+Install it with `state_class` on the process — without this the subclass is never used:
+
+```python
+class OrderProcess(Process):
+    state_class = AuditedState
+    transitions = [...]
+```
+
+Every state read and write for that process then goes through your class, including the ones the background engine performs (phase-1's `in_progress_state`, phase-2's target and `failed_state`). Two rules: `get_persisted_state()` must keep reading the database row — the under-the-lock revalidation and the phase-2 state guard rely on it being authoritative, so never override it with a cached read — and `set_state` must call `super()`.
+
 ### Context Passing
 Pass data between side effects and callbacks:
+
+> **Reserved kwarg names.** The engine sets `tr_id`, `root_id`, `parent_id`,
+> `process_class` and `owning_process_class` on every drive (they carry
+> transition identity and lineage, and are forwarded to `next_transition`
+> follow-ups), replaces `user` with `user_id` on the background wire, and
+> rebuilds `context` in phase 2. Passing any of those as your own data means
+> the engine overwrites it. Use different names.
+
+> `context` is scoped to **one execution**, not persisted. A caller-supplied
+> `context=` reaches a synchronous transition's hooks, but for a *background*
+> transition phase 1 drops it and phase 2 rebuilds an empty one — it is a
+> channel between hooks within a run, not a way to pass data across the queue.
+> Anything phase 2 must see belongs in ordinary kwargs (which are serialized)
+> or on the instance.
+
 
 ```python
 def calculate_total(instance, context, **kwargs):
@@ -771,7 +832,7 @@ class GmailConversationProcess(Process):
         BackgroundTransition(
             action_name='send_message_via_integration',
             sources=['open'], target='open',
-            in_progress_state='gmail_sending',     # distinct here: different failure hooks
+            in_progress_state='gmail_sending',
             conditions=[is_gmail],
             side_effects=[send_via_gmail],
         ),
@@ -814,18 +875,51 @@ phase 2 restores that exact transition from the recorded owner — it does not
 re-evaluate the condition, so routing is deterministic even if the instance
 changes mid-flight. Constraints: a background `action_name` must only be
 **unique within a single process class** (two in one class are
-indistinguishable at restore). `in_progress_state` may be shared by several
-transitions **of the same bound process** — useful when a UI only knows one
-"busy" value — provided they agree on `failed_state` and their failure hooks
-(matched by object identity, so reference the same callables rather than
-equivalent ones), since a record-less stranded instance in that state has no
-owner to recover under. Two *different* bound processes sharing a state is
-always rejected, however identically they recover: each sweep only sees its own
-`process_name`'s in-flight rows, so the other's live transition would look
-stranded. `django_logic.E001` fails `manage.py check` in both cases. A background `action_name` *may* coincide with a
+indistinguishable at restore). `in_progress_state` may be shared freely —
+useful when a UI only knows one "busy" value: every marked instance carries
+its exact transition on the `TransitionMessage` row, so recovery never has to
+guess an owner (the `django_logic.E001` ownership check that used to police
+sharing was retired in 0.12.0 along with the stranded sweep). A background `action_name` *may* coincide with a
 synchronous transition of the same name (phase 2 restores only background
 transitions; phase 1 routes the call by condition) — so a synchronous fast-path
 and a durable background slow-path can share one `action_name`.
+
+> **`in_progress_state` is background-only (0.12.0).** On a `BackgroundTransition`
+> the marker is written atomically with the `TransitionMessage` row, so every
+> marked instance has a recovery owner. A *synchronous* transition used to write
+> it under a cache lock with no durable record — a hard-killed worker left the
+> instance parked in a state with no outbound edges (#136), and the engine
+> needed a whole sweeping subsystem (`recover_stranded_states`, retired) to find
+> those. Declaring it on a plain `Transition`/`Action` now raises
+> `ImproperlyConfigured`. Without a marker, a killed synchronous run simply
+> rolls back to its source state and is re-drivable once the lock TTL expires —
+> nothing to sweep.
+>
+> **Migrating a sync transition that used the marker:** model the busy phase as
+> a real state with explicit edges —
+>
+> ```python
+> Transition('submit', sources=['draft'], target='fulfilling',
+>            next_transition='do_fulfil'),
+> BackgroundTransition('do_fulfil', sources=['fulfilling'], target='fulfilled',
+>                      failed_state='fulfilment_failed', side_effects=[...]),
+> ```
+>
+> Readers see `fulfilling` exactly as before, and the work itself is TM-durable.
+> The pattern accepts one narrow window the old atomic marker did not have: a
+> crash between `submit`'s commit and the chained dispatch parks the instance at
+> `fulfilling` with no row. The recovery is a three-line periodic re-drive,
+> safe by construction — instances genuinely in flight raise
+> `AlreadyInProgress` and are skipped, parked ones retry *forward*:
+>
+> ```python
+> for obj in Order.objects.filter(status='fulfilling',
+>                                 modified__lt=now() - timedelta(hours=1)):
+>     try:
+>         obj.process.do_fulfil()
+>     except TransitionNotAllowed:
+>         pass  # in flight or locked — someone owns it
+> ```
 
 > **Upgrade note.** When you turn an existing, uniquely-named background
 > transition into this shared-name nested pattern, deploy it with no in-flight
@@ -835,7 +929,7 @@ and a durable background slow-path can share one `action_name`.
 > it without running its side-effects (safe, but the work won't run). Rows
 > enqueued after the upgrade always record their owner.
 
-### Testing your processes
+### Testing background transitions
 
 Set `BACKGROUND_EXECUTION='sync'` in your test settings — the global default is `'celery'`, so this opt-in is required — and every `instance.process.fulfil(...)` call runs phase 1 **and** phase 2 inline, no broker involved:
 
@@ -881,13 +975,12 @@ The periodic starter re-dispatches stale transitions back to their own queue —
 
 ### Safety-net tasks
 
-Five periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
+Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durable model self-healing:
 
 - `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
 - `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
 - `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
-- `recover_stranded_states` — recovers instances a hard-killed **synchronous** transition left parked in an `in_progress_state` (no lock held, no uncompleted `TransitionMessage`): drives them through the owning transition's failure path (`failed_state` + failure hooks) with a synthetic `[stranded]` error. Transitions without a `failed_state` are logged loudly and left re-drivable (#136). The state lock is the liveness signal, so size `LOCK_TIMEOUT` above your longest synchronous side-effect — or give legitimately long transitions (report generation, large exports) their own `Transition(..., lock_timeout=...)`. Long-running **background** transitions need neither: their uncompleted `TransitionMessage` row shields them from this sweep regardless of lock expiry.
 
 ### Per-attempt timeouts
 
@@ -906,7 +999,7 @@ BackgroundTransition(
 )
 ```
 
-`watchdog_stale_attempts` scans in-flight rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. Because the watchdog cannot tell a crashed attempt from a merely slow one, a re-dispatched attempt may run side-effects again while the original is still executing — **side-effects must be idempotent against external systems** (their database writes are per-attempt atomic and roll back on failure, but an external API call made by both attempts happens twice).
+`watchdog_stale_attempts` scans in-flight rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. An attempt is charged **at most once**: if it has already recorded an error of its own since it started, the watchdog leaves it alone rather than spending a second retry on it. `started_at` is written in its own committed statement before the attempt begins, precisely so it stays visible while the attempt runs and survives a worker dying mid-flight — which is what makes a hung or crashed attempt observable at all. Because the watchdog cannot tell a crashed attempt from a merely slow one, a re-dispatched attempt may run side-effects again while the original is still executing — **side-effects must be idempotent against external systems** (their database writes are per-attempt atomic and roll back on failure, but an external API call made by both attempts happens twice).
 
 ### Concurrency and locking
 
@@ -922,7 +1015,7 @@ The constraint is scoped **per process**: two independent state machines bound t
 
 Because the in-flight marker is a database row rather than a held lock, nothing leaks if the caller's surrounding transaction rolls back — the row, the `in_progress_state` write, and the dispatch all disappear together.
 
-**Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired (it just logs and leaves it intact). A `State` object that never locked keeps the historical unconditional delete as a manual force-release path.
+**Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired — the token no longer matches, so it leaves it intact and returns silently. A `State` object that never locked keeps the historical unconditional delete as a manual force-release path.
 
 **Synchronous transitions inside an outer `transaction.atomic()`.** By default the lock is released as soon as the transition completes — before the outer block commits. That window is real: another connection can acquire the lock, read the *old committed* state, and run the same transition again (both side-effect runs happen; the final state depends on commit ordering). If your code drives transitions inside atomic blocks and needs exclusion to cover the whole uncommitted span, opt in:
 
@@ -961,9 +1054,9 @@ Celery mode has three things you **must** wire up, or the durability guarantees 
 
 **1. A real broker.** `BACKGROUND_EXECUTION='celery'` requires a durable broker (Redis/RabbitMQ). With no broker configured, Celery falls back to an in-memory transport that no worker drains — `apply_async` succeeds but the task never runs (django-logic logs a one-time warning on first dispatch).
 
-**2. The five periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, the timeout watchdog, and stranded-sync recovery never run** — a single lost broker message or crashed worker then strands an instance in `in_progress_state` forever.
+**2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, the timeout watchdog, and cleanup never run** — a single lost broker message then leaves an instance waiting forever.
 
-Use the ready-made schedule — it routes all five tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, stranded 300s, cleanup daily), each overridable by keyword:
+Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, cleanup daily), each overridable by keyword:
 
 ```python
 # celery.py — after the app is configured
@@ -981,7 +1074,7 @@ app.conf['CELERY_BEAT_SCHEDULE'] = {
 }
 ```
 
-(A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.recover_stranded_states`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)
+(A hand-written `CELERY_BEAT_SCHEDULE` works exactly the same — the task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts`, `django_logic.cleanup_completed_transitions`; remember to set `options={'queue': ...}` per entry yourself.)
 
 Run a worker that consumes both your transition queues **and** the starter queue, plus beat:
 
@@ -1049,7 +1142,7 @@ including background transitions — **inline, with no Celery broker**.
 
 Two principles keep these tests worth writing: **test your process, not the
 machinery**, and **assert what the object became, not that a hook ran**. Full
-rationale, and the 15-scenario catalog, in
+rationale, and the 18-scenario catalog, in
 [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md#journeys-not-mirrors).
 
 ```python
@@ -1189,9 +1282,10 @@ report = coverage_report(log_path='/tmp/fsm_coverage.log')
 A pair is recorded at *initiation* (direct calls, `next_transition`
 follow-ups, background phase 1); phase-2 restore and retries don't re-notify.
 Diffing `report['uncovered']` in CI catches transitions that silently stop
-being exercised. Logs written by 0.8 recorders (2-field `class\taction`
-lines) are still accepted with their original semantics — a legacy line
-covers every same-name namesake. The observer list is public — consumers can
+being exercised. Logs written by 0.8/0.9.0 recorders are **no longer read** —
+0.10.0 removed the cross-version readers, so a log in an older format reports
+everything as uncovered. Re-measure against the current release rather than
+carrying an old log forward. The observer list is public — consumers can
 register their own hooks (metrics, tracing), called as
 `observer(owning_process_cls, action_name, instance, transition)` (the
 resolved declaration object was added as a fourth argument in 0.9); a raising

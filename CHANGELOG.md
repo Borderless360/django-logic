@@ -2,6 +2,537 @@
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-30
+
+A correctness release that ends in a design decision. Three acts:
+
+**One — five engine defects** (#178–#182), found reviewing 0.11.0, three of
+them capable of losing or corrupting work; every one reproduced before the fix
+and pinned in `tests/test_issue_fixes_0_12.py`.
+
+**Two — a fourth review pass over those fixes**: seven independent readings of
+the library plus mutation testing of the new tests. It found two more serious
+defects (a watchdog that could terminalise a healthy attempt, and a lock leak
+the release's own change made reachable), an undeclared breaking change, two
+assertions that proved nothing, and nine fixes with no pinning test at all —
+all fixed and pinned in `tests/test_pass4_*.py`, every pin verified by
+reverting its fix and confirming the test fails. Plus #188, from a live
+production incident: a failed lock acquisition is finally visible in the logs.
+
+**Three — the headline: `in_progress_state` is background-only, and the
+stranded sweep is retired** (see *Removed (breaking)*). Four review passes kept
+finding their most serious defects in the same place — the machinery that
+recovers instances from a marker the engine itself wrote with no durable
+record. Rather than harden that machinery a fifth time, this release removes
+the reason it exists. The engine is smaller, the beat schedule is four tasks
+instead of five, and a killed synchronous run now rolls back to its source
+state and is simply re-drivable.
+
+Validated twice on real infrastructure (broker, PostgreSQL, workers, beat) via
+the `django-logic-test` rig — once after act two, once after act three: 31
+matrix rows each, zero failures.
+
+### Changed (breaking)
+
+Three definitions the engine used to accept now raise, because it could never
+honour them. Each is a defect in the *declaration*, so a project hitting one was
+already broken — but it will now fail at import or bind time rather than
+silently doing nothing:
+
+- an `action_name` shadowed by a `Process` attribute *or* by one of the
+  attributes `Process.__init__` sets (`state`, `instance`, `field_name`) —
+  `ImproperlyConfigured` at class creation;
+- a `process_name` that already names something on the model's MRO (a field's
+  descriptor, a method, a property, a manager) — `ImproperlyConfigured` at
+  `bind_model_process`. Reverse FK/M2M *query* names are deliberately not
+  flagged: they own no class attribute, so binding under one is sound;
+- `sources` passed as a bare string — `ImproperlyConfigured`, since
+  `list('draft')` silently became `['d','r','a','f','t']`.
+
+`STRICT_KWARGS_SERIALIZATION` and `STRICT_HOOK_SIGNATURES` now require a real
+bool and are validated at boot; a project passing the *string* `'false'` had
+strict mode silently ON and will now get `ImproperlyConfigured` naming the key.
+
+`django_logic.W004` is a new warning, so a project that keeps unrelated keys in
+`DJANGO_LOGIC` and runs `manage.py check --fail-level WARNING` will need
+`SILENCED_SYSTEM_CHECKS`.
+
+### Removed (breaking) — `in_progress_state` is background-only; the stranded sweep and E001 are retired
+
+The single largest simplification in the library's history, and a deliberate
+design decision rather than a bug fix: **the in-progress marker now exists only
+where it has a durable recovery owner.**
+
+- **`in_progress_state` on a synchronous `Transition`/`Action` raises
+  `ImproperlyConfigured` at class creation.** On a `BackgroundTransition` the
+  marker is written atomically with the `TransitionMessage` row, so every
+  marked instance carries its exact transition and the TM safety nets own its
+  whole flight. A synchronous transition wrote the marker under a cache lock
+  with *no durable record*: a hard-killed worker left the instance parked in a
+  state with no outbound edges and nothing that could ever move it (#136) —
+  the incident shape that produced the stranded sweep, and, across four review
+  passes, the sweep and its ownership rules were the most defect-dense
+  subsystem in the engine. Without the marker, a killed synchronous run rolls
+  back to its source state and is simply re-drivable once the lock TTL
+  expires: self-healing, no machinery.
+
+- **`recover_stranded_states` is retired** (the fifth safety-net task, its
+  beat entry, and the whole sweeping subsystem — candidate scans, lock-guarded
+  recovery, ownership transfer, ambiguity skips). Record-less stranding is now
+  structurally impossible: sync transitions cannot write a marker, a
+  background marker always has a TM row, and a crash inside phase 1 rolls both
+  back together. `beat_schedule()` ships **four** entries; a schedule still
+  naming `django_logic.recover_stranded_states` simply has one stale entry
+  (django_logic.W002 matches by task name and will not complain about extras).
+
+- **`django_logic.E001` is retired.** The shared-`in_progress_state`
+  ownership check existed to scope the sweep — a record-less stranded instance
+  had no provenance, so transitions sharing a marker had to agree on recovery.
+  With recovery TM-scoped, sharing a marker is harmless, in one process or
+  across many. Projects silencing or asserting on E001 can drop it.
+
+- **Consequences an operator will notice.** Rows the safety nets complete
+  *without* managing a `failed_state` write (an unrestorable row, a rejected
+  `failed_state` write) now leave the instance parked in its
+  `in_progress_state` — visibly, with the reason on the completed row — and
+  re-drivable via the implicit source, instead of being force-failed by the
+  sweep on a later tick. Monitor `last_error_message`/
+  `failure_side_effect_error` for the `[unrestorable]` / `failed_state write:`
+  markers.
+
+- **Migrating a synchronous transition that declared the marker:** model the
+  busy phase as a real state — a fast transition into it, chained via
+  `next_transition` to a `BackgroundTransition` that does the work (readers
+  see the busy state exactly as before, and the work becomes TM-durable). The
+  pattern accepts one narrow window the atomic marker did not have: a crash
+  between the first transition's commit and the chained dispatch parks the
+  instance in the busy state with no row. The README documents the three-line
+  periodic re-drive that covers it — safe by construction, because in-flight
+  instances raise `AlreadyInProgress`, and it retries *forward* instead of
+  force-failing. Instances already stranded in a marker state by a PREVIOUS
+  release are not recovered by anything after the upgrade: re-drive or
+  hand-fix them BEFORE upgrading (the sweep in 0.9.1–0.11.0 can do it for
+  you), or clean them up with your own command afterwards.
+
+Two more declarations now raise, found in the fourth pass:
+
+- `failed_state` equal to `in_progress_state` — `ImproperlyConfigured` at class
+  creation. The two states are what recovery reads to tell "failed" from "still
+  running"; identical, `recover_stranded_states` wrote `failed_state`, re-read
+  the same `in_progress_state`, concluded the recovery had not landed, and
+  re-ran the failure hooks on every sweep tick forever;
+- a kwarg named `state`, `exception` or `deferrable` passed to a transition —
+  `TypeError` before the lock is taken. These name the engine's own parameters
+  on the state-change path, so they used to raise deep on the *failure* path
+  instead: `failed_state` was never applied, the real exception was replaced by
+  the `TypeError`, and the state lock leaked until its TTL (hours). Nest the
+  value or rename it. Distinct from the lineage names (`tr_id`, `root_id`, …),
+  which the engine forwards itself and therefore still cannot refuse.
+
+**Background kwargs containing a NUL byte or a lone surrogate now raise
+`KwargsSerializationError` at phase 1**, on every backend and regardless of
+`STRICT_KWARGS_SERIALIZATION`. This shipped unannounced in the original 0.12.0
+branch and is called out here because it is a real behaviour change: SQLite
+stored such values happily, and PostgreSQL failed later, inside the worker,
+where the failure was much harder to attribute. Failing at the call site is the
+same trade the non-finite-float rejection made in 0.7.0.
+
+**`State.get_persisted_state()` now reads the instance's own database alias**
+rather than always `default`. On a multi-database project with routing, the
+under-lock revalidation and the phase-2 state guard previously read the wrong
+database. No effect on single-database projects.
+
+**Two `TransitionMessage` text columns changed shape.**
+`failure_side_effect_error` accumulates labelled entries (`failed_state write:
+…; failure_side_effects: …`) instead of being overwritten, and
+`last_error_message` has NUL bytes escaped (`\x00`) and lone surrogates
+replaced. Anything parsing these columns should expect the new shapes.
+
+**Coverage keys changed shape for `functools.partial` and callable-instance
+conditions.** The per-declaration key includes a fingerprint of each condition;
+0.9.1–0.11.0 rendered every `partial` as the literal `partial` and a callable
+instance as its bare class name, so the per-variant declarations the fingerprint
+exists to separate collapsed into one key and could report false coverage — the
+per-courier `Condition('ups')` / `Condition('dhl')` pattern being the case that
+matters. They now render as `partial(<func>(<bound args>))` and the
+module-qualified class name plus the instance's configuration. Consequence: a
+`TRANSITION_COVERAGE_LOG` recorded by an earlier release no longer matches such
+declarations — they read as uncovered. Record a fresh log per run, which is the
+documented practice. Named-function conditions keep their keys.
+
+### Fixed
+
+- **A failing state write no longer escapes phase-2 error accounting**
+  (#178). The side-effect loop was savepointed so "the error bookkeeping below
+  always works", but both `set_state` calls sat outside any savepoint. A write
+  the database rejected — CHECK constraint, `pre_save` receiver, `save()`
+  override, column length — escaped the outer atomic and **took `record_error`
+  with it**: `errors_count` stayed 0, so `retry_stale_transitions`
+  re-dispatched the row on every tick and its side-effects, including
+  non-idempotent external calls, re-ran forever. `detect_stuck_transitions`
+  never saw it (errors below `MAX_ERRORS`), `recover_stranded_states` skipped
+  it (an uncompleted row existed), and the instance sat in its
+  `in_progress_state` permanently. The terminal branch was worse: it rolled
+  back the `record_error` immediately preceding it, pinning `errors_count` one
+  below `MAX_ERRORS` for good — and the safety-net finalizer had the identical
+  unguarded write, so nothing could rescue the row.
+
+  The target write now happens **inside** the attempt savepoint, which also
+  restores the documented all-or-nothing-per-attempt contract. Both
+  `failed_state` writes are savepointed and never allowed to escape: completing
+  the row is what stops the retry loop, so a rejected `failed_state` is logged
+  and recorded on the row rather than preventing completion, leaving the
+  instance for stranded recovery instead of an infinite loop.
+
+- **The timeout watchdog works, and charges an attempt at most once** (#179).
+  `mark_as_started` ran inside the attempt's `atomic`, so `started_at` was
+  invisible to other connections *while* the attempt ran and was rolled back
+  when a worker died — the watchdog could never see the attempts it exists to
+  abandon. The only rows it matched were ones whose attempt had already
+  committed a failure, and it re-charged them on every tick: one real attempt
+  plus three ticks took `errors_count` from 1 to 4 with no new work, and a
+  fourth terminalised the row, discarding every remaining retry. It also
+  overwrote the real error message with a synthetic timeout. **Declaring
+  `timeout=` made a transition strictly less reliable than omitting it.**
+
+  `started_at` is now written in its own committed statement before the attempt
+  and deliberately survives the attempt rolling back, so a hung or crashed
+  attempt is observable; and the watchdog skips any attempt that has recorded
+  an error since it started. `started_at` is therefore set on paths that exit
+  early (superseded, unrestorable) — `duration_ms` remains the field that
+  distinguishes "no work was measured".
+
+- **A nested `Process` reachable by two paths is callable again** (#180).
+  `_iter_available_with_owner` was the only tree walker without a visited set,
+  so a diamond — or the same class listed twice in `nested_processes` — yielded
+  each of its transitions twice and resolution rejected the single declaration
+  as "several transitions available", with a hint no condition could satisfy.
+  `get_available_actions()` set-dedupes, so the action was advertised and then
+  failed on every call. A nested cycle recursed to `RecursionError`. The walk
+  now visits each Process class once, which preserves the supported pattern of
+  one `action_name` on distinct nested classes disambiguated by conditions.
+
+- **Rendering `{{ obj.process.action }}` no longer executes the transition**
+  (#181). Django calls any callable a template resolves, so referencing a
+  transition instead of listing `get_available_actions` drove the state machine
+  during rendering and printed the `tr_id` into the page. The dispatcher now
+  carries `alters_data`, the marker `Model.save`/`delete` use; templates render
+  `''` instead.
+
+- **Four definitions the engine accepted but could not honour are now
+  rejected** (#182):
+  - An `action_name` shadowed by a real `Process` attribute (`state`,
+    `is_valid`, `transitions`…) was advertised by `get_available_actions()` and
+    silently did nothing, because `__getattr__` only runs when attribute lookup
+    *fails*. Rejected at class creation.
+  - A `process_name` colliding with one of the model's own fields replaced that
+    field's descriptor with a read-only property, after which the model could
+    not be instantiated at all. Rejected at bind time.
+  - `STRICT_KWARGS_SERIALIZATION` was `bool()`-coerced, so the string
+    `'false'` — an environment variable read straight through — switched strict
+    mode **on**. Only a literal `True` enables it now, validated at boot;
+    `STRICT_HOOK_SIGNATURES` gets the same treatment.
+
+- `ProcessScenario.process_name` defaults to `process_class.process_name`
+  instead of the literal `'process'`. A scenario for a process bound under a
+  custom name no longer has to repeat it, and forgetting no longer surfaced as
+  a bare `AttributeError` from inside an assertion. `assert_changed` explains
+  the `{field: (old, new)}` shape instead of failing with "too many values to
+  unpack".
+
+### Added
+
+- **`django_logic.W004`** reports `DJANGO_LOGIC` keys the engine never reads
+  (#182). The settings dict has no schema, so a typo — `LOCK_TIMOUT`,
+  `TRANSITION_MESSAGE_MAX_ERROR` — was silently ignored and the default
+  silently applied. Removed keys are left to `W003`, which already names them
+  with migration advice.
+
+### Removed
+
+- **The `[drf]` extra.** It installed `djangorestframework` and nothing in the
+  library has referenced `rest_framework` since 0.4. A DRF integration module
+  is still on the roadmap; it can bring its own extra back when it exists.
+- **The nested-process tree walk existed five times.** Four class-level
+  re-implementations — in `checks.py`, `coverage.py`, `testing/runner.py` and
+  `collect_ambiguous_in_progress_states` — now call the canonical
+  `_iter_process_tree`. This was not cosmetic: the fifth copy, the one on the
+  runtime path, was the only one without a visited set, which is #180. The two
+  remaining walks build *instances* (each sub-process sharing the parent's
+  state), so they are genuinely different and stay.
+- A duplicate failure-callback runner (two functions, byte-identical bodies and
+  log lines, differing only in argument shape), `_validated_number`'s
+  `allow_zero` parameter (never passed, its branch unreachable), and a
+  defensive branch in `_recover_stranded_instance` whose own comment said it
+  could not be reached.
+- `ProcessScenario`'s `expect_raises=` no longer re-implements the three
+  caller-boundary predicates; it routes through `assert_raised` /
+  `assert_not_raised`, so the contract is pinned in one place instead of two.
+
+### Fixed (from the same review — lower severity)
+
+- **`sources` passed as a bare string is rejected.** `sources='draft'` became
+  `['d','r','a','f','t']`, matching no state: the transition was invisible to
+  `get_available_actions()` and calling it reported a missing action rather
+  than a bad declaration.
+- **A rejected `failed_state` write no longer masks the original failure** on
+  the synchronous path. `fail_transition`'s docstring promised "the original
+  side-effect exception keeps propagating either way"; the write's own
+  exception used to win, losing the real cause. (The background equivalents are
+  #178.)
+- **The `DEFER_UNLOCK_UNTIL_COMMIT` registry clears again after a rollback.**
+  It registered its `on_commit` clear only while empty; a rollback discards the
+  hook but leaves the entries, so the registry was never empty again, no
+  further clear was ever registered, and the list grew for the life of the
+  connection — pinning every `State` it held.
+- **A caller-supplied `user_id` kwarg is dropped loudly** instead of being
+  silently consumed. `user_id` is the engine's wire form for `user`, so phase 2
+  replaced the caller's value with a live user object and the hook never saw
+  it — while the identical call behaved correctly in sync mode, a parity break
+  that only appeared in production.
+- `django_logic/__init__.py` defines `__all__`, so `from django_logic import *`
+  no longer leaks whichever submodules happened to be imported (the namespace
+  varied with `INSTALLED_APPS`). The six command bundles are now all swappable:
+  `failure_side_effects_class` and `failure_callbacks_class` join the four that
+  already existed, which had left `FailureSideEffects` a top-level export with
+  no way to substitute it.
+- `ProcessScenario.process_name` derives from `process_class.process_name`, and
+  `assert_changed` explains the `{field: (old, new)}` shape rather than failing
+  with "too many values to unpack".
+
+### Fixed (fourth review pass — reviewing the fixes above)
+
+- **The timeout watchdog could charge, and terminalise, a healthy attempt.**
+  `watchdog_stale_attempts` decided "this attempt is stale" from its
+  unsynchronised candidate scan and never re-verified under the row lock. A
+  retry that stamped a fresh `started_at` in the scan→lock window defeated the
+  one-charge guard added above — that guard compares the last error to
+  `started_at`, and the new stamp is *later* than the old error — so an attempt
+  milliseconds old was charged a synthetic `TimeoutError`, and at `MAX_ERRORS`
+  the row was finalized to `failed_state` while its worker was still running.
+  The staleness check now runs on the locked read; the scan is only a hint.
+  (`beat_schedule()` co-schedules the starter every 60s and the watchdog every
+  120s on one queue, so the two hitting the same row in the same second is
+  systematic, not exotic.)
+
+- **A rolled-back phase-2 attempt leaked the state lock of any instance its
+  side-effects had driven.** Under `DEFER_UNLOCK_UNTIL_COMMIT`, a side-effect
+  that synchronously drives a transition on another instance — the fan-out and
+  report-back recipes both encourage this — registers that instance's unlock on
+  `transaction.on_commit` inside the attempt savepoint. When a later side-effect
+  failed, Django discarded the hook with the savepoint while the outer
+  transaction still committed the bookkeeping: the other instance's state write
+  rolled back but its lock was held until `LOCK_TIMEOUT` (7200s by default),
+  every transition on it raised `TransitionNotAllowed("State is locked")`, and
+  the driver's own retries then burned `MAX_ERRORS` against that held lock. Every
+  hook bundle already ran through the machinery built for exactly this
+  (`_run_in_savepoint`); the attempt savepoint was the one raw `atomic` left.
+  Moving #178's target write inside that savepoint added a new way to reach it.
+
+- **The safety-net finalizers now honour a manual fix whole, not just its state
+  write.** On a state-guard mismatch, `detect_stuck_transitions` and the
+  watchdog skipped the `failed_state` write but still ran `failure_side_effects`
+  *and* `failure_callbacks` against an instance an operator had already
+  resolved — destructive cleanup (refunds, releases) and report-back callbacks
+  for a child that was fixed by hand — and completed the row with no marker
+  explaining why. They now complete it as `[superseded]` with no hooks, matching
+  what phase 2 has done since 0.10.0, and preserve the original error text after
+  the marker.
+
+- **A restore failure the engine had not classified escaped phase 2 unaccounted.**
+  `_restore` treats model-uninstalled / row-gone / transition-renamed as
+  permanent and stops retrying. Anything else — a consumer `process` property
+  raising, an `instance_id` that no longer coerces to the pk type after a
+  migration, a transient database error — propagated with `errors_count` still
+  0, so the starter re-dispatched the row forever: the same unaccounted
+  infinite-retry class #178 closed for state writes. Such failures are now
+  charged like any attempt failure, so transient causes get their retries and
+  permanent ones reach `MAX_ERRORS` and stop. The same escape inside the
+  safety-net finalizer rolled back the whole finalization on every tick.
+
+- **The stop-retry write could itself be the statement that failed.**
+  `_mark_unrestorable_completed` was the one `last_error_message` writer still
+  bypassing `db_safe_text`, and its text embeds an arbitrary import error — a
+  NUL byte in it made the UPDATE fail on PostgreSQL, so the row never completed
+  and was re-dispatched forever, defeating the guarantee the function exists to
+  provide.
+
+- **Two `nested_processes` walks in the phase-2 restore path had no cycle
+  guard.** #180 made the sync walk cycle-safe and its test blesses A→B→A, but
+  `_find_background_transition_in_owner` and `_background_transitions_named`
+  still recursed until `RecursionError` on such a topology — on the blank or
+  stale `owning_process_class` fall-throughs their caller is written to handle
+  gracefully. Both now walk through `_iter_process_tree`.
+
+- **An exotic-but-legal transition could take down `manage.py check` and the
+  stranded sweep.** The E001 collector read `failed_state` and the failure
+  bundles unguarded, so a duck-typed custom transition that declares
+  `in_progress_state` and none of them raised `AttributeError` — in every
+  `manage.py check`, and on every beat tick of `recover_stranded_states`, where
+  the call sits before the per-binding containment and so killed the sweep for
+  the whole deployment. Guarded like the hook-signature collector already was.
+
+- **Background transitions bound with `django_logic.background` missing from
+  `INSTALLED_APPS` are now reported** (`django_logic.E003`). Every existing
+  check gated on the app being installed, so this misconfiguration passed
+  `check` silently and surfaced as a raw `OperationalError: no such table` on
+  the first drive.
+
+- **`DJANGO_LOGIC` set to a non-dict** now raises `ImproperlyConfigured` naming
+  the setting instead of an `AttributeError` from inside `_conf()`, and
+  **`TRANSITION_COVERAGE_LOG` is type-validated at boot** — `open()` accepts a
+  bool as a file descriptor, so `True` appended coverage lines to stdout.
+
+- **The shadowed-`action_name` check no longer rejects working topologies.** It
+  flagged a name shadowed by an attribute on *any* class in the nested tree, but
+  dispatch only enters through the bound root's `__getattr__`, so a helper
+  stored on a sibling nested Process — a natural pattern — failed at import with
+  an error message that was demonstrably false. Root-only loses nothing: every
+  `Process` subclass is validated as its own root when defined.
+
+- **MTI and proxy models sharing one inherited state column are no longer
+  invisible to E001.** The ambiguity collector keyed on the bound model's label,
+  so a parent and a child bound to *different* processes could claim the same
+  `in_progress_state` on the same physical column with different recovery — the
+  cross-process case E001 exists to refuse. It now keys on the concrete model
+  that owns the column.
+
+- **`ProcessManager.unbind_model_process()`** removes a binding and its model
+  accessor — the inverse of `bind_model_process`, for consumer test teardown.
+  The library's own tests had been hand-rolling it.
+
+- **Testing-framework assertions no longer pass vacuously on a bare string.**
+  `assert_not_available(order, 'approve')` iterated the string per character, so
+  it tested single letters and passed while `approve` was in fact available —
+  the same footgun `sources` now rejects. The name-collection helpers raise
+  `TypeError`.
+
+- **Snapshot round-trips are lossless and loud.** `snapshot()` omitted
+  `started_at`, `last_error_dt`, `failure_side_effect_error`, `completed_at` and
+  `duration_ms`, so a snapshot of the row a timeout incident produced could not
+  reproduce it (the watchdog filters on `started_at`); and `from_snapshot()`
+  ignored the recorded model label while silently dropping unknown fields, so a
+  wrong-model snapshot restored corrupted instead of failing. It now raises, and
+  purges stale `TransitionMessage` rows for the instance before inserting the
+  snapshot's own (they do not FK-cascade, so an orphan could be replayed
+  instead).
+
+- **`ScenarioAssertions` no longer needs `process_name` spelled out** — it
+  derives from `process_class`, where a `None` default used to become
+  `process_name=None` and make assertions pass or fail for the wrong reason.
+  Now pinned by a scenario that omits it.
+
+- **`record_failure_side_effect_error` keeps the newest note.** Truncation kept
+  the head, so once the accumulated text approached the 10k limit, the note just
+  appended — the most recent diagnostic — was what got cut.
+
+- **A failed lock acquisition is logged before the raise** (#188). A frozen
+  instance (leaked lock) and a healthy start were indistinguishable: both
+  emitted one `Start` line and nothing else, because `change_state` raised
+  `TransitionNotAllowed("State is locked")` before logging anything. In the
+  incident that surfaced this, seven instances re-driven every 20 minutes for
+  ten days produced ~1400 `Start` lines and zero indication a lock was the
+  cause — and the wrong conclusion ("the worker drops it") made it into a bug
+  report. Both call sites now log `Lock failed <instance_key> — state is
+  locked` at INFO (not ERROR — losing the lock race is expected concurrency,
+  per #154) before raising; the background phase-1 conditions/permissions
+  rejection gets the same treatment. The `Lock`/`Unlock` lifecycle lines now
+  carry `instance_key`, so a per-instance log filter shows whether the lock
+  was ever taken or released without a `tr_id` self-join — previously `Start`
+  was the only line naming the instance, which made the *absence* of a `Lock`
+  line invisible during triage. The revalidation-failure release also logs
+  (`Unlock <instance_key> after revalidation failure`) so it cannot read as a
+  leak. Log-format note for anything parsing these lines: `Lock` and `Unlock`
+  gained a trailing `instance_key` argument.
+
+- **An expected concurrency guard is no longer logged at ERROR** (#154). Phase
+  1's post-create source recheck raises `SourceStateChanged` (a
+  `TransitionNotAllowed` subclass, so existing `except` clauses are unaffected),
+  and the hook runners log it and `AlreadyInProgress` at WARNING. Both mean
+  "another flight owns this instance right now" — the guard working — and at
+  ERROR they paged an on-call for healthy contention, which is the common shape
+  when a background transition is driven from another transition's side-effects.
+
+- Two of this release's own regression tests asserted nothing and now do: one
+  filtered log output for `'Set state'` while the engine logs `'Set State'`, so
+  its empty-list assertion passed however false the log was; the other claimed
+  to prove the attempt savepoint rolls back but gave the transition no
+  observable write to roll back. Both were caught by mutation testing, along
+  with nine fixes that had no pinning test anywhere — including #178's terminal
+  path, the headline of this release.
+
+### Fixed (fifth review pass — reviewing the branch for release)
+
+- **A phase-2 attempt whose writes were silently discarded was reported as a
+  success.** A side-effect that raises a database error and suppresses it —
+  `try: obj.save() except IntegrityError: pass` without the nested `atomic()`
+  that idiom needs — leaves Django's `needs_rollback` set, so `Atomic.__exit__`
+  discards every write in the attempt savepoint with *no exception
+  propagating*. `_run_in_savepoint` already detected that case (it releases the
+  deferred unlocks the rollback dropped) but returned normally, and phase 2
+  reads "returned" as "committed": the row was marked completed with
+  `errors_count=0` and the success callbacks and `next_transition` ran on top of
+  work that no longer existed. It is now accounted as the failure it is, so the
+  attempt retries and terminalises to `failed_state` like any other. Reachable
+  on a `BackgroundAction`, which writes no state — a `BackgroundTransition` is
+  protected by accident, because its target `set_state` is the last statement in
+  the attempt and raises `TransactionManagementError` on the poisoned
+  connection. **Pre-existing, not new in 0.12.0** (0.11.0 behaves identically
+  for an action, and *worse* for a transition: it advanced the instance to
+  `target` and completed the row). Correctly-written consumer code — the
+  suppression wrapped in its own `atomic()` — is unaffected, and is pinned as
+  such. A silent rollback now also logs a WARNING wherever it happens,
+  including in the best-effort hook bundles that tolerate it, since otherwise
+  the missing writes are the only trace. (Reported by Cursor Bugbot; its
+  conclusion for the target-writing case did not reproduce.)
+
+### Documentation
+
+- Four statements retired by this release's own design cut, still shipping in
+  the release: the deployment section promised `beat_schedule()` "routes all
+  **five** tasks … stranded 300s" two lines under a heading that correctly says
+  four (and named a `stranded_seconds=` keyword that no longer exists, so
+  copying it raises `TypeError`); `BackgroundTransition`'s docstring still made
+  a shared `in_progress_state` conditional on matching failure hooks and pointed
+  at the deleted `django_logic.E001`, which the README and `CLAUDE.md` correctly
+  describe as retired; three operator-facing log lines sent whoever read them to
+  `recover_stranded_states`, deleted in the same commit; and the
+  `failed_state == in_progress_state` error still justified itself by
+  "stranded recovery can never settle". The prose and comments were updated with
+  the cut — the runtime strings were not.
+
+- The **Complete Example is runnable as printed**. Its conditions called
+  `instance.items.all()` and read `instance.shipping_address` on a model that
+  declared neither, so copying it verbatim raised an uncaught `AttributeError`
+  — a 500, since the example's own view only catches `TransitionNotAllowed` —
+  and the Troubleshooting section's recommended `get_available_actions()`
+  diagnostic raised the same thing. The example now declares `Product`,
+  `OrderItem` and `shipping_address`, wires up the previously-unused
+  `is_payment_verified`, and notes that conditions must be total.
+- **"Custom State Classes" says how to install one.** It showed a `State`
+  subclass but never mentioned `Process.state_class`, the attribute that makes
+  a process use it, so the recipe had no effect as written.
+- The watchdog and coverage sections match the code: `started_at` is described
+  as what it now is, and the claim that 0.8/0.9.0 coverage logs are still read
+  is corrected — 0.10.0 removed those readers.
+- `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, which `CLAUDE.md` tells
+  engine-changers to read first, no longer marks `STARTER_QUEUE` "Required" or
+  claims every `BackgroundTransition` must carry a queue.
+- Documented three behaviours that were silently true: a synchronous `Action`
+  ignores `next_transition` (it has no completion to chain from, while a
+  `BackgroundAction` does run it); `context` is scoped to one execution and is
+  rebuilt empty in phase 2, so it cannot carry caller data across the queue;
+  and `tr_id` / `root_id` / `parent_id` / `process_class` /
+  `owning_process_class` are reserved names the engine overwrites.
+- Corrected four smaller claims: `State.unlock` leaves a successor's lock
+  intact silently (it logs nothing), the testing guide's catalog is 18
+  scenarios not 15, its "(opt-in) snapshot" on assertion failure was removed in
+  0.10.0, and two headings that slugified to the same anchor made three
+  in-document links land on the wrong section.
+- Removed `docs/research/race-condition-issue` — an extensionless, unlinked
+  13KB traceback referencing API deleted in 0.10.0.
+
+
 ## [0.11.0] — 2026-07-28
 
 ### Changed (breaking)

@@ -50,7 +50,7 @@ broker required — see §6.
 │      TransitionMessage.objects.create(                                   │
 │          app_label, model_name, instance_id,                             │
 │          process_name, transition_name,                                  │
-│          queue_name=<transition.queue>,        ── REQUIRED, no default   │
+│          queue_name=<transition.queue or DEFAULT_QUEUE>,                 │
 │          kwargs=<serialized>,                                            │
 │      )                                                                   │
 │  }                                                                       │
@@ -127,19 +127,21 @@ Three properties this gives you, effectively for free:
    Either side-effects + target-state write all commit, or none of
    them do and the task retries. There is no "side effects succeeded,
    state never updated" stuck state.
-3. **Every transition runs on exactly the queue its author chose.**
-   No `DJANGO_LOGIC['CELERY_QUEUE']` default to quietly re-route work
-   when a new transition is added. Missing `queue=` is a boot-time
-   error, not a production surprise.
+3. **Every transition runs on a queue its author can name.** `queue=` is
+   optional; a transition without one goes to `DJANGO_LOGIC['DEFAULT_QUEUE']`
+   (`'django_logic'`). Give heavy or SLA-sensitive transitions their own
+   queue and a dedicated worker, so a saturated slow queue cannot delay
+   critical work.
 
 Two smaller rules keep the design honest:
 
-- **`in_progress_state` need not be unique.** Phase 2 restores its
-  transition from the owner recorded on the `TransitionMessage`, not
-  from the state, so sharing costs nothing there. The one consumer that
-  needs an owner is stranded recovery of a *record-less* instance, which
-  is why claimants must agree on `failed_state` and failure hooks
-  (`django_logic.E001`) rather than on the state name.
+- **`in_progress_state` need not be unique — and is background-only.**
+  Phase 2 restores its transition from the owner recorded on the
+  `TransitionMessage`, not from the state, so marker sharing needs no
+  ownership rules (the old `django_logic.E001` check is retired).
+  Synchronous transitions cannot declare the marker at all since 0.12.0 —
+  a killed sync run rolls back to its source state and is re-drivable, so
+  there is nothing to sweep (`recover_stranded_states` is retired with it).
 - **`BackgroundAction` uses the same durable path.** No state change
   on success, but same `TransitionMessage` row, same retry, same
   concurrency guard. A background action that bypassed the DB record
@@ -237,7 +239,7 @@ Briefly, for the record:
 ├─────────────────────────────────────────────────────┤
 │  USER OBLIGATIONS:                                   │
 │                                                      │
-│  ! Every BackgroundTransition declares queue=        │
+│  ! Route by SLA: queue= per heavy transition          │
 │  ! Side-effects MUST be idempotent                   │
 │  ! Critical work goes in side-effects,               │
 │    not callbacks                                     │
@@ -257,9 +259,11 @@ layout is the user's decision.
 
 ### Rule the framework enforces
 
-`BackgroundTransition(queue=<str>)` is required. Omission raises
-`ImproperlyConfigured` at import. There is no `CELERY_QUEUE` setting
-that supplies a fallback.
+`BackgroundTransition(queue=<str>)` is optional and resolved lazily, at run
+time: a transition without one goes to `DJANGO_LOGIC['DEFAULT_QUEUE']`
+(`'django_logic'`). What the framework does enforce is that a queue you
+*do* name has a worker — `django_logic.W002` reports a beat schedule that
+never installed the safety-net tasks.
 
 ### Suggested layout (guidance only, not shipped as default)
 
@@ -270,8 +274,9 @@ django_logic.critical   — user-facing with SLA
                           fulfilment, payment authorisation, checkout
 django_logic.slow       — > 30s work, low concurrency
                           exports, reports, bulk imports
-django_logic.starter    — the framework's own periodic tasks
-                          (retry_stale_transitions, cleanup, detect_stuck)
+django_logic.starter    — the framework's own four periodic tasks
+                          (retry_stale_transitions, cleanup, detect_stuck,
+                           watchdog_stale_attempts)
 ```
 
 Worker configuration matches resource profile to queue:
@@ -319,21 +324,29 @@ celery -A myapp worker -Q django_logic.critical.high,django_logic.critical.norma
 
 ## 7. Settings reference
 
+The README's settings block is the reference; it lists every key with its
+default and is checked against the code. Only the background-specific
+defaults are repeated here, with the values the code actually applies:
+
 ```python
 DJANGO_LOGIC = {
     'LOCK_TIMEOUT': 7200,
-
-    # Required. Framework's own periodic tasks run here.
+    # Optional, like every key here — the default below applies when unset.
+    # The framework's own periodic tasks run on this queue.
     'STARTER_QUEUE': 'django_logic.starter',
-
+    'DEFAULT_QUEUE': 'django_logic',
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
     'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
     'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
 }
 ```
 
-No `CELERY_QUEUE` default. Every `BackgroundTransition` carries its own
-queue.
+`queue=` is optional on a `BackgroundTransition`: one declared without it
+routes to `DEFAULT_QUEUE`.
+
+`manage.py check` reports a key this list does not contain
+(`django_logic.W004`) and a key an earlier release removed
+(`django_logic.W003`), so a typo is not silently ignored.
 
 ---
 
@@ -430,11 +443,20 @@ the concurrency contract — it just removes the broker hop.
 
 - `BACKGROUND_EXECUTION='celery'` but Celery isn't installed → raised
   at Django app-ready time.
-- `BACKGROUND_EXECUTION='celery'` but `STARTER_QUEUE` not set → raised
-  at Django app-ready time.
-- `BackgroundTransition` missing `queue=` → raised at class creation.
-- Two transitions on the same `Process` sharing an `in_progress_state`
-  → raised at class creation.
+- An invalid `DJANGO_LOGIC` value (non-bool strict flag, non-positive
+  `LOCK_TIMEOUT`, non-dict `DJANGO_LOGIC`) → raised at Django app-ready
+  time. `STARTER_QUEUE` has a default (`'django_logic.starter'`) and is
+  not one of them.
+- An `action_name` shadowed by a `Process` attribute, `sources` as a bare
+  string, or `failed_state == in_progress_state` → raised at class
+  creation.
+- A `process_name` that already names something on the model's MRO →
+  raised at `bind_model_process`.
+
+Two transitions sharing an `in_progress_state` need no validation at all
+since 0.12.0: the marker is background-only and every marked instance
+carries its transition on the `TransitionMessage` row, so recovery is
+TM-scoped (`django_logic.E001` retired — see the changelog).
 
 ---
 

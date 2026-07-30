@@ -55,7 +55,6 @@ class TestCrashDuringSideEffects(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     failed_state='fulfillment_failed',
                     side_effects=patched_effects,
                     failure_side_effects=[failure_side_effect],
@@ -89,7 +88,6 @@ class TestCrashDuringSideEffects(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     failed_state='fulfillment_failed',
                     side_effects=[
                         sim.wrap(tracked_se1),
@@ -176,7 +174,6 @@ class TestCrashDuringCallbacks(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     side_effects=[side_effect_one],
                     callbacks=[crashing_callback],
                 )
@@ -250,7 +247,6 @@ class TestCrashDuringFailurePath(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     failed_state='fulfillment_failed',
                     side_effects=[failing_side_effect],
                     failure_side_effects=[crashing_failure_se],
@@ -297,7 +293,6 @@ class TestMaxRetriesExhausted(StabilityTestCase):
                         action_name='fulfill',
                         sources=['approved'],
                         target='fulfilled',
-                        in_progress_state='fulfilling',
                         failed_state='fulfillment_failed',
                         side_effects=[always_failing],
                         failure_side_effects=[failure_side_effect],
@@ -312,8 +307,9 @@ class TestMaxRetriesExhausted(StabilityTestCase):
             order.refresh_from_db()
             self.assertEqual(order.status, 'fulfillment_failed')
 
-    def test_no_failed_state_leaves_in_progress(self):
-        """Without failed_state, the state stays at in_progress on failure."""
+    def test_no_failed_state_leaves_the_source_state(self):
+        """Without failed_state, a failed sync run leaves the instance at its
+        source (0.12.0: no in-progress marker) — re-drivable, not parked."""
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
         self.track_lock(state)
@@ -327,7 +323,6 @@ class TestMaxRetriesExhausted(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     side_effects=[failing_se],
                 )
             ]
@@ -338,5 +333,5 @@ class TestMaxRetriesExhausted(StabilityTestCase):
             process.fulfill()
 
         order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilling')
+        self.assertEqual(order.status, 'approved')
         self.assert_unlocked(state)

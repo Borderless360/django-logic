@@ -10,7 +10,6 @@ from django.core import checks
 
 from django_logic.process import (
     ProcessManager,
-    collect_ambiguous_in_progress_states,
     collect_hook_signature_offenders,
 )
 
@@ -39,61 +38,67 @@ def check_hook_signatures(app_configs, **kwargs):
     return findings
 
 
-@checks.register('django_logic')
-def check_unambiguous_in_progress_ownership(app_configs, **kwargs):
-    """Transitions sharing an in_progress_state on one
-    (model, state_field) must all recover a record-less stranded instance
-    the same way — such an instance has no provenance, so recovery picks
-    an owner, and claimants that disagree on ``failed_state`` or their
-    failure hooks make that pick wrong half the time
-    (``django_logic.E001``). Sharing is fine on its own;
-    ``recover_stranded_states`` also skips ambiguous states at runtime,
-    but the topology itself is the defect, so fail loudly at check
-    time."""
-    findings = []
-    for key, owners in sorted(collect_ambiguous_in_progress_states().items()):
-        model_label, state_field, in_progress = key
-        claimants = ', '.join(sorted(
-            f'{process_cls.__name__}.{transition.action_name}'
-            for process_cls, transition in owners
-        ))
-        findings.append(checks.Error(
-            f"in_progress_state {in_progress!r} on {model_label}."
-            f"{state_field} is shared by transitions that recover "
-            f"differently: {claimants}.",
-            hint='Give them a matching failed_state and matching '
-                 'failure_side_effects/failure_callbacks, or a distinct '
-                 'in_progress_state each (or bind the processes to distinct '
-                 'state fields). Hooks are matched by object identity, so '
-                 'the claimants must reference the SAME callables — hoist a '
-                 'shared partial/lambda to a module-level name rather than '
-                 'building one per transition. Two different bound processes '
-                 'sharing a state are always ambiguous, however identically '
-                 'they recover, because each sweep only sees its own '
-                 'process_name in-flight rows. Stranded-state recovery skips '
-                 'ambiguous states, leaving instances parked until fixed '
-                 'manually.',
-            obj=f'{model_label}.{state_field}',
-            id='django_logic.E001',
-        ))
-    return findings
+# django_logic.E001 (shared in_progress_state with divergent recovery) was
+# retired in 0.12.0 along with recover_stranded_states. The check existed to
+# scope the sweep: a record-less stranded instance carried no provenance, so
+# transitions sharing a marker had to agree on how to recover it. With
+# in_progress_state now background-only — written atomically with the
+# TransitionMessage row — every marked instance has its exact transition on
+# the row, recovery is TM-scoped, and sharing a marker is harmless.
 
 
 def _process_tree_has_background_transition(process_class) -> bool:
     """Does ``process_class`` (or any process nested under it) declare a
     background transition? Duck-typed via ``is_background`` so the check
     never imports the background package for the walk itself."""
-    stack, seen = [process_class], set()
-    while stack:
-        process_cls = stack.pop()
-        if process_cls in seen:
-            continue
-        seen.add(process_cls)
-        for transition in process_cls.transitions:
-            if getattr(transition, 'is_background', False):
-                return True
-        stack.extend(process_cls.nested_processes or [])
-    return False
+    from django_logic.process import _iter_process_tree
+
+    return any(
+        getattr(transition, 'is_background', False)
+        for process_cls in _iter_process_tree(process_class)
+        for transition in process_cls.transitions or []
+    )
+
+
+def _models_bound_to_background_transitions() -> list:
+    """Sorted labels of the models bound to a process whose tree declares a
+    background transition."""
+    return sorted({
+        binding.model._meta.label for binding in ProcessManager.bindings
+        if _process_tree_has_background_transition(binding.process_class)
+    })
+
+
+@checks.register('django_logic')
+def check_background_app_is_installed(app_configs, **kwargs):
+    """A bound ``BackgroundTransition`` needs ``django_logic.background`` in
+    ``INSTALLED_APPS`` (``django_logic.E003``).
+
+    The app owns the ``TransitionMessage`` table and its migrations. Without
+    it, phase 1 has nowhere to write the outbox row, so the first background
+    transition dies with a raw ``OperationalError: no such table`` from deep
+    inside the engine — and the other background checks (E002, W002) gate on
+    the very same missing app, so ``manage.py check`` said nothing at all.
+    """
+    from django.apps import apps
+
+    if apps.is_installed('django_logic.background'):
+        return []
+    offenders = _models_bound_to_background_transitions()
+    if not offenders:
+        return []
+    return [checks.Error(
+        "Background transitions are bound on %s, but "
+        "'django_logic.background' is not in INSTALLED_APPS. The app owns "
+        "the TransitionMessage table those transitions write in phase 1, so "
+        "the first background transition fails with a missing-table "
+        "database error." % ', '.join(offenders),
+        hint="Add 'django_logic.background' to INSTALLED_APPS and run "
+             "manage.py migrate. There is no table-less mode: use plain "
+             "synchronous Transitions where the durable outbox is not "
+             "wanted.",
+        id='django_logic.E003',
+    )]
 
 
 @checks.register('django_logic')
@@ -112,9 +117,16 @@ def check_background_database_routing(app_configs, **kwargs):
     prevent. The supported topology is ``TransitionMessage`` and every
     background-bound model on the shared ``default`` alias; anything else
     is refused here at check time.
+
+    Static routing only: a router that decides from ``hints`` (an
+    ``instance``, a ``model_name``) can answer ``default`` to the
+    model-class questions asked here and still send a real write elsewhere,
+    so passing this check is not proof the invariant holds at runtime.
     """
     from django.apps import apps
 
+    # Nothing to route without the app; a bound background transition with
+    # the app missing is django_logic.E003, not a routing finding.
     if not apps.is_installed('django_logic.background'):
         return []
 
@@ -174,7 +186,7 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     They are the durability half of ``BACKGROUND_EXECUTION='celery'``: without
     them a lost phase-2 message is never re-dispatched, an attempt that dies
     without raising is never terminalized, and completed rows are never pruned.
-    Nothing else notices — a consumer ran seven weeks with all five silently
+    Nothing else notices — a consumer ran seven weeks with them all silently
     unscheduled, accumulating 36 stranded rows, because
     ``app.conf.beat_schedule = {...}`` is ignored when the project also defines
     the ``CELERY_``-namespaced setting (Celery resolves the namespaced key
@@ -187,7 +199,8 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
     # checks too, so without this an install that never added the background
     # app would get a false warning on every `manage.py check` — and fail any
-    # CI running `check --fail-level WARNING`. Same gate as E002.
+    # CI running `check --fail-level WARNING`. Same gate as E002; an install
+    # that *does* bind background transitions without the app is E003.
     if not apps.is_installed('django_logic.background'):
         return []
 
@@ -275,3 +288,56 @@ def check_no_removed_settings(app_configs, **kwargs):
         )
         for key, advice in _REMOVED_SETTINGS.items() if key in conf
     ]
+
+
+#: Every key the engine reads. The set is closed, so anything outside it (and
+#: outside ``_REMOVED_SETTINGS``) is a typo.
+_KNOWN_SETTINGS = frozenset({
+    'BACKGROUND_EXECUTION',
+    'DEFAULT_QUEUE',
+    'STARTER_QUEUE',
+    'LOCK_TIMEOUT',
+    'DEFER_UNLOCK_UNTIL_COMMIT',
+    'STRICT_HOOK_SIGNATURES',
+    'STRICT_KWARGS_SERIALIZATION',
+    'TRANSITION_COVERAGE_LOG',
+    'TRANSITION_MESSAGE_MAX_ERRORS',
+    'TRANSITION_MESSAGE_RETRY_MINUTES',
+    'TRANSITION_MESSAGE_CLEANUP_DAYS',
+})
+
+
+@checks.register('django_logic')
+def check_no_unknown_settings(app_configs, **kwargs):
+    """Report ``DJANGO_LOGIC`` keys the engine never reads
+    (``django_logic.W004``, #182).
+
+    ``DJANGO_LOGIC`` is a plain dict with no schema, so a typo —
+    ``TRANSITION_MESSAGE_MAX_ERROR``, ``LOCK_TIMOUT`` — is silently ignored
+    and the default silently applies. That is the failure mode behind every
+    "I set the retry limit and it did nothing" report. The known set is
+    closed and small, so reporting the complement is cheap and precise.
+
+    Removed keys are excluded here because ``W003`` already names them with
+    migration advice; flagging them twice would just be noise.
+    """
+    from django.conf import settings
+
+    conf = getattr(settings, 'DJANGO_LOGIC', None) or {}
+    if not isinstance(conf, dict):
+        return []
+    unknown = sorted(
+        set(conf) - _KNOWN_SETTINGS - set(_REMOVED_SETTINGS)
+    )
+    if not unknown:
+        return []
+    return [checks.Warning(
+        f"DJANGO_LOGIC contains {'a key' if len(unknown) == 1 else 'keys'} "
+        f"django-logic does not read: {', '.join(repr(k) for k in unknown)}. "
+        f"The value has no effect and the documented default applies.",
+        hint=f"Check for a typo against the documented settings: "
+             f"{', '.join(sorted(_KNOWN_SETTINGS))}. If you keep unrelated "
+             f"keys in DJANGO_LOGIC on purpose, silence this with "
+             f"SILENCED_SYSTEM_CHECKS = ['django_logic.W004'].",
+        id='django_logic.W004',
+    )]
