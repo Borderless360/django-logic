@@ -84,6 +84,7 @@ class WatchdogUnderLockRecheckTests(_BindCleanup, TestCase):
         ProcessManager.bind_model_process(
             Invoice, WatchdogUnderLockRecheckProcess, state_field='status')
         cache.clear()
+        self.addCleanup(cache.clear)
 
     def _stale_row(self, **overrides):
         inv = Invoice.objects.create(status='wd_running')
@@ -191,6 +192,7 @@ class SupersedeParityTests(_BindCleanup, TestCase):
         ProcessManager.bind_model_process(
             Invoice, SupersedeParityProcess, state_field='status')
         cache.clear()
+        self.addCleanup(cache.clear)
         _HOOK_LOG.clear()
 
     def _row_at_max(self, status='sp_running', **overrides):
@@ -284,17 +286,27 @@ class DbSafeTextTests(TestCase):
 class IndistinguishableFailureStateTests(TestCase):
     def test_failed_state_equal_to_in_progress_state_is_refused(self):
         with self.assertRaises(ImproperlyConfigured) as ctx:
-            Transition(
+            BackgroundTransition(
                 'go', sources=['draft'], target='done',
                 in_progress_state='running', failed_state='running',
             )
         self.assertIn('indistinguishable', str(ctx.exception))
 
     def test_distinct_states_are_accepted(self):
-        Transition(
+        BackgroundTransition(
             'go', sources=['draft'], target='done',
             in_progress_state='running', failed_state='failed',
         )
+
+    def test_sync_transitions_reject_the_marker_outright(self):
+        """0.12.0: in_progress_state is background-only — on a sync
+        transition it was a record-less dead end (#136)."""
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            Transition(
+                'go', sources=['draft'], target='done',
+                in_progress_state='running',
+            )
+        self.assertIn('BackgroundTransition', str(ctx.exception))
 
 
 # --- F4: engine-parameter kwargs are refused BEFORE the lock -------------
@@ -304,7 +316,7 @@ class ReservedKwargProcess(Process):
     transitions = [
         Transition(
             'go', sources=['draft'], target='done',
-            in_progress_state='rk_running', failed_state='rk_failed',
+            failed_state='rk_failed',
             side_effects=[_boom],
         ),
         Action('act', sources=['draft'], side_effects=[_boom]),
@@ -332,6 +344,7 @@ class ReservedKwargTests(_BindCleanup, TestCase):
         ProcessManager.bind_model_process(
             Invoice, ReservedKwargProcess, state_field='status')
         cache.clear()
+        self.addCleanup(cache.clear)
 
     def test_transition_refuses_and_leaves_no_lock(self):
         inv = Invoice.objects.create(status='draft')
@@ -436,6 +449,7 @@ class UnclassifiedRestoreFailureTests(_BindCleanup, TestCase):
         ProcessManager.bind_model_process(
             Invoice, UnclassifiedRestoreFailureProcess, state_field='status')
         cache.clear()
+        self.addCleanup(cache.clear)
 
     def _row_with_corrupt_instance_id(self, **overrides):
         fields = dict(
@@ -515,6 +529,7 @@ class Phase2DeferredUnlockTests(TransactionTestCase):
         ProcessManager.bind_model_process(
             Invoice, NestedVictimProcess, state_field='status')
         cache.clear()
+        self.addCleanup(cache.clear)
         self.addCleanup(
             ProcessManager.unbind_model_process, Invoice, DeferLeakProcess)
         self.addCleanup(

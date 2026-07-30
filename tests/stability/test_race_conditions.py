@@ -124,12 +124,12 @@ class TestRaceBetweenUserActionAndBackground(StabilityTestCase):
     2.5 -- While a background transition is in_progress, a user tries
     to trigger a different transition on the same instance.
 
-    Must be rejected: state is locked (via cache) and/or the current
-    state (in_progress_state) is not in the new transition's sources.
+    Must be rejected: the state lock is held for the critical section, so
+    get_available_transitions offers nothing while it is.
     """
 
     def test_user_action_rejected_while_in_progress(self):
-        order = Order.objects.create(status='fulfilling')
+        order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
 
         self.assertTrue(state.lock())

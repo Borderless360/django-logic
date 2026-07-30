@@ -50,14 +50,16 @@ change on success) for anything slow, external, or retriable.
    completion check** on the parent, and **aggregate errors by reading child
    rows** (give the parent an explicit `action_required` partial-failure
    state). Never re-raise a child error into the parent.
-4. **Set a `failed_state`** so failures are contained. Transitions **of one
-   bound process** may share an `in_progress_state` (several actions that all
-   mean "busy" to a UI), provided they also share `failed_state` and their
-   failure hooks — the same callable objects, not merely equivalent ones.
-   Two *different* bound processes may never share one, however identically
-   they recover: each sweep only queries its own `process_name`'s in-flight
-   rows, so the sibling's live transition would look stranded and be
-   force-failed. `django_logic.E001` fails `manage.py check` either way.
+4. **Set a `failed_state`** so failures are contained. `in_progress_state`
+   is **background-only** (0.12.0): on a `BackgroundTransition` it is written
+   atomically with the `TransitionMessage` row; declaring it on a synchronous
+   `Transition`/`Action` raises at class creation. It may be shared freely —
+   every marked instance carries its exact transition on the row, so recovery
+   never guesses an owner (the old `django_logic.E001` ownership check is
+   retired). A synchronous "busy" phase is modelled as a real state: a fast
+   transition into it chained via `next_transition` to a
+   `BackgroundTransition` that does the work, plus a small periodic re-drive
+   for the crash window (see the README migration note).
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
    `sync_execution()` context manager) runs phase 2 inline with no broker and
    propagates exceptions; `retry_pending()` simulates the periodic starter.
@@ -86,7 +88,7 @@ change on success) for anything slow, external, or retriable.
 - Crash re-delivery is built in (every django-logic task sets
   `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
   pair only for your *own* tasks. You still need a **single beat**
-  scheduling the five `django_logic.*` safety-net tasks — and a worker for
+  scheduling the four `django_logic.*` safety-net tasks — and a worker for
   every queue you use. Install them by writing the `CELERY_`-namespaced key,
   because a plain `app.conf.beat_schedule = …` assignment is silently ignored
   when the project also defines `CELERY_BEAT_SCHEDULE` in Django settings:

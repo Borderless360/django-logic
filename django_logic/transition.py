@@ -78,12 +78,18 @@ class Transition:
       2. revalidate under the lock: the persisted state is still a valid
          source AND no background transition is in flight on this
          process (uncompleted ``TransitionMessage``)
-      3. optionally set ``in_progress_state``
-      4. run side-effects
-      5. on success: set ``target``, unlock, run callbacks, run ``next_transition``
-      6. on failure: set ``failed_state`` (so failure hooks observe the
+      3. run side-effects
+      4. on success: set ``target``, unlock, run callbacks, run ``next_transition``
+      5. on failure: set ``failed_state`` (so failure hooks observe the
          contained state), run ``failure_side_effects``, unlock, run
          ``failure_callbacks`` (and re-raise)
+
+    The state field does not change until the transition finishes:
+    ``in_progress_state`` is background-only (0.12.0), where it is written
+    atomically with the durable ``TransitionMessage`` row. A synchronous run
+    that dies mid-flight rolls back to its source state and is re-drivable —
+    a visible "busy" phase, where wanted, is a real state with an explicit
+    fast transition into it, chained via ``next_transition``.
     """
 
     side_effects_class = SideEffects
@@ -116,6 +122,29 @@ class Transition:
             )
         self.sources = list(sources)
         self.in_progress_state = kwargs.get('in_progress_state')
+        if self.in_progress_state and not self.is_background:
+            # Background-only (0.12.0). On a background transition the marker
+            # is written atomically with the TransitionMessage row, so every
+            # marked instance has a recovery owner (the TM safety nets). A
+            # synchronous transition wrote it under a cache lock with NO
+            # durable record: a hard-killed worker left the instance parked in
+            # a state with no outbound edges and nothing that could ever move
+            # it (#136) — the engine grew a whole sweeping subsystem to find
+            # those, and the sweep was the most defect-dense code in four
+            # review passes. Without the marker a killed sync run rolls back
+            # to its source state and is simply re-drivable: self-healing, no
+            # machinery. Model a visible "busy" phase as a real state instead:
+            # a fast transition into it, chained via next_transition to the
+            # transition that does the work (see the README migration note).
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: in_progress_state is only "
+                f"supported on BackgroundTransition, where it is written "
+                f"atomically with the durable TransitionMessage row. On a "
+                f"synchronous transition the marker is a record-less dead "
+                f"end (#136). Model the busy phase as a real state with an "
+                f"explicit transition into it, or make this transition a "
+                f"BackgroundTransition."
+            )
         if self.in_progress_state and self.in_progress_state not in self.sources:
             # Treat the in-progress state as a valid source of the same
             # transition so phase 2 / retry paths can look the transition
@@ -128,13 +157,10 @@ class Transition:
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
         if self.failed_state and self.failed_state == self.in_progress_state:
-            # Recovery reads the state field to decide what happened, so the
-            # two states must be distinguishable. Identical, "failed" and
-            # "still running" are the same value: recover_stranded_states
-            # writes failed_state, re-reads the same in_progress_state, and
-            # concludes the recovery did not land — re-running the failure
-            # hooks on every sweep tick, forever, while the instance stays a
-            # permanent sweep candidate.
+            # The state field is what operators, UIs and the phase-2 guard
+            # read to tell "failed" from "still running"; identical, every
+            # failed instance is indistinguishable from a busy one and the
+            # terminal write is a silent no-op.
             raise ImproperlyConfigured(
                 f"Transition {action_name!r}: failed_state and "
                 f"in_progress_state are both {self.failed_state!r}. A failed "
@@ -144,9 +170,9 @@ class Transition:
             )
         # Per-transition override of the global LOCK_TIMEOUT for the
         # synchronous execution path — for transitions whose side-effects
-        # legitimately run long (report generation, large exports). The
-        # lock is the liveness signal recover_stranded_states relies on,
-        # so size it above the longest expected run. Background
+        # legitimately run long (report generation, large exports) — size it
+        # above the longest expected run so mutual exclusion holds for the
+        # whole run instead of expiring mid-flight. Background
         # transitions don't need this: their phase-1 critical section is
         # short and their in-flight marker is the TransitionMessage row.
         self.lock_timeout = kwargs.get('lock_timeout')
@@ -247,19 +273,14 @@ class Transition:
         # the transition was resolved before the lock was acquired;
         # by now a concurrent transition may have won the race and moved
         # the state (validate-then-lock TOCTOU). One cheap query closes it.
-        # Any failure between acquisition and the side-effect machinery —
-        # including the in_progress_state write itself (connection drop,
-        # statement timeout, broken outer atomic) — must release the lock
-        # or the instance's FSM freezes until the lock TTL expires.
+        # Any failure here must release the lock or the instance's FSM
+        # freezes until the lock TTL expires. (No state is written under the
+        # lock before the side-effects anymore: in_progress_state is
+        # background-only since 0.12.0 — a sync run that dies leaves the
+        # instance at its source state, re-drivable, with nothing to sweep.)
         try:
             self._ensure_db_state_in_sources(state)
             self._ensure_no_background_in_flight(state)
-            if self.in_progress_state:
-                state.set_state(self.in_progress_state)
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                    f'{self.in_progress_state}'
-                )
         except Exception:
             state.unlock()
             # Without this line the per-instance lifecycle (#188) shows a Lock
@@ -290,8 +311,8 @@ class Transition:
         instance's FSM freezes until the lock TTL): the transition fails
         loudly either way, but a leaked lock turns one failed request into
         hours of rejected transitions. The release follows the same
-        deferral rule as ``fail_transition`` — deferred only when
-        ``in_progress_state`` was written under this lock.
+        deferral rule as ``fail_transition`` — immediate, since the rejected
+        write means nothing landed under this lock.
         """
         try:
             state.set_state(self.target)
@@ -300,14 +321,12 @@ class Transition:
                 f'{kwargs.get("tr_id")} target-state write failed for '
                 f'{state.instance_key}; releasing the lock before re-raising.'
             )
-            # Same deferral rule as fail_transition: if in_progress_state
-            # was written under this lock, its uncommitted span still
-            # needs protecting — an immediate release would reopen the
-            # unlock-before-commit window (#141). With no prior write,
-            # release now (nothing to protect, nothing to leak).
-            self._release_lock(
-                state, deferrable=bool(self.in_progress_state), **kwargs
-            )
+            # Same deferral rule as fail_transition: nothing was written
+            # under this lock (the rejected target never landed, and sync
+            # transitions write no marker since 0.12.0), so there is no
+            # invisible span to protect — release now; deferring would only
+            # leak the lock until TTL when the outer transaction rolls back.
+            self._release_lock(state, deferrable=False, **kwargs)
             raise
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
@@ -326,12 +345,12 @@ class Transition:
         # SideEffects.execute either way.
         #
         # Deferral (#141) only applies when a state write actually
-        # happened under this lock — the in_progress_state written in
-        # change_state, or the failed_state written below. A failure with
-        # neither wrote nothing: there is no invisible span to protect,
-        # so the unlock stays immediate (deferring would only leak the
-        # lock until TTL when the outer transaction rolls back).
-        wrote_state = bool(self.in_progress_state)
+        # happened under this lock — the failed_state written below (sync
+        # transitions write no in-progress marker since 0.12.0). A failure
+        # that wrote nothing has no invisible span to protect, so the unlock
+        # stays immediate (deferring would only leak the lock until TTL when
+        # the outer transaction rolls back).
+        wrote_state = False
         try:
             if self.failed_state:
                 # Savepointed so a rejected failed_state write cannot replace
@@ -386,10 +405,10 @@ class Transition:
         trade-offs, and when to enable it, are in the README.
 
         ``deferrable`` is False on the paths where nothing was written
-        under the lock (the early revalidation-failure unlock, and a
-        failure path with neither ``in_progress_state`` nor
-        ``failed_state``): with no visibility window to protect,
-        deferring would only leak the lock until TTL on rollback.
+        under the lock (the early revalidation-failure unlock, a rejected
+        target write, and a failure path with no ``failed_state`` landed):
+        with no visibility window to protect, deferring would only leak the
+        lock until TTL on rollback.
         """
         if deferrable and _defer_unlock_until_commit():
             using = state.instance._state.db or DEFAULT_DB_ALIAS
@@ -476,8 +495,8 @@ class Action(Transition):
       transition is in flight);
     * ``next_transition`` is NOT executed on success (note the divergence:
       a *BackgroundAction*'s phase 2 does run ``next_transition``);
-    * ``in_progress_state`` is accepted but never written (it is only
-      added to ``sources``); ``BackgroundAction`` rejects it outright.
+    * ``in_progress_state`` is rejected like any synchronous transition's
+      (background-only since 0.12.0); ``BackgroundAction`` rejects it too.
     """
 
     def __init__(self, action_name: str, sources: list, **kwargs):

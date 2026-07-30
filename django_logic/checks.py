@@ -10,7 +10,6 @@ from django.core import checks
 
 from django_logic.process import (
     ProcessManager,
-    collect_ambiguous_in_progress_states,
     collect_hook_signature_offenders,
 )
 
@@ -39,44 +38,13 @@ def check_hook_signatures(app_configs, **kwargs):
     return findings
 
 
-@checks.register('django_logic')
-def check_unambiguous_in_progress_ownership(app_configs, **kwargs):
-    """Transitions sharing an in_progress_state on one
-    (model, state_field) must all recover a record-less stranded instance
-    the same way — such an instance has no provenance, so recovery picks
-    an owner, and claimants that disagree on ``failed_state`` or their
-    failure hooks make that pick wrong half the time
-    (``django_logic.E001``). Sharing is fine on its own;
-    ``recover_stranded_states`` also skips ambiguous states at runtime,
-    but the topology itself is the defect, so fail loudly at check
-    time."""
-    findings = []
-    for key, owners in sorted(collect_ambiguous_in_progress_states().items()):
-        model_label, state_field, in_progress = key
-        claimants = ', '.join(sorted(
-            f'{process_cls.__name__}.{transition.action_name}'
-            for process_cls, transition in owners
-        ))
-        findings.append(checks.Error(
-            f"in_progress_state {in_progress!r} on {model_label}."
-            f"{state_field} is shared by transitions that recover "
-            f"differently: {claimants}.",
-            hint='Give them a matching failed_state and matching '
-                 'failure_side_effects/failure_callbacks, or a distinct '
-                 'in_progress_state each (or bind the processes to distinct '
-                 'state fields). Hooks are matched by object identity, so '
-                 'the claimants must reference the SAME callables — hoist a '
-                 'shared partial/lambda to a module-level name rather than '
-                 'building one per transition. Two different bound processes '
-                 'sharing a state are always ambiguous, however identically '
-                 'they recover, because each sweep only sees its own '
-                 'process_name in-flight rows. Stranded-state recovery skips '
-                 'ambiguous states, leaving instances parked until fixed '
-                 'manually.',
-            obj=f'{model_label}.{state_field}',
-            id='django_logic.E001',
-        ))
-    return findings
+# django_logic.E001 (shared in_progress_state with divergent recovery) was
+# retired in 0.12.0 along with recover_stranded_states. The check existed to
+# scope the sweep: a record-less stranded instance carried no provenance, so
+# transitions sharing a marker had to agree on how to recover it. With
+# in_progress_state now background-only — written atomically with the
+# TransitionMessage row — every marked instance has its exact transition on
+# the row, recovery is TM-scoped, and sharing a marker is harmless.
 
 
 def _process_tree_has_background_transition(process_class) -> bool:
@@ -218,7 +186,7 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     They are the durability half of ``BACKGROUND_EXECUTION='celery'``: without
     them a lost phase-2 message is never re-dispatched, an attempt that dies
     without raising is never terminalized, and completed rows are never pruned.
-    Nothing else notices — a consumer ran seven weeks with all five silently
+    Nothing else notices — a consumer ran seven weeks with them all silently
     unscheduled, accumulating 36 stranded rows, because
     ``app.conf.beat_schedule = {...}`` is ignored when the project also defines
     the ``CELERY_``-namespaced setting (Celery resolves the namespaced key

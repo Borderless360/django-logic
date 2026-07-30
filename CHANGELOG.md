@@ -44,6 +44,63 @@ strict mode silently ON and will now get `ImproperlyConfigured` naming the key.
 `DJANGO_LOGIC` and runs `manage.py check --fail-level WARNING` will need
 `SILENCED_SYSTEM_CHECKS`.
 
+### Removed (breaking) — `in_progress_state` is background-only; the stranded sweep and E001 are retired
+
+The single largest simplification in the library's history, and a deliberate
+design decision rather than a bug fix: **the in-progress marker now exists only
+where it has a durable recovery owner.**
+
+- **`in_progress_state` on a synchronous `Transition`/`Action` raises
+  `ImproperlyConfigured` at class creation.** On a `BackgroundTransition` the
+  marker is written atomically with the `TransitionMessage` row, so every
+  marked instance carries its exact transition and the TM safety nets own its
+  whole flight. A synchronous transition wrote the marker under a cache lock
+  with *no durable record*: a hard-killed worker left the instance parked in a
+  state with no outbound edges and nothing that could ever move it (#136) —
+  the incident shape that produced the stranded sweep, and, across four review
+  passes, the sweep and its ownership rules were the most defect-dense
+  subsystem in the engine. Without the marker, a killed synchronous run rolls
+  back to its source state and is simply re-drivable once the lock TTL
+  expires: self-healing, no machinery.
+
+- **`recover_stranded_states` is retired** (the fifth safety-net task, its
+  beat entry, and the whole sweeping subsystem — candidate scans, lock-guarded
+  recovery, ownership transfer, ambiguity skips). Record-less stranding is now
+  structurally impossible: sync transitions cannot write a marker, a
+  background marker always has a TM row, and a crash inside phase 1 rolls both
+  back together. `beat_schedule()` ships **four** entries; a schedule still
+  naming `django_logic.recover_stranded_states` simply has one stale entry
+  (django_logic.W002 matches by task name and will not complain about extras).
+
+- **`django_logic.E001` is retired.** The shared-`in_progress_state`
+  ownership check existed to scope the sweep — a record-less stranded instance
+  had no provenance, so transitions sharing a marker had to agree on recovery.
+  With recovery TM-scoped, sharing a marker is harmless, in one process or
+  across many. Projects silencing or asserting on E001 can drop it.
+
+- **Consequences an operator will notice.** Rows the safety nets complete
+  *without* managing a `failed_state` write (an unrestorable row, a rejected
+  `failed_state` write) now leave the instance parked in its
+  `in_progress_state` — visibly, with the reason on the completed row — and
+  re-drivable via the implicit source, instead of being force-failed by the
+  sweep on a later tick. Monitor `last_error_message`/
+  `failure_side_effect_error` for the `[unrestorable]` / `failed_state write:`
+  markers.
+
+- **Migrating a synchronous transition that declared the marker:** model the
+  busy phase as a real state — a fast transition into it, chained via
+  `next_transition` to a `BackgroundTransition` that does the work (readers
+  see the busy state exactly as before, and the work becomes TM-durable). The
+  pattern accepts one narrow window the atomic marker did not have: a crash
+  between the first transition's commit and the chained dispatch parks the
+  instance in the busy state with no row. The README documents the three-line
+  periodic re-drive that covers it — safe by construction, because in-flight
+  instances raise `AlreadyInProgress`, and it retries *forward* instead of
+  force-failing. Instances already stranded in a marker state by a PREVIOUS
+  release are not recovered by anything after the upgrade: re-drive or
+  hand-fix them BEFORE upgrading (the sweep in 0.9.1–0.11.0 can do it for
+  you), or clean them up with your own command afterwards.
+
 Two more declarations now raise, found in the fourth pass:
 
 - `failed_state` equal to `in_progress_state` — `ImproperlyConfigured` at class

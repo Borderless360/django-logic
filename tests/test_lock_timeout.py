@@ -22,7 +22,6 @@ class _SlowReportProcess(Process):
     process_name = 'slow_report_process'
     transitions = [
         Transition('generate', sources=['draft'], target='done',
-                   in_progress_state='generating',
                    failed_state='failed',
                    lock_timeout=4 * 3600),
         Transition('quick', sources=['draft'], target='done'),

@@ -135,12 +135,13 @@ Three properties this gives you, effectively for free:
 
 Two smaller rules keep the design honest:
 
-- **`in_progress_state` need not be unique.** Phase 2 restores its
-  transition from the owner recorded on the `TransitionMessage`, not
-  from the state, so sharing costs nothing there. The one consumer that
-  needs an owner is stranded recovery of a *record-less* instance, which
-  is why claimants must agree on `failed_state` and failure hooks
-  (`django_logic.E001`) rather than on the state name.
+- **`in_progress_state` need not be unique — and is background-only.**
+  Phase 2 restores its transition from the owner recorded on the
+  `TransitionMessage`, not from the state, so marker sharing needs no
+  ownership rules (the old `django_logic.E001` check is retired).
+  Synchronous transitions cannot declare the marker at all since 0.12.0 —
+  a killed sync run rolls back to its source state and is re-drivable, so
+  there is nothing to sweep (`recover_stranded_states` is retired with it).
 - **`BackgroundAction` uses the same durable path.** No state change
   on success, but same `TransitionMessage` row, same retry, same
   concurrency guard. A background action that bypassed the DB record
@@ -273,9 +274,9 @@ django_logic.critical   — user-facing with SLA
                           fulfilment, payment authorisation, checkout
 django_logic.slow       — > 30s work, low concurrency
                           exports, reports, bulk imports
-django_logic.starter    — the framework's own five periodic tasks
+django_logic.starter    — the framework's own four periodic tasks
                           (retry_stale_transitions, cleanup, detect_stuck,
-                           watchdog_stale_attempts, recover_stranded_states)
+                           watchdog_stale_attempts)
 ```
 
 Worker configuration matches resource profile to queue:
@@ -452,10 +453,10 @@ the concurrency contract — it just removes the broker hop.
 - A `process_name` that already names something on the model's MRO →
   raised at `bind_model_process`.
 
-Two transitions sharing an `in_progress_state` are validated at *check*
-time, not class creation: legal within one bound process when they also
-share `failed_state` and their failure hooks, and `django_logic.E001`
-otherwise (relaxed in 0.11.0 — see the changelog).
+Two transitions sharing an `in_progress_state` need no validation at all
+since 0.12.0: the marker is background-only and every marked instance
+carries its transition on the `TransitionMessage` row, so recovery is
+TM-scoped (`django_logic.E001` retired — see the changelog).
 
 ---
 

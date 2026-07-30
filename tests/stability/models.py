@@ -114,7 +114,6 @@ class OrderProcess(Process):
             action_name='fulfill',
             sources=['approved'],
             target='fulfilled',
-            in_progress_state='fulfilling',
             failed_state='fulfillment_failed',
             side_effects=[side_effect_one, side_effect_two, side_effect_three],
             callbacks=[callback_one, callback_two],
@@ -148,7 +147,6 @@ class OrderProcessWithNestedCallback(Process):
             action_name='fulfill',
             sources=['approved'],
             target='fulfilled',
-            in_progress_state='fulfilling',
             side_effects=[side_effect_one],
             callbacks=[trigger_nested_transition],
         ),
@@ -167,7 +165,6 @@ class FulfillmentProcess(Process):
             action_name='start_fulfillment',
             sources=['pending'],
             target='fulfilled',
-            in_progress_state='fulfilling',
             side_effects=[side_effect_one],
         ),
     ]
@@ -180,7 +177,6 @@ class PaymentProcess(Process):
             action_name='pay',
             sources=['unpaid'],
             target='paid',
-            in_progress_state='processing_payment',
             side_effects=[side_effect_two],
         ),
     ]

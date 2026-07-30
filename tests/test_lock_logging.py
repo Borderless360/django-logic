@@ -54,6 +54,7 @@ class FailedLockAcquisitionLoggingTests(TestCase):
         self.addCleanup(
             ProcessManager.unbind_model_process, Invoice, LockLoggingProcess)
         cache.clear()
+        self.addCleanup(cache.clear)
 
     def _locked_by_someone_else(self, inv):
         # A foreign holder: same key, different token — exactly the leaked-lock
@@ -130,6 +131,7 @@ class LifecycleLinesCarryInstanceKeyTests(TestCase):
         self.addCleanup(
             ProcessManager.unbind_model_process, Invoice, LockLoggingProcess)
         cache.clear()
+        self.addCleanup(cache.clear)
 
     def test_sync_lock_and_unlock_name_the_instance(self):
         inv = Invoice.objects.create(status='draft')

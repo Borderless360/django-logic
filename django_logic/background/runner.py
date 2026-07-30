@@ -396,7 +396,8 @@ def _finalize_terminal_from_watchdog(
         # ``process`` property raising, a corrupt instance_id, a DB blip).
         # Escaping here rolled back the whole finalization on every tick, so
         # the safety net looped forever on this one row. Completing it stops
-        # the loop; the instance is left for recover_stranded_states.
+        # the loop; the instance stays in its in_progress_state, which is an
+        # implicit source — re-drivable by an operator or a periodic re-drive.
         transition_logger.error(
             f'{source}: TransitionMessage#{tm.pk} could not be restored '
             f'({type(exc).__name__}: {exc}); completing it so the safety net '
@@ -718,8 +719,9 @@ def _handle_restore_failure(
     remain, and at ``MAX_ERRORS`` complete the row loudly so the retry loop
     stops. No ``failed_state`` is written (nothing restored to write it on) —
     the instance is left in its ``in_progress_state`` for
-    ``recover_stranded_states``, which is a recoverable end state rather than
-    an infinite loop.
+    re-drivable (``in_progress_state`` is an implicit source of its own
+    transition) — a visible parked state rather than an infinite loop, with
+    the reason on the completed row.
     """
     tm.record_error(error)
     transition_logger.error(
@@ -796,7 +798,7 @@ def _handle_failure(
     # the retry loop, so a rejected failed_state must not prevent it: log it,
     # record it where an operator will see it, and carry on to
     # mark_as_completed. The instance is then left in its in_progress_state
-    # for recover_stranded_states, which is a recoverable end state rather
+    # re-drivable via the implicit source — a visible parked state rather
     # than an infinite loop.
     if transition.failed_state:
         try:

@@ -8,8 +8,9 @@ transitions complete.
 This module tests the contract:
   - After successful transition: Redis key deleted, DB has target state
   - After failed transition: Redis key deleted, DB has failed_state
-  - After lock timeout expiry: Redis key expires, DB has in_progress_state
-  - During active transition: Redis reflects in_progress_state
+  - After lock timeout expiry: Redis key expires; the DB holds the last
+    committed state (no in-progress marker for sync work since 0.12.0)
+  - During an active transition: the lock is the only in-flight signal
 """
 import time
 
@@ -63,7 +64,6 @@ class TestStateConsistencyAfterFailure(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     failed_state='fulfillment_failed',
                     side_effects=[failing],
                 )
@@ -87,21 +87,21 @@ class TestStateConsistencyDuringTransition(StabilityTestCase):
 
 @tag('stability')
 class TestStateConsistencyAfterLockExpiry(StabilityTestCase):
-    """After lock expires, Redis key is gone but DB retains in_progress_state."""
+    """After lock expiry a sync run leaves no divergence to reconcile."""
 
-    def test_expired_lock_state_divergence(self):
+    def test_expired_lock_leaves_no_state_divergence(self):
+        """After TTL expiry the Redis key is gone and the DB state is
+        whatever the last COMMITTED transition wrote — a killed sync run
+        rolls back to its source (0.12.0: no in-progress marker), so
+        nothing needs detecting or handling; the instance is re-drivable.
         """
-        After TTL expiry, the Redis key is gone but the DB still has
-        in_progress_state. This is the scenario the periodic starter
-        must detect and handle.
-        """
-        order = Order.objects.create(status='fulfilling')
+        order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
 
         self.assertFalse(state.is_locked())
 
         order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilling')
+        self.assertEqual(order.status, 'approved')
 
 
 @tag('stability')

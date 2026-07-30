@@ -552,7 +552,7 @@ class RejectedFailedStateWriteProcess(Process):
     process_name = 'rej_failed_proc'
     transitions = [
         Transition('go', sources=['draft'], target='rf_done',
-                   in_progress_state='rf_running', failed_state='rf_refused',
+                   failed_state='rf_refused',
                    side_effects=[_raise_slow]),
     ]
 
@@ -627,43 +627,9 @@ class FailureErrorAccumulationTests(TestCase):
                       tm.failure_side_effect_error)
 
 
-class StrandedRecoveryHonestyTests(_BindCleanup, TestCase):
-    """The sweep must not report a recovery that did not happen.
-
-    #178 made fail_transition swallow a rejected failed_state write, so
-    "returned without raising" stopped implying "the state moved". Caught
-    reviewing 0.12.0's own diff.
-    """
-
-    _bound = (RejectedFailedStateWriteProcess,)
-
-    def setUp(self):
-        super().setUp()
-        ProcessManager.bind_model_process(
-            Invoice, RejectedFailedStateWriteProcess, state_field='status')
-        cache.clear()
-
-        def veto(sender, instance, **kwargs):
-            if instance.status == 'rf_refused':
-                raise ValueError('the database refuses failed_state')
-
-        pre_save.connect(veto, sender=Invoice)
-        self.addCleanup(pre_save.disconnect, veto, sender=Invoice)
-
-    @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'sync'})
-    def test_a_failed_failed_state_write_is_not_counted_as_recovered(self):
-        from django_logic.background.dispatch import recover_stranded_states
-
-        # Record-less stranded instance: in the in-progress state, no TM row.
-        stranded = Invoice.objects.create(status='rf_running')
-
-        with self.assertLogs('django-logic', level='ERROR') as logs:
-            recovered = recover_stranded_states()
-
-        stranded.refresh_from_db()
-        self.assertEqual(stranded.status, 'rf_running')  # never moved
-        self.assertEqual(recovered, 0, 'reported a recovery that never happened')
-        self.assertTrue(any('could NOT recover' in line for line in logs.output))
+# (StrandedRecoveryHonestyTests retired in 0.12.0 with recover_stranded_states
+# itself — in_progress_state is background-only now, so no record-less
+# stranding exists for a sweep to recover or misreport.)
 
 
 class ShadowValidatorInstanceAttrTests(TestCase):

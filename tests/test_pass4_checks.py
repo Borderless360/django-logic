@@ -3,9 +3,6 @@ lie, or reject working topologies.
 
 Each test here pins one confirmed finding:
 
-* ``_recovery_signature`` read the failure attributes off a transition
-  unguarded, so a duck-typed transition took the E001 check (and the
-  stranded sweep that calls it) down with an ``AttributeError``.
 * A bound ``BackgroundTransition`` without ``django_logic.background`` in
   ``INSTALLED_APPS`` was reported by nothing — every check early-returns on
   the missing app and the first ``.go()`` died with a raw missing-table
@@ -17,9 +14,6 @@ Each test here pins one confirmed finding:
 * The #182 shadow validator checked every class in the nested tree, so a
   sibling process holding a helper named like another branch's transition
   rejected a working topology at import time.
-* Ambiguous-recovery collection keyed on the bound model's label, so an MTI
-  child and its parent could claim one ``in_progress_state`` on the SAME
-  inherited column with different recovery, unreported.
 * Unbinding was hand-rolled by every test that binds (registry
   comprehension + ``delattr``); ``ProcessManager.unbind_model_process`` is
   the supported inverse.
@@ -40,19 +34,17 @@ from django_logic.background.transitions import BackgroundTransition
 from django_logic.checks import (
     check_background_app_is_installed,
     check_background_database_routing,
-    check_unambiguous_in_progress_ownership,
 )
 from django_logic.conf import validate_core_settings
 from django_logic.process import (
     ModelProcessBinding,
     Process,
     ProcessManager,
-    collect_ambiguous_in_progress_states,
     transition_observers,
 )
 from django_logic.transition import Transition
 from tests import dl_settings
-from tests.models import Invoice, MtiChild, MtiParent
+from tests.models import Invoice
 
 
 class _BindingHelper:
@@ -69,69 +61,10 @@ class _BindingHelper:
 
 # --- A1: duck-typed transitions in the recovery signature -----------------
 
-class _DuckTransition:
-    """A custom transition object with the attributes the engine documents
-    as required and none of the failure ones — the shape a consumer writes
-    when its transition can only ever succeed or be retried."""
+# (The duck-typed-transition E001/sweep pins were retired with E001 and
+# recover_stranded_states in 0.12.0 — nothing left reads failure attributes
+# off arbitrary transition objects outside bind-time hook validation.)
 
-    def __init__(self, action_name, sources, target, in_progress_state):
-        self.action_name = action_name
-        self.sources = sources
-        self.target = target
-        self.in_progress_state = in_progress_state
-
-
-class _DuckTypedProcess(Process):
-    process_name = 'pass4_duck'
-    transitions = [
-        _DuckTransition('duck_run', sources=['draft'], target='done',
-                        in_progress_state='duck_busy'),
-    ]
-
-
-class _RealClaimantProcess(Process):
-    process_name = 'pass4_real_claimant'
-    transitions = [
-        Transition('real_run', sources=['draft'], target='done',
-                   in_progress_state='duck_busy', failed_state='real_failed'),
-    ]
-
-
-class DuckTypedTransitionSignatureTests(_BindingHelper, SimpleTestCase):
-    def test_collector_and_e001_survive_a_duck_typed_transition(self):
-        self.bind(Invoice, _DuckTypedProcess)
-
-        # No failed_state / failure_side_effects / failure_callbacks
-        # anywhere on the transition, and neither the collector nor the
-        # check may raise.
-        self.assertNotIn(
-            ('tests.Invoice', 'status', 'duck_busy'),
-            collect_ambiguous_in_progress_states(),
-        )
-        self.assertEqual(
-            [f for f in check_unambiguous_in_progress_ownership(None)
-             if f.obj == 'tests.Invoice.status'],
-            [],
-        )
-
-    def test_e001_still_fires_when_a_duck_claimant_shares_the_state(self):
-        # Missing failure attributes read as "recovers with nothing", which
-        # is a real disagreement with a claimant that has a failed_state.
-        self.bind(Invoice, _DuckTypedProcess)
-        self.bind(Invoice, _RealClaimantProcess)
-
-        self.assertIn(
-            ('tests.Invoice', 'status', 'duck_busy'),
-            collect_ambiguous_in_progress_states(),
-        )
-        findings = [f for f in check_unambiguous_in_progress_ownership(None)
-                    if f.obj == 'tests.Invoice.status']
-        self.assertEqual([f.id for f in findings], ['django_logic.E001'])
-        self.assertIn('_DuckTypedProcess.duck_run', findings[0].msg)
-        self.assertIn('_RealClaimantProcess.real_run', findings[0].msg)
-
-
-# --- A2: django_logic.E003, background app missing ------------------------
 
 class _BackgroundBoundProcess(Process):
     process_name = 'pass4_background'
@@ -329,169 +262,7 @@ class ActionNameShadowingTests(_BindingHelper, TestCase):
 
 # --- F3-lite: ambiguity follows the physical column ----------------------
 
-class _MtiParentProcess(Process):
-    process_name = 'pass4_mti_parent'
-    transitions = [
-        Transition('parent_run', sources=['draft'], target='done',
-                   in_progress_state='mti_busy',
-                   failed_state='parent_failed'),
-    ]
 
-
-class _MtiChildProcess(Process):
-    process_name = 'pass4_mti_child'
-    transitions = [
-        Transition('child_run', sources=['draft'], target='done',
-                   in_progress_state='mti_busy',
-                   failed_state='child_failed'),
-    ]
-
-
-class _MtiSharedProcess(Process):
-    """One class bound to both models — the supported MTI shape, where each
-    model drives its own copy of the same machine."""
-    process_name = 'pass4_mti_shared'
-    transitions = [
-        Transition('shared_run', sources=['draft'], target='done',
-                   in_progress_state='mti_shared_busy',
-                   failed_state='shared_failed'),
-    ]
-
-
-class InheritedColumnAmbiguityTests(_BindingHelper, SimpleTestCase):
-    PARENT_KEY = ('tests.MtiParent', 'status', 'mti_busy')
-    CHILD_KEY = ('tests.MtiChild', 'status', 'mti_busy')
-
-    def test_shared_state_on_an_inherited_column_is_ambiguous(self):
-        # MtiChild.status has no column of its own: both processes write
-        # tests_mtiparent.status with different recovery.
-        self.bind(MtiParent, _MtiParentProcess)
-        self.bind(MtiChild, _MtiChildProcess)
-
-        ambiguous = collect_ambiguous_in_progress_states()
-        self.assertIn(self.PARENT_KEY, ambiguous)
-        # Keyed by the bound model too, so the stranded sweep — which looks
-        # itself up by its own binding — still skips it.
-        self.assertIn(self.CHILD_KEY, ambiguous)
-        findings = check_unambiguous_in_progress_ownership(None)
-        objs = {f.obj for f in findings if f.id == 'django_logic.E001'}
-        self.assertIn('tests.MtiParent.status', objs)
-        self.assertIn('tests.MtiChild.status', objs)
-        claimants = [f.msg for f in findings
-                     if f.obj == 'tests.MtiChild.status']
-        self.assertIn('_MtiParentProcess.parent_run', claimants[0])
-        self.assertIn('_MtiChildProcess.child_run', claimants[0])
-
-    def test_distinct_columns_on_the_same_mti_pair_are_fine(self):
-        # 'extra' is the child's OWN column, so nothing is shared.
-        self.bind(MtiParent, _MtiParentProcess)
-        self.bind(MtiChild, _MtiChildProcess, state_field='extra')
-
-        ambiguous = collect_ambiguous_in_progress_states()
-        self.assertNotIn(self.PARENT_KEY, ambiguous)
-        self.assertNotIn(('tests.MtiChild', 'extra', 'mti_busy'), ambiguous)
-        self.assertEqual(
-            [f for f in check_unambiguous_in_progress_ownership(None)
-             if f.obj.startswith('tests.Mti')],
-            [],
-        )
-
-    def test_one_process_bound_to_both_mti_models_is_not_flagged(self):
-        # Same class, same recovery signature: sharing the inherited column
-        # is exactly what this topology means.
-        self.bind(MtiParent, _MtiSharedProcess)
-        self.bind(MtiChild, _MtiSharedProcess)
-
-        ambiguous = collect_ambiguous_in_progress_states()
-        self.assertNotIn(
-            ('tests.MtiParent', 'status', 'mti_shared_busy'), ambiguous)
-        self.assertNotIn(
-            ('tests.MtiChild', 'status', 'mti_shared_busy'), ambiguous)
-
-
-# --- B-REG: unbind_model_process -----------------------------------------
-
-class _UnbindProcess(Process):
-    process_name = 'pass4_unbind'
-    transitions = [
-        Transition('run', sources=['draft'], target='done'),
-    ]
-
-
-class _SecondFieldProcess(Process):
-    process_name = 'pass4_unbind_second'
-    transitions = [
-        Transition('flag', sources=['draft'], target='done'),
-    ]
-
-
-class UnbindModelProcessTests(SimpleTestCase):
-    def tearDown(self):
-        for process_class in (_UnbindProcess, _SecondFieldProcess):
-            ProcessManager.unbind_model_process(Invoice, process_class)
-        super().tearDown()
-
-    def _bindings_for(self, process_class):
-        return [b for b in ProcessManager.bindings
-                if b.process_class is process_class]
-
-    def test_bind_unbind_rebind_leaves_no_residue(self):
-        ProcessManager.bind_model_process(
-            Invoice, _UnbindProcess, state_field='status')
-        self.assertTrue(self._bindings_for(_UnbindProcess))
-        self.assertIsInstance(
-            Invoice(status='draft').pass4_unbind, _UnbindProcess)
-
-        ProcessManager.unbind_model_process(Invoice, _UnbindProcess)
-
-        self.assertEqual(self._bindings_for(_UnbindProcess), [])
-        self.assertNotIn('pass4_unbind', vars(Invoice))
-        self.assertFalse(hasattr(Invoice(status='draft'), 'pass4_unbind'))
-
-        # Rebinding is a fresh bind, not a duplicate-name rejection.
-        ProcessManager.bind_model_process(
-            Invoice, _UnbindProcess, state_field='status')
-        self.assertEqual(len(self._bindings_for(_UnbindProcess)), 1)
-        self.assertIsInstance(
-            Invoice(status='draft').pass4_unbind, _UnbindProcess)
-
-    def test_unbinding_something_unbound_is_a_no_op(self):
-        before = list(ProcessManager.bindings)
-        ProcessManager.unbind_model_process(Invoice, _UnbindProcess)
-        self.assertEqual(ProcessManager.bindings, before)
-
-    def test_unbinding_one_process_keeps_the_models_other_machines(self):
-        ProcessManager.bind_model_process(
-            Invoice, _UnbindProcess, state_field='status')
-        ProcessManager.bind_model_process(
-            Invoice, _SecondFieldProcess, state_field='customer_received')
-
-        ProcessManager.unbind_model_process(Invoice, _UnbindProcess)
-
-        self.assertNotIn('pass4_unbind', vars(Invoice))
-        self.assertIn('pass4_unbind_second', vars(Invoice))
-        self.assertEqual(len(self._bindings_for(_SecondFieldProcess)), 1)
-
-    def test_state_field_narrows_which_binding_is_removed(self):
-        ProcessManager.bind_model_process(
-            Invoice, _UnbindProcess, state_field='status')
-
-        ProcessManager.unbind_model_process(
-            Invoice, _UnbindProcess, state_field='customer_received')
-        self.assertEqual(len(self._bindings_for(_UnbindProcess)), 1)
-
-        ProcessManager.unbind_model_process(
-            Invoice, _UnbindProcess, state_field='status')
-        self.assertEqual(self._bindings_for(_UnbindProcess), [])
-
-
-# --- docstring honesty ---------------------------------------------------
-
-class RouterCheckDocstringTests(SimpleTestCase):
-    def test_e002_admits_hint_dependent_routers_can_pass(self):
-        # The check asks the router about model CLASSES; a router that
-        # decides from hints can answer 'default' here and still split a
-        # real write. The docstring must not claim otherwise.
-        doc = check_background_database_routing.__doc__
-        self.assertIn('hints', doc)
-        self.assertIn('not proof', doc)
+# (InheritedColumnAmbiguityTests retired with collect_ambiguous_in_progress_states
+# in 0.12.0 — see tests/test_binding_validation.py::SharedMarkerIsLegalTests for
+# the replacement contract: marker sharing is legal, recovery is TM-scoped.)

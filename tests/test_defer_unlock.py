@@ -57,9 +57,6 @@ class _DeferProcess(Process):
         # in_progress_state, no failed_state.
         Transition('explode_bare', sources=['draft'], target='done',
                    side_effects=[_boom]),
-        # Fails after writing in_progress_state (but no failed_state).
-        Transition('explode_in_progress', sources=['draft'], target='done',
-                   in_progress_state='working', side_effects=[_boom]),
         # Succeeds, then a callback drives another instance and fails.
         Transition('chain_hook', sources=['draft'], target='approved',
                    callbacks=[_drive_other_then_fail]),
@@ -69,9 +66,8 @@ class _DeferProcess(Process):
         Transition('cleanup_chain', sources=['draft'], target='done',
                    failed_state='failed', side_effects=[_boom],
                    failure_side_effects=[_drive_other_then_fail]),
-        # Plain in-progress transition for the failed-target-write tests.
-        Transition('finish_ip', sources=['draft'], target='done_ip',
-                   in_progress_state='ip_working'),
+        # Plain transition for the failed-target-write tests.
+        Transition('finish_plain', sources=['draft'], target='done_plain'),
     ]
 
 
@@ -149,17 +145,6 @@ class DeferUnlockUntilCommitTests(TestCase):
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'draft')
 
-    def test_failure_after_in_progress_write_defers(self):
-        """The in_progress_state written in change_state IS a state write
-        under this lock — its visibility span is protected like any
-        other."""
-        with self.captureOnCommitCallbacks(execute=True):
-            with self.assertRaises(ValueError):
-                self._process().explode_in_progress()
-            self.assertTrue(self.state.is_locked())
-        self.assertFalse(self.state.is_locked())
-        self.invoice.refresh_from_db()
-        self.assertEqual(self.invoice.status, 'working')
 
     def test_hook_savepoint_rollback_releases_inner_deferred_unlock(self):
         """A failing callback's savepoint rollback discards the on_commit
@@ -229,25 +214,24 @@ class DeferUnlockUntilCommitTests(TestCase):
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'failed')
 
-    def test_failed_target_write_defers_when_in_progress_was_written(self):
-        """A failed target write after a real in_progress write keeps the
-        deferral — an immediate release would reopen the
-        unlock-before-commit window for the uncommitted in_progress."""
+    def test_failed_target_write_releases_immediately(self):
+        """A rejected target write leaves nothing committed-but-invisible
+        under this lock (sync transitions write no in-progress marker since
+        0.12.0), so the release is immediate — deferring would only leak the
+        lock until TTL when the outer transaction rolls back."""
         original = State.set_state
 
         def failing_target(state_self, value):
-            if value == 'done_ip':
+            if value == 'done_plain':
                 raise RuntimeError('target write failed')
             return original(state_self, value)
 
         with mock.patch.object(State, 'set_state', failing_target):
-            with self.captureOnCommitCallbacks(execute=True):
-                with self.assertRaises(RuntimeError):
-                    self._process().finish_ip()
-                self.assertTrue(self.state.is_locked())
+            with self.assertRaises(RuntimeError):
+                self._process().finish_plain()
         self.assertFalse(self.state.is_locked())
         self.invoice.refresh_from_db()
-        self.assertEqual(self.invoice.status, 'ip_working')
+        self.assertEqual(self.invoice.status, 'draft')
 
     def test_failed_target_write_without_prior_write_unlocks_immediately(self):
         original = State.set_state

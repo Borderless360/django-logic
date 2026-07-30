@@ -93,7 +93,6 @@ class TestNestedTransitionLockContention(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     failed_state='fulfillment_failed',
                     side_effects=[side_effect_that_nests],
                 )
@@ -259,7 +258,6 @@ class TestLockReleaseOnEveryFailurePath(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     failed_state='fulfillment_failed',
                     side_effects=[failing_se],
                 )
@@ -307,7 +305,6 @@ class TestLockReleaseOnEveryFailurePath(StabilityTestCase):
                     action_name='fulfill',
                     sources=['approved'],
                     target='fulfilled',
-                    in_progress_state='fulfilling',
                     side_effects=[failing_se],
                 )
             ]
