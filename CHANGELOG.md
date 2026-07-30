@@ -2,22 +2,35 @@
 
 ## [Unreleased]
 
-## [0.12.0] — 2026-07-28
+## [0.12.0] — 2026-07-30
 
-A correctness release. A full review of 0.11.0 turned up five engine defects,
-three of them capable of losing or corrupting work; every one was reproduced
-before the fix and is now pinned by a regression test
-(`tests/test_issue_fixes_0_12.py`). No feature was added beyond the checks that
-make two of the defects impossible to reintroduce silently.
+A correctness release that ends in a design decision. Three acts:
 
-A fourth review pass then reviewed *those fixes* — seven independent readings of
-the library, plus mutation testing of the new tests — and found two more
-serious defects (a watchdog that could terminalise a healthy attempt, and a
-lock leak the release's own change made reachable), an undeclared breaking
-change, two assertions that proved nothing, and nine fixes with no pinning test
-at all. Those are in this release too, pinned in `tests/test_pass4_engine_pins.py`,
-`tests/test_pass4_checks.py` and `tests/test_pass4_testing.py`. Every pin was
-verified by reverting its fix and confirming the test fails.
+**One — five engine defects** (#178–#182), found reviewing 0.11.0, three of
+them capable of losing or corrupting work; every one reproduced before the fix
+and pinned in `tests/test_issue_fixes_0_12.py`.
+
+**Two — a fourth review pass over those fixes**: seven independent readings of
+the library plus mutation testing of the new tests. It found two more serious
+defects (a watchdog that could terminalise a healthy attempt, and a lock leak
+the release's own change made reachable), an undeclared breaking change, two
+assertions that proved nothing, and nine fixes with no pinning test at all —
+all fixed and pinned in `tests/test_pass4_*.py`, every pin verified by
+reverting its fix and confirming the test fails. Plus #188, from a live
+production incident: a failed lock acquisition is finally visible in the logs.
+
+**Three — the headline: `in_progress_state` is background-only, and the
+stranded sweep is retired** (see *Removed (breaking)*). Four review passes kept
+finding their most serious defects in the same place — the machinery that
+recovers instances from a marker the engine itself wrote with no durable
+record. Rather than harden that machinery a fifth time, this release removes
+the reason it exists. The engine is smaller, the beat schedule is four tasks
+instead of five, and a killed synchronous run now rolls back to its source
+state and is simply re-drivable.
+
+Validated twice on real infrastructure (broker, PostgreSQL, workers, beat) via
+the `django-logic-test` rig — once after act two, once after act three: 31
+matrix rows each, zero failures.
 
 ### Changed (breaking)
 
