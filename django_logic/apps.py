@@ -14,6 +14,7 @@ class DjangoLogicConfig(AppConfig):
     def ready(self) -> None:
         from django_logic import checks  # noqa: F401 — registers system checks
         from django_logic.conf import (
+            install_legacy_exception_base,
             transition_coverage_log,
             validate_core_settings,
         )
@@ -24,6 +25,7 @@ class DjangoLogicConfig(AppConfig):
         # background app's validate_on_ready() re-runs this as part of its
         # full gate; both are idempotent.
         validate_core_settings()
+        install_legacy_exception_base()
 
         # Transition-coverage recording (#132). Activated in ready() so
         # spawn-based parallel test workers, which re-run it, self-activate;

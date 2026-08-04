@@ -64,6 +64,13 @@ def transition_coverage_log():
     return _conf().get('TRANSITION_COVERAGE_LOG') or None
 
 
+def legacy_exception_base():
+    """Dotted path of an extra base class to mix into
+    ``TransitionNotAllowed`` (coexistence with a differently-named fork
+    during a migration, #190), or ``None``."""
+    return _conf().get('LEGACY_EXCEPTION_BASE') or None
+
+
 def validate_core_settings() -> None:
     """Fail fast on misconfigured core knobs (``ImproperlyConfigured``
     naming the setting), from every install shape."""
@@ -104,4 +111,60 @@ def validate_core_settings() -> None:
             f"DJANGO_LOGIC['TRANSITION_COVERAGE_LOG'] must be a filesystem "
             f"path (str or os.PathLike), or None to disable recording, got "
             f"{value!r}."
+        )
+    # Type check only — resolving the dotted path imports consumer code,
+    # which does not belong in a pure-read validator. The import happens in
+    # install_legacy_exception_base(), where failures are equally loud and
+    # equally attributable to the setting.
+    value = _conf().get('LEGACY_EXCEPTION_BASE')
+    if value is not None and (not isinstance(value, str) or not value):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] must be the dotted path "
+            f"of an exception class (str), or None, got {value!r}."
+        )
+
+
+def install_legacy_exception_base() -> None:
+    """Mix the settings-declared legacy base into ``TransitionNotAllowed``
+    (#190). Idempotent — called from both apps' ``ready()``.
+
+    A consumer migrating off a differently-named fork must run both engines
+    side by side, with shared handlers that catch the *fork's*
+    ``TransitionNotAllowed``. Declaring the fork's class here makes this
+    engine's denials also instances of it, so those handlers keep answering
+    gracefully instead of turning into 500s. Zero cost when unset — which is
+    every consumer not mid-migration. Every failure mode raises
+    ``ImproperlyConfigured`` at boot: a broken bridge must never be silent,
+    that is the whole point of supporting it first-class.
+    """
+    path = legacy_exception_base()
+    if not path:
+        return
+    from django.utils.module_loading import import_string
+
+    from django_logic.exceptions import TransitionNotAllowed
+
+    try:
+        base = import_string(path)
+    except ImportError as exc:
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] could not be imported "
+            f"({path!r}): {exc}"
+        )
+    if not (isinstance(base, type) and issubclass(base, BaseException)):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] must name an exception "
+            f"class, got {base!r}."
+        )
+    if base is TransitionNotAllowed or issubclass(TransitionNotAllowed, base):
+        # Already bridged (double ready()) or an existing ancestor.
+        return
+    try:
+        TransitionNotAllowed.__bases__ = (
+            TransitionNotAllowed.__bases__ + (base,)
+        )
+    except TypeError as exc:
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] {path!r} cannot be mixed "
+            f"into TransitionNotAllowed (incompatible bases/MRO): {exc}"
         )

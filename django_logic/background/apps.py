@@ -11,7 +11,14 @@ class BackgroundConfig(AppConfig):
         from django_logic.background.settings import validate_on_ready
         validate_on_ready()
         from django_logic import checks  # noqa: F401 — registers system checks
-        from django_logic.conf import transition_coverage_log
+        from django_logic.conf import (
+            install_legacy_exception_base,
+            transition_coverage_log,
+        )
+
+        # Idempotent — covers an install shape where only the background
+        # app's ready() runs before denials are raised or caught (#190).
+        install_legacy_exception_base()
 
         # Transition-coverage recording (#132). Activated here (not in the
         # recorder module) so spawn-based parallel test workers, which re-run
