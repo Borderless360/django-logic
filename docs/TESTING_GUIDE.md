@@ -336,6 +336,9 @@ Both are worth pinning if your UX depends on them:
 ```python
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.exceptions import TransitionNotAllowed
+# AlreadyInProgress is also catchable as TransitionTemporarilyUnavailable
+# (from django_logic.exceptions) — the "busy, retry shortly" type a generic
+# handler can branch on without importing the background subpackage.
 
 def test_cannot_cancel_mid_fulfilment(self):
     order = self.create_instance(status='approved')

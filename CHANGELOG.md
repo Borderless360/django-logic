@@ -2,6 +2,81 @@
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-04
+
+A small, deliberate release triaged from what the 0.12.0 review passes filed
+(#185, #187, #189) and what a consumer's August release review raised (#190,
+#191). Two additions make coexistence and generic error handling first-class
+for consumers; two fixes close honesty gaps on the failure paths; and the
+0.12.0 multi-database routing fix is finally pinned by tests. Deliberately
+**not** here: the lock-key identity rework (#184, #186) — changing the key's
+shape breaks lock recognition between old and new processes during a rolling
+deploy, so it gets a dedicated release with a migration note rather than a
+quiet ride in a mixed minor.
+
+### Added
+
+- **`TransitionTemporarilyUnavailable`** (#191, `django_logic.exceptions`) — a
+  shared base for the transient concurrency refusals, slotted between
+  `AlreadyInProgress`/`SourceStateChanged` and `TransitionNotAllowed`. "Busy,
+  retry shortly" and "you may not do this" were indistinguishable at a generic
+  top-level `except TransitionNotAllowed`, so whatever answer that handler gave
+  was wrong for one of them — typically telling a user who clicked during an
+  in-flight background transition that the action *is not allowed*. One
+  `except TransitionTemporarilyUnavailable` ahead of the base now answers
+  409/retry, without importing the background subpackage or enumerating
+  subclasses per call site. Existing catches keep working (the base still
+  subclasses `TransitionNotAllowed`); the hook runner's WARNING-vs-ERROR
+  distinction (#154) now branches on this type. Lock contention ("State is
+  locked") deliberately stays plain `TransitionNotAllowed` — a TTL-stuck lock
+  is not "retry shortly".
+
+- **`DJANGO_LOGIC['LEGACY_EXCEPTION_BASE']`** (#190) — first-class coexistence
+  with a differently-named fork during a migration. Declare the fork's
+  `TransitionNotAllowed` by dotted path and it is mixed into this engine's
+  `TransitionNotAllowed.__bases__` at `AppConfig.ready()`, so shared handlers
+  that catch the fork's class keep answering gracefully while apps migrate one
+  at a time. The only prior option was a local patch to `exceptions.py` — a
+  patch that re-vendoring has now silently destroyed twice, each time turning
+  graceful refusals into HTTP 500s with no test failing. Zero cost when unset;
+  every failure mode (unimportable path, non-exception class, MRO conflict)
+  raises `ImproperlyConfigured` at boot, because a broken bridge must never be
+  silent.
+
+### Fixed
+
+- **`Action.fail_transition` could clobber an in-flight transition's state**
+  (#185). The `failed_state` write was guarded by `is_locked()` and then
+  performed non-atomically, so a `Transition` (or a background phase 1)
+  acquiring the lock in the window between check and write had its state
+  overwritten by the Action's stale write — against a background flight, the
+  phase-2 state guard would then supersede the whole flight. The write now
+  happens only under an atomically-acquired lock (cache `add`), released
+  token-checked in a `finally`. Actions still run their side-effects lock-free;
+  the acquire is scoped to the one `UPDATE`.
+
+- **A silently-discarded `failed_state` write logged a false `SET_STATE`**
+  (#189, completing the `require_commit` fix from 0.12.0's `bd1445a`). The
+  terminal failure paths — `_handle_failure` and the watchdog/detect-stuck
+  finalizer — wrote `failed_state` through `_run_in_savepoint` without
+  `require_commit`, so a consumer receiver that raises a database error and
+  suppresses it (the receiver-authored `try: save() except IntegrityError:
+  pass` idiom, no nested `atomic()`) made the savepoint roll back silently
+  while the trace said the write landed. Both sites now pass
+  `require_commit=True`, routing the rollback into the existing honest
+  except-branch: log the failure, record it on the row where an operator will
+  see it, complete the row anyway.
+
+### Tests
+
+- **The 0.12.0 multi-database alias routing is now pinned** (#187). A second
+  in-memory SQLite alias in the test settings plus routed fixtures assert that
+  `State.get_persisted_state()` reads the instance's own database and that the
+  engine's savepoints (sync failure path, background attempt, terminal
+  `failed_state` writes) open on the instance's alias — previously mutation
+  testing showed all of it could be reverted to `default`-only with the whole
+  suite staying green.
+
 ## [0.12.0] — 2026-07-30
 
 A correctness release that ends in a design decision. Three acts:
