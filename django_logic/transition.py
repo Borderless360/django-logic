@@ -490,9 +490,11 @@ class Action(Transition):
     Deliberate asymmetries vs :class:`Transition` — an Action does not
     change state, so it skips the state-change machinery entirely:
 
-    * no cache lock, no under-the-lock source revalidation, and no
-      background-in-flight gate (Actions may run while a background
-      transition is in flight);
+    * no cache lock around the side-effects, no under-the-lock source
+      revalidation, and no background-in-flight gate (Actions may run
+      while a background transition is in flight); the one lock an Action
+      takes is short-lived, scoped to the ``failed_state`` write in
+      ``fail_transition`` (#185);
     * ``next_transition`` is NOT executed on success (note the divergence:
       a *BackgroundAction*'s phase 2 does run ``next_transition``);
     * ``in_progress_state`` is rejected like any synchronous transition's
@@ -506,8 +508,9 @@ class Action(Transition):
         return f"Action: {self.action_name}"
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
-        # An Action takes no lock, so there is none to leak — but the failure
-        # path still loses failed_state and the original exception.
+        # An Action takes no lock on the success path, so there is none to
+        # leak — but the failure path still loses failed_state and the
+        # original exception.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
         self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
@@ -517,30 +520,32 @@ class Action(Transition):
         self.callbacks.execute(state, **kwargs)
 
     def fail_transition(self, state: State, exception: Exception, **kwargs):
-        """Run the failure path WITHOUT unlocking.
+        """Run the failure path, taking the lock only around the write.
 
-        An Action never acquires the state lock (``change_state`` skips
-        ``state.lock()``), so it must never release one either. Inheriting
-        ``Transition.fail_transition`` would call ``state.unlock()`` and,
-        because the lock key is derived only from instance+field, delete
-        the lock a concurrent ``Transition`` on the same instance/field
-        legitimately holds. This mirrors the
-        lock/unlock asymmetry already present in ``complete_transition``.
+        An Action runs its side-effects without the state lock, so
+        inheriting ``Transition.fail_transition`` — whose unconditional
+        ``state.unlock()`` would delete the lock a concurrent ``Transition``
+        on the same instance/field legitimately holds — is not an option.
+        This mirrors the lock/unlock asymmetry already present in
+        ``complete_transition``.
 
-        ``failed_state`` is only written when the state is NOT currently
-        locked: an Action holds no lock, so writing the state field while
-        another transition is legitimately mid-flight would silently
-        overwrite that transition's state ("last write wins"). When the
-        write is skipped, the failure is still fully visible — the
-        exception propagates and the failure hooks run.
+        ``failed_state`` is written only under an atomically-acquired lock:
+        checking ``is_locked()`` and then writing left a window for a
+        concurrent transition to start between the check and the write, and
+        the Action's stale write then clobbered that flight's state (#185).
+        ``lock()`` is a cache ``add`` — atomic where ``is_locked()`` + write
+        was not — and the token-checked ``unlock()`` in the ``finally``
+        releases only the Action's own lock. When the lock cannot be
+        acquired, the write is skipped and the failure is still fully
+        visible — the exception propagates and the failure hooks run.
         """
         if self.failed_state:
-            if state.is_locked():
+            if not state.lock():
                 transition_logger.error(
                     f'{kwargs.get("tr_id")} Action {self.action_name!r}: '
                     f'skipping failed_state={self.failed_state!r} write — '
                     f'{state.instance_key} is locked by an in-flight '
-                    f'transition and an Action holds no lock.'
+                    f'transition and an Action must not overwrite its state.'
                 )
             else:
                 # Savepointed like Transition.fail_transition (#178): a
@@ -573,5 +578,7 @@ class Action(Transition):
                         f'{TransitionEventType.SET_STATE.value} '
                         f'{self.failed_state}'
                     )
+                finally:
+                    state.unlock()
         self.failure_side_effects.execute(state, exception=exception, **kwargs)
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
