@@ -23,9 +23,12 @@ from django.test import TestCase, TransactionTestCase, override_settings
 
 from django_logic import Action
 from django_logic.background.dispatch import sync_execution
-from django_logic.background.exceptions import AlreadyInProgress
+from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import (
+    TransitionNotAllowed,
+    TransitionTemporarilyUnavailable,
+)
 from django_logic.state import State
 from tests.background.models import Widget
 from tests import dl_settings
@@ -167,6 +170,17 @@ class BackgroundPhaseOneMutexTests(TransactionTestCase):
         # atomic block rolled back.
         self.assertEqual(TransitionMessage.objects.count(), 1)
 
+    def test_rejection_is_catchable_as_temporarily_unavailable(self):
+        # A consumer holding only the core import can answer "busy, retry
+        # shortly" without importing the background subpackage (#191).
+        _make_tm(self.widget)
+
+        with sync_execution():
+            with self.assertRaises(TransitionTemporarilyUnavailable) as ctx:
+                self.widget.process.fulfil()
+
+        self.assertIsInstance(ctx.exception, AlreadyInProgress)
+
     def test_phase_one_releases_lock_on_success(self):
         # D2 (f): on the happy path the lock is released by the same
         # finally before dispatch — phase 2 then runs unlocked and the
@@ -225,6 +239,26 @@ class PhaseOnePostInsertRecheckTests(TransactionTestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
+
+    def test_recheck_rejection_is_catchable_as_temporarily_unavailable(self):
+        # Same core-import contract as the AlreadyInProgress guard (#191):
+        # the recheck's refusal means "busy, retry shortly", not "forbidden".
+        from unittest.mock import patch
+
+        real_create = TransitionMessage.objects.create
+
+        def create_then_state_moves(**kwargs):
+            tm = real_create(**kwargs)
+            Widget.objects.filter(pk=self.widget.pk).update(status='fulfilled')
+            return tm
+
+        with patch.object(TransitionMessage.objects, 'create',
+                          side_effect=create_then_state_moves):
+            with sync_execution():
+                with self.assertRaises(TransitionTemporarilyUnavailable) as ctx:
+                    self.widget.process.fulfil()
+
+        self.assertIsInstance(ctx.exception, SourceStateChanged)
 
     def test_retry_from_in_progress_still_admitted(self):
         # The legitimate recovery path must keep working: instance stranded

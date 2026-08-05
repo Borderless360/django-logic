@@ -11,6 +11,8 @@ Covers:
 from datetime import timedelta
 
 from django.core.exceptions import ImproperlyConfigured
+from django.db import IntegrityError
+from django.db.models.signals import post_init
 from django.test import TestCase, SimpleTestCase, override_settings
 from django.utils import timezone
 
@@ -193,3 +195,57 @@ class WatchdogActsTests(TestCase):
         self.assertEqual(_watchdog_stale_attempts_inline(), 1)
         tm.refresh_from_db()
         self.assertTrue(tm.is_completed)
+
+
+def _suppress_db_error_on_failed_materialization(sender, instance, **kwargs):
+    """Poisons the watchdog finalizer's ``failed_state`` savepoint (#189).
+
+    ``post_init`` because ``set_state`` ends with ``refresh_from_db`` — the
+    one receiver spot where a suppressed database error leaves no query
+    behind it inside the savepoint, so the rollback is genuinely silent.
+    """
+    if instance.pk is None or instance.status != 'tb_failed':
+        return
+    try:
+        Widget.objects.create(pk=instance.pk)
+    except IntegrityError:
+        pass
+
+
+@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
+class WatchdogFinalizeWritePoisonedTests(TestCase):
+    """A silently-discarded ``failed_state`` write in the watchdog finalizer
+    must be recorded as the failure it is, not logged as landed (#189)."""
+
+    def test_discarded_write_is_reported_not_logged_as_landed(self):
+        widget = Widget.objects.create(status='tb_running')
+        tm = TransitionMessage.objects.create(
+            app_label='bg_tests',
+            model_name='widget',
+            instance_id=widget.pk,
+            process_name='process',
+            transition_name='timeboxed',
+            queue_name='django_logic.slow',
+            started_at=timezone.now() - timedelta(seconds=120),
+            timeout_seconds=60,
+            errors_count=1,  # next increment hits MAX_ERRORS=2
+        )
+        post_init.connect(
+            _suppress_db_error_on_failed_materialization, sender=Widget)
+        self.addCleanup(
+            post_init.disconnect,
+            _suppress_db_error_on_failed_materialization, sender=Widget)
+
+        with self.assertLogs('django-logic.transition', level='INFO') as logs:
+            self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+
+        tm.refresh_from_db()
+        widget.refresh_from_db()
+        # The row still terminalises — that is what stops the retry loop.
+        self.assertTrue(tm.is_completed)
+        # The proof the write was discarded: the instance stays parked.
+        self.assertEqual(widget.status, 'tb_running')
+        self.assertIn('failed_state write', tm.failure_side_effect_error)
+        output = '\n'.join(logs.output)
+        self.assertIn('could not write failed_state', output)
+        self.assertNotIn('set failed_state=', output)
