@@ -34,7 +34,10 @@ from django_logic.commands import (
     SideEffects,
     note_deferred_unlock,
 )
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import (
+    TransitionNotAllowed,
+    TransitionTemporarilyUnavailable,
+)
 from django_logic.logger import (
     redact_log_kwargs,
     transition_logger,
@@ -449,33 +452,43 @@ class Transition:
                 f"source states (a concurrent transition won the race)."
             )
 
-    def _ensure_no_background_in_flight(self, state: State) -> None:
-        """Reject a state-changing transition while a background transition
-        is in flight on the same instance + process.
-
-        The uncompleted ``TransitionMessage`` row is the durable in-flight
-        marker for background work; the cache lock only guards short
-        critical sections. Without this gate a synchronous transition could
-        interleave with phase 2 and the two would overwrite each other's
-        state writes. Checked under the lock, like the source revalidation.
+    @staticmethod
+    def _background_in_flight(state: State) -> bool:
+        """Whether an uncompleted ``TransitionMessage`` exists for this
+        instance + process — the durable in-flight marker for background
+        work (the cache lock only guards short critical sections). Only
+        meaningful while holding the lock: phase 1 needs the lock to create
+        a new row, so the answer cannot flip underneath the holder.
         """
         from django.apps import apps
 
         if not apps.is_installed('django_logic.background'):
-            return
+            return False
         from django_logic.background.models import TransitionMessage
 
-        in_flight = TransitionMessage.objects.filter(
+        return TransitionMessage.objects.filter(
             app_label=state.instance._meta.app_label,
             model_name=state.instance._meta.model_name,
             instance_id=str(state.instance.pk),
             process_name=state.process_name,
             is_completed=False,
         ).exists()
-        if in_flight:
-            raise TransitionNotAllowed(
-                f"Transition '{self.action_name}' is not allowed: a "
-                f"background transition is in progress for "
+
+    def _ensure_no_background_in_flight(self, state: State) -> None:
+        """Reject a state-changing transition while a background transition
+        is in flight on the same instance + process.
+
+        Without this gate a synchronous transition could interleave with
+        phase 2 and the two would overwrite each other's state writes.
+        Checked under the lock, like the source revalidation. Raises the
+        transient type (#191): the row clears when the flight completes, so
+        "come back in a moment" is the correct answer, unlike a genuine
+        source/permission refusal.
+        """
+        if self._background_in_flight(state):
+            raise TransitionTemporarilyUnavailable(
+                f"Transition '{self.action_name}' is not allowed right now: "
+                f"a background transition is in progress for "
                 f"{state.instance_key} (uncompleted TransitionMessage)."
             )
 
@@ -490,9 +503,13 @@ class Action(Transition):
     Deliberate asymmetries vs :class:`Transition` — an Action does not
     change state, so it skips the state-change machinery entirely:
 
-    * no cache lock, no under-the-lock source revalidation, and no
-      background-in-flight gate (Actions may run while a background
-      transition is in flight);
+    * no cache lock around the side-effects, no under-the-lock source
+      revalidation, and no background-in-flight gate (Actions may run
+      while a background transition is in flight); the one lock an Action
+      takes is short-lived, scoped to the ``failed_state`` write in
+      ``fail_transition`` (#185) — and that write is skipped while an
+      uncompleted ``TransitionMessage`` exists, because phase 2 owns the
+      state field until the row completes;
     * ``next_transition`` is NOT executed on success (note the divergence:
       a *BackgroundAction*'s phase 2 does run ``next_transition``);
     * ``in_progress_state`` is rejected like any synchronous transition's
@@ -506,8 +523,9 @@ class Action(Transition):
         return f"Action: {self.action_name}"
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
-        # An Action takes no lock, so there is none to leak — but the failure
-        # path still loses failed_state and the original exception.
+        # An Action takes no lock on the success path, so there is none to
+        # leak — but the failure path still loses failed_state and the
+        # original exception.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
         self._init_transition_context(kwargs)
         self.side_effects.execute(state, **kwargs)
@@ -517,61 +535,90 @@ class Action(Transition):
         self.callbacks.execute(state, **kwargs)
 
     def fail_transition(self, state: State, exception: Exception, **kwargs):
-        """Run the failure path WITHOUT unlocking.
+        """Run the failure path, taking the lock only around the write.
 
-        An Action never acquires the state lock (``change_state`` skips
-        ``state.lock()``), so it must never release one either. Inheriting
-        ``Transition.fail_transition`` would call ``state.unlock()`` and,
-        because the lock key is derived only from instance+field, delete
-        the lock a concurrent ``Transition`` on the same instance/field
-        legitimately holds. This mirrors the
-        lock/unlock asymmetry already present in ``complete_transition``.
+        An Action runs its side-effects without the state lock, so
+        inheriting ``Transition.fail_transition`` — whose unconditional
+        ``state.unlock()`` would delete the lock a concurrent ``Transition``
+        on the same instance/field legitimately holds — is not an option.
+        This mirrors the lock/unlock asymmetry already present in
+        ``complete_transition``.
 
-        ``failed_state`` is only written when the state is NOT currently
-        locked: an Action holds no lock, so writing the state field while
-        another transition is legitimately mid-flight would silently
-        overwrite that transition's state ("last write wins"). When the
-        write is skipped, the failure is still fully visible — the
-        exception propagates and the failure hooks run.
+        ``failed_state`` is written only under an atomically-acquired lock:
+        checking ``is_locked()`` and then writing left a window for a
+        concurrent transition to start between the check and the write, and
+        the Action's stale write then clobbered that flight's state (#185).
+        The cache lock only covers sync flights and phase 1, so under the
+        lock the durable in-flight marker is consulted too: while an
+        uncompleted ``TransitionMessage`` exists, phase 2 owns the state
+        field and the write is skipped — otherwise it would supersede the
+        flight (or be destroyed by its target write). Whenever the write is
+        skipped, the failure is still fully visible — the exception
+        propagates and the failure hooks run.
         """
         if self.failed_state:
-            if state.is_locked():
+            if not state.lock():
                 transition_logger.error(
                     f'{kwargs.get("tr_id")} Action {self.action_name!r}: '
                     f'skipping failed_state={self.failed_state!r} write — '
                     f'{state.instance_key} is locked by an in-flight '
-                    f'transition and an Action holds no lock.'
+                    f'transition and an Action must not overwrite its state.'
                 )
             else:
-                # Savepointed like Transition.fail_transition (#178): a
-                # rejected write must not replace the original side-effect
-                # exception on its way out, and must not log a SET_STATE line
-                # for a write that never landed.
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+                    f'{state.instance_key}'
+                )
+                wrote_state = False
                 try:
-                    # The instance's alias, not DEFAULT: set_state routes its
-                    # write with hints={'instance': ...}, so a savepoint opened
-                    # on DEFAULT would guard the wrong connection — no
-                    # savepoint around the actual write, and a stray
-                    # BEGIN/RELEASE on a connection that was not doing
-                    # anything.
-                    with transaction.atomic(
-                        using=state.instance._state.db or DEFAULT_DB_ALIAS
-                    ):
-                        state.set_state(self.failed_state)
-                except Exception as write_error:
-                    transition_logger.error(
-                        f'{kwargs.get("tr_id")} Action {self.action_name!r}: '
-                        f'could not write failed_state '
-                        f'{self.failed_state!r} on {state.instance_key}: '
-                        f'{type(write_error).__name__}: {write_error}. The '
-                        f'original failure is re-raised unchanged.',
-                        exc_info=True,
-                    )
-                else:
-                    transition_logger.info(
-                        f'{kwargs.get("tr_id")} '
-                        f'{TransitionEventType.SET_STATE.value} '
-                        f'{self.failed_state}'
-                    )
+                    if self._background_in_flight(state):
+                        transition_logger.error(
+                            f'{kwargs.get("tr_id")} Action '
+                            f'{self.action_name!r}: skipping failed_state='
+                            f'{self.failed_state!r} write — an uncompleted '
+                            f'TransitionMessage owns the state field of '
+                            f'{state.instance_key} until its flight '
+                            f'completes.'
+                        )
+                    else:
+                        # Savepointed like Transition.fail_transition (#178):
+                        # a rejected write must not replace the original
+                        # side-effect exception on its way out, and must not
+                        # log a SET_STATE line for a write that never landed.
+                        try:
+                            # The instance's alias, not DEFAULT: set_state
+                            # routes its write with hints={'instance': ...},
+                            # so a savepoint opened on DEFAULT would guard the
+                            # wrong connection — no savepoint around the
+                            # actual write, and a stray BEGIN/RELEASE on a
+                            # connection that was not doing anything.
+                            with transaction.atomic(
+                                using=state.instance._state.db
+                                or DEFAULT_DB_ALIAS
+                            ):
+                                state.set_state(self.failed_state)
+                        except Exception as write_error:
+                            transition_logger.error(
+                                f'{kwargs.get("tr_id")} Action '
+                                f'{self.action_name!r}: could not write '
+                                f'failed_state {self.failed_state!r} on '
+                                f'{state.instance_key}: '
+                                f'{type(write_error).__name__}: '
+                                f'{write_error}. The original failure is '
+                                f're-raised unchanged.',
+                                exc_info=True,
+                            )
+                        else:
+                            wrote_state = True
+                            transition_logger.info(
+                                f'{kwargs.get("tr_id")} '
+                                f'{TransitionEventType.SET_STATE.value} '
+                                f'{self.failed_state}'
+                            )
+                finally:
+                    # The shared release path: emits the Unlock lifecycle
+                    # line (#188) and honours DEFER_UNLOCK_UNTIL_COMMIT when
+                    # a state write landed under the lock (#141).
+                    self._release_lock(state, deferrable=wrote_state, **kwargs)
         self.failure_side_effects.execute(state, exception=exception, **kwargs)
         self.failure_callbacks.execute(state, exception=exception, **kwargs)

@@ -68,8 +68,11 @@ change on success) for anything slow, external, or retriable.
 6. **One in-flight background transition per instance per process.** While an
    uncompleted `TransitionMessage` exists, a second background transition
    raises `AlreadyInProgress` and a *synchronous* transition on the same
-   instance+process raises `TransitionNotAllowed` — design flows so follow-up
-   work chains from terminal hooks, not mid-flight.
+   instance+process raises `TransitionTemporarilyUnavailable` (both subclass
+   `TransitionNotAllowed`; catch the transient type first to answer
+   "retry shortly") — design flows so follow-up work chains from terminal
+   hooks, not mid-flight. A failing `Action`'s `failed_state` write is
+   skipped while the row is uncompleted: phase 2 owns the state field.
 7. **Manual state fixes win.** If an instance is moved externally while a
    background row is pending, phase 2 completes the row as *superseded*
    (`'[superseded]'` in `last_error_message`) and skips side-effects. This is

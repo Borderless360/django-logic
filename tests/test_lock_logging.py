@@ -11,7 +11,7 @@ findable with a per-instance log filter.
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 
-from django_logic import Process, ProcessManager, Transition
+from django_logic import Action, Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import TransitionEventType
@@ -28,10 +28,16 @@ def _never(instance, **kwargs):
     return False
 
 
+def _boom(instance, **kwargs):
+    raise ValueError('boom')
+
+
 class LockLoggingProcess(Process):
     process_name = 'lock_logging_proc'
     transitions = [
         Transition('go', sources=['draft'], target='done'),
+        Action('act_fail', sources=['draft'], failed_state='ll_act_failed',
+               side_effects=[_boom]),
         BackgroundTransition(
             'bg', sources=['draft'], target='done',
             in_progress_state='ll_running', failed_state='ll_failed',
@@ -147,6 +153,27 @@ class LifecycleLinesCarryInstanceKeyTests(TestCase):
         self.assertTrue(
             any(f'{TransitionEventType.UNLOCK.value} {key}' in line
                 for line in per_instance), logs.output)
+
+    def test_action_failed_state_write_lock_and_unlock_name_the_instance(self):
+        # The Action's write-scoped lock (#185) is the engine's newest
+        # acquisition — without these lines a crash inside the write window
+        # would be unattributable, the exact #188 blind spot.
+        inv = Invoice.objects.create(status='draft')
+        key = inv.lock_logging_proc.state.instance_key
+
+        with self.assertLogs('django-logic.transition', level='INFO') as logs:
+            with self.assertRaises(ValueError):
+                inv.lock_logging_proc.act_fail()
+
+        per_instance = [line for line in logs.output if key in line]
+        self.assertTrue(
+            any(f'{TransitionEventType.LOCK.value} {key}' in line
+                for line in per_instance), logs.output)
+        self.assertTrue(
+            any(f'{TransitionEventType.UNLOCK.value} {key}' in line
+                for line in per_instance), logs.output)
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'll_act_failed')
 
     def test_background_phase1_lock_and_unlock_name_the_instance(self):
         inv = Invoice.objects.create(status='draft')

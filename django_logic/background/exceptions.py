@@ -1,7 +1,7 @@
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import TransitionTemporarilyUnavailable
 
 
-class AlreadyInProgress(TransitionNotAllowed):
+class AlreadyInProgress(TransitionTemporarilyUnavailable):
     """Raised by phase 1 when an uncompleted TransitionMessage already
     exists for the target instance + process (the partial unique
     constraint fires).
@@ -20,13 +20,14 @@ class AlreadyInProgress(TransitionNotAllowed):
     """
 
 
-class SourceStateChanged(TransitionNotAllowed):
+class SourceStateChanged(TransitionTemporarilyUnavailable):
     """Raised by phase 1's post-create recheck when the persisted state left
     the transition's sources while the insert waited on a finishing flight.
 
     A named subclass because this is an *expected* concurrency outcome — the
-    guard doing its job, the same class of event as ``AlreadyInProgress`` — and
-    the hook runner logs it at WARNING rather than ERROR on that basis (#154).
-    Consumers that treat it distinctly can catch it by type; everything
-    catching ``TransitionNotAllowed`` keeps working.
+    guard doing its job, the same class of event as ``AlreadyInProgress``;
+    both share ``TransitionTemporarilyUnavailable``, which is why the hook
+    runner logs them at WARNING rather than ERROR (#154). Consumers that
+    treat it distinctly can catch it by type; everything catching
+    ``TransitionNotAllowed`` keeps working.
     """

@@ -9,6 +9,7 @@ import logging
 
 from django.db import DEFAULT_DB_ALIAS, transaction
 
+from django_logic.exceptions import TransitionTemporarilyUnavailable
 from django_logic.logger import (
     redact_log_kwargs,
     transition_logger,
@@ -151,26 +152,20 @@ def _release_dropped(registry, before) -> None:
 
 
 def _log_hook_error(message: str, error: BaseException, **log_kwargs) -> None:
-    """Log a hook failure at ERROR — or WARNING when it is the engine's own
-    concurrency guard firing (#154).
+    """Log a hook failure at ERROR — or WARNING when it is a transient
+    concurrency outcome (#154, #191).
 
-    ``AlreadyInProgress`` and ``SourceStateChanged`` mean "another flight owns
-    this instance right now": the designed outcome of two drives racing, and
+    ``TransitionTemporarilyUnavailable`` means "another flight owns this
+    instance right now": the designed outcome of two drives racing, and
     the common shape when a background transition is invoked from another
-    transition's side-effects. At ERROR they page an on-call for healthy
-    contention. Every other exception stays at ERROR.
+    transition's side-effects. At ERROR it pages an on-call for healthy
+    contention. Every other exception stays at ERROR. Consumer subclasses
+    of the base inherit the WARNING treatment — the type's contract is
+    that it means "retry shortly".
     """
     level = logging.ERROR
-    try:
-        from django_logic.background.exceptions import (
-            AlreadyInProgress, SourceStateChanged,
-        )
-    except ImportError:
-        # Sync-only install: no background exceptions exist to special-case.
-        pass
-    else:
-        if isinstance(error, (AlreadyInProgress, SourceStateChanged)):
-            level = logging.WARNING
+    if isinstance(error, TransitionTemporarilyUnavailable):
+        level = logging.WARNING
     transition_logger.log(level, message, **log_kwargs)
 
 
@@ -299,8 +294,10 @@ class FailureSideEffects(BaseCommand):
     When the caller is inside an open transaction, the bundle runs in a
     savepoint that rolls back on error (#138): the same contract phase 2
     applies — a broken cleanup path neither poisons the outer transaction
-    nor commits its partial writes. Outside a transaction the historical
-    autocommit behavior is unchanged.
+    nor commits its partial writes. A savepoint discarded silently (a hook
+    suppressing a database error without a nested ``atomic``) is returned
+    as the error too. Outside a transaction the historical autocommit
+    behavior is unchanged.
     """
 
     def execute(self, state: State, **kwargs):
@@ -314,9 +311,16 @@ class FailureSideEffects(BaseCommand):
                 raise _FailureSideEffectsRollback(error)
 
         try:
-            _run_in_savepoint(using, _bundle)
+            # require_commit: the caller records a returned error on the
+            # TransitionMessage, so a cleanup bundle whose writes were
+            # silently discarded must be returned as the failure it is —
+            # not left as success-shaped bookkeeping over rolled-back work
+            # (the #189 class, third savepoint).
+            _run_in_savepoint(using, _bundle, require_commit=True)
         except _FailureSideEffectsRollback as rollback:
             return rollback.error
+        except _SilentRollback as silent:
+            return silent
         return None
 
     def _run(self, state: State, **kwargs):

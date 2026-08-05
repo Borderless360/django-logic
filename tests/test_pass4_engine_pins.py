@@ -18,14 +18,17 @@ from django.utils import timezone
 
 from django_logic import Action, Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
-from django_logic.background.exceptions import SourceStateChanged
+from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.runner import (
     abandon_timed_out_attempt,
     finalize_stuck_attempt,
     run_background_transition,
 )
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import (
+    TransitionNotAllowed,
+    TransitionTemporarilyUnavailable,
+)
 from tests.models import Invoice
 
 _SYNC = {
@@ -417,6 +420,62 @@ class ConcurrencyGuardLogLevelTests(TestCase):
             _log_hook_error('real', ValueError('a genuine bug'))
         self.assertEqual(
             [r.levelno for r in logs.records], [logging.ERROR], logs.output)
+
+
+# --- #191: one catchable type for "busy, retry shortly" --------------------
+
+class TemporarilyUnavailableBaseTests(TestCase):
+    """A generic top-level handler must tell transient concurrency (retry is
+    right) from permanent refusal (retry is pointless) without importing the
+    background subpackage. The base slots between the guard exceptions and
+    ``TransitionNotAllowed``, so every existing catch keeps working.
+    """
+
+    def test_guard_exceptions_share_the_transient_base(self):
+        self.assertTrue(
+            issubclass(AlreadyInProgress, TransitionTemporarilyUnavailable))
+        self.assertTrue(
+            issubclass(SourceStateChanged, TransitionTemporarilyUnavailable))
+
+    def test_transient_base_is_a_transition_not_allowed(self):
+        self.assertTrue(issubclass(
+            TransitionTemporarilyUnavailable, TransitionNotAllowed))
+
+    def test_except_ordering_separates_busy_from_forbidden(self):
+        # The documented consumer pattern: the transient base AHEAD of
+        # TransitionNotAllowed answers "busy" instead of "forbidden".
+        def classify(error):
+            try:
+                raise error
+            except TransitionTemporarilyUnavailable:
+                return 'busy'
+            except TransitionNotAllowed:
+                return 'forbidden'
+
+        self.assertEqual(classify(AlreadyInProgress('in flight')), 'busy')
+        self.assertEqual(
+            classify(TransitionNotAllowed('no such edge')), 'forbidden')
+
+    def test_already_in_progress_logs_at_warning(self):
+        from django_logic.commands import _log_hook_error
+
+        with self.assertLogs('django-logic.transition', level='DEBUG') as logs:
+            _log_hook_error('guard', AlreadyInProgress('in flight'))
+        self.assertEqual(
+            [r.levelno for r in logs.records], [logging.WARNING], logs.output)
+
+    def test_consumer_subclass_of_transient_base_logs_at_warning(self):
+        # The WARNING treatment keys on the base, not an enumerated tuple:
+        # by the type's contract a consumer subclass means "retry shortly".
+        from django_logic.commands import _log_hook_error
+
+        class ChildFlightBusy(TransitionTemporarilyUnavailable):
+            pass
+
+        with self.assertLogs('django-logic.transition', level='DEBUG') as logs:
+            _log_hook_error('guard', ChildFlightBusy('child in flight'))
+        self.assertEqual(
+            [r.levelno for r in logs.records], [logging.WARNING], logs.output)
 
 
 # --- C3: a restore failure the engine did not classify is still accounted --

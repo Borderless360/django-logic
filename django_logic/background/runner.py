@@ -460,9 +460,13 @@ def _finalize_terminal_from_watchdog(
         # through _run_in_savepoint, so a rollback releases any deferred
         # unlock registered inside it instead of leaking it until TTL.
         try:
+            # require_commit: the else-branch below logs the write as landed,
+            # so a silently discarded savepoint must surface as the failure
+            # it is and take the honest except-path instead (#189).
             _run_in_savepoint(
                 state.instance._state.db or DEFAULT_DB_ALIAS,
                 lambda: state.set_state(transition.failed_state),
+                require_commit=True,
             )
         except Exception as write_error:
             transition_logger.error(
@@ -818,9 +822,13 @@ def _handle_failure(
         try:
             # On the instance's alias, and via _run_in_savepoint: see the
             # attempt savepoint in _run_atomic for why both matter.
+            # require_commit: the else-branch below logs SET_STATE, so a
+            # silently discarded savepoint must surface as the failure it is
+            # and take the honest except-path instead (#189).
             _run_in_savepoint(
                 state.instance._state.db or DEFAULT_DB_ALIAS,
                 lambda: state.set_state(transition.failed_state),
+                require_commit=True,
             )
         except Exception as write_error:
             transition_logger.error(

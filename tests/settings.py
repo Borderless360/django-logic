@@ -55,6 +55,16 @@ else:
         }
     }
 
+# Second alias so the instance-alias routing shipped in 0.12.0 is pinned
+# (#187, mutation M26): get_persisted_state and the engine's savepoints must
+# follow instance._state.db, not 'default'. No global router — the routed
+# topology is installed per-test in tests/test_multidb_alias.py, so startup
+# system checks (and tests/test_router_check.py) see the default setup.
+DATABASES['other'] = {
+    'ENGINE': 'django.db.backends.sqlite3',
+    'NAME': ':memory:',
+}
+
 # LocMemCache by default. Tests that need atomic nx semantics use the
 # @requires_real_redis skip decorator and run under settings_redis.py
 # / settings_stability.py in dedicated CI jobs.
