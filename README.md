@@ -561,8 +561,9 @@ handler should answer them differently:
 **Transient concurrency** — the action is fine, retry shortly. These raise
 `TransitionTemporarilyUnavailable` (a `TransitionNotAllowed` subclass, importable
 from `django_logic.exceptions`): another flight owns the instance right now
-(`AlreadyInProgress`), or the state moved while phase 1 waited
-(`SourceStateChanged`). Catch it **ahead of** the base class:
+(`AlreadyInProgress`, or the sync gate while a background row is uncompleted),
+or the state moved while phase 1 waited (`SourceStateChanged`). Catch it
+**ahead of** the base class:
 
 ```python
 from django_logic.exceptions import (
@@ -593,7 +594,7 @@ Multiple processes trying to transition the same object can cause race condition
 
 **Solution**: Django-Logic serializes work on a state field with two mechanisms (see [Concurrency and locking](#concurrency-and-locking)):
 - a **cache lock** (atomic set-if-absent on the `default` cache) held for a synchronous transition's whole flight and for a background transition's phase-1 critical section, with the persisted state re-validated under the lock; and
-- the **`TransitionMessage` row** — while a background transition is in flight, a second one raises `AlreadyInProgress` and a synchronous transition on the same instance + process raises `TransitionNotAllowed`.
+- the **`TransitionMessage` row** — while a background transition is in flight, a second one raises `AlreadyInProgress` and a synchronous transition on the same instance + process raises `TransitionTemporarilyUnavailable` (both are `TransitionNotAllowed` subclasses).
 
 Use a cross-process cache so the lock is shared between web processes and workers.
 
@@ -1052,8 +1053,8 @@ Two mechanisms serialize work on a state field, each with a precise scope:
 1. **The cache lock** (atomic set-if-absent on the `default` cache) is held for a *synchronous* transition's whole flight, and for a background transition's **phase-1 critical section only** (validate → create the `TransitionMessage` → write `in_progress_state`, then released). Both re-validate the **persisted** state under the lock before proceeding, so two requests racing to transition the same instance can't both win.
 2. **The uncompleted `TransitionMessage` row** is the durable in-flight marker for background work. While one exists for an instance + process:
    - a second background transition raises `AlreadyInProgress` (`from django_logic.background.exceptions import AlreadyInProgress`; also catchable as `TransitionTemporarilyUnavailable` from `django_logic.exceptions` without importing the background subpackage) — enforced by a partial unique constraint, so it holds across processes and dynos;
-   - a **synchronous transition on the same instance + process raises `TransitionNotAllowed`** — phase 2 owns the state field until the row completes;
-   - synchronous `Action`s still run (they don't change state).
+   - a **synchronous transition on the same instance + process raises `TransitionTemporarilyUnavailable`** — phase 2 owns the state field until the row completes;
+   - synchronous `Action`s still run (they don't change state on success); a failing Action's `failed_state` write is skipped while the row is uncompleted, for the same ownership reason.
 
 The constraint is scoped **per process**: two independent state machines bound to different fields of the same model (say `status` and `payment_status`) can both have background work in flight.
 

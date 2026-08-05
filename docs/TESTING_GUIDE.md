@@ -330,8 +330,10 @@ def test_persistent_failure_reaches_failed_state(self):
 
 While an uncompleted `TransitionMessage` exists for an instance + process,
 a second background transition raises `AlreadyInProgress`, and a synchronous
-transition on the same instance + process raises `TransitionNotAllowed`.
-Both are worth pinning if your UX depends on them:
+transition on the same instance + process raises
+`TransitionTemporarilyUnavailable` (both subclass `TransitionNotAllowed`,
+so the catches below keep working). Both are worth pinning if your UX
+depends on them:
 
 ```python
 from django_logic.background.exceptions import AlreadyInProgress
