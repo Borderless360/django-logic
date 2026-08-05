@@ -159,12 +159,25 @@ def install_legacy_exception_base() -> None:
     if base is TransitionNotAllowed or issubclass(TransitionNotAllowed, base):
         # Already bridged (double ready()) or an existing ancestor.
         return
+    original_bases = TransitionNotAllowed.__bases__
     try:
-        TransitionNotAllowed.__bases__ = (
-            TransitionNotAllowed.__bases__ + (base,)
-        )
+        TransitionNotAllowed.__bases__ = original_bases + (base,)
     except TypeError as exc:
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] {path!r} cannot be mixed "
             f"into TransitionNotAllowed (incompatible bases/MRO): {exc}"
+        )
+    # Smoke-construct through the new MRO. Neither TransitionNotAllowed nor
+    # DjangoLogicException defines __init__, so a legacy base with a
+    # non-message signature would otherwise boot green and then replace
+    # every denial with a TypeError at its raise site.
+    try:
+        TransitionNotAllowed('legacy-base constructor compatibility probe')
+    except Exception as exc:
+        TransitionNotAllowed.__bases__ = original_bases
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] {path!r} breaks "
+            f"TransitionNotAllowed('message') construction "
+            f"({type(exc).__name__}: {exc}). The legacy base must accept a "
+            f"single message argument, like a plain Exception subclass."
         )

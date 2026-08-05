@@ -15,8 +15,11 @@ instance + process must never interleave:
 * ``BackgroundTransition.change_state`` holds the cache lock only for
   its critical section and ALWAYS unlocks in a finally — on rejection
   (``AlreadyInProgress``) and on success alike.
-* Plain ``Action`` is documented as NOT gated: it does not change state,
-  takes no lock, and ignores in-flight background work.
+* Plain ``Action`` is documented as NOT gated on its success path: it does
+  not change state, takes no lock, and ignores in-flight background work.
+  Its FAILURE path's ``failed_state`` write is the exception — while an
+  uncompleted row exists, phase 2 owns the state field, so the write is
+  skipped (#185 review).
 """
 from django.core.cache import cache
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -116,6 +119,47 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')  # Actions never move state
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
+
+    def test_tm_gate_raises_the_transient_type(self):
+        # The gated condition clears when the flight completes, so it is
+        # the motivating case for TransitionTemporarilyUnavailable (#191):
+        # a generic handler must be able to answer 409/retry, not 400.
+        _make_tm(self.widget)
+
+        with self.assertRaises(TransitionTemporarilyUnavailable):
+            self.widget.process.cancel()
+
+    def test_failing_action_skips_failed_state_write_while_tm_in_flight(self):
+        # D2 (h): the cache lock is free for the whole queued/phase-2 span,
+        # so the Action's atomic acquire succeeds — but the uncompleted row
+        # is the durable owner of the state field, and writing failed_state
+        # over the in_progress_state would supersede the flight (or be
+        # destroyed by its target write). The write is skipped; the failure
+        # stays fully visible.
+        _make_tm(self.widget)
+
+        def boom(instance, **kwargs):
+            raise ValueError('boom')
+
+        action = Action('poke_fail', sources=['draft'],
+                        failed_state='poke_failed', side_effects=[boom])
+        state = State(self.widget, 'status', 'process')
+
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
+            with self.assertRaises(ValueError):
+                try:
+                    action.change_state(state)
+                except Exception as exc:
+                    action.fail_transition(state, exc)
+                    raise
+
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'draft')  # write skipped
+        self.assertFalse(state.is_locked())            # no lock leaked
+        self.assertIn(
+            'uncompleted TransitionMessage owns the state field',
+            '\n'.join(logs.output),
+        )
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

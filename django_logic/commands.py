@@ -294,8 +294,10 @@ class FailureSideEffects(BaseCommand):
     When the caller is inside an open transaction, the bundle runs in a
     savepoint that rolls back on error (#138): the same contract phase 2
     applies — a broken cleanup path neither poisons the outer transaction
-    nor commits its partial writes. Outside a transaction the historical
-    autocommit behavior is unchanged.
+    nor commits its partial writes. A savepoint discarded silently (a hook
+    suppressing a database error without a nested ``atomic``) is returned
+    as the error too. Outside a transaction the historical autocommit
+    behavior is unchanged.
     """
 
     def execute(self, state: State, **kwargs):
@@ -309,9 +311,16 @@ class FailureSideEffects(BaseCommand):
                 raise _FailureSideEffectsRollback(error)
 
         try:
-            _run_in_savepoint(using, _bundle)
+            # require_commit: the caller records a returned error on the
+            # TransitionMessage, so a cleanup bundle whose writes were
+            # silently discarded must be returned as the failure it is —
+            # not left as success-shaped bookkeeping over rolled-back work
+            # (the #189 class, third savepoint).
+            _run_in_savepoint(using, _bundle, require_commit=True)
         except _FailureSideEffectsRollback as rollback:
             return rollback.error
+        except _SilentRollback as silent:
+            return silent
         return None
 
     def _run(self, state: State, **kwargs):

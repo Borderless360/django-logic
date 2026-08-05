@@ -17,7 +17,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.process import Process
 from django_logic.state import State
-from django_logic.transition import Transition
+from django_logic.transition import Action, Transition
 from tests.models import Invoice
 from tests import dl_settings
 
@@ -68,6 +68,10 @@ class _DeferProcess(Process):
                    failure_side_effects=[_drive_other_then_fail]),
         # Plain transition for the failed-target-write tests.
         Transition('finish_plain', sources=['draft'], target='done_plain'),
+        # An Action's failed_state write is a state write under its
+        # write-scoped lock (#185) — the deferral rule applies to it too.
+        Action('act_explode', sources=['draft'], failed_state='act_failed',
+               side_effects=[_boom]),
     ]
 
 
@@ -133,6 +137,17 @@ class DeferUnlockUntilCommitTests(TestCase):
             self.assertTrue(self.state.is_locked())
             self.invoice.refresh_from_db()
             self.assertEqual(self.invoice.status, 'failed')
+        self.assertFalse(self.state.is_locked())
+
+    def test_action_failed_state_write_defers_its_unlock(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            with self.assertRaises(ValueError):
+                self._process().act_explode()
+            # The write landed but is invisible until commit — exclusion
+            # must cover that span, exactly like Transition's failure path.
+            self.assertTrue(self.state.is_locked())
+            self.invoice.refresh_from_db()
+            self.assertEqual(self.invoice.status, 'act_failed')
         self.assertFalse(self.state.is_locked())
 
     def test_failure_without_any_state_write_unlocks_immediately(self):

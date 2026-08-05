@@ -46,6 +46,16 @@ class CycleBase(TransitionNotAllowed):
     inheritance cycle — the TypeError path the installer must translate."""
 
 
+class ArgfulLegacyBase(Exception):
+    """A fork base with a non-message constructor. Neither
+    TransitionNotAllowed nor DjangoLogicException defines ``__init__``, so
+    through the new MRO this would service every denial's construction —
+    booting green and then raising TypeError at every raise site."""
+
+    def __init__(self, code, message):
+        super().__init__(f'{code}: {message}')
+
+
 NOT_A_CLASS = object()
 
 LEGACY_PATH = 'tests.test_legacy_exception_base.LegacyTransitionNotAllowed'
@@ -128,6 +138,12 @@ class BridgeRejectionTests(_BasesCleanup, SimpleTestCase):
     def test_mro_conflict_rejected(self):
         self.assert_install_rejected(
             'tests.test_legacy_exception_base.CycleBase')
+
+    def test_incompatible_constructor_rejected_and_rolled_back(self):
+        self.assert_install_rejected(
+            'tests.test_legacy_exception_base.ArgfulLegacyBase')
+        # The probe unwound the mutation, so denials still construct.
+        TransitionNotAllowed('still constructible')
 
     def test_non_str_values_rejected_at_boot(self):
         for bad in (123, True, [LEGACY_PATH], b'legacy', ''):

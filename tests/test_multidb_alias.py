@@ -18,13 +18,17 @@ case the engine's defensive routing covers. Bindings and the router are
 installed per-test (after startup checks), so the check suite still sees the
 default topology.
 """
+from datetime import timedelta
+
 from django.core.cache import cache
 from django.db.models.signals import post_save
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
+from django_logic.background.tasks import _watchdog_stale_attempts_inline
 from django_logic.state import State
 from tests.models import Invoice
 
@@ -150,3 +154,81 @@ class BackgroundAliasTests(TestCase):
         self.assertEqual(tm.errors_count, 1)
         # The TM row stays on default; no instance rows leaked there.
         self.assertFalse(Invoice.objects.using('default').exists())
+
+
+@override_settings(DATABASE_ROUTERS=[_InvoiceOnOtherRouter()])
+class WatchdogFinalizeAliasTests(TestCase):
+    """The OTHER terminal writer: _finalize_terminal_from_watchdog's
+    failed_state savepoint must open on the instance's alias too — without
+    this pin, reverting that site to DEFAULT leaves the suite green."""
+
+    databases = {'default', 'other'}
+
+    def setUp(self):
+        ProcessManager.bind_model_process(
+            Invoice, RoutedBgProcess, state_field='status')
+        self.addCleanup(
+            ProcessManager.unbind_model_process, Invoice, RoutedBgProcess)
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def _stale_tm(self, w):
+        return TransitionMessage.objects.create(
+            app_label='tests',
+            model_name='invoice',
+            instance_id=str(w.pk),
+            process_name='routed_bg_proc',
+            transition_name='go',
+            queue_name='django_logic',
+            started_at=timezone.now() - timedelta(seconds=120),
+            timeout_seconds=60,
+            errors_count=1,  # the watchdog's increment hits MAX_ERRORS=2
+        )
+
+    @override_settings(DJANGO_LOGIC={
+        'BACKGROUND_EXECUTION': 'sync',
+        'TRANSITION_MESSAGE_MAX_ERRORS': 2,
+    })
+    def test_watchdog_terminal_failed_state_lands_on_the_instance_alias(self):
+        w = Invoice.objects.using('other').create(status='running')
+        self._stale_tm(w)
+
+        self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+
+        self.assertEqual(
+            Invoice.objects.using('other').get(pk=w.pk).status, 'failed')
+        tm = TransitionMessage.objects.get(instance_id=str(w.pk))
+        self.assertTrue(tm.is_completed)
+        self.assertFalse(Invoice.objects.using('default').exists())
+
+    @override_settings(DJANGO_LOGIC={
+        'BACKGROUND_EXECUTION': 'sync',
+        'TRANSITION_MESSAGE_MAX_ERRORS': 2,
+    })
+    def test_vetoed_watchdog_write_rolls_back_on_the_instance_alias(self):
+        # The distinguishing pin: a landed-write assertion passes whichever
+        # connection the savepoint guards (set_state routes by instance
+        # regardless). Only a rolled-back write can tell the aliases apart —
+        # a savepoint opened on 'default' would leave BOTH writes standing
+        # on 'other'.
+        w = Invoice.objects.using('other').create(status='running')
+        tm = self._stale_tm(w)
+
+        def veto_failed(sender, instance, **kwargs):
+            if instance.status == 'failed':
+                Invoice.objects.using(instance._state.db).create(
+                    status='audit')
+                raise RuntimeError('db refuses failed')
+
+        post_save.connect(veto_failed, sender=Invoice)
+        self.addCleanup(post_save.disconnect, veto_failed, sender=Invoice)
+
+        self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+
+        tm.refresh_from_db()
+        self.assertTrue(tm.is_completed)  # completes despite the veto
+        self.assertIn('failed_state write', tm.failure_side_effect_error)
+        self.assertEqual(
+            Invoice.objects.using('other').get(pk=w.pk).status, 'running')
+        self.assertFalse(
+            Invoice.objects.using('other').filter(status='audit').exists())
