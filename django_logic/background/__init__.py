@@ -7,6 +7,8 @@ Public API:
 * :func:`sync_execution` — context manager that forces the current block
   to run phase 2 inline (for tests, management commands, the shell).
 * :func:`retry_pending` — run the periodic safety-net task once inline.
+* :func:`in_flight` — racy read of the durable in-flight marker, for
+  shaping "busy, try again shortly" answers at API seams (#197).
 * :func:`beat_schedule` — ready-made Celery beat entries for the five
   safety-net tasks, routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
@@ -24,6 +26,7 @@ _PUBLIC = {
     'BackgroundAction': ('django_logic.background.transitions', 'BackgroundAction'),
     'sync_execution': ('django_logic.background.dispatch', 'sync_execution'),
     'retry_pending': ('django_logic.background.dispatch', 'retry_pending'),
+    'in_flight': ('django_logic.background.dispatch', 'in_flight'),
     'beat_schedule': ('django_logic.background.settings', 'beat_schedule'),
 }
 

@@ -151,6 +151,24 @@ class TransitionMessage(TimeStampedModel):
         )
 
     @classmethod
+    def in_flight_for(cls, instance, process_name: str):
+        """The uncompleted rows for ``instance`` + ``process_name`` — the
+        durable in-flight marker (#197).
+
+        The ONE place the marker filter is written. The sync gate, the
+        Action failure path, and the public ``in_flight()`` probe all read
+        through it, so a future change to the marker's keying (the
+        #184/#186 identity rework) changes it exactly once.
+        """
+        return cls.objects.filter(
+            app_label=instance._meta.app_label,
+            model_name=instance._meta.model_name,
+            instance_id=str(instance.pk),
+            process_name=process_name,
+            is_completed=False,
+        )
+
+    @classmethod
     def stamp_attempt_started(cls, tm_id: int) -> bool:
         """Mark an attempt as beginning, in its own committed statement.
 

@@ -18,7 +18,7 @@ from django.db import IntegrityError, transaction
 from django.db.models.signals import post_init
 from django.test import TestCase, override_settings
 
-from django_logic import Process, ProcessManager
+from django_logic import Action, Process, ProcessManager, Transition
 from django_logic.background import BackgroundAction, BackgroundTransition
 from django_logic.background.models import TransitionMessage
 from django_logic.commands import _SilentRollback
@@ -294,6 +294,97 @@ class FseCorrectlyNestedIsUntouchedTests(_Base):
         self.assertEqual(inv.status, 'failed')
         self.assertTrue(inv.customer_received)  # the cleanup committed
         self.assertEqual(tm.failure_side_effect_error, '')
+
+
+class SyncFailPoisonProcess(Process):
+    process_name = 'sync_fail_poison_proc'
+    transitions = [
+        Transition('go', sources=['draft'], target='done',
+                   failed_state='failed', side_effects=[_fail_attempt]),
+    ]
+
+
+class ActionWritePoisonProcess(Process):
+    process_name = 'action_write_poison_proc'
+    transitions = [
+        Action('go', sources=['draft'], failed_state='failed',
+               side_effects=[_fail_attempt]),
+    ]
+
+
+class _SyncPoisonBase(_Base):
+    """The #192 shape: the sync failure paths' ``failed_state`` savepoints
+    must not log a false SET_STATE when a receiver silently discards them
+    (the sync analog of #189; same ``post_init`` receiver spot)."""
+
+    def setUp(self):
+        super().setUp()
+        post_init.connect(
+            _suppress_db_error_on_failed_materialization, sender=Invoice)
+        self.addCleanup(
+            post_init.disconnect,
+            _suppress_db_error_on_failed_materialization, sender=Invoice)
+
+    def assert_discarded_write_reported(self, drive):
+        inv = Invoice.objects.create(status='draft')
+
+        with self.assertLogs('django-logic.transition', level='INFO') as logs:
+            with self.assertRaises(ValueError):
+                drive(inv)
+
+        inv.refresh_from_db()
+        # The write really was discarded — the instance stays at its source.
+        self.assertEqual(inv.status, 'draft')
+        output = '\n'.join(logs.output)
+        self.assertIn('could not write failed_state', output)
+        self.assertNotIn('Set State failed', output)
+
+
+@override_settings(DJANGO_LOGIC=_SYNC)
+class SyncTransitionWritePoisonedTests(_SyncPoisonBase):
+    process = SyncFailPoisonProcess
+
+    def test_discarded_write_is_reported_not_logged_as_landed(self):
+        self.assert_discarded_write_reported(
+            lambda inv: inv.sync_fail_poison_proc.go())
+
+
+@override_settings(DJANGO_LOGIC=_SYNC)
+class SyncActionWritePoisonedTests(_SyncPoisonBase):
+    process = ActionWritePoisonProcess
+
+    def test_discarded_write_is_reported_not_logged_as_landed(self):
+        self.assert_discarded_write_reported(
+            lambda inv: inv.action_write_poison_proc.go())
+
+
+@override_settings(DJANGO_LOGIC=_SYNC)
+class SyncTransitionWriteCorrectlyNestedTests(_Base):
+    """Control: the nested-atomic idiom in the same receiver spot must
+    leave both sync writers untouched — no over-firing."""
+
+    process = SyncFailPoisonProcess
+
+    def setUp(self):
+        super().setUp()
+        post_init.connect(
+            _suppress_db_error_correctly_on_failed_materialization,
+            sender=Invoice)
+        self.addCleanup(
+            post_init.disconnect,
+            _suppress_db_error_correctly_on_failed_materialization,
+            sender=Invoice)
+
+    def test_the_write_lands_and_set_state_is_logged(self):
+        inv = Invoice.objects.create(status='draft')
+
+        with self.assertLogs('django-logic.transition', level='INFO') as logs:
+            with self.assertRaises(ValueError):
+                inv.sync_fail_poison_proc.go()
+
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'failed')
+        self.assertIn('Set State failed', '\n'.join(logs.output))
 
 
 @override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})

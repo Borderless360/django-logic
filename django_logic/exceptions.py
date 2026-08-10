@@ -14,10 +14,11 @@ class TransitionTemporarilyUnavailable(TransitionNotAllowed):
 
     Catch this AHEAD of ``TransitionNotAllowed`` to answer "busy" instead
     of "forbidden". Covers the background concurrency guards
-    (``AlreadyInProgress``, ``SourceStateChanged``) and the sync gate that
-    rejects a transition while an uncompleted ``TransitionMessage`` exists
-    — all three resolve when the in-flight work completes. Lock contention
-    ("State is locked") deliberately stays plain ``TransitionNotAllowed``:
-    a TTL-stuck lock is not "retry shortly", so widening this type to
-    cover it would be a documented, deliberate decision — not drift.
+    (``AlreadyInProgress``, ``SourceStateChanged``) and the sync gate while
+    the uncompleted ``TransitionMessage`` is LIVE — all of these resolve
+    when the in-flight work completes. A row untouched past the retry
+    horizon is stranded, not busy, and raises the plain base (#195): it
+    has no TTL, so "retry shortly" would be wrong forever. Lock contention
+    ("State is locked") stays plain ``TransitionNotAllowed`` for the same
+    reason: a TTL-stuck lock is not "retry shortly".
     """

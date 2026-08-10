@@ -171,13 +171,32 @@ def install_legacy_exception_base() -> None:
     # DjangoLogicException defines __init__, so a legacy base with a
     # non-message signature would otherwise boot green and then replace
     # every denial with a TypeError at its raise site.
+    probe_msg = 'legacy-base constructor compatibility probe'
     try:
-        TransitionNotAllowed('legacy-base constructor compatibility probe')
-    except Exception as exc:
+        probe = TransitionNotAllowed(probe_msg)
+    except BaseException as exc:
+        # BaseException, not Exception (#196): a fork __init__ that raises
+        # SystemExit/KeyboardInterrupt during boot must not leave the class
+        # half-mutated. Unwind always; translate only Exception.
         TransitionNotAllowed.__bases__ = original_bases
+        if not isinstance(exc, Exception):
+            raise
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] {path!r} breaks "
             f"TransitionNotAllowed('message') construction "
             f"({type(exc).__name__}: {exc}). The legacy base must accept a "
             f"single message argument, like a plain Exception subclass."
+        )
+    if probe.args != (probe_msg,) or str(probe) != probe_msg:
+        # A message-eating base (the `self.message = message;
+        # super().__init__()` idiom) blanks str() and args for every denial,
+        # and args=() breaks exception (un)pickling wherever celery/tblib
+        # serialize exception info (#196).
+        TransitionNotAllowed.__bases__ = original_bases
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] {path!r} alters the "
+            f"denial message (args={probe.args!r}, str={str(probe)!r}). "
+            f"Denial text and exception pickling depend on args, so the "
+            f"legacy base must pass the message through to Exception like "
+            f"a plain Exception subclass."
         )

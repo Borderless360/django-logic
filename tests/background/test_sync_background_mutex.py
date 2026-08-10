@@ -21,11 +21,15 @@ instance + process must never interleave:
   uncompleted row exists, phase 2 owns the state field, so the write is
   skipped (#185 review).
 """
+from datetime import timedelta
+
 from django.core.cache import cache
+from django.db import IntegrityError
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 
 from django_logic import Action
-from django_logic.background.dispatch import sync_execution
+from django_logic.background.dispatch import in_flight, sync_execution
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import (
@@ -129,6 +133,77 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         with self.assertRaises(TransitionTemporarilyUnavailable):
             self.widget.process.cancel()
 
+    def test_stale_uncompleted_tm_is_not_transient(self):
+        # A row untouched past the retry horizon is stranded, not busy
+        # (#195): "retry shortly" would be wrong forever, and the WARNING
+        # demotion would stop a stuck instance from paging. The plain base
+        # keeps generic handlers refusing and hook logging at ERROR.
+        tm = _make_tm(self.widget)
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            modified=timezone.now() - timedelta(hours=2))
+
+        with self.assertRaises(TransitionNotAllowed) as ctx:
+            self.widget.process.cancel()
+
+        self.assertNotIsInstance(
+            ctx.exception, TransitionTemporarilyUnavailable)
+        self.assertIn('stranded', str(ctx.exception))
+        # The refusal path must still release the lock.
+        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
+
+    def test_public_in_flight_probe_reads_the_marker(self):
+        # #197: the documented probe for consumer API seams. One shared
+        # queryset (TransitionMessage.in_flight_for) backs this, the sync
+        # gate, and the Action failure path.
+        self.assertFalse(in_flight(self.widget, 'process'))
+
+        tm = _make_tm(self.widget)
+        self.assertTrue(in_flight(self.widget, 'process'))
+        # Default process_name is 'process'.
+        self.assertTrue(in_flight(self.widget))
+        # Scoped per process, and completed rows do not count.
+        self.assertFalse(in_flight(self.widget, 'other_process'))
+        TransitionMessage.objects.filter(pk=tm.pk).update(is_completed=True)
+        self.assertFalse(in_flight(self.widget, 'process'))
+
+    def test_probe_failure_keeps_the_original_exception_and_runs_hooks(self):
+        # #194: the side-effect that brought us to fail_transition may have
+        # rollback-poisoned the connection, so the in-flight probe itself
+        # raises TransactionManagementError. That error must not replace
+        # the original one, and both failure hook bundles must still run.
+        widget = Widget.objects.create()
+        hooks = []
+
+        def poison_then_fail(instance, **kwargs):
+            # IntegrityError propagates AND marks needs_rollback — the
+            # receiver-free version of the poisoned-connection shape.
+            Widget.objects.create(pk=instance.pk)
+
+        def record_fse(instance, exception, **kwargs):
+            hooks.append('failure_side_effects')
+
+        def record_fcb(instance, exception, **kwargs):
+            hooks.append('failure_callbacks')
+
+        action = Action(
+            'poke_fail', sources=['draft'], failed_state='poke_failed',
+            side_effects=[poison_then_fail],
+            failure_side_effects=[record_fse],
+            failure_callbacks=[record_fcb],
+        )
+        state = State(widget, 'status', 'process')
+
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
+            with self.assertRaises(IntegrityError):
+                # SideEffects.execute routes the failure into
+                # fail_transition itself before re-raising.
+                action.change_state(state)
+
+        self.assertEqual(
+            hooks, ['failure_side_effects', 'failure_callbacks'])
+        self.assertFalse(state.is_locked())
+        self.assertIn('could not probe', '\n'.join(logs.output))
+
     def test_failing_action_skips_failed_state_write_while_tm_in_flight(self):
         # D2 (h): the cache lock is free for the whole queued/phase-2 span,
         # so the Action's atomic acquire succeeds — but the uncompleted row
@@ -147,11 +222,9 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
         with self.assertLogs('django-logic.transition', level='ERROR') as logs:
             with self.assertRaises(ValueError):
-                try:
-                    action.change_state(state)
-                except Exception as exc:
-                    action.fail_transition(state, exc)
-                    raise
+                # SideEffects.execute routes the failure into
+                # fail_transition itself before re-raising.
+                action.change_state(state)
 
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')  # write skipped

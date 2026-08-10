@@ -133,3 +133,25 @@ def retry_pending() -> int:
     """
     from django_logic.background.tasks import _retry_pending_inline
     return _retry_pending_inline()
+
+
+def in_flight(instance, process_name: str = 'process') -> bool:
+    """Whether a background transition is in flight for ``instance`` +
+    ``process_name`` — i.e. an uncompleted ``TransitionMessage`` exists
+    (#197).
+
+    For shaping answers at API seams ("busy, try again shortly"), NOT as a
+    pre-flight gate: the read is racy — a flight can start or complete
+    between this call and whatever the caller does next. The engine's own
+    guards (phase 1's unique constraint, the sync gate's under-lock check)
+    stay authoritative.
+
+    Returns ``False`` when ``django_logic.background`` is not installed.
+    """
+    from django.apps import apps
+
+    if not apps.is_installed('django_logic.background'):
+        return False
+    from django_logic.background.models import TransitionMessage
+
+    return TransitionMessage.in_flight_for(instance, process_name).exists()
