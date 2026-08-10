@@ -25,7 +25,12 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db import IntegrityError
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import (
+    TestCase,
+    TransactionTestCase,
+    modify_settings,
+    override_settings,
+)
 from django.utils import timezone
 
 from django_logic import Action
@@ -151,6 +156,104 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         # The refusal path must still release the lock.
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
+    def test_running_attempt_inside_its_declared_budget_is_live(self):
+        # The watchdog's own liveness definition: an attempt inside
+        # started_at + timeout_seconds is live, however old `modified` is.
+        # Without this signal a healthy 40-minute attempt read as
+        # "stranded" at minute 16 (review of #195).
+        tm = _make_tm(self.widget)
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            modified=timezone.now() - timedelta(minutes=16),
+            started_at=timezone.now() - timedelta(minutes=16),
+            timeout_seconds=3600,
+        )
+
+        with self.assertRaises(TransitionTemporarilyUnavailable):
+            self.widget.process.cancel()
+
+    def test_attempt_past_its_budget_and_horizon_is_stranded(self):
+        # Budget exhausted AND nothing recorded since: the watchdog would
+        # have abandoned it — the horizon clock applies again.
+        tm = _make_tm(self.widget)
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            modified=timezone.now() - timedelta(hours=2),
+            started_at=timezone.now() - timedelta(hours=2),
+            timeout_seconds=60,
+        )
+
+        with self.assertRaises(TransitionNotAllowed) as ctx:
+            self.widget.process.cancel()
+        self.assertNotIsInstance(
+            ctx.exception, TransitionTemporarilyUnavailable)
+
+    def test_horizon_floor_keeps_short_retry_configs_transient(self):
+        # Suite settings give RETRY_MINUTES=2, MAX_ERRORS=3 → formula 8,
+        # floor 15. A 10-minute-old row sits between the two: only the
+        # floor keeps it transient.
+        tm = _make_tm(self.widget)
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            modified=timezone.now() - timedelta(minutes=10))
+
+        with self.assertRaises(TransitionTemporarilyUnavailable):
+            self.widget.process.cancel()
+
+    @override_settings(DJANGO_LOGIC=dl_settings(
+        TRANSITION_MESSAGE_MAX_ERRORS=2,
+        TRANSITION_MESSAGE_RETRY_MINUTES=20,
+    ))
+    def test_horizon_scales_with_the_retry_pipeline(self):
+        # RETRY_MINUTES=20, MAX_ERRORS=2 → horizon 60. A 30-minute-old row
+        # is still inside the pipeline's span: transient, not stranded.
+        # Kills a hardcoded-15 horizon.
+        tm = _make_tm(self.widget)
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            modified=timezone.now() - timedelta(minutes=30))
+
+        with self.assertRaises(TransitionTemporarilyUnavailable):
+            self.widget.process.cancel()
+
+    def test_stranded_row_reclassifies_the_background_rejection_too(self):
+        # Phase 1's constraint rejection shares the classification (#195
+        # review): re-driving the SAME background transition was the most
+        # likely consumer retry, and it kept answering AlreadyInProgress
+        # ("retry shortly", WARNING) forever on a stranded row.
+        tm = _make_tm(self.widget, process_name='process')
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            modified=timezone.now() - timedelta(hours=2))
+
+        with self.assertRaises(TransitionNotAllowed) as ctx:
+            with sync_execution():
+                self.widget.process.fulfil()
+
+        self.assertNotIsInstance(
+            ctx.exception, TransitionTemporarilyUnavailable)
+        self.assertIn('stranded', str(ctx.exception))
+        # No second row was created, and the lock was released.
+        self.assertEqual(TransitionMessage.objects.count(), 1)
+        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
+
+    def test_live_row_still_rejects_background_redrive_as_transient(self):
+        # Control for the reclassification: a live row keeps
+        # AlreadyInProgress.
+        _make_tm(self.widget, process_name='process')
+
+        with self.assertRaises(AlreadyInProgress):
+            with sync_execution():
+                self.widget.process.fulfil()
+
+    @modify_settings(INSTALLED_APPS={'remove': 'django_logic.background'})
+    def test_probe_and_gate_answer_not_installed_with_no_query(self):
+        # The documented sync-only contract (#197): with the background app
+        # absent, in_flight() answers False — even though the row exists in
+        # the table — and the sync gate lets the transition through.
+        _make_tm(self.widget)
+
+        with self.assertNumQueries(0):
+            self.assertFalse(in_flight(self.widget, 'process'))
+        self.widget.process.cancel()
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'cancelled')
+
     def test_public_in_flight_probe_reads_the_marker(self):
         # #197: the documented probe for consumer API seams. One shared
         # queryset (TransitionMessage.in_flight_for) backs this, the sync
@@ -164,6 +267,16 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         # Scoped per process, and completed rows do not count.
         self.assertFalse(in_flight(self.widget, 'other_process'))
         TransitionMessage.objects.filter(pk=tm.pk).update(is_completed=True)
+        self.assertFalse(in_flight(self.widget, 'process'))
+
+    def test_public_probe_answers_false_for_a_stranded_row(self):
+        # The probe shapes 409 "retry shortly" answers, so it shares the
+        # gate's liveness classification: a stranded row is not busy, and
+        # answering "busy" from it would be the forever-retry #195 removed.
+        tm = _make_tm(self.widget)
+        TransitionMessage.objects.filter(pk=tm.pk).update(
+            modified=timezone.now() - timedelta(hours=2))
+
         self.assertFalse(in_flight(self.widget, 'process'))
 
     def test_probe_failure_keeps_the_original_exception_and_runs_hooks(self):

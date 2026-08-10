@@ -136,15 +136,22 @@ def retry_pending() -> int:
 
 
 def in_flight(instance, process_name: str = 'process') -> bool:
-    """Whether a background transition is in flight for ``instance`` +
-    ``process_name`` — i.e. an uncompleted ``TransitionMessage`` exists
-    (#197).
+    """Whether a background transition is LIVE for ``instance`` +
+    ``process_name`` (#197) — an uncompleted ``TransitionMessage`` exists
+    and is inside its liveness window.
 
     For shaping answers at API seams ("busy, try again shortly"), NOT as a
     pre-flight gate: the read is racy — a flight can start or complete
     between this call and whatever the caller does next. The engine's own
     guards (phase 1's unique constraint, the sync gate's under-lock check)
     stay authoritative.
+
+    A STRANDED row (past the retry horizon, #195) answers ``False``: it is
+    not "busy, retry shortly", and the engine's gates raise the plain
+    ``TransitionNotAllowed`` for it — so a consumer answering 409 on this
+    probe and 400 on the plain base stays consistent. The engine's own
+    failure-path write-skip deliberately uses bare existence instead —
+    it must never clobber an uncompleted row's instance, stranded or not.
 
     Returns ``False`` when ``django_logic.background`` is not installed.
     """
@@ -154,4 +161,7 @@ def in_flight(instance, process_name: str = 'process') -> bool:
         return False
     from django_logic.background.models import TransitionMessage
 
-    return TransitionMessage.in_flight_for(instance, process_name).exists()
+    return (
+        TransitionMessage.in_flight_liveness(instance, process_name)
+        == TransitionMessage.LIVENESS_LIVE
+    )

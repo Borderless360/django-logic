@@ -187,11 +187,13 @@ def install_legacy_exception_base() -> None:
             f"({type(exc).__name__}: {exc}). The legacy base must accept a "
             f"single message argument, like a plain Exception subclass."
         )
-    if probe.args != (probe_msg,) or str(probe) != probe_msg:
+    if probe.args != (probe_msg,) or probe_msg not in str(probe):
         # A message-eating base (the `self.message = message;
         # super().__init__()` idiom) blanks str() and args for every denial,
         # and args=() breaks exception (un)pickling wherever celery/tblib
-        # serialize exception info (#196).
+        # serialize exception info (#196). `in`, not equality, for str(): a
+        # fork __str__ that FORMATS the preserved message (prefixes, codes)
+        # is a working bridge, not a broken one.
         TransitionNotAllowed.__bases__ = original_bases
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'] {path!r} alters the "

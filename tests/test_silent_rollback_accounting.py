@@ -181,6 +181,13 @@ def _suppress_db_error_correctly_on_failed_materialization(
         pass
 
 
+FSE_SAW: list = []
+
+
+def _record_fse_observed_status(instance, **kwargs):
+    FSE_SAW.append(instance.status)
+
+
 class TerminalWritePoisonProcess(Process):
     process_name = 'terminal_write_poison_proc'
     transitions = [
@@ -188,6 +195,7 @@ class TerminalWritePoisonProcess(Process):
             'sync_out', sources=['draft'], target='done',
             in_progress_state='syncing', failed_state='failed',
             side_effects=[_fail_attempt],
+            failure_side_effects=[_record_fse_observed_status],
             callbacks=[_record_callback],
         ),
     ]
@@ -209,6 +217,8 @@ class TerminalFailedStateWritePoisonedTests(_Base):
             _suppress_db_error_on_failed_materialization, sender=Invoice)
 
     def test_discarded_write_is_reported_not_logged_as_landed(self):
+        FSE_SAW.clear()
+        self.addCleanup(FSE_SAW.clear)
         inv = Invoice.objects.create(status='draft')
 
         with self.assertLogs('django-logic.transition', level='INFO') as logs:
@@ -221,6 +231,9 @@ class TerminalFailedStateWritePoisonedTests(_Base):
         self.assertTrue(tm.is_completed)
         # The proof the write was discarded: the instance stays parked.
         self.assertEqual(inv.status, 'syncing')
+        # The failure hooks saw the restored state, not the phantom value
+        # the discarded savepoint left on the in-memory instance.
+        self.assertEqual(FSE_SAW, ['syncing'])
         # …and both problems are visible where an operator looks.
         self.assertIn('failed_state write', tm.failure_side_effect_error)
         self.assertIn('boom', tm.last_error_message)
@@ -332,6 +345,10 @@ class _SyncPoisonBase(_Base):
             with self.assertRaises(ValueError):
                 drive(inv)
 
+        # BEFORE the refresh: the in-memory attribute must not hold the
+        # discarded value — the failure hooks and the sync caller read it,
+        # and a phantom 'failed' here is a state the database never had.
+        self.assertEqual(inv.status, 'draft')
         inv.refresh_from_db()
         # The write really was discarded — the instance stays at its source.
         self.assertEqual(inv.status, 'draft')

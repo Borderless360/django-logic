@@ -74,6 +74,14 @@ class SystemExitingLegacyBase(Exception):
         raise SystemExit(3)
 
 
+class FormattingStrLegacyBase(Exception):
+    """A fork base that FORMATS the message but preserves ``args`` — a
+    working bridge the probe must accept (#196 review)."""
+
+    def __str__(self):
+        return f'TransitionError: {self.args[0] if self.args else ""}'
+
+
 NOT_A_CLASS = object()
 
 LEGACY_PATH = 'tests.test_legacy_exception_base.LegacyTransitionNotAllowed'
@@ -168,6 +176,21 @@ class BridgeRejectionTests(_BasesCleanup, SimpleTestCase):
             'tests.test_legacy_exception_base.MessageEatingLegacyBase')
         # Denial messages still work after the unwind.
         self.assertEqual(str(TransitionNotAllowed('kept')), 'kept')
+
+    def test_formatting_str_base_is_accepted(self):
+        # args survive and the message is IN str() — a formatting __str__
+        # is a working bridge, not a broken one; the probe must not
+        # boot-reject it.
+        with override_settings(DJANGO_LOGIC=_conf(
+            LEGACY_EXCEPTION_BASE=(
+                'tests.test_legacy_exception_base.FormattingStrLegacyBase'),
+        )):
+            install_legacy_exception_base()
+        self.assertTrue(
+            issubclass(TransitionNotAllowed, FormattingStrLegacyBase))
+        denial = TransitionNotAllowed('denied')
+        self.assertEqual(denial.args, ('denied',))
+        self.assertIn('denied', str(denial))
 
     def test_base_exception_during_probe_still_unwinds(self):
         with override_settings(DJANGO_LOGIC=_conf(

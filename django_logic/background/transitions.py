@@ -152,7 +152,30 @@ class BackgroundTransition(Transition):
             # Same under-the-lock revalidation as the synchronous path:
             # the source check ran before the lock was acquired.
             self._ensure_db_state_in_sources(state)
-            tm = self._phase_one_atomic(state, kwargs, queue_name)
+            try:
+                tm = self._phase_one_atomic(state, kwargs, queue_name)
+            except AlreadyInProgress:
+                # Same liveness classification as the sync gate (#195): the
+                # constraint held by a STRANDED row is not "retry shortly" —
+                # that answer would be wrong forever, at WARNING. Queried
+                # here, after _phase_one_atomic's rolled-back atomic, so the
+                # connection is healthy; still under the cache lock. A row
+                # that completed in the window keeps AlreadyInProgress —
+                # it JUST finished, so retrying is exactly right.
+                if TransitionMessage.in_flight_liveness(
+                    state.instance, state.process_name,
+                ) == TransitionMessage.LIVENESS_STRANDED:
+                    raise TransitionNotAllowed(
+                        f"BackgroundTransition '{self.action_name}' is not "
+                        f"allowed: the in-flight marker for "
+                        f"{state.instance_key} is past the retry horizon — "
+                        f"stranded, not in flight. Likely causes: the "
+                        f"safety-net beat tasks are not scheduled "
+                        f"(django_logic.W002), a queue backlog or worker "
+                        f"outage longer than the horizon, or a lost broker "
+                        f"message. Re-drive or complete the row."
+                    )
+                raise
         finally:
             state.unlock()
             transition_logger.info(

@@ -20,7 +20,6 @@ in ``django_logic.background.transitions`` (phase 1) and
 ``django_logic.background.runner`` (phase 2).
 """
 import math
-from datetime import timedelta
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
@@ -363,6 +362,7 @@ class Transition:
                 # docstring above promised "the original exception keeps
                 # propagating either way"; without this the write's own
                 # exception won and the real cause was lost.
+                previous = state.get_state()
                 try:
                     # The instance's alias, not DEFAULT: set_state routes its
                     # write with hints={'instance': ...}, so a savepoint opened
@@ -376,6 +376,11 @@ class Transition:
                         require_commit=True,
                     )
                 except Exception as write_error:
+                    # A silent rollback discards the write AFTER set_state
+                    # refreshed the attribute to the savepoint's uncommitted
+                    # value — restore it, or the failure hooks and the sync
+                    # caller observe a state the database never had.
+                    setattr(state.instance, state.field_name, previous)
                     transition_logger.error(
                         f'{kwargs.get("tr_id")} could not write failed_state '
                         f'{self.failed_state!r} on {state.instance_key}: '
@@ -462,10 +467,21 @@ class Transition:
         work (the cache lock only guards short critical sections). Only
         meaningful while holding the lock: phase 1 needs the lock to create
         a new row, so the answer cannot flip underneath the holder.
-        """
-        from django_logic.background.dispatch import in_flight
 
-        return in_flight(state.instance, state.process_name)
+        Bare existence, deliberately stricter than the public
+        ``in_flight()`` probe: the Action's write-skip must never clobber
+        an uncompleted row's instance, stranded or not — force-failing a
+        stranded row's instance is what the retired sweep used to do.
+        """
+        from django.apps import apps
+
+        if not apps.is_installed('django_logic.background'):
+            return False
+        from django_logic.background.models import TransitionMessage
+
+        return TransitionMessage.in_flight_for(
+            state.instance, state.process_name,
+        ).exists()
 
     def _ensure_no_background_in_flight(self, state: State) -> None:
         """Reject a state-changing transition while a background transition
@@ -477,46 +493,31 @@ class Transition:
 
         A LIVE row raises the transient type (#191): it clears when the
         flight completes, so "come back in a moment" is the right answer.
-        A row past the retry horizon is stranded, not busy (#195) — a lost
-        broker message with the safety-net beat tasks unscheduled leaves it
-        uncompleted forever, and "retry shortly" forever is the same wrong
-        answer the transient type exists to prevent. Stale rows raise the
-        plain base, so generic handlers refuse and hook-path logging stays
-        at ERROR — a stuck instance must page.
+        A STRANDED row raises the plain base (#195): nothing is driving it,
+        so "retry shortly" would be wrong forever, and hook-path logging
+        must stay at ERROR — a stuck instance pages. The classification
+        (``TransitionMessage.in_flight_liveness``) is shared with phase 1's
+        constraint rejection and the public probe.
         """
         from django.apps import apps
 
         if not apps.is_installed('django_logic.background'):
             return
-        from django.utils import timezone
-
-        from django_logic.background import settings as bg_settings
         from django_logic.background.models import TransitionMessage
 
-        newest = (
-            TransitionMessage.in_flight_for(state.instance, state.process_name)
-            .order_by('-modified')
-            .values_list('modified', flat=True)
-            .first()
-        )
-        if newest is None:
+        liveness = TransitionMessage.in_flight_liveness(
+            state.instance, state.process_name)
+        if liveness is None:
             return
-        # An actively-retried row's ``modified`` refreshes on every attempt,
-        # so age-since-modified only grows on a row nothing is driving. The
-        # horizon is the whole retry pipeline's span plus slack, floored so
-        # short test/dev retry configs don't classify a fresh row as stale.
-        horizon_minutes = max(
-            bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
-        )
-        age = timezone.now() - newest
-        if age > timedelta(minutes=horizon_minutes):
+        if liveness == TransitionMessage.LIVENESS_STRANDED:
             raise TransitionNotAllowed(
                 f"Transition '{self.action_name}' is not allowed: a "
                 f"background transition for {state.instance_key} has an "
-                f"uncompleted TransitionMessage untouched for "
-                f"{int(age.total_seconds() // 60)} minutes — stranded, not "
-                f"in flight. Check that the safety-net beat tasks are "
-                f"scheduled (django_logic.W002), or complete the row."
+                f"uncompleted TransitionMessage past the retry horizon — "
+                f"stranded, not in flight. Likely causes: the safety-net "
+                f"beat tasks are not scheduled (django_logic.W002), a "
+                f"queue backlog or worker outage longer than the horizon, "
+                f"or a lost broker message. Re-drive or complete the row."
             )
         raise TransitionTemporarilyUnavailable(
             f"Transition '{self.action_name}' is not allowed right now: "
@@ -638,6 +639,7 @@ class Action(Transition):
                         # a rejected write must not replace the original
                         # side-effect exception on its way out, and must not
                         # log a SET_STATE line for a write that never landed.
+                        previous = state.get_state()
                         try:
                             # The instance's alias, not DEFAULT: set_state
                             # routes its write with hints={'instance': ...},
@@ -651,6 +653,11 @@ class Action(Transition):
                                 require_commit=True,
                             )
                         except Exception as write_error:
+                            # Restore the attribute a discarded savepoint
+                            # left refreshed — hooks must not see a state
+                            # the database never had.
+                            setattr(
+                                state.instance, state.field_name, previous)
                             transition_logger.error(
                                 f'{kwargs.get("tr_id")} Action '
                                 f'{self.action_name!r}: could not write '
