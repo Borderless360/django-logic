@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-08-10
+
+Five fixes from the 0.13.0 adoption review (raised by the gv consumer as
+#194–#197) plus #192, the sync analog the 0.13.0 review deliberately deferred.
+One is a 0.13.0 regression; the rest harden the release's new surfaces. Every
+fix is mutation-pinned: reverting it makes its tests fail.
+
+### Fixed
+
+- **Regression: `Action.fail_transition`'s in-flight probe was unguarded**
+  (#194, introduced in 0.13.0). The side-effect that brings the engine to the
+  failure path may have rollback-poisoned the connection (`ATOMIC_REQUESTS`,
+  any caller's `atomic`), in which case the probe itself raised
+  `TransactionManagementError` — replacing the original exception at the
+  caller and silently skipping both failure hook bundles. A probe failure now
+  logs, skips the `failed_state` write (unknown means don't write), and lets
+  the original exception re-raise with both hook bundles running.
+
+- **The sync gate's transient typing is bounded by the retry horizon**
+  (#195). An uncompleted `TransitionMessage` untouched for longer than
+  `max(RETRY_MINUTES × (MAX_ERRORS + 1), 15)` minutes is stranded, not busy —
+  a lost broker message with the safety-net beat tasks unscheduled leaves it
+  uncompleted forever, and 0.13.0's `TransitionTemporarilyUnavailable` then
+  told generic handlers to retry forever while hook-path logging sat demoted
+  at WARNING. A stale row now raises plain `TransitionNotAllowed` again (and
+  pages at ERROR), with the row's age and a pointer to `django_logic.W002` in
+  the message. A live row keeps the transient type.
+
+- **The sync `failed_state` writers get the #189 treatment** (#192). Both
+  sync savepoints — `Transition.fail_transition` and the Action's
+  write-under-lock — now pass `require_commit=True`, so a silently discarded
+  write (the receiver-authored suppressed-database-error idiom at the one
+  spot with no query after it) takes the honest except-branch instead of
+  logging a false `SET_STATE`. The original exception still re-raises
+  unchanged.
+
+- **The `LEGACY_EXCEPTION_BASE` smoke probe is airtight** (#196). It now
+  verifies the bridged class preserves the denial message (`args` and
+  `str()` survive the new MRO — a message-eating fork `__init__` used to boot
+  green and blank every denial, breaking pickling too), and the `__bases__`
+  unwind runs on `BaseException`, so a fork `__init__` raising
+  `SystemExit`/`KeyboardInterrupt` during boot cannot leave the class
+  half-mutated.
+
+### Added
+
+- **`django_logic.background.in_flight(instance, process_name='process')`**
+  (#197) — a documented probe of the durable in-flight marker, for shaping
+  "busy, try again shortly" answers at consumer API seams without poking
+  engine internals or duplicating the marker filter. Racy by nature (the
+  engine's own guards stay authoritative), returns `False` when the
+  background app is not installed. The marker filter itself now lives in
+  exactly one place (`TransitionMessage.in_flight_for`) — the sync gate and
+  the Action failure path read through it, so the #184/#186 identity rework
+  will change it once.
+
 ## [0.13.0] — 2026-08-04
 
 A small, deliberate release triaged from what the 0.12.0 review passes filed
