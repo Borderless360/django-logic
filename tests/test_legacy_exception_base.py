@@ -56,6 +56,32 @@ class ArgfulLegacyBase(Exception):
         super().__init__(f'{code}: {message}')
 
 
+class MessageEatingLegacyBase(Exception):
+    """The common fork idiom that constructs fine but blanks ``str(exc)``
+    and ``args`` for every denial — and ``args=()`` breaks exception
+    (un)pickling wherever celery/tblib serialize exception info (#196)."""
+
+    def __init__(self, message):
+        self.message = message
+        super().__init__()
+
+
+class SystemExitingLegacyBase(Exception):
+    """A fork ``__init__`` that raises a BaseException during boot. The
+    installer's unwind must still run (#196)."""
+
+    def __init__(self, *args):
+        raise SystemExit(3)
+
+
+class FormattingStrLegacyBase(Exception):
+    """A fork base that FORMATS the message but preserves ``args`` — a
+    working bridge the probe must accept (#196 review)."""
+
+    def __str__(self):
+        return f'TransitionError: {self.args[0] if self.args else ""}'
+
+
 NOT_A_CLASS = object()
 
 LEGACY_PATH = 'tests.test_legacy_exception_base.LegacyTransitionNotAllowed'
@@ -144,6 +170,41 @@ class BridgeRejectionTests(_BasesCleanup, SimpleTestCase):
             'tests.test_legacy_exception_base.ArgfulLegacyBase')
         # The probe unwound the mutation, so denials still construct.
         TransitionNotAllowed('still constructible')
+
+    def test_message_eating_base_rejected_and_rolled_back(self):
+        self.assert_install_rejected(
+            'tests.test_legacy_exception_base.MessageEatingLegacyBase')
+        # Denial messages still work after the unwind.
+        self.assertEqual(str(TransitionNotAllowed('kept')), 'kept')
+
+    def test_formatting_str_base_is_accepted(self):
+        # args survive and the message is IN str() — a formatting __str__
+        # is a working bridge, not a broken one; the probe must not
+        # boot-reject it.
+        with override_settings(DJANGO_LOGIC=_conf(
+            LEGACY_EXCEPTION_BASE=(
+                'tests.test_legacy_exception_base.FormattingStrLegacyBase'),
+        )):
+            install_legacy_exception_base()
+        self.assertTrue(
+            issubclass(TransitionNotAllowed, FormattingStrLegacyBase))
+        denial = TransitionNotAllowed('denied')
+        self.assertEqual(denial.args, ('denied',))
+        self.assertIn('denied', str(denial))
+
+    def test_base_exception_during_probe_still_unwinds(self):
+        with override_settings(DJANGO_LOGIC=_conf(
+            LEGACY_EXCEPTION_BASE=(
+                'tests.test_legacy_exception_base.SystemExitingLegacyBase'),
+        )):
+            # Not translated to ImproperlyConfigured — SystemExit must
+            # propagate as itself — but the class must not stay
+            # half-mutated.
+            with self.assertRaises(SystemExit):
+                install_legacy_exception_base()
+        self.assertEqual(TransitionNotAllowed.__bases__, self._saved_bases)
+        probe = TransitionNotAllowed('kept')
+        self.assertEqual(probe.args, ('kept',))
 
     def test_non_str_values_rejected_at_boot(self):
         for bad in (123, True, [LEGACY_PATH], b'legacy', ''):

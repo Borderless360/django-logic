@@ -14,6 +14,8 @@ flight.
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from django.db import OperationalError, models, transaction
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
@@ -149,6 +151,80 @@ class TransitionMessage(TimeStampedModel):
             f'{self.app_label}.{self.model_name}#{self.instance_id} '
             f'{self.transition_name} on {self.queue_name}'
         )
+
+    @classmethod
+    def in_flight_for(cls, instance, process_name: str):
+        """The uncompleted rows for ``instance`` + ``process_name`` — the
+        durable in-flight marker (#197).
+
+        The ONE place the marker filter is written. The sync gate, the
+        Action failure path, and the public ``in_flight()`` probe all read
+        through it, so a future change to the marker's keying (the
+        #184/#186 identity rework) changes it exactly once.
+        """
+        return cls.objects.filter(
+            app_label=instance._meta.app_label,
+            model_name=instance._meta.model_name,
+            instance_id=str(instance.pk),
+            process_name=process_name,
+            is_completed=False,
+        )
+
+    LIVENESS_LIVE = 'live'
+    LIVENESS_STRANDED = 'stranded'
+
+    #: Grace between an attempt exhausting its declared budget and the
+    #: watchdog abandoning it (which writes ``modified`` via record_error,
+    #: putting the row back on the horizon clock).
+    LIVENESS_SLACK = timedelta(minutes=5)
+
+    @classmethod
+    def in_flight_liveness(cls, instance, process_name: str):
+        """``None`` (no uncompleted row), ``LIVENESS_LIVE``, or
+        ``LIVENESS_STRANDED`` (#195) — one classification shared by the
+        sync gate, phase 1's constraint rejection, and ``in_flight()``, so
+        they can never disagree about the same row.
+
+        Liveness signals, in order:
+
+        * a running attempt inside its declared per-attempt budget
+          (``started_at + timeout_seconds`` plus slack) is LIVE — the
+          watchdog's own definition, so the gate cannot call an attempt
+          stranded while the watchdog still calls it live;
+        * otherwise a row whose newest activity (``modified``, refreshed at
+          attempt start / on every recorded error, or ``started_at``) is
+          within the retry horizon is LIVE;
+        * past the horizon it is STRANDED: nothing has driven it for longer
+          than the whole retry pipeline's span. This cannot distinguish a
+          truly lost row from a queue backlogged for that long — the
+          stranded message names both causes.
+        """
+        from django_logic.background import settings as bg_settings
+
+        row = (
+            cls.in_flight_for(instance, process_name)
+            .order_by('-modified')
+            .values('modified', 'started_at', 'timeout_seconds')
+            .first()
+        )
+        if row is None:
+            return None
+        now = timezone.now()
+        started, timeout = row['started_at'], row['timeout_seconds']
+        if (
+            started is not None and timeout is not None
+            and now < started + timedelta(seconds=timeout) + cls.LIVENESS_SLACK
+        ):
+            return cls.LIVENESS_LIVE
+        newest = max(t for t in (row['modified'], started) if t is not None)
+        # The whole retry pipeline's span plus slack, floored so short
+        # test/dev retry configs don't classify a fresh row as stale.
+        horizon = max(
+            bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
+        )
+        if now - newest > timedelta(minutes=horizon):
+            return cls.LIVENESS_STRANDED
+        return cls.LIVENESS_LIVE
 
     @classmethod
     def stamp_attempt_started(cls, tm_id: int) -> bool:

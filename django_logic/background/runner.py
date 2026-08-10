@@ -459,6 +459,7 @@ def _finalize_terminal_from_watchdog(
         # loop. Opened on the instance's alias (set_state routes there) and
         # through _run_in_savepoint, so a rollback releases any deferred
         # unlock registered inside it instead of leaking it until TTL.
+        previous = state.get_state()
         try:
             # require_commit: the else-branch below logs the write as landed,
             # so a silently discarded savepoint must surface as the failure
@@ -469,6 +470,10 @@ def _finalize_terminal_from_watchdog(
                 require_commit=True,
             )
         except Exception as write_error:
+            # Restore the attribute a discarded savepoint left refreshed —
+            # the failure hooks below must not see a state the database
+            # never had.
+            setattr(state.instance, state.field_name, previous)
             transition_logger.error(
                 f'{source}: could not write failed_state='
                 f'{transition.failed_state!r} on {state.instance_key}: '
@@ -819,6 +824,7 @@ def _handle_failure(
     # re-drivable via the implicit source — a visible parked state rather
     # than an infinite loop.
     if transition.failed_state:
+        previous = state.get_state()
         try:
             # On the instance's alias, and via _run_in_savepoint: see the
             # attempt savepoint in _run_atomic for why both matter.
@@ -831,6 +837,10 @@ def _handle_failure(
                 require_commit=True,
             )
         except Exception as write_error:
+            # Restore the attribute a discarded savepoint left refreshed —
+            # the failure hooks below must not see a state the database
+            # never had.
+            setattr(state.instance, state.field_name, previous)
             transition_logger.error(
                 f'{kwargs.get("tr_id")} could not write failed_state '
                 f'{transition.failed_state!r} on {state.instance_key}: '
