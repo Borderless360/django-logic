@@ -563,9 +563,11 @@ handler should answer them differently:
 from `django_logic.exceptions`): another flight owns the instance right now
 (`AlreadyInProgress`, or the sync gate while a **live** background row is
 uncompleted), or the state moved while phase 1 waited (`SourceStateChanged`).
-A row untouched past the retry horizon is stranded, not busy — the gate then
-raises the plain base again, so "retry shortly" is never a forever answer.
-Catch the transient type **ahead of** the base class:
+A row past its liveness window is stranded, not busy — both the sync gate and
+a background re-drive then raise the plain base again, so "retry shortly" is
+never a forever answer. (A running attempt inside its declared `timeout=`
+budget always counts as live.) Catch the transient type **ahead of** the base
+class:
 
 ```python
 from django_logic.exceptions import (
@@ -1069,7 +1071,7 @@ if in_flight(order, 'process'):
     return Response(status=409, data={'detail': 'Busy — please retry shortly.'})
 ```
 
-The read is racy — a flight can start or complete right after it — so use it for shaping answers, not as a pre-flight gate; the engine's own guards stay authoritative.
+The read is racy — a flight can start or complete right after it — so use it for shaping answers, not as a pre-flight gate; the engine's own guards stay authoritative. It answers the *busy* question: a stranded row (uncompleted but past the retry horizon) is `False`, matching the plain `TransitionNotAllowed` the engine's gates raise for it.
 
 Because the in-flight marker is a database row rather than a held lock, nothing leaks if the caller's surrounding transaction rolls back — the row, the `in_progress_state` write, and the dispatch all disappear together.
 

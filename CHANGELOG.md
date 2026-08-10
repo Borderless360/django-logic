@@ -6,7 +6,10 @@
 
 Five fixes from the 0.13.0 adoption review (raised by the gv consumer as
 #194–#197) plus #192, the sync analog the 0.13.0 review deliberately deferred.
-One is a 0.13.0 regression; the rest harden the release's new surfaces. Every
+One is a 0.13.0 regression; the rest harden the release's new surfaces. An
+adversarial review pass over this release's own diff then confirmed nine gaps
+in the first cut — the largest being that the staleness horizon used the
+wrong liveness signal — all fixed and folded into the bullets below. Every
 fix is mutation-pinned: reverting it makes its tests fail.
 
 ### Fixed
@@ -20,15 +23,24 @@ fix is mutation-pinned: reverting it makes its tests fail.
   logs, skips the `failed_state` write (unknown means don't write), and lets
   the original exception re-raise with both hook bundles running.
 
-- **The sync gate's transient typing is bounded by the retry horizon**
-  (#195). An uncompleted `TransitionMessage` untouched for longer than
-  `max(RETRY_MINUTES × (MAX_ERRORS + 1), 15)` minutes is stranded, not busy —
-  a lost broker message with the safety-net beat tasks unscheduled leaves it
-  uncompleted forever, and 0.13.0's `TransitionTemporarilyUnavailable` then
-  told generic handlers to retry forever while hook-path logging sat demoted
-  at WARNING. A stale row now raises plain `TransitionNotAllowed` again (and
-  pages at ERROR), with the row's age and a pointer to `django_logic.W002` in
-  the message. A live row keeps the transient type.
+- **The transient typing is bounded by one shared liveness classification**
+  (#195, `TransitionMessage.in_flight_liveness`). A stranded row — one
+  nothing is driving — used to keep answering "retry shortly" forever:
+  0.13.0's `TransitionTemporarilyUnavailable` told generic handlers to retry
+  while hook-path logging sat demoted at WARNING. Liveness now reads the
+  watchdog's own signals first: an attempt inside its declared
+  `started_at + timeout_seconds` budget (plus slack) is LIVE however old
+  `modified` is — a healthy 40-minute declared-budget attempt is never
+  called stranded at minute 16. Otherwise a row whose newest activity is
+  within `max(RETRY_MINUTES × (MAX_ERRORS + 1), 15)` minutes is live; past
+  that it is stranded and raises plain `TransitionNotAllowed` (paging at
+  ERROR), with likely causes in the message — unscheduled beats
+  (`django_logic.W002`), a queue backlog or worker outage longer than the
+  horizon, or a lost broker message. The classification covers **both entry
+  points**: the sync gate and phase 1's constraint rejection (a stranded row
+  no longer raises `AlreadyInProgress` on a background re-drive — the most
+  likely consumer retry path). A row that completed in the race window keeps
+  the transient answer: it just finished, so retrying is exactly right.
 
 - **The sync `failed_state` writers get the #189 treatment** (#192). Both
   sync savepoints — `Transition.fail_transition` and the Action's
@@ -36,27 +48,36 @@ fix is mutation-pinned: reverting it makes its tests fail.
   write (the receiver-authored suppressed-database-error idiom at the one
   spot with no query after it) takes the honest except-branch instead of
   logging a false `SET_STATE`. The original exception still re-raises
-  unchanged.
+  unchanged. The except-branches (all four terminal writers) also restore
+  the in-memory state attribute the discarded savepoint left refreshed, so
+  failure hooks and the sync caller never observe a state the database
+  never had.
 
 - **The `LEGACY_EXCEPTION_BASE` smoke probe is airtight** (#196). It now
-  verifies the bridged class preserves the denial message (`args` and
-  `str()` survive the new MRO — a message-eating fork `__init__` used to boot
-  green and blank every denial, breaking pickling too), and the `__bases__`
-  unwind runs on `BaseException`, so a fork `__init__` raising
-  `SystemExit`/`KeyboardInterrupt` during boot cannot leave the class
-  half-mutated.
+  verifies the bridged class preserves the denial message — `args` must
+  survive exactly and the message must appear in `str()` (a fork `__str__`
+  that *formats* the preserved message is accepted; a message-eating
+  `__init__` that used to boot green and blank every denial, breaking
+  pickling too, is rejected) — and the `__bases__` unwind runs on
+  `BaseException`, so a fork `__init__` raising `SystemExit`/
+  `KeyboardInterrupt` during boot cannot leave the class half-mutated.
 
 ### Added
 
 - **`django_logic.background.in_flight(instance, process_name='process')`**
-  (#197) — a documented probe of the durable in-flight marker, for shaping
-  "busy, try again shortly" answers at consumer API seams without poking
-  engine internals or duplicating the marker filter. Racy by nature (the
-  engine's own guards stay authoritative), returns `False` when the
-  background app is not installed. The marker filter itself now lives in
-  exactly one place (`TransitionMessage.in_flight_for`) — the sync gate and
-  the Action failure path read through it, so the #184/#186 identity rework
-  will change it once.
+  (#197) — a documented probe for shaping "busy, try again shortly" answers
+  at consumer API seams without poking engine internals or duplicating the
+  marker filter. It answers the *busy* question: `True` only for a LIVE
+  uncompleted row (same classification as the gates), `False` for a
+  stranded one — so a consumer answering 409 on this probe and 400 on plain
+  `TransitionNotAllowed` stays consistent with what the engine raises. Racy
+  by nature (the engine's own guards stay authoritative); `False` when the
+  background app is not installed, without touching the database. The
+  engine's failure-path write-skip deliberately stays bare existence — an
+  Action must never clobber an uncompleted row's instance, stranded or not.
+  The marker filter itself now lives in exactly one place
+  (`TransitionMessage.in_flight_for`), so the #184/#186 identity rework will
+  change it once.
 
 ## [0.13.0] — 2026-08-04
 
