@@ -78,6 +78,47 @@ change on success) for anything slow, external, or retriable.
    (`'[superseded]'` in `last_error_message`) and skips side-effects. This is
    unconditional since 0.10.0.
 
+## The architecture rule (locked — do not drift back)
+
+One rule decides every reliability design here: **the cache may lie briefly
+(a lock key expires); the database row never lies (it is written atomically
+with the state change); everything recoverable recovers from a row.**
+Its corollaries, each pinned by a shipped mistake:
+
+- **No durable busy marker without a durable owner.** A DB-visible
+  "in progress" with no row that owns its recovery parks the instance
+  forever when a worker is hard-killed (#136). That design shipped once,
+  grew a sweeper whose defects dominated four review passes, and was cut
+  in 0.12.0. Do not rebuild it.
+- **The mutex stays in the cache, and refusal is instant.** A conditional
+  UPDATE is a durable busy marker; an in-transaction row lock holds a
+  connection idle-in-transaction across external side effects (fatal under
+  pgbouncer) and turns instant refusal into blocking.
+- **The row names its transition.** Recovery re-drives from
+  `TransitionMessage` rows, never from broker messages, so the row records
+  `transition_name` + `owning_process_class` (#98). Never switch to
+  task-per-transition: a task name inside a broker message turns a rename
+  deploy into silent message drop; the one shared task fails closed
+  (`[unrestorable]`).
+
+## Release policy (anti-spiral)
+
+Measured on 0.10.0 → 0.13.1: +1,263 net engine lines in 13 days, ~90% of it
+guarding the machinery's own failure modes; 68.9% of inserted lines fixed the
+same release's own fixes. Therefore:
+
+1. **No hardening without a consumer-reproduced failure.** A guard, knob,
+   validator or doc lands only for a defect a consumer hit or reproduced —
+   never because a review imagined one. Corollary: do not validate,
+   document or optimize a knob until a consumer sets it.
+2. **Adversarial self-review is capped at one pass per release.** Findings
+   from later passes become issues for the next consumer-driven release;
+   they are not fixed in place.
+3. **A third fix on the same defect class triggers a design cut, not a
+   fourth fix.** Precedent: 0.12.0 removed the stranded sweep (−582) after
+   four passes kept finding defects there — the cut ended the incident
+   class where hardening had not.
+
 ## Deployment the durability contract depends on
 
 - A real broker (Redis/RabbitMQ). Celery is a core dependency of
