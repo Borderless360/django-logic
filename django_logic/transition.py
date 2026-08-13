@@ -16,7 +16,6 @@ worker runs the side-effects and writes the final state). Definitions
 live in ``django_logic.background.transitions`` (enqueue) and
 ``django_logic.background.runner`` (execute).
 """
-import math
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
@@ -25,7 +24,6 @@ from django.db import DEFAULT_DB_ALIAS, transaction
 from django_logic.commands import (
     Callbacks,
     Conditions,
-    FailureSideEffects,
     NextTransition,
     Permissions,
     SideEffects,
@@ -46,15 +44,12 @@ from django_logic.state import State
 
 
 #: Names of the engine's OWN method parameters on the state-change path.
-#: A caller kwarg carrying one of these reaches an engine call that already
-#: passes it positionally — ``fail_transition(state, error, **kwargs)``,
-#: ``_release_lock(state, deferrable=…, **kwargs)`` — and raises TypeError
-#: there, on the failure path, *after* the lock was taken: ``failed_state``
-#: was never applied, the real exception was replaced by the TypeError, and
-#: the lock leaked until its TTL (hours). Refused up front instead, before
-#: anything is acquired. Distinct from ``process._RESERVED_KWARGS`` (lineage
-#: names the engine forwards itself, so it cannot tell its own forwarding from
-#: a caller's — those are documented, not refused).
+#: A caller kwarg carrying one raises TypeError inside ``fail_transition``/
+#: ``_release_lock`` — on the failure path, after the lock was taken: no
+#: ``failed_state``, the real exception replaced, the lock leaked until TTL.
+#: Refused up front, before anything is acquired. Distinct from
+#: ``process._RESERVED_KWARGS`` (names the engine forwards itself —
+#: documented, not refused).
 _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception', 'deferrable'})
 
 
@@ -82,8 +77,7 @@ class Transition:
       3. run side-effects
       4. on success: set ``target``, unlock, run callbacks, run ``next_transition``
       5. on failure: set ``failed_state`` (so failure hooks observe the
-         contained state), run ``failure_side_effects``, unlock, run
-         ``failure_callbacks`` (and re-raise)
+         contained state), unlock, run ``failure_callbacks`` (and re-raise)
 
     The state field does not change until the transition finishes:
     ``in_progress_state`` is background-only (0.12.0), where it is written
@@ -95,7 +89,6 @@ class Transition:
 
     side_effects_class = SideEffects
     callbacks_class = Callbacks
-    failure_side_effects_class = FailureSideEffects
     failure_callbacks_class = Callbacks
     permissions_class = Permissions
     conditions_class = Conditions
@@ -111,6 +104,17 @@ class Transition:
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
         self.target = target
+        # Removed in 0.14.0; unknown kwargs are otherwise ignored, so a
+        # declaration carrying one would silently lose behavior on upgrade.
+        for removed, hint in (
+            ('failure_side_effects', 'use failure_callbacks'),
+            ('lock_timeout', "use the global DJANGO_LOGIC['LOCK_TIMEOUT']"),
+        ):
+            if removed in kwargs:
+                raise ImproperlyConfigured(
+                    f"Transition {action_name!r}: {removed}= was removed in "
+                    f"0.14.0 — {hint}."
+                )
         if isinstance(sources, str):
             # list('draft') is ['d','r','a','f','t'], which matches no state:
             # the transition becomes invisible to get_available_actions() and
@@ -169,35 +173,12 @@ class Transition:
                 f"the terminal write a silent no-op. Give the failure its "
                 f"own state."
             )
-        # Per-transition override of the global LOCK_TIMEOUT for the
-        # synchronous execution path — for transitions whose side-effects
-        # legitimately run long (report generation, large exports) — size it
-        # above the longest expected run so mutual exclusion holds for the
-        # whole run instead of expiring mid-flight. Background
-        # transitions don't need this: their enqueue critical section is
-        # short and the uncompleted TransitionMessage row is the gate.
-        self.lock_timeout = kwargs.get('lock_timeout')
-        if self.lock_timeout is not None and (
-            not isinstance(self.lock_timeout, (int, float))
-            or isinstance(self.lock_timeout, bool)
-            or self.lock_timeout <= 0
-            or not math.isfinite(self.lock_timeout)
-        ):
-            raise ImproperlyConfigured(
-                f"Transition '{action_name}': lock_timeout must be a "
-                f"positive number of seconds, got {self.lock_timeout!r}."
-            )
         # Only SideEffects dereferences its transition (to drive
         # complete/fail); the other command bundles never read it.
-        # Built through class attributes like the other four, so all six
-        # bundles are swappable — the two failure bundles used to be
-        # hardcoded, which made FailureSideEffects a top-level export with
-        # no way to substitute it.
+        # Built through class attributes like the other four, so all five
+        # bundles are swappable.
         self.failure_callbacks = self.failure_callbacks_class(
             kwargs.get('failure_callbacks', [])
-        )
-        self.failure_side_effects = self.failure_side_effects_class(
-            kwargs.get('failure_side_effects', [])
         )
         self.side_effects = self.side_effects_class(
             kwargs.get('side_effects', []), transition=self
@@ -242,15 +223,7 @@ class Transition:
         # A separate is_locked() pre-check only adds a TOCTOU window and a
         # redundant round-trip (a stale is_locked()==True could even reject
         # a transition the atomic lock() would have granted).
-        #
-        # No-arg call when no per-transition override is configured, so
-        # custom State subclasses written against the pre-lock_timeout
-        # ``lock(self)`` signature keep working.
-        locked = (
-            state.lock()
-            if self.lock_timeout is None
-            else state.lock(self.lock_timeout)
-        )
+        locked = state.lock()
         if not locked:
             # Logged BEFORE the raise, or a permanently frozen instance is
             # indistinguishable from a healthy start: both emit one Start line
@@ -339,9 +312,8 @@ class Transition:
         self.next_transition.execute(state, **kwargs)
 
     def fail_transition(self, state: State, exception: Exception, **kwargs):
-        # try/finally: a failed failed_state write (or a malformed
-        # failure_side_effects bundle) must still release the lock; the
-        # original side-effect exception keeps propagating out of
+        # try/finally: a failed failed_state write must still release the
+        # lock; the original side-effect exception keeps propagating out of
         # SideEffects.execute either way.
         #
         # Deferral only applies when a state write actually happened
@@ -395,8 +367,6 @@ class Transition:
                         f'{TransitionEventType.SET_STATE.value} '
                         f'{self.failed_state}'
                     )
-
-            self.failure_side_effects.execute(state, exception=exception, **kwargs)
         finally:
             self._release_lock(state, deferrable=wrote_state, **kwargs)
 
@@ -678,5 +648,4 @@ class Action(Transition):
                     # line and honours DEFER_UNLOCK_UNTIL_COMMIT when a
                     # state write landed under the lock.
                     self._release_lock(state, deferrable=wrote_state, **kwargs)
-        self.failure_side_effects.execute(state, exception=exception, **kwargs)
         self.failure_callbacks.execute(state, exception=exception, **kwargs)

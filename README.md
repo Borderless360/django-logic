@@ -618,12 +618,11 @@ Transition(
     sources=['pending'],
     target='paid',
     side_effects=[process_payment, another_side_effect],
-    failure_side_effects=[compensate_payment],  # runs before unlock (while instance is locked)
     failure_callbacks=[notify_admin],            # runs after unlock
 )
 ```
 
-When a side-effect fails, execution order is: set `failed_state` (if configured) → **failure_side_effects** → unlock → **failure_callbacks**. Use failure_side_effects for cleanup that must run before other processes can access the instance.
+When a side-effect fails, execution order is: set `failed_state` (if configured) → unlock → **failure_callbacks**.
 
 ## Django-Logic vs Django FSM 
 [Django FSM](https://github.com/viewflow/django-fsm) is a predecessor of Django-Logic. 
@@ -751,7 +750,7 @@ Add `'django_logic.background'` to `INSTALLED_APPS` and configure:
 
 ```python
 DJANGO_LOGIC = {
-    'LOCK_TIMEOUT': 7200,   # per-transition override: Transition(..., lock_timeout=...)
+    'LOCK_TIMEOUT': 7200,   # the state lock's TTL, seconds
     'BACKGROUND_EXECUTION': 'celery',   # the default; set 'sync' in test settings
     'DEFAULT_QUEUE': 'django_logic',    # queue for transitions without queue=
     'STARTER_QUEUE': 'django_logic.starter',
@@ -761,12 +760,11 @@ DJANGO_LOGIC = {
     'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
     'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
     'DEFER_UNLOCK_UNTIL_COMMIT': False,  # True: sync unlocks ride transaction.on_commit (see "Concurrency and locking")
-    # 'TRANSITION_COVERAGE_LOG': '...',  # opt-in: record driven transitions to a file (see "Transition-execution coverage")
     # 'LEGACY_EXCEPTION_BASE': '...',  # opt-in: dotted path of a fork's TransitionNotAllowed to mix in during a migration (see below)
 }
 ```
 
-Every key has the default shown above, so an empty `DJANGO_LOGIC = {}` is a valid production start. Keys removed in 0.10.0 are reported by `manage.py check` as `django_logic.W003` rather than ignored in silence. Numeric and safety-critical settings are validated at boot — a bad value raises `ImproperlyConfigured` naming the setting instead of failing inside a worker at 3 a.m. Run `manage.py migrate` to create the `TransitionMessage` table.
+Every key has the default shown above, so an empty `DJANGO_LOGIC = {}` is a valid production start. Keys the engine does not read — typos and keys a past release removed — are reported by `manage.py check` as `django_logic.W004` rather than ignored in silence. Numeric and safety-critical settings are validated at boot — a bad value raises `ImproperlyConfigured` naming the setting instead of failing inside a worker at 3 a.m. Run `manage.py migrate` to create the `TransitionMessage` table.
 
 #### Migrating off a fork: `LEGACY_EXCEPTION_BASE`
 
@@ -1029,7 +1027,7 @@ Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durab
 
 - `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
-- `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
+- `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_callbacks`, marks completed) so the retry loop stops.
 - `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
 
 ### Per-attempt timeouts
@@ -1084,7 +1082,7 @@ Because the gate is a database row rather than a held lock, nothing leaks if the
 DJANGO_LOGIC = {..., 'DEFER_UNLOCK_UNTIL_COMMIT': True}
 ```
 
-The unlock then rides `transaction.on_commit`. Trade-offs to design for: on **rollback** the hook never fires, so the lock expires via its TTL — a bounded lockout, the same failure mode as a crashed process (give rollback-prone flows a per-transition `lock_timeout`); and same-instance follow-ups (`callbacks` / `next_transition`) inside the atomic block find the state still locked and are skipped — chain them from `transaction.on_commit` in the caller instead. Alternatively, keep the default and invoke transitions via `transaction.on_commit` so they start only once the surrounding write is visible.
+The unlock then rides `transaction.on_commit`. Trade-offs to design for: on **rollback** the hook never fires, so the lock expires via its TTL — a bounded lockout, the same failure mode as a crashed process; and same-instance follow-ups (`callbacks` / `next_transition`) inside the atomic block find the state still locked and are skipped — chain them from `transaction.on_commit` in the caller instead. Alternatively, keep the default and invoke transitions via `transaction.on_commit` so they start only once the surrounding write is visible.
 
 Practical consequence: you **cannot** chain a background transition from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained enqueue will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 
@@ -1203,7 +1201,7 @@ including background transitions — **inline, with no Celery broker**.
 
 Two principles keep these tests worth writing: **test your process, not the
 machinery**, and **assert what the object became, not that a hook ran**. Full
-rationale, and the 18-scenario catalog, in
+rationale, and the scenario catalog, in
 [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md#journeys-not-mirrors).
 
 ```python
@@ -1281,13 +1279,13 @@ class TestOrderFulfilment(ProcessScenario):
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` enqueue **and** execute inline |
 | `retry_transition(obj)` | Re-run the instance's uncompleted transition — simulates the periodic starter |
 
-Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. Add `expect_raises=SomeError` to assert the failure **propagated to the caller** (the `side_effects` re-raise contract), or `expect_raises=False` to assert it was **swallowed** (`callbacks` / `next_transition` / `failure_side_effects`); omit it to absorb the injected exception and assert on the recorded error instead.
+Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. Add `expect_raises=SomeError` to assert the failure **propagated to the caller** (the `side_effects` re-raise contract), or `expect_raises=False` to assert it was **swallowed** (`callbacks` / `next_transition`); omit it to absorb the injected exception and assert on the recorded error instead.
 
 **Assertions**
 
 - *State & availability:* `assert_state` · `assert_state_trace` · `assert_available` / `assert_not_available` (optional `user=`).
 - *Domain outcome* — what the object *became*: `capture` → `assert_changed` / `assert_unchanged` · `assert_related_count`.
-- *Wiring* — that a hook ran (pair with an outcome assertion): `assert_side_effects_ran` / `assert_side_effects_not_ran` · `assert_callbacks_ran` · `assert_failure_side_effects_ran` / `assert_failure_callbacks_ran`.
+- *Wiring* — that a hook ran (pair with an outcome assertion): `assert_side_effects_ran` / `assert_side_effects_not_ran` · `assert_callbacks_ran` · `assert_failure_callbacks_ran`.
 - *Caller boundary & durable row:* `assert_raised` / `assert_not_raised` · `assert_error_recorded` · `assert_error_count` · `assert_transition_owner`.
 - *The whole journey:* `assert_journey([JourneyStep(...)])`.
 
@@ -1297,64 +1295,11 @@ Side-effects and callbacks are **tracked, not mocked** (identified by function `
 `TransitionMessage` as JSON — from a shell, an admin action, Sentry or a log —
 and `self.from_snapshot('fixtures/bug_12345.json')` rebuilds it in a test, which
 turns a production bug into a regression test. See
-[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) §13.
+[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) §5.
 
 **AI-readable failure output.** When an assertion fails, the error includes a numbered timeline of every step and the relevant `TransitionMessage`, so a person or an agent can see where the process diverged without reading stack traces.
 
 `ProcessScenario` extends `TransactionTestCase`, so it works with the durable `TransitionMessage` + atomic-block machinery.
-
-### Transition-execution coverage
-
-Which transitions does your test suite actually drive? Static analysis of the
-test tree can't tell — a test that exercises a view or Celery task which calls
-`instance.process.action()` looks uncovered, and dynamically-dispatched drives
-(`getattr(process, name)()`) can't be attributed at all. The engine can answer
-exactly: every initiation resolves the transition and its declaring (possibly
-nested) process in one place, and notifies
-`django_logic.process.transition_observers`.
-
-```python
-from django_logic.coverage import TransitionCoverage
-
-with TransitionCoverage() as cov:
-    ...  # drive processes / run tests
-report = cov.report()
-report['uncovered']  # [{'process': ..., 'action': ..., 'background': ..., 'models': [...]}]
-```
-
-Coverage is keyed **per declaration**, not per action name: legal same-name
-transitions (condition-disambiguated variants, or a synchronous + background
-namesake pair in one class) count and cover separately — the entry carries the
-declaration's `sources`/`target`/`background` so you can tell them apart.
-
-For parallel test runs (fork or spawn), record to a file instead — every
-worker appends unique declaration keys:
-
-```python
-# settings used for the coverage run
-DJANGO_LOGIC = {..., 'TRANSITION_COVERAGE_LOG': '/tmp/fsm_coverage.log'}
-```
-
-```python
-from django_logic.coverage import coverage_report
-report = coverage_report(log_path='/tmp/fsm_coverage.log')
-```
-
-A pair is recorded at *initiation* (direct calls, `next_transition`
-follow-ups, background enqueue); worker restore and retries don't re-notify.
-Diffing `report['uncovered']` in CI catches transitions that silently stop
-being exercised. Logs written by 0.8/0.9.0 recorders are **no longer read** —
-0.10.0 removed the cross-version readers, so a log in an older format reports
-everything as uncovered. Re-measure against the current release rather than
-carrying an old log forward. The observer list is public — consumers can
-register their own hooks (metrics, tracing), called as
-`observer(owning_process_cls, action_name, instance, transition)` (the
-resolved declaration object was added as a fourth argument in 0.9); a raising
-observer is logged and never breaks a transition.
-
-The log is **append-only and never truncated** — point each run at a fresh
-path (or delete the old file first), or stale pairs from earlier runs count
-as covered.
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.

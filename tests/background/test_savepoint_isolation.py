@@ -15,7 +15,7 @@ users into perfect idempotency even for plain DB writes. With the
 savepoint, a failed attempt rolls back all of its side-effect writes —
 all-or-nothing per attempt.
 
-The same isolation applies to ``failure_side_effects`` on the terminal
+The same isolation applies on the terminal
 path (their swallowed exception used to leave the connection aborted, so
 ``record_failure_side_effect_error`` / ``mark_as_completed`` blew up).
 """
@@ -74,30 +74,6 @@ def se_boom_once(instance, **kwargs):
         raise ValueError('first attempt fails')
 
 
-def fse_integrity_error(instance, **kwargs):
-    CALLS.append('fse_integrity_error')
-    for _ in range(2):
-        TransitionMessage.objects.create(
-            app_label='bg_tests',
-            model_name='widget',
-            instance_id='888888',
-            process_name='dup_proc_fse',
-            transition_name='x',
-            queue_name='q',
-        )
-
-
-def fse_write_log(instance, **kwargs):
-    CALLS.append('fse_write_log')
-    instance.cb_log = (instance.cb_log or '') + 'fse_written,'
-    instance.save(update_fields=['cb_log'])
-
-
-def fse_boom(instance, **kwargs):
-    CALLS.append('fse_boom')
-    raise RuntimeError('cleanup boom')
-
-
 class SavepointProcess(Process):
     """Not bound to Widget — phase 2 restores it via the recorded
     ``process_class`` (the AttributeError fallback path)."""
@@ -130,26 +106,6 @@ class SavepointProcess(Process):
             in_progress_state='fw_running',
             failed_state='fw_failed',
             side_effects=[se_write_log, se_boom_once],
-        ),
-        # R1 terminal path: DB error inside failure_side_effects.
-        BackgroundTransition(
-            action_name='bad_cleanup_db',
-            sources=['draft'],
-            target='bc_done',
-            in_progress_state='bc_running',
-            failed_state='bc_failed',
-            side_effects=[se_boom],
-            failure_side_effects=[fse_integrity_error],
-        ),
-        # R2 for failure_side_effects: partial fse write + fse failure.
-        BackgroundTransition(
-            action_name='bad_cleanup_partial',
-            sources=['draft'],
-            target='bcp_done',
-            in_progress_state='bcp_running',
-            failed_state='bcp_failed',
-            side_effects=[se_boom],
-            failure_side_effects=[fse_write_log, fse_boom],
         ),
     ]
 
@@ -265,44 +221,3 @@ class PartialWriteRollbackTests(TransactionTestCase):
         self.assertEqual(self.widget.se_log, 'written,')
         tm = _tm(self.widget)
         self.assertTrue(tm.is_completed)
-
-
-@override_settings(DJANGO_LOGIC=dict(_SETTINGS, TRANSITION_MESSAGE_MAX_ERRORS=1))
-class FailureSideEffectIsolationTests(TransactionTestCase):
-    """R1 terminal path — failure_side_effects get the same isolation."""
-
-    def setUp(self):
-        CALLS.clear()
-        self.widget = Widget.objects.create()
-
-    def test_db_error_in_failure_side_effects_still_finalizes_the_row(self):
-        # MAX_ERRORS=1: the first failure is terminal. The fse raises a real
-        # IntegrityError; pre-fix the aborted connection made
-        # record_failure_side_effect_error / mark_as_completed blow up on
-        # the terminal path too.
-        with self.assertRaises(ValueError):
-            _drive(self.widget, 'bad_cleanup_db')
-
-        tm = _tm(self.widget)
-        self.assertTrue(tm.is_completed)
-        self.assertIn('UNIQUE', tm.failure_side_effect_error.upper())
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'bc_failed')
-        self.assertIn('fse_integrity_error', CALLS)
-        # The fse's own partial insert rolled back.
-        self.assertFalse(
-            TransitionMessage.objects.filter(process_name='dup_proc_fse').exists()
-        )
-
-    def test_failed_cleanup_rolls_back_its_partial_writes(self):
-        with self.assertRaises(ValueError):
-            _drive(self.widget, 'bad_cleanup_partial')
-
-        tm = _tm(self.widget)
-        self.assertTrue(tm.is_completed)
-        self.assertIn('cleanup boom', tm.failure_side_effect_error)
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'bcp_failed')
-        # fse_write_log ran but its write rolled back with the fse savepoint.
-        self.assertIn('fse_write_log', CALLS)
-        self.assertEqual(self.widget.cb_log, '')

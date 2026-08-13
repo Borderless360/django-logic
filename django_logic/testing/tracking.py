@@ -2,7 +2,7 @@
 
 We do not mock. During a tracked transition we temporarily replace the
 callables on the transition's hook bundles (``side_effects``, ``callbacks``,
-``failure_side_effects``, ``failure_callbacks``) with thin wrappers that:
+``failure_callbacks``) with thin wrappers that:
 
 * record the hook's ``__name__`` *after* it runs successfully, and
 * (for ``side_effects`` only) optionally raise a chosen exception instead of
@@ -21,7 +21,6 @@ from contextlib import contextmanager
 _HOOK_SLOTS = (
     ('side_effects', 'side_effects_ran'),
     ('callbacks', 'callbacks_ran'),
-    ('failure_side_effects', 'failure_side_effects_ran'),
     ('failure_callbacks', 'failure_callbacks_ran'),
 )
 
@@ -32,7 +31,6 @@ class ExecutionTracker:
     def __init__(self):
         self.side_effects_ran: list[str] = []
         self.callbacks_ran: list[str] = []
-        self.failure_side_effects_ran: list[str] = []
         self.failure_callbacks_ran: list[str] = []
         # The exception raised by an injected side-effect, if any.
         self.injected_exception: BaseException | None = None

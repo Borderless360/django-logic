@@ -145,16 +145,6 @@ class ScenarioAssertions:
                        f'callbacks that ran: {ran}.')
         self._record_assert(f'assert_callbacks_ran({names})', ok=True)
 
-    def assert_failure_side_effects_ran(self, names):
-        names = _names(names, 'assert_failure_side_effects_ran')
-        ran = self._tracker().failure_side_effects_ran
-        missing = [n for n in names if n not in ran]
-        if missing:
-            self._record_assert(f'assert_failure_side_effects_ran({names})', ok=False)
-            self._fail(f'Expected failure side-effects {missing} to have run; '
-                       f'failure side-effects that ran: {ran}.')
-        self._record_assert(f'assert_failure_side_effects_ran({names})', ok=True)
-
     def assert_failure_callbacks_ran(self, names):
         names = _names(names, 'assert_failure_callbacks_ran')
         ran = self._tracker().failure_callbacks_ran
@@ -319,8 +309,8 @@ class ScenarioAssertions:
 
     def assert_not_raised(self):
         """Assert the last drive did NOT propagate an exception to the caller
-        — the swallow contract (Callbacks / NextTransition /
-        FailureSideEffects). A regression that starts re-raising a best-effort
+        — the swallow contract (Callbacks / NextTransition). A regression
+        that starts re-raising a best-effort
         failure makes this assertion fail."""
         raised = self._last_raised
         if raised is not None:

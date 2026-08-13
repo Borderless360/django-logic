@@ -433,10 +433,11 @@ class UnknownSettingsCheckTests(TestCase):
         'BACKGROUND_EXECUTION': 'sync',
         'PHASE2_STATE_GUARD': 'enforce',        # removed in 0.10.0
     })
-    def test_removed_keys_are_left_to_w003(self):
-        """W003 already names removed keys with migration advice; W004 must
-        not duplicate the report."""
-        self.assertEqual(check_no_unknown_settings(None), [])
+    def test_removed_keys_get_the_migration_advice_not_the_typo_hint(self):
+        findings = check_no_unknown_settings(None)
+        self.assertEqual(len(findings), 1)
+        self.assertIn('removed', findings[0].msg)
+        self.assertNotIn('typo', findings[0].msg)
 
 
 # --- the low-severity sweep -----------------------------------------------
@@ -516,7 +517,7 @@ class PublicSurfaceTests(TestCase):
         import django_logic
 
         self.assertEqual(sorted(django_logic.__all__), [
-            'Action', 'Callbacks', 'Conditions', 'FailureSideEffects',
+            'Action', 'Callbacks', 'Conditions',
             'Permissions', 'Process', 'ProcessManager', 'SideEffects',
             'Transition',
         ])
@@ -525,23 +526,17 @@ class PublicSurfaceTests(TestCase):
 
 
 class FailureBundleSwapTests(TestCase):
-    def test_failure_bundles_are_swappable_like_the_other_four(self):
-        """They were hardcoded, which left FailureSideEffects a top-level
-        export with no way to substitute it."""
-        from django_logic.commands import Callbacks, FailureSideEffects
-
-        class LoudFailureSideEffects(FailureSideEffects):
-            pass
+    def test_failure_bundle_is_swappable_like_the_other_four(self):
+        """It was hardcoded, with no way to substitute it."""
+        from django_logic.commands import Callbacks
 
         class LoudFailureCallbacks(Callbacks):
             pass
 
         class Custom(Transition):
-            failure_side_effects_class = LoudFailureSideEffects
             failure_callbacks_class = LoudFailureCallbacks
 
         t = Custom('go', sources=['draft'], target='approved')
-        self.assertIsInstance(t.failure_side_effects, LoudFailureSideEffects)
         self.assertIsInstance(t.failure_callbacks, LoudFailureCallbacks)
 
 
@@ -604,10 +599,8 @@ class FailedStateWriteHonestyTests(_BindCleanup, TestCase):
 class FailureErrorAccumulationTests(TestCase):
     """record_failure_side_effect_error must not erase an earlier note.
 
-    The terminal path can record two independent problems on one row — a
-    rejected failed_state write and a broken failure_side_effects bundle.
-    Overwriting meant whichever came second silently erased the other.
-    (Caught reviewing 0.12.0's own diff.)
+    Overwriting meant whichever note came second silently erased the
+    other. (Caught reviewing 0.12.0's own diff.)
     """
 
     def test_two_recorded_problems_both_survive(self):
@@ -618,12 +611,12 @@ class FailureErrorAccumulationTests(TestCase):
         tm.record_failure_side_effect_error(
             ValueError('write refused'), label='failed_state write')
         tm.record_failure_side_effect_error(
-            RuntimeError('cleanup broke'), label='failure_side_effects')
+            RuntimeError('cleanup broke'), label='failed_state write')
 
         tm.refresh_from_db()
         self.assertIn('failed_state write: ValueError: write refused',
                       tm.failure_side_effect_error)
-        self.assertIn('failure_side_effects: RuntimeError: cleanup broke',
+        self.assertIn('failed_state write: RuntimeError: cleanup broke',
                       tm.failure_side_effect_error)
 
 

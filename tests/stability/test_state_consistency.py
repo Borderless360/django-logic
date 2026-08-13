@@ -23,7 +23,6 @@ from tests.stability.base import StabilityTestCase, requires_real_redis
 from tests.stability.models import (
     Order, OrderProcess,
     side_effect_one, side_effect_two, side_effect_three,
-    failure_side_effect,
 )
 from django_logic import Transition
 

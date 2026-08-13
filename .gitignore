@@ -244,4 +244,4 @@ dmypy.json
 .pypirc
 *.pypirc
 .env.local
-.secrets/
+.secrets/uv.lock

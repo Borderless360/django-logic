@@ -137,20 +137,8 @@ class SyncProcessDrivingScenario(ProcessScenario):
         # side-effect did NOT complete.
         self.assert_state(widget, 'rejection_failed')
         self.assert_state_trace(['rejection_failed'])
-        self.assert_failure_side_effects_ran(['fse_cleanup'])
         self.assert_failure_callbacks_ran(['fcb_on_fail'])
         self.assert_side_effects_not_ran(['se_reject_attempt'])
-
-    def test_failure_side_effects_run_before_failure_callbacks(self):
-        # The cross-hook ordering is observable via SYNC_ORDER.
-        from tests.background.models import SYNC_ORDER
-        SYNC_ORDER.clear()
-        widget = self.create_instance(status='draft')
-        self.transition(
-            widget, 'reject',
-            fail_side_effect='se_reject_attempt', fail_with=ValueError('boom'),
-        )
-        self.assertEqual(SYNC_ORDER, ['fse:cleanup', 'fcb:on_fail'])
 
     def test_action_does_not_change_state_on_success(self):
         widget = self.create_instance(status='draft')

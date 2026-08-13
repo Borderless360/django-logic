@@ -43,10 +43,6 @@ class _HookProcess(Process):
                    failed_state='failed',
                    side_effects=[_boom],
                    failure_callbacks=[_poison_db, _record]),
-        Transition('cleanup_breaks', sources=['draft'], target='done',
-                   failed_state='failed',
-                   side_effects=[_boom],
-                   failure_side_effects=[_poison_db]),
         Transition('chain', sources=['draft'], target='approved',
                    next_transition='poisoned_followup'),
         Transition('poisoned_followup', sources=['approved'], target='done',
@@ -86,15 +82,6 @@ class CallbackIsolationInTransactionTests(TestCase):
 
         self.assertEqual(RECORDED, ['poison_attempt', 'record'])
         self.invoice.refresh_from_db()
-        self.assertEqual(self.invoice.status, 'failed')
-        self._assert_connection_healthy()
-
-    def test_failing_failure_side_effect_does_not_poison_the_transaction(self):
-        with self.assertRaises(ValueError):
-            _process(self.invoice).cleanup_breaks()
-
-        self.invoice.refresh_from_db()
-        # failed_state was written before the cleanup broke, and survives.
         self.assertEqual(self.invoice.status, 'failed')
         self._assert_connection_healthy()
 

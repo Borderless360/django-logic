@@ -22,8 +22,7 @@ Contracts pinned per class:
 * hook ordering — side-effects run while the persisted state is still
   the source, callbacks only after the target write is observable; on
   terminal failure, failed_state is written first, then
-  failure_side_effects, then failure_callbacks — the same sequence
-  sync and background;
+  failure_callbacks — the same sequence sync and background;
 * ``next_transition`` — the same background follow-up runs with the
   same typed kwargs and a live ``user`` whether the parent is sync or
   background, and never sees ``request``; the declared difference: a
@@ -85,11 +84,6 @@ def record_order_callback(instance, **kwargs):
     ORDER.append(('callback', instance.status))
 
 
-def record_order_failure_side_effect(instance, **kwargs):
-    instance.refresh_from_db()
-    ORDER.append(('failure_side_effect', instance.status))
-
-
 def record_order_failure_callback(instance, **kwargs):
     instance.refresh_from_db()
     ORDER.append(('failure_callback', instance.status))
@@ -107,7 +101,6 @@ class ParityProcess(Process):
                    failed_state='failed',
                    side_effects=[record_kwargs, record_order_side_effect],
                    callbacks=[record_callback_state, record_order_callback],
-                   failure_side_effects=[record_order_failure_side_effect],
                    failure_callbacks=[record_order_failure_callback]),
         Action('sync_action', sources=['draft'],
                side_effects=[record_kwargs, record_order_side_effect],
@@ -116,7 +109,6 @@ class ParityProcess(Process):
                              failed_state='failed',
                              side_effects=[record_kwargs, record_order_side_effect],
                              callbacks=[record_callback_state, record_order_callback],
-                             failure_side_effects=[record_order_failure_side_effect],
                              failure_callbacks=[record_order_failure_callback]),
         BackgroundAction('bg_action', sources=['draft'],
                          side_effects=[record_kwargs, record_order_side_effect],
@@ -259,14 +251,11 @@ class ParityMatrixTests(TestCase):
             )
 
     def test_terminal_failure_order_is_identical_for_both_failure_capable_classes(self):
-        # failed_state is written FIRST, so both failure hooks observe the
-        # contained state; failure_side_effects run before failure_callbacks.
-        # Every implementation site agrees on this sequence — the sync path
-        # (Transition.fail_transition), the background terminal attempt
+        # failed_state is written FIRST, so the failure callbacks observe
+        # the contained state. Every implementation site agrees — the sync
+        # path (Transition.fail_transition), the background terminal attempt
         # (runner._handle_failure), and the watchdog finalizer that mirrors
         # it — and that cross-class symmetry is the contract pinned here.
-        # (Transition's class docstring lists failure_side_effects before
-        # the failed_state write; the code does not, in any class.)
         from django_logic.background.models import TransitionMessage
         from django_logic.background.runner import run_background_transition
 
@@ -291,8 +280,7 @@ class ParityMatrixTests(TestCase):
             results[action] = list(ORDER)
 
         for action, order in results.items():
-            self.assertEqual(order, [('failure_side_effect', 'failed'),
-                                     ('failure_callback', 'failed')], action)
+            self.assertEqual(order, [('failure_callback', 'failed')], action)
         FAIL['on'] = False
 
     def test_next_transition_chains_equivalently_across_all_four_classes(self):

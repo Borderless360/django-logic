@@ -10,8 +10,6 @@ boundary*:
 * ``Callbacks`` — best-effort; exceptions are **swallowed**.
 * ``NextTransition`` — a follow-up's failure is **swallowed** (it must not
   bubble into the transition that triggered it).
-* ``FailureSideEffects`` — a raising cleanup hook is **swallowed** and must not
-  mask the original exception (which still re-raises).
 
 Every test drives a real object through the real entrypoint and pins what
 reaches the caller via ``expect_raises`` / ``assert_raised`` /
@@ -49,7 +47,6 @@ class SideEffectReRaiseContract(ProcessScenario):
         # landed in its failed_state with both failure hook families run.
         self.assert_raised(ValueError, match='reject boom')
         self.assert_state(widget, 'rejection_failed')
-        self.assert_failure_side_effects_ran(['fse_cleanup'])
         self.assert_failure_callbacks_ran(['fcb_on_fail'])
 
     def test_genuine_side_effect_exception_reaches_caller_without_injection(self):
@@ -80,17 +77,6 @@ class SideEffectReRaiseContract(ProcessScenario):
                 failed=True,              # <- the re-raise pin
             ),
         ])
-
-    def test_failure_side_effect_that_raises_does_not_mask_the_original(self):
-        # reject_bad_cleanup: side-effect raises ValueError, then its
-        # failure_side_effect (sync_fse_boom) ALSO raises RuntimeError. The
-        # cleanup failure must be swallowed and must NOT replace the original
-        # ValueError, which still re-raises. The failure callback still runs.
-        widget = self.create_instance(status='draft')
-        self.transition(widget, 'reject_bad_cleanup', expect_raises=ValueError)
-        self.assert_raised(ValueError, match='sync boom')  # original, not RuntimeError
-        self.assert_state(widget, 'rbc_failed')
-        self.assert_failure_callbacks_ran(['fcb_rbc'])
 
 
 class SwallowContract(ProcessScenario):
@@ -129,15 +115,3 @@ class SwallowContract(ProcessScenario):
         # (se_c is the injected target, so it never records as "ran"
         # regardless of engine behaviour — not asserted; the kept 'approved'
         # state above is what proves notify failed and was swallowed.)
-
-    def test_failure_hooks_run_in_order_across_the_boundary(self):
-        # Independent of the caller boundary: failure_side_effects run before
-        # failure_callbacks. Pinned via the cross-hook SYNC_ORDER sink.
-        SYNC_ORDER.clear()
-        widget = self.create_instance(status='draft')
-        self.transition(
-            widget, 'reject',
-            fail_side_effect='se_reject_attempt', fail_with=ValueError('boom'),
-            expect_raises=ValueError,
-        )
-        self.assertEqual(SYNC_ORDER, ['fse:cleanup', 'fcb:on_fail'])

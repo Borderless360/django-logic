@@ -22,7 +22,6 @@ from django_logic.state import State
 from django_logic.testing import JourneyStep, ProcessScenario
 from tests.background.models import (
     CALLBACK_SEEN_STATE,
-    SYNC_FSE_KWARGS,
     SYNC_LAST_KWARGS,
     SYNC_ORDER,
     Widget,
@@ -92,17 +91,7 @@ class TransitionSideEffectsScenario(ProcessScenario):
         self.assert_state_trace(['rejection_failed'])
         # The success side-effect did not complete; the failure hooks ran.
         self.assert_side_effects_not_ran(['se_reject_attempt'])
-        self.assert_failure_side_effects_ran(['fse_cleanup'])
         self.assert_failure_callbacks_ran(['fcb_on_fail'])
-
-    def test_failure_side_effects_run_before_failure_callbacks(self):
-        SYNC_ORDER.clear()
-        widget = self.create_instance(status='draft')
-        self.transition(
-            widget, 'reject',
-            fail_side_effect='se_reject_attempt', fail_with=ValueError('boom'),
-        )
-        self.assertEqual(SYNC_ORDER, ['fse:cleanup', 'fcb:on_fail'])
 
     def test_lock_is_released_after_success(self):
         widget = self.create_instance(status='draft')
@@ -274,22 +263,6 @@ class KwargsAndFailureContractScenario(ProcessScenario):
         self.assertIsInstance(SYNC_LAST_KWARGS.get('exception'), ValueError)
         self.assertIn('captured boom', str(SYNC_LAST_KWARGS['exception']))
         self.assertEqual(SYNC_LAST_KWARGS.get('foo'), 'bar')
-
-    def test_failure_side_effect_receives_exception_and_forwarded_kwargs(self):
-        # Same contract for failure_SIDE_EFFECTS (not just failure_callbacks):
-        # they are called with the original exception and the caller's kwargs.
-        SYNC_FSE_KWARGS.clear()
-        widget = self.create_instance(status='draft')
-        self.transition(
-            widget, 'capture_fail',
-            fail_side_effect='sync_boom', fail_with=ValueError('fse boom'),
-            ticket=7,
-        )
-        self.assert_state(widget, 'capture_failed')
-        self.assertIsInstance(SYNC_FSE_KWARGS.get('exception'), ValueError)
-        self.assertIn('fse boom', str(SYNC_FSE_KWARGS['exception']))
-        self.assertEqual(SYNC_FSE_KWARGS.get('ticket'), 7)
-
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class NextTransitionScenario(ProcessScenario):

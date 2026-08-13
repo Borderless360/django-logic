@@ -157,10 +157,6 @@ class WatchdogUnderLockRecheckTests(_BindCleanup, TestCase):
 _HOOK_LOG: list = []
 
 
-def _record_fse(instance, **kwargs):
-    _HOOK_LOG.append('fse')
-
-
 def _record_fcb(instance, **kwargs):
     _HOOK_LOG.append('fcb')
 
@@ -172,7 +168,6 @@ class SupersedeParityProcess(Process):
             'go', sources=['draft'], target='done',
             in_progress_state='sp_running', failed_state='sp_failed',
             side_effects=[_noop], timeout=60,
-            failure_side_effects=[_record_fse],
             failure_callbacks=[_record_fcb],
         ),
     ]
@@ -182,10 +177,9 @@ class SupersedeParityProcess(Process):
 class SupersedeParityTests(_BindCleanup, TestCase):
     """Phase 2 supersedes when the instance was moved externally: no hooks, a
     ``[superseded]`` marker, row completed. The safety-net finalizers guarded
-    only the ``failed_state`` WRITE — they still ran failure_side_effects and
-    failure_callbacks against an instance an operator had already fixed
-    (destructive cleanup, report-back callbacks) and completed the row with
-    nothing explaining why.
+    only the ``failed_state`` WRITE — they still ran failure hooks against
+    an instance an operator had already fixed (report-back callbacks for a
+    child fixed by hand) and completed the row with nothing explaining why.
     """
 
     _bound = (SupersedeParityProcess,)
@@ -245,7 +239,7 @@ class SupersedeParityTests(_BindCleanup, TestCase):
 
         inv.refresh_from_db()
         self.assertEqual(inv.status, 'sp_failed')
-        self.assertEqual(_HOOK_LOG, ['fse', 'fcb'])
+        self.assertEqual(_HOOK_LOG, ['fcb'])
 
 
 # --- C4 / B-K3 / E6: the bookkeeping must never be what fails -------------

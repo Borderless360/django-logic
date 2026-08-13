@@ -195,7 +195,7 @@ class TerminalWritePoisonProcess(Process):
             'sync_out', sources=['draft'], target='done',
             in_progress_state='syncing', failed_state='failed',
             side_effects=[_fail_attempt],
-            failure_side_effects=[_record_fse_observed_status],
+            failure_callbacks=[_record_fse_observed_status],
             callbacks=[_record_callback],
         ),
     ]
@@ -241,72 +241,6 @@ class TerminalFailedStateWritePoisonedTests(_Base):
         output = '\n'.join(logs.output)
         self.assertIn('could not write failed_state', output)
         self.assertNotIn('Set State failed', output)
-
-
-class FsePoisonProcess(Process):
-    process_name = 'fse_poison_proc'
-    transitions = [
-        BackgroundTransition(
-            'sync_out', sources=['draft'], target='done',
-            in_progress_state='syncing', failed_state='failed',
-            side_effects=[_fail_attempt],
-            failure_side_effects=[_work_then_suppress_db_error],
-        ),
-    ]
-
-
-class FseNestedProcess(Process):
-    process_name = 'fse_nested_proc'
-    transitions = [
-        BackgroundTransition(
-            'sync_out', sources=['draft'], target='done',
-            in_progress_state='syncing', failed_state='failed',
-            side_effects=[_fail_attempt],
-            failure_side_effects=[_work_then_suppress_db_error_correctly],
-        ),
-    ]
-
-
-@override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
-class FailureSideEffectsSilentRollbackTests(_Base):
-    """The cleanup bundle is the third terminal savepoint (#189 review):
-    silently discarded cleanup must be recorded on the row, not left as
-    success-shaped bookkeeping over rolled-back work."""
-
-    process = FsePoisonProcess
-
-    def test_discarded_cleanup_is_recorded_on_the_row(self):
-        inv = Invoice.objects.create(status='draft')
-
-        with self.assertRaises(ValueError):
-            inv.fse_poison_proc.sync_out()
-
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        inv.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(inv.status, 'failed')  # the state write is fine
-        # The proof the cleanup was discarded: its write is gone…
-        self.assertFalse(inv.customer_received)
-        # …and the row says so.
-        self.assertIn('failure_side_effects', tm.failure_side_effect_error)
-
-
-@override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
-class FseCorrectlyNestedIsUntouchedTests(_Base):
-    process = FseNestedProcess
-
-    def test_a_nested_atomic_cleanup_commits_and_records_nothing(self):
-        inv = Invoice.objects.create(status='draft')
-
-        with self.assertRaises(ValueError):
-            inv.fse_nested_proc.sync_out()
-
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        inv.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(inv.status, 'failed')
-        self.assertTrue(inv.customer_received)  # the cleanup committed
-        self.assertEqual(tm.failure_side_effect_error, '')
 
 
 class SyncFailPoisonProcess(Process):

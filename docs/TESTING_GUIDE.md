@@ -127,7 +127,6 @@ re-delivers after a worker crash. Those are library guarantees; sync mode
 deliberately removes them from your test surface.
 
 ---
-
 ## The scenario catalog
 
 Every scenario below uses `django_logic.testing.ProcessScenario` — a
@@ -185,44 +184,7 @@ def test_order_lifecycle(self):
     self.assert_callbacks_ran(['send_confirmation_email'])
 ```
 
-### 2. Condition gating
-
-Conditions decide whether a transition is *available*. Test both sides.
-
-```python
-def test_cannot_approve_without_stock(self):
-    order = self.create_instance(status='draft', stock=0)
-    self.assert_not_available(order, ['approve'])
-
-def test_can_approve_with_stock(self):
-    order = self.create_instance(status='draft', stock=5)
-    self.assert_available(order, ['approve'])
-```
-
-### 3. Permission gating
-
-```python
-def setUp(self):
-    super().setUp()
-    # User fixtures are the test author's responsibility — ProcessScenario
-    # does not create any.
-    self.staff = User.objects.create(username='staff', is_staff=True)
-    self.customer = User.objects.create(username='customer')
-
-def test_only_staff_can_approve(self):
-    order = self.create_instance(status='draft')
-    self.assert_available(order, ['approve'], user=self.staff)
-    self.assert_not_available(order, ['approve'], user=self.customer)
-```
-
-> ⚠️ Permissions are only evaluated when a `user=` is passed. A call without
-> one is a *system call* and bypasses permissions entirely — so a test that
-> drives `self.transition(order, 'approve')` without `user=` proves the
-> machine works, **not** that the endpoint is protected. Test permission
-> denial with an explicit unauthorized user, and make sure your views always
-> pass `user=request.user`.
-
-### 4. Synchronous failure → failed_state + failure hooks + re-raise
+### 2. Synchronous failure → failed_state + failure hooks + re-raise
 
 Inject a failure into one *named* side-effect — every other side-effect runs
 for real, so the genuine failure path executes. A synchronous `SideEffects`
@@ -238,27 +200,16 @@ def test_validation_failure_voids_the_order(self):
                     expect_raises=ValueError)          # <- the caller sees it
     self.assert_state(order, 'draft')                  # or failed_state if declared
     # If approve declared failure hooks, assert they ran:
-    # self.assert_failure_side_effects_ran(['void_reservation'])
     # self.assert_failure_callbacks_ran(['notify_ops'])
 ```
 
 `expect_raises` is what makes this a journey test rather than a mirror:
 without it the harness absorbs the injected exception, so the test would pass
-whether the engine re-raised or silently swallowed. See
-[scenario 16](#16-the-caller-boundary-re-raise-vs-swallow) for the full
-re-raise/swallow contract.
+whether the engine re-raised or silently swallowed. The full contract:
+`side_effects` re-raise to the caller; `callbacks` and `next_transition`
+are swallowed (best-effort).
 
-### 5. Action — side-effects without a state change
-
-```python
-def test_sync_inventory_keeps_state(self):
-    order = self.create_instance(status='fulfilled')
-    self.background_transition(order, 'sync_inventory')
-    self.assert_state(order, 'fulfilled')     # unchanged on success
-    self.assert_side_effects_ran(['push_to_erp'])
-```
-
-### 6. Background failure → in-progress + recorded error
+### 3. Background failure → in-progress + recorded error
 
 A failed background attempt leaves the instance in `in_progress_state`, the
 error recorded on the durable row, and the row uncompleted (the periodic
@@ -292,24 +243,7 @@ def test_failed_attempt_rolls_back_db_writes(self):
     self.assertFalse(StockReservation.objects.filter(order=order).exists())
 ```
 
-### 7. Retry to success
-
-`retry_transition` does exactly what the periodic starter does in production:
-re-runs the instance's uncompleted transition.
-
-```python
-def test_retry_completes_after_transient_failure(self):
-    order = self.create_instance(status='approved')
-    self.background_transition(order, 'fulfil',
-                               fail_side_effect='call_courier',
-                               fail_with=ConnectionError('transient'))
-    self.assert_state(order, 'fulfilling')
-
-    self.retry_transition(order)                  # the starter's re-dispatch
-    self.assert_state(order, 'fulfilled')
-```
-
-### 8. Terminal failure at MAX_ERRORS → failed_state
+### 4. Terminal failure at MAX_ERRORS → failed_state
 
 ```python
 @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'sync',
@@ -326,94 +260,7 @@ def test_persistent_failure_reaches_failed_state(self):
     self.assert_error_count(order, 2)
 ```
 
-### 9. One in flight: AlreadyInProgress and the sync gate
-
-While an uncompleted `TransitionMessage` exists for an instance + process,
-a second background transition raises `AlreadyInProgress`, and a synchronous
-transition on the same instance + process raises
-`TransitionTemporarilyUnavailable` (both subclass `TransitionNotAllowed`,
-so the catches below keep working). Both are worth pinning if your UX
-depends on them:
-
-```python
-from django_logic.background.exceptions import AlreadyInProgress
-from django_logic.exceptions import TransitionNotAllowed
-# AlreadyInProgress is also catchable as TransitionTemporarilyUnavailable
-# (from django_logic.exceptions) — the "busy, retry shortly" type a generic
-# handler can branch on without importing the background subpackage.
-
-def test_cannot_cancel_mid_fulfilment(self):
-    order = self.create_instance(status='approved')
-    self.background_transition(order, 'fulfil',
-                               fail_side_effect='call_courier',
-                               fail_with=ConnectionError('x'))   # row stays open
-
-    with self.assertRaises(TransitionNotAllowed):
-        order.process.cancel()                    # sync transition gated
-
-    with self.assertRaises(AlreadyInProgress):
-        with sync_execution():
-            order.process.fulfil()                # second background gated
-```
-
-Design consequence: chain follow-up background work from a *terminal* hook
-(a callback that fires after the row completes), never from inside the run.
-
-### 10. The superseded scenario (manual ops fix wins)
-
-If something external moves the instance while a background row is pending —
-a support engineer in the admin, a data migration — the worker must NOT undo it.
-Reproduce it by completing the ops fix between failure and retry:
-
-```python
-def test_ops_fix_is_not_clobbered_by_a_late_retry(self):
-    order = self.create_instance(status='approved')
-    self.background_transition(order, 'fulfil',
-                               fail_side_effect='call_courier',
-                               fail_with=ConnectionError('x'))
-    self.assert_state(order, 'fulfilling')
-
-    # Support manually resolves the order while the row is pending.
-    order.status = 'cancelled_by_support'
-    order.save(update_fields=['status'])
-
-    self.retry_transition(order)                  # late retry fires...
-    self.assert_state(order, 'cancelled_by_support')   # ...and yields
-    self.assert_error_recorded(order, '[superseded]')
-```
-
-### 11. next_transition chains
-
-(Assumes a process with `Transition('pay', sources=['pending'], target='paid', next_transition='process')` and `Transition('process', sources=['paid'], target='processing')` — chains aren't part of the running example above.)
-
-```python
-def test_pay_chains_into_processing(self):
-    order = self.create_instance(status='pending')
-    self.transition(order, 'pay')
-    self.assert_state(order, 'processing')        # follow-up ran after unlock
-```
-
-Tracking covers the whole process tree, so the follow-up's side-effects are
-visible to `assert_side_effects_ran` even though you only drove `'pay'`.
-
-### 12. Nested processes
-
-Background transitions declared on nested processes restore correctly on
-the worker — drive them through the parent's bound property like production code
-would:
-
-```python
-class CourierScenario(ProcessScenario):
-    process_class = OrderParentProcess   # has nested_processes=[CourierProcess]
-    model = Order
-
-    def test_nested_dispatch(self):
-        order = self.create_instance(status='submitted')
-        self.background_transition(order, 'dispatch')   # lives on the nested process
-        self.assert_state(order, 'dispatched')
-```
-
-### 13. Snapshot & replay — turn a production bug into a test
+### 5. Snapshot & replay — turn a production bug into a test
 
 Capture a stuck instance in production (shell, admin action, Sentry hook):
 
@@ -432,140 +279,12 @@ def test_reproduce_stuck_order_12345(self):
     self.assert_state(order, 'fulfilled')
 ```
 
-### 14. Conditions in the *blocking* direction
-
-Most condition tests only prove a transition fires when the condition passes.
-A condition that silently always-returned-`True` would pass every one of those.
-Pin the negative too — the transition must be **refused** when the condition
-does not hold, with the object unchanged:
-
-```python
-def test_partial_fulfilment_cannot_be_marked_fulfilled(self):
-    order = self.create_instance(status='fulfilling')
-    order.lines.create(status='fulfilled')
-    order.lines.create(status='pending')          # not all lines done
-
-    # Unavailable...
-    self.assert_not_available(order, ['mark_fulfilled'])
-    # ...and refused if forced, with no state change.
-    self.transition(order, 'mark_fulfilled',
-                    expect_raises=TransitionNotAllowed)
-    self.assert_state(order, 'fulfilling')
-```
-
-### 15. Asserting the domain outcome (not just that a hook ran)
-
-`assert_side_effects_ran` proves the *wiring*; to pin the *outcome* — what the
-object became — capture a baseline and assert the delta. This is the assertion
-that fails if a side-effect is called but does the wrong thing.
-
-```python
-def test_approve_normalises_and_stamps_the_order(self):
-    order = self.create_instance(status='draft')
-    before = self.capture(order, ['status', 'total', 'approved_at'])
-
-    self.transition(order, 'approve', user=self.staff)
-
-    self.assert_side_effects_ran(['validate_order'])       # wiring
-    self.assert_changed(order, before, {                   # outcome
-        'status': ('draft', 'approved'),
-        'approved_at': (None, order.approved_at),           # now set
-    })
-    self.assert_unchanged(order, before, ['total'])         # must NOT move
-```
-
-For a hook whose whole job is a *related-row* effect (a `delete_*` callback, a
-side-effect that generates N records), assert the row delta directly:
-
-```python
-def test_cancel_deletes_reservations(self):
-    order = self.create_instance(status='approved')
-    order.reservations.create(); order.reservations.create()
-
-    self.transition(order, 'cancel')
-
-    self.assert_callbacks_ran(['release_reservations'])     # wiring
-    self.assert_related_count(order.reservations.all(), 0)  # outcome
-```
-
-### 16. The caller boundary: re-raise vs swallow
-
-The engine treats the four hook families asymmetrically at the *caller
-boundary*, and that asymmetry is exactly what the `0.1.6 → 0.2.0` regression
-flipped. Pin which one each transition relies on:
-
-| Hook | On failure | Assert with |
-|---|---|---|
-| `side_effects` | runs `fail_transition`, then **re-raises** | `expect_raises=Err` / `assert_raised(Err)` |
-| `callbacks` | **swallowed** (best-effort) | `expect_raises=False` / `assert_not_raised()` |
-| `next_transition` follow-up | follow-up failure **swallowed** | `expect_raises=False` |
-| `failure_side_effects` | **swallowed**, does not mask the original | `expect_raises=OriginalErr` |
-
-```python
-def test_side_effect_failure_reaches_the_caller(self):
-    order = self.create_instance(status='approved')
-    self.background_transition(order, 'fulfil',
-                               fail_side_effect='call_courier',
-                               fail_with=ConnectionError('down'),
-                               expect_raises=ConnectionError)
-    self.assert_raised(ConnectionError, match='down')
-
-def test_callback_failure_is_swallowed_and_target_kept(self):
-    order = self.create_instance(status='approved')
-    self.transition(order, 'confirm',
-                    fail_side_effect='send_receipt_email',   # a callback hook
-                    fail_with=SMTPError(),
-                    expect_raises=False)                     # must NOT propagate
-    self.assert_not_raised()
-    self.assert_state(order, 'confirmed')                    # target survives
-```
-
-`expect_raises` accepts an exception type (or tuple) to assert it propagated,
-or `False` to assert nothing did. Leave it out (the legacy default) only when
-you are asserting on the *recorded* error of a background failure rather than
-the caller boundary.
-
-### 17. Pinning the whole journey in one assertion
-
-`assert_state_trace` pins the ordered states the object passed through;
-`assert_journey` pins each drive's full observable transformation — action,
-before → after, side-effects, callbacks, and whether it reached the caller.
-
-```python
-from django_logic.testing import JourneyStep
-
-def test_fulfilment_journey(self):
-    order = self.create_instance(status='approved')
-    self.background_transition(order, 'fulfil')
-
-    # Every state the object moved through (in-progress -> target, chains, …):
-    self.assert_state_trace(['fulfilling', 'fulfilled'])
-
-    # The whole end-to-end story as one assertion:
-    self.assert_journey([
-        JourneyStep(action='fulfil', before='approved', after='fulfilled',
-                    side_effects=['reserve_stock', 'call_courier'],
-                    callbacks=['send_confirmation_email'],
-                    failed=False),
-    ])
-```
-
-`JourneyStep.failed` means *an exception propagated to the caller* — so a
-failure-path `assert_journey(..., failed=True)` alone detects a
-swallow-vs-reraise flip.
-
-### 18. The cross-machine cascade (anti-pattern contract)
-
-If a side-effect drives a transition on *another* instance and lets its
-exception propagate (the "fundamental problem" anti-pattern — see
-[docs/recipes/nested-processes.md](recipes/nested-processes.md) for the correct
-fan-out alternative), that behaviour is worth pinning as one journey so a
-refactor can't silently change it: the inner machine lands in its
-`failed_state` with its failure hooks run, the outer's later side-effects are
-skipped, and the exception reaches the caller. See
-`tests/test_cross_machine_cascade.py` for a worked contract test.
-
----
+The five scenarios above are the canonical shapes; every other case
+(condition/permission gating, retry-to-success, the one-in-flight gate,
+superseded rows, next_transition chains, nested processes, the caller
+boundary, the cross-machine cascade) follows the same pattern and is
+pinned in the library's own suite under `tests/` — copy from there when
+you need one.
 
 ## ProcessScenario API reference
 
@@ -591,7 +310,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
   asserts it propagated to the caller (the `SideEffects` re-raise contract);
   **`False`** asserts nothing propagated (the swallow contract). Omitted (the
   legacy default), an injected failure is absorbed so you can assert on the
-  *recorded* error instead. See [scenario 16](#16-the-caller-boundary-re-raise-vs-swallow).
+  *recorded* error instead.
 
 **Assertions**
 
@@ -618,7 +337,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 |---|---|
 | `assert_side_effects_ran(names)` / `assert_side_effects_not_ran(names)` | Which side-effects executed in the last tracked drive (by function `__name__` — tracked, not mocked: the real code ran). Tracking covers the whole process tree, including `next_transition` follow-ups. |
 | `assert_callbacks_ran(names)` | Which callbacks executed. |
-| `assert_failure_side_effects_ran(names)` / `assert_failure_callbacks_ran(names)` | Which failure hooks executed (for failure-path scenarios). |
+| `assert_failure_callbacks_ran(names)` | Which failure hooks executed (for failure-path scenarios). |
 
 *Caller boundary & durable row*
 

@@ -117,7 +117,6 @@ class OrderProcess(Process):
             failed_state='fulfillment_failed',
             side_effects=[side_effect_one, side_effect_two, side_effect_three],
             callbacks=[callback_one, callback_two],
-            failure_side_effects=[failure_side_effect],
             failure_callbacks=[failure_callback],
         ),
         Transition(

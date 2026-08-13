@@ -157,10 +157,8 @@ class FailureHookAssertionsTests(ProcessScenario):
 
     @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=1))
     def test_failure_hooks_are_assertable(self):
-        # crash_with_bad_cleanup: side-effect raises; terminal at
-        # MAX_ERRORS=1; its failure_side_effect (bg_fse_boom) raises too —
-        # so only failure_callbacks complete. Use 'crash' which declares
-        # failure_callbacks=[bg_failure_callback].
+        # 'crash' declares failure_callbacks=[bg_failure_callback];
+        # terminal at MAX_ERRORS=1, so the failure callback completes.
         widget = self.create_instance()
         self.background_transition(widget, 'crash',
                                    fail_side_effect='bg_boom',

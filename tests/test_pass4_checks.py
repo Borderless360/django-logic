@@ -9,8 +9,6 @@ Each test here pins one confirmed finding:
   error (``django_logic.E003``).
 * ``DJANGO_LOGIC`` set to a non-dict raised a bare ``AttributeError`` out of
   ``ready()``, naming no setting.
-* ``TRANSITION_COVERAGE_LOG = True`` reached ``open()`` unvalidated, where a
-  bool is a file descriptor: coverage lines went to stdout.
 * The #182 shadow validator checked every class in the nested tree, so a
   sibling process holding a helper named like another branch's transition
   rejected a working topology at import time.
@@ -18,8 +16,6 @@ Each test here pins one confirmed finding:
   comprehension + ``delattr``); ``ProcessManager.unbind_model_process`` is
   the supported inverse.
 """
-import pathlib
-
 from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
 from django.test import (
@@ -29,7 +25,6 @@ from django.test import (
     override_settings,
 )
 
-from django_logic import coverage
 from django_logic.background.transitions import BackgroundTransition
 from django_logic.checks import (
     check_background_app_is_installed,
@@ -40,7 +35,6 @@ from django_logic.process import (
     ModelProcessBinding,
     Process,
     ProcessManager,
-    transition_observers,
 )
 from django_logic.transition import Transition
 from tests import dl_settings
@@ -149,52 +143,6 @@ class NonDictSettingsBlockTests(SimpleTestCase):
             with self.subTest(value=value):
                 with override_settings(DJANGO_LOGIC=value):
                     validate_core_settings()
-
-
-# --- A4: TRANSITION_COVERAGE_LOG is a path, not a file descriptor --------
-
-class CoverageLogValidationTests(SimpleTestCase):
-    def test_true_is_refused_instead_of_writing_to_stdout(self):
-        # open(True) writes to file descriptor 1, so an un-validated True
-        # appended coverage lines to stdout for the rest of the process.
-        with override_settings(
-                DJANGO_LOGIC=dl_settings(TRANSITION_COVERAGE_LOG=True)):
-            with self.assertRaises(ImproperlyConfigured) as ctx:
-                validate_core_settings()
-        self.assertIn('TRANSITION_COVERAGE_LOG', str(ctx.exception))
-
-    def test_non_path_values_are_refused(self):
-        for bad in (True, 1, ['/tmp/coverage.log'], {'path': '/tmp/x'}):
-            with self.subTest(value=bad):
-                with override_settings(
-                        DJANGO_LOGIC=dl_settings(TRANSITION_COVERAGE_LOG=bad)):
-                    with self.assertRaises(ImproperlyConfigured) as ctx:
-                        validate_core_settings()
-                self.assertIn(
-                    'TRANSITION_COVERAGE_LOG', str(ctx.exception))
-
-    def test_paths_and_none_are_accepted(self):
-        for good in (None, '/tmp/pass4_coverage.log',
-                     pathlib.Path('/tmp/pass4_coverage.log')):
-            with self.subTest(value=good):
-                with override_settings(
-                        DJANGO_LOGIC=dl_settings(TRANSITION_COVERAGE_LOG=good)):
-                    validate_core_settings()
-
-    def test_ready_refuses_at_boot_and_records_nothing(self):
-        # Reverting the validation makes ready() install a recorder writing
-        # to fd 1; drop it either way so no later test logs to stdout.
-        self.addCleanup(coverage.stop_file_recording)
-        config = apps.get_app_config('django_logic')
-        observers_before = list(transition_observers)
-
-        with override_settings(
-                DJANGO_LOGIC=dl_settings(TRANSITION_COVERAGE_LOG=True)):
-            with self.assertRaises(ImproperlyConfigured):
-                config.ready()
-
-        self.assertEqual(list(transition_observers), observers_before)
-        config.ready()
 
 
 # --- F1: only the ROOT's attributes can shadow an action_name -----------

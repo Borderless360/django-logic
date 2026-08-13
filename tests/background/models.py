@@ -44,12 +44,6 @@ def bg_failure_callback(instance, **kwargs):
     instance.save(update_fields=['cb_log'])
 
 
-def bg_fse_boom(instance, **kwargs):
-    """Failure-side-effect that itself raises — used to test that the
-    swallowed exception is recorded on the TransitionMessage."""
-    raise RuntimeError('cleanup exploded')
-
-
 class Widget(models.Model):
     status = models.CharField(max_length=32, default='draft')
     # R5: a SECOND state field driven by an independent process
@@ -96,16 +90,6 @@ class WidgetProcess(Process):
             queue='django_logic.critical',
             side_effects=[bg_boom],
             failure_callbacks=[bg_failure_callback],
-        ),
-        BackgroundTransition(
-            action_name='crash_with_bad_cleanup',
-            sources=['draft'],
-            target='cwbc_target',
-            in_progress_state='cwbc_in_progress',
-            failed_state='cwbc_failed',
-            queue='django_logic.critical',
-            side_effects=[bg_boom],
-            failure_side_effects=[bg_fse_boom],
         ),
         BackgroundTransition(
             action_name='timeboxed',
@@ -627,18 +611,6 @@ SYNC_ORDER: list = []
 SYNC_LAST_KWARGS: dict = {}
 
 
-def _fse(marker):
-    """Failure-side-effect: append ``fse_<marker>`` to se_log AND record the
-    cross-hook ordering in SYNC_ORDER (so a test can assert fse runs before
-    fcb)."""
-    def fn(instance, **kwargs):
-        instance.se_log = (instance.se_log or '') + 'fse_' + marker + ','
-        instance.save(update_fields=['se_log'])
-        SYNC_ORDER.append(f'fse:{marker}')
-    fn.__name__ = f'fse_{marker}'
-    return fn
-
-
 def _fcb(marker):
     """Failure-callback: append ``fcb_<marker>`` to cb_log AND record the
     cross-hook ordering in SYNC_ORDER."""
@@ -679,27 +651,6 @@ def sync_capture_fail(instance, exception, **kwargs):
     SYNC_LAST_KWARGS['exception'] = exception
 
 
-# Separate sink for the failure-SIDE-EFFECT exception/kwarg contract, so it is
-# asserted independently of the failure-CALLBACK sink above.
-SYNC_FSE_KWARGS: dict = {}
-
-
-def sync_capture_fse(instance, exception=None, **kwargs):
-    """Failure-side-effect that records the ``exception`` kwarg + forwarded
-    caller kwargs. Pins that failure_side_effects (not just failure_callbacks)
-    receive the original exception and the caller's kwargs."""
-    SYNC_FSE_KWARGS.clear()
-    SYNC_FSE_KWARGS.update(kwargs)
-    SYNC_FSE_KWARGS['exception'] = exception
-
-
-def sync_fse_boom(instance, exception=None, **kwargs):
-    """Failure-side-effect that itself raises. Pins that a raising
-    failure_side_effect is swallowed (does not mask the ORIGINAL exception,
-    which still re-raises to the caller)."""
-    raise RuntimeError('sync cleanup exploded')
-
-
 # Callback that records the persisted state visible AT CALLBACK TIME, proving
 # the target is written before callbacks run. Reads a fresh row from the DB so
 # it observes the persisted write, not an in-memory attribute.
@@ -733,7 +684,7 @@ class WidgetSyncProcess(Process):
     """Sync Transition/Action matrix on Widget.status, bound as ``sync_proc``.
 
     Covers: ordered side-effects + next_transition chaining, the failure
-    path (failed_state + failure_side_effects + failure_callbacks), a sync
+    path (failed_state + failure_callbacks), a sync
     Action (no state change on success; failed_state only when unlocked),
     a swallowed callback exception, same-action-name disambiguation by
     condition, a permission gate, and kwargs forwarding / failure-hook
@@ -751,7 +702,6 @@ class WidgetSyncProcess(Process):
         Transition('reject', sources=['draft'], target='rejected',
                    failed_state='rejection_failed',
                    side_effects=[_se('reject_attempt')],
-                   failure_side_effects=[_fse('cleanup')],
                    failure_callbacks=[_fcb('on_fail')]),
         # Target is written before callbacks run, so a raising callback is
         # swallowed and the target state survives.
@@ -778,19 +728,11 @@ class WidgetSyncProcess(Process):
         Transition('capture_fail', sources=['draft'], target='captured',
                    failed_state='capture_failed',
                    side_effects=[sync_boom],
-                   failure_side_effects=[sync_capture_fse],
                    failure_callbacks=[sync_capture_fail]),
         # Callback ordering: the target is persisted BEFORE callbacks run.
         Transition('finalize', sources=['draft'], target='finalized',
                    side_effects=[_se('finalize')],
                    callbacks=[cb_record_seen_state]),
-        # A raising failure_side_effect must be swallowed and must NOT mask the
-        # ORIGINAL side-effect exception, which still re-raises to the caller.
-        Transition('reject_bad_cleanup', sources=['draft'], target='rbc_done',
-                   failed_state='rbc_failed',
-                   side_effects=[sync_boom],
-                   failure_side_effects=[sync_fse_boom],
-                   failure_callbacks=[_fcb('rbc')]),
     ]
 
 

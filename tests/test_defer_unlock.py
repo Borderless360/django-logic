@@ -63,9 +63,6 @@ class _DeferProcess(Process):
         Transition('chain_hook_two', sources=['draft'], target='approved',
                    callbacks=[_drive_two_others_then_fail]),
         # Fails; a failure side-effect drives another instance and fails.
-        Transition('cleanup_chain', sources=['draft'], target='done',
-                   failed_state='failed', side_effects=[_boom],
-                   failure_side_effects=[_drive_other_then_fail]),
         # Plain transition for the failed-target-write tests.
         Transition('finish_plain', sources=['draft'], target='done_plain'),
         # An Action's failed_state write is a state write under its
@@ -212,22 +209,6 @@ class DeferUnlockUntilCommitTests(TestCase):
 
         # Manual cleanup for the leaked key.
         State(first, 'status', process_name='defer_process').unlock()
-
-    def test_failure_side_effect_savepoint_rollback_releases_inner_deferred_unlock(self):
-        other = Invoice.objects.create(status='draft')
-        _OTHER['pk'] = other.pk
-        other_state = State(other, 'status', process_name='defer_process')
-
-        with self.captureOnCommitCallbacks(execute=True):
-            with self.assertRaises(ValueError):
-                self._process().cleanup_chain()
-            self.assertFalse(other_state.is_locked())
-            self.assertEqual(Invoice.objects.get(pk=other.pk).status, 'draft')
-            # Own failed_state write was real: deferral holds.
-            self.assertTrue(self.state.is_locked())
-        self.assertFalse(self.state.is_locked())
-        self.invoice.refresh_from_db()
-        self.assertEqual(self.invoice.status, 'failed')
 
     def test_failed_target_write_releases_immediately(self):
         """A rejected target write leaves nothing committed-but-invisible

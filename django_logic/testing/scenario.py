@@ -57,7 +57,7 @@ class JourneyStep:
     callbacks: list[str] = field(default_factory=list)
     # ``failed`` means an exception PROPAGATED TO THE CALLER of this drive —
     # not merely that something went wrong internally. SideEffects re-raise
-    # (failed=True); Callbacks / NextTransition / FailureSideEffects swallow
+    # (failed=True); Callbacks / NextTransition swallow
     # (failed=False even though a hook failed). That distinction is the
     # re-raise/swallow contract, so pinning ``failed`` in assert_journey
     # detects a swallow-vs-reraise flip.
@@ -155,7 +155,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
           the caller (the SideEffects re-raise contract). Works for both an
           injected failure and a hook that genuinely raises.
         * ``False`` — assert NO exception propagated even though a failure
-          occurred (the Callbacks / NextTransition / FailureSideEffects
+          occurred (the Callbacks / NextTransition
           swallow contract).
         * ``None`` (default) — legacy: an injected failure is absorbed
           silently; any other exception fails the test loudly.
@@ -273,7 +273,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # Whether an exception reaching the CALLER of the entrypoint was
         # expected — the re-raise/swallow contract. SideEffects re-raise (the
         # caller sees the exception); Callbacks / NextTransition /
-        # FailureSideEffects swallow (the caller sees nothing). A failure test
+        # NextTransition swallows (the caller sees nothing). A failure test
         # that does not declare which it expects cannot tell the two apart —
         # the exact blind spot that let the 0.1.6->0.2.0 swallow flip pass.
         # The predicates live in assert_raised / assert_not_raised — this

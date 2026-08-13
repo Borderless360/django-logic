@@ -23,13 +23,12 @@ See ``docs/TESTING_GUIDE.md`` for the full guide.
 """
 from django_logic.testing.idempotency import assert_idempotent
 from django_logic.testing.scenario import ProcessScenario, JourneyStep
-from django_logic.testing.snapshot import from_snapshot, snapshot, to_json
+from django_logic.testing.snapshot import from_snapshot, snapshot
 
 __all__ = [
     'ProcessScenario',
     'JourneyStep',
     'snapshot',
     'from_snapshot',
-    'to_json',
     'assert_idempotent',
 ]

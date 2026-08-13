@@ -26,7 +26,7 @@ from tests.stability.models import (
     Order, OrderProcess,
     side_effect_one, side_effect_two, side_effect_three,
     callback_one, callback_two,
-    failure_side_effect, failure_callback,
+    failure_callback,
 )
 
 
@@ -57,7 +57,6 @@ class TestCrashDuringSideEffects(StabilityTestCase):
                     target='fulfilled',
                     failed_state='fulfillment_failed',
                     side_effects=patched_effects,
-                    failure_side_effects=[failure_side_effect],
                 )
             ]
         })
@@ -94,7 +93,6 @@ class TestCrashDuringSideEffects(StabilityTestCase):
                         sim.wrap(side_effect_two),
                         sim.wrap(side_effect_three),
                     ],
-                    failure_side_effects=[failure_side_effect],
                 )
             ]
         })
@@ -218,54 +216,6 @@ class TestCrashBetweenCommitAndDispatch(StabilityTestCase):
 
 
 @tag('stability')
-class TestCrashDuringFailurePath(StabilityTestCase):
-    """
-    1.5 -- Side effect raises, then worker crashes during failure_side_effects.
-
-    On recovery, the full failure path should execute again (side effects
-    fail again, failure_side_effects run, failed_state set).
-    """
-
-    def test_crash_during_failure_side_effects(self):
-        call_log = []
-
-        def failing_side_effect(instance, **kwargs):
-            call_log.append('failing_se')
-            raise ValueError("Business error")
-
-        def crashing_failure_se(instance, **kwargs):
-            call_log.append('failure_se_crash')
-            raise WorkerCrashSimulated("Crash during failure SE")
-
-        order = Order.objects.create(status='approved')
-        state = State(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        process_cls = type('FailurePathCrashProcess', (OrderProcess,), {
-            'transitions': [
-                type(OrderProcess.transitions[1])(
-                    action_name='fulfill',
-                    sources=['approved'],
-                    target='fulfilled',
-                    failed_state='fulfillment_failed',
-                    side_effects=[failing_side_effect],
-                    failure_side_effects=[crashing_failure_se],
-                )
-            ]
-        })
-
-        process = process_cls(field_name='status', instance=order)
-        with self.assertRaises(ValueError):
-            process.fulfill()
-
-        self.assertIn('failing_se', call_log)
-        self.assertIn('failure_se_crash', call_log)
-
-        order.refresh_from_db()
-        self.assertIn(order.status, ('fulfillment_failed', 'fulfilling'))
-
-
-@tag('stability')
 class TestMaxRetriesExhausted(StabilityTestCase):
     """
     1.6 -- After N consecutive failures, the transition should reach
@@ -295,7 +245,6 @@ class TestMaxRetriesExhausted(StabilityTestCase):
                         target='fulfilled',
                         failed_state='fulfillment_failed',
                         side_effects=[always_failing],
-                        failure_side_effects=[failure_side_effect],
                     )
                 ]
             })

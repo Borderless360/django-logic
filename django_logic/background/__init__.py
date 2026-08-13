@@ -10,7 +10,7 @@ Public API:
 * :func:`in_flight` — racy read of whether an uncompleted row is still
   being retried, for shaping "busy, try again shortly" answers at API
   seams.
-* :func:`beat_schedule` — ready-made Celery beat entries for the five
+* :func:`beat_schedule` — ready-made Celery beat entries for the four
   safety-net tasks, routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
 All symbols are importable after Django's app registry is ready

@@ -24,30 +24,6 @@ _transition_context: ContextVar[dict | None] = ContextVar(
     '_transition_context', default=None
 )
 
-#: Transition-initiation observers. Each callable is invoked as
-#: ``observer(owning_process_cls, action_name, instance, transition)``
-#: after a transition resolves, before it executes — for every initiation
-#: path (direct calls, next_transition follow-ups, background enqueue;
-#: worker restore does not re-notify). ``transition`` is the resolved
-#: declaration object, so same-name transitions chosen by conditions
-#: are distinguishable (observers written against the 0.8
-#: three-argument form need a ``transition=None`` parameter added).
-#: Observers must never break a transition: exceptions
-#: are logged and swallowed. Registered by ``django_logic.coverage``;
-#: open to consumer metrics/tracing hooks.
-transition_observers: list = []
-
-
-def _notify_transition_observers(owning_process, action_name, instance, transition):
-    for observer in tuple(transition_observers):
-        try:
-            observer(type(owning_process), action_name, instance, transition)
-        except Exception:
-            transition_logger.exception(
-                f'transition observer {observer!r} raised; ignored'
-            )
-
-
 #: Kwarg names the engine sets on every drive, and forwards through
 #: ``__getattr__`` itself when chaining a ``next_transition`` follow-up. A
 #: caller that passes one gets it silently overwritten, so they are documented
@@ -177,10 +153,6 @@ class Process:
         transition, owning_process = self._resolve_transition_with_owner(
             action_name, user
         )
-        if transition_observers:
-            _notify_transition_observers(
-                owning_process, action_name, self.state.instance, transition
-            )
 
         tr_id = uuid.uuid4()
         transition_logger.info(
@@ -539,8 +511,8 @@ def collect_hook_signature_offenders(process_cls) -> list:
             )
 
     _HOOK_ATTRS = (
-        'side_effects', 'callbacks', 'failure_side_effects',
-        'failure_callbacks', 'conditions', 'permissions',
+        'side_effects', 'callbacks', 'failure_callbacks',
+        'conditions', 'permissions',
     )
     for proc_cls in _iter_process_tree(process_cls):
         owner = f'{proc_cls.__module__}.{proc_cls.__name__}'

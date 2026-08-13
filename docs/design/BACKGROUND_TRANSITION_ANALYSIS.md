@@ -199,9 +199,7 @@ PHASE 3 (task, outside atomic block — BEST EFFORT):
 - **If a follow-up step is critical, chain another `BackgroundTransition`.**
   The second transition has its own TM row and its own retry. The
   "best-effort" boundary is only at the callback layer.
-- **`failure_side_effects` run inside the atomic block**, before the
-  TM is marked completed. They are part of the retried flow.
-  `failure_callbacks` run after and are best-effort.
+- **`failure_callbacks` run after the atomic block** and are best-effort.
 
 ---
 
@@ -347,7 +345,7 @@ routes to `DEFAULT_QUEUE`.
 
 `manage.py check` reports a key this list does not contain
 (`django_logic.W004`) and a key an earlier release removed
-(`django_logic.W003`), so a typo is not silently ignored.
+(`django_logic.W004`), so a typo is not silently ignored.
 
 ---
 
