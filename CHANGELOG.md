@@ -33,9 +33,16 @@ growth defended the engine's own machinery).
   rejected `failed_state` write.
 - **`to_json`** from `django_logic.testing` (zero consumers; `snapshot()`
   returns a dict that `json.dumps` handles).
-- **The separate removed-settings check (`W003`)** — folded into `W004`:
-  one check now owns "the engine does not read this key", answering with
-  per-key migration advice for removed keys and the typo hint otherwise.
+- **The separate removed-settings check function** — merged into
+  `check_no_unknown_settings`, so one function now owns "the engine does
+  not read this key". The two reports keep their own ids:
+  `django_logic.W003` still carries the per-key migration advice for a
+  removed key, and `django_logic.W004` still reports a typo. They stay
+  separate because the W004 hint tells you to silence W004 when you keep
+  extra keys in `DJANGO_LOGIC` on purpose — a shared id would have hidden
+  the migration advice from everyone who followed it, and would have
+  turned `check --fail-level WARNING` red for anyone who had silenced
+  W003. No settings change is needed on upgrade.
 
 ### Added
 

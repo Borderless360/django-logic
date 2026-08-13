@@ -124,12 +124,11 @@ order.process.pay()  # Changes status from 'pending' to 'paid'
 ## Core Concepts
 
 ### Definitions 
-- **Transition** - Changes the state of an object from one to another. Contains conditions, permissions, side-effects, callbacks, failure side-effects, and failure callbacks.
+- **Transition** - Changes the state of an object from one to another. Contains conditions, permissions, side-effects, callbacks, and failure callbacks.
 - **Action** - Similar to transition but doesn't change the state. Useful for operations that need permissions and side effects without state change.
 - **Side-effects** - Functions executed during a transition before reaching the target state. If any fail, the state does not advance (`failed_state` is applied if declared). Background transitions additionally roll back the failed attempt's database writes (savepoint); synchronous side-effect writes are **not** rolled back automatically.
 - **Callbacks** - Functions executed after successfully reaching the target state.
-- **Failure side-effects** - Functions executed when side-effects fail, before the state is unlocked. Useful for cleanup or compensation that must run while the instance is still locked.
-- **Failure callbacks** - Functions executed after side-effects fail, after the state is unlocked.
+- **Failure callbacks** - Functions executed after side-effects fail, after `failed_state` is written and the state is unlocked. This is where cleanup and compensation go.
 - **Conditions** - Functions that must return True for a transition to be allowed.
 - **Permissions** - Functions that check if a user can perform a transition.
 - **Process** - Groups related transitions with common conditions and permissions.
@@ -606,11 +605,11 @@ Use a cross-process cache so the lock is shared between web processes and worker
 #### 4. Side Effects Not Rolling Back
 Side effects that modify external systems may not roll back automatically.
 
-**Solution**: Implement compensating transactions using failure side-effects (run while locked) or failure callbacks (run after unlock):
+**Solution**: Compensate in failure callbacks. They run after the state is unlocked, so make them idempotent — another process can act on the instance in between:
 
 ```python
 def compensate_payment(instance, exception, **kwargs):
-    # Reverse the payment if side effect failed
+    # Reverse the payment if a side-effect failed
     pass
 
 Transition(
@@ -618,7 +617,7 @@ Transition(
     sources=['pending'],
     target='paid',
     side_effects=[process_payment, another_side_effect],
-    failure_callbacks=[notify_admin],            # runs after unlock
+    failure_callbacks=[compensate_payment, notify_admin],   # run after unlock
 )
 ```
 
@@ -632,7 +631,7 @@ Django-Logic was created to address limitations and add new features:
 - **Processes**: Django-Logic supports grouping transitions into processes
 - **Nested Processes**: Build hierarchical workflows  
 - **Built-in Locking**: Prevents race conditions out of the box
-- **Failure Handling**: Dedicated failure side-effects, failure callbacks, and failed states
+- **Failure Handling**: Dedicated failure callbacks and failed states
 - **Better Separation**: Clear separation between business logic and implementation
 - **Background Tasks**: Durable, queue-routed background execution built in via `django_logic.background` ([Background Transitions](#background-transitions)) — no external package required
 

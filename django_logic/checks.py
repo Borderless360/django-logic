@@ -246,11 +246,12 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     )]
 
 
-#: Settings a past release removed, mapped to what to do instead. Folded into
-#: the unknown-key report below: ``DJANGO_LOGIC`` has no unknown-key
-#: rejection, so a leftover key would fail open silently — the sharpest case
-#: is a deployment that set ``LOG_KWARGS_REDACTOR`` for PII compliance,
-#: upgrades, and starts writing raw kwargs to its logs with no signal.
+#: Settings a past release removed, mapped to what to do instead. Reported by
+#: the same function as the unknown-key check below, under its own id:
+#: ``DJANGO_LOGIC`` has no unknown-key rejection, so a leftover key would fail
+#: open silently — the sharpest case is a deployment that set
+#: ``LOG_KWARGS_REDACTOR`` for PII compliance, upgrades, and starts writing raw
+#: kwargs to its logs with no signal.
 _REMOVED_SETTINGS = {
     'LOG_KWARGS':
         'kwargs are always attached to log records now; scrub them with a '
@@ -288,7 +289,8 @@ _KNOWN_SETTINGS = frozenset({
 
 @checks.register('django_logic')
 def check_no_unknown_settings(app_configs, **kwargs):
-    """Report ``DJANGO_LOGIC`` keys the engine never reads
+    """Report ``DJANGO_LOGIC`` keys the engine never reads — a key a past
+    release removed (``django_logic.W003``) or a typo
     (``django_logic.W004``).
 
     ``DJANGO_LOGIC`` is a plain dict with no schema, so a typo —
@@ -297,8 +299,11 @@ def check_no_unknown_settings(app_configs, **kwargs):
     "I set the retry limit and it did nothing" report. The known set is
     closed and small, so reporting the complement is cheap and precise.
 
-    A key a past release removed gets its own warning carrying the
-    migration advice from ``_REMOVED_SETTINGS`` instead of the typo hint.
+    A key a past release removed gets its own warning (``W003``) carrying
+    the migration advice from ``_REMOVED_SETTINGS`` instead of the typo
+    hint. One function owns both reports, but they keep separate ids: the
+    typo hint tells you to silence W004 when you keep extra keys on
+    purpose, and that must not also silence the migration advice.
     """
     from django.conf import settings
 
@@ -310,7 +315,7 @@ def check_no_unknown_settings(app_configs, **kwargs):
             f"DJANGO_LOGIC['{key}'] was removed and is now ignored: "
             f"{advice}.",
             hint='Delete the key from DJANGO_LOGIC.',
-            id='django_logic.W004',
+            id='django_logic.W003',
         )
         for key, advice in _REMOVED_SETTINGS.items() if key in conf
     ]

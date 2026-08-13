@@ -73,10 +73,11 @@ Mock only true externals (an HTTP client, a courier API, a payment gateway),
 Reject a process test that:
 
 - **(a)** asserts `get_available_transitions` / the transition list back
-  against the definition instead of asserting *availability behaviour* (a
-  blocked-by-condition or permission-denied journey — see scenarios
-  [2](#2-condition-gating), [3](#3-permission-gating),
-  [14](#14-conditions-in-the-blocking-direction));
+  against the definition instead of asserting *availability behaviour*. Write
+  a blocked-by-condition or permission-denied journey instead: call
+  `assert_not_available`, then force the transition and assert it raises
+  `TransitionNotAllowed` and changed no state. Worked examples live in the
+  library's own `tests/test_process_guards.py`;
 - **(b)** `patch`es any `django_logic` internal (use `fail_side_effect=` to
   inject a failure into the real path instead);
 - **(c)** contains no assertion against a persisted instance (a test that only
