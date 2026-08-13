@@ -188,6 +188,13 @@ class BeatScheduleTests(ProcessScenario):
             {'task': 'django_logic.retry_stale_transitions',
              'schedule': 30.0, 'options': {'queue': 'my.starter'}},
         )
+        # Cleanup must be a wall-clock schedule, not an interval: interval
+        # entries count from beat start-up, and a beat that restarts on
+        # every deploy (or daily, on platforms that cycle dynos) never
+        # reaches a day-scale interval, so cleanup silently never ran.
+        from celery.schedules import crontab
+        self.assertIsInstance(
+            schedule['django-logic-cleanup']['schedule'], crontab)
         # Every entry names a task that actually exists in the registry.
         from django_logic.background import tasks
         registered = {

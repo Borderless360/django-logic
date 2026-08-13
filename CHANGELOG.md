@@ -45,6 +45,17 @@ growth defended the engine's own machinery).
   a consumer-reproduced failure, adversarial self-review capped at one
   pass, and a third fix on one defect class triggers a design cut.
 
+### Fixed
+
+- **`beat_schedule()` schedules cleanup by crontab (03:17), not a 24-hour
+  interval** (#203, reproduced on both gv Heroku apps). Interval entries
+  count from beat start-up and the default scheduler state lives on disk,
+  so a beat that restarts on every deploy — or daily, on platforms that
+  cycle dynos — never reaches a day-scale interval: completed rows piled
+  up 9–10 days deep while the short-interval tasks ran fine. The
+  ``cleanup_seconds`` keyword becomes ``cleanup_schedule`` (any Celery
+  schedule value).
+
 ### Changed
 
 - The testing-guide scenario catalog is five canonical scenarios; the
