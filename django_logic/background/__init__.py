@@ -5,10 +5,11 @@ Public API:
 * :class:`BackgroundTransition` / :class:`BackgroundAction` — declarative
   background-executed transitions with per-transition queue routing.
 * :func:`sync_execution` — context manager that forces the current block
-  to run phase 2 inline (for tests, management commands, the shell).
+  to run the worker path inline (for tests, management commands, the shell).
 * :func:`retry_pending` — run the periodic safety-net task once inline.
-* :func:`in_flight` — racy read of the durable in-flight marker, for
-  shaping "busy, try again shortly" answers at API seams (#197).
+* :func:`in_flight` — racy read of whether an uncompleted row is still
+  being retried, for shaping "busy, try again shortly" answers at API
+  seams.
 * :func:`beat_schedule` — ready-made Celery beat entries for the five
   safety-net tasks, routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 

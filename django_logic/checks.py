@@ -75,7 +75,7 @@ def check_background_app_is_installed(app_configs, **kwargs):
     ``INSTALLED_APPS`` (``django_logic.E003``).
 
     The app owns the ``TransitionMessage`` table and its migrations. Without
-    it, phase 1 has nowhere to write the outbox row, so the first background
+    it, enqueue has nowhere to write the outbox row, so the first background
     transition dies with a raw ``OperationalError: no such table`` from deep
     inside the engine — and the other background checks (E002, W002) gate on
     the very same missing app, so ``manage.py check`` said nothing at all.
@@ -90,7 +90,7 @@ def check_background_app_is_installed(app_configs, **kwargs):
     return [checks.Error(
         "Background transitions are bound on %s, but "
         "'django_logic.background' is not in INSTALLED_APPS. The app owns "
-        "the TransitionMessage table those transitions write in phase 1, so "
+        "the TransitionMessage table those transitions write in enqueue, so "
         "the first background transition fails with a missing-table "
         "database error." % ', '.join(offenders),
         hint="Add 'django_logic.background' to INSTALLED_APPS and run "
@@ -104,9 +104,9 @@ def check_background_app_is_installed(app_configs, **kwargs):
 @checks.register('django_logic')
 def check_background_database_routing(app_configs, **kwargs):
     """Database routers must not split the background engine across
-    databases (``django_logic.E002``, #148).
+    databases (``django_logic.E002``).
 
-    The durability contract is an *atomic outbox*: phase 1 writes the
+    The durability contract is an *atomic outbox*: enqueue writes the
     instance's ``in_progress_state`` and the ``TransitionMessage`` row in
     ONE transaction, and the runtime uses unqualified managers and bare
     ``transaction.atomic()`` throughout — both resolve to the ``default``
@@ -184,7 +184,7 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     running app's beat schedule (``django_logic.W002``).
 
     They are the durability half of ``BACKGROUND_EXECUTION='celery'``: without
-    them a lost phase-2 message is never re-dispatched, an attempt that dies
+    them a lost worker message is never re-dispatched, an attempt that dies
     without raising is never terminalized, and completed rows are never pruned.
     Nothing else notices — a consumer ran seven weeks with them all silently
     unscheduled, accumulating 36 stranded rows, because
@@ -230,7 +230,7 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
         return []
     return [checks.Warning(
         "BACKGROUND_EXECUTION='celery' but these periodic safety-net tasks "
-        "are not in the Celery beat schedule: %s. Lost phase-2 messages will "
+        "are not in the Celery beat schedule: %s. Lost worker messages will "
         "never be re-dispatched and completed rows will never be pruned."
         % ', '.join(missing),
         hint="Install them with "
@@ -258,7 +258,7 @@ _REMOVED_SETTINGS = {
         'kwargs are always attached to log records now; scrub them with a '
         'logging.Filter on the "django-logic.transition" logger',
     'PHASE2_STATE_GUARD':
-        'the phase-2 state guard always enforces; there are no modes',
+        'the worker state guard always enforces; there are no modes',
     'SENTRY_TRANSACTION_NAMING':
         'Sentry transactions are always named per transition',
     'PROCESS_CLASS_ALIASES':
@@ -311,7 +311,7 @@ _KNOWN_SETTINGS = frozenset({
 @checks.register('django_logic')
 def check_no_unknown_settings(app_configs, **kwargs):
     """Report ``DJANGO_LOGIC`` keys the engine never reads
-    (``django_logic.W004``, #182).
+    (``django_logic.W004``).
 
     ``DJANGO_LOGIC`` is a plain dict with no schema, so a typo —
     ``TRANSITION_MESSAGE_MAX_ERROR``, ``LOCK_TIMOUT`` — is silently ignored

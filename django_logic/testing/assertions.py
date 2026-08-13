@@ -111,7 +111,7 @@ class ScenarioAssertions:
         the hook is listed and got called — NOT that it produced the right
         domain change. Pair it with assert_changed / assert_unchanged /
         assert_related_count (or a direct DB assertion) to pin the OUTCOME the
-        side-effect is supposed to produce (issue #103)."""
+        side-effect is supposed to produce."""
         names = _names(names, 'assert_side_effects_ran')
         ran = self._tracker().side_effects_ran
         missing = [n for n in names if n not in ran]
@@ -135,7 +135,7 @@ class ScenarioAssertions:
         """WIRING check: assert the named callbacks executed — not that they
         did the right thing. For a callback whose whole purpose is a domain
         effect (e.g. deleting related rows), also assert the effect with
-        assert_related_count / assert_changed (issue #103)."""
+        assert_related_count / assert_changed."""
         names = _names(names, 'assert_callbacks_ran')
         ran = self._tracker().callbacks_ran
         missing = [n for n in names if n not in ran]
@@ -168,30 +168,30 @@ class ScenarioAssertions:
     # --- background error state ------------------------------------------
 
     def assert_error_recorded(self, instance, contains):
-        tm = latest_message(instance, process_name=self._process_name)
-        if tm is None or contains not in (tm.last_error_message or ''):
+        transition_message = latest_message(instance, process_name=self._process_name)
+        if transition_message is None or contains not in (transition_message.last_error_message or ''):
             self._record_assert(f'assert_error_recorded({contains!r})', ok=False)
             self._fail(
                 f'Expected a recorded error containing {contains!r}, but '
                 + ('no TransitionMessage exists for this instance.'
-                   if tm is None else f'last_error={tm.last_error_message!r}.'),
+                   if transition_message is None else f'last_error={transition_message.last_error_message!r}.'),
                 instance=instance,
             )
         self._record_assert(f'assert_error_recorded({contains!r})', ok=True)
 
     def assert_error_count(self, instance, expected):
-        tm = latest_message(instance, process_name=self._process_name)
-        actual = None if tm is None else tm.errors_count
+        transition_message = latest_message(instance, process_name=self._process_name)
+        actual = None if transition_message is None else transition_message.errors_count
         if actual != expected:
             self._record_assert(f'assert_error_count({expected})', ok=False)
             self._fail(
                 f'Expected errors_count={expected}, but '
-                + ('no TransitionMessage exists.' if tm is None else f'got {actual}.'),
+                + ('no TransitionMessage exists.' if transition_message is None else f'got {actual}.'),
                 instance=instance,
             )
         self._record_assert(f'assert_error_count({expected})', ok=True)
 
-    # --- domain outcome (before/after delta, issue #103) -----------------
+    # --- domain outcome (before/after delta) -----------------
 
     def capture(self, instance, fields):
         """Snapshot the named fields of ``instance`` NOW, as a baseline for a
@@ -199,7 +199,7 @@ class ScenarioAssertions:
         from the DB (via ``_base_manager`` so a filtered default manager can't
         hide it) and does NOT mutate the instance you pass in.
 
-        The point (issue #103): a scenario should assert what the object
+        The point: a scenario should assert what the object
         *became*, not merely that a hook ran. ``capture`` records the "before"
         so the "after" delta is checkable.
         """
@@ -215,8 +215,7 @@ class ScenarioAssertions:
         holds ``new`` now. Refreshes ``instance`` from the DB first.
 
         Unlike ``assert_side_effects_ran`` (a wiring check), this fails if the
-        hook was called but produced the wrong change — the gap issue #103
-        describes.
+        hook was called but produced the wrong change.
         """
         instance.refresh_from_db()
         problems = []
@@ -270,8 +269,7 @@ class ScenarioAssertions:
 
         For a hook whose whole effect is on related tables — a ``delete_*``
         callback that must drop child rows, a side-effect that must generate
-        N records — this pins the related-row delta the wiring check can't see
-        (issue #103). Pass the queryset AFTER the drive; capture the
+        N records — this pins the related-row delta the wiring check can't see. Pass the queryset AFTER the drive; capture the
         before-count with ``queryset.count()`` yourself if you need the delta.
         """
         actual = queryset.count()
@@ -388,23 +386,23 @@ class ScenarioAssertions:
         self._record_assert(f'assert_journey({len(expected_steps)} steps)',
                             ok=True)
 
-    # --- background owner (phase-2 restore discriminator) ---------------
+    # --- background owner (worker restore discriminator) ---------------
 
     def assert_transition_owner(self, instance, owner, *, transition_name=None):
         """Assert the recorded ``owning_process_class`` on the instance's
         latest ``TransitionMessage`` (or the one named ``transition_name``
-        when given). Pins the phase-2 owner discriminator — critical for
+        when given). Pins the worker owner discriminator — critical for
         chained/nested background transitions, where the follow-up must
         record its OWN owner, not the predecessor's.
         """
         if transition_name is not None:
-            tm = message_for(instance, transition_name,
+            transition_message = message_for(instance, transition_name,
                              process_name=self._process_name)
             label = f'assert_transition_owner({transition_name!r}, {owner!r})'
         else:
-            tm = latest_message(instance, process_name=self._process_name)
+            transition_message = latest_message(instance, process_name=self._process_name)
             label = f'assert_transition_owner({owner!r})'
-        actual = None if tm is None else tm.owning_process_class
+        actual = None if transition_message is None else transition_message.owning_process_class
         if actual != owner:
             self._record_assert(label, ok=False,
                                 detail=f'got {actual!r}')
@@ -412,7 +410,7 @@ class ScenarioAssertions:
                 where = 'the latest TransitionMessage'
             else:
                 where = f'TransitionMessage for {transition_name!r}'
-            suffix = '' if tm is not None else ' (no TransitionMessage exists.)'
+            suffix = '' if transition_message is not None else ' (no TransitionMessage exists.)'
             self._fail(
                 f'Expected owning_process_class={owner!r} on {where}, '
                 f'but got {actual!r}.{suffix}',

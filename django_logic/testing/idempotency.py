@@ -1,4 +1,4 @@
-"""Idempotency assertion for background side-effects (issue #106).
+"""Idempotency assertion for background side-effects.
 
 Background side-effects re-run FROM SCRATCH on every retry (crash
 re-delivery, watchdog requeue, the periodic starter), so every side-effect

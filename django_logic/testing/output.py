@@ -23,21 +23,21 @@ def format_timeline(entries: list[dict]) -> str:
     return '\n'.join(lines)
 
 
-def format_tm(tm) -> str:
-    if tm is None:
+def format_transition_message(transition_message) -> str:
+    if transition_message is None:
         return ''
     return (
         '\n  TransitionMessage:\n'
-        f'    transition: {tm.transition_name}\n'
-        f'    is_completed: {tm.is_completed}\n'
-        f'    errors_count: {tm.errors_count}\n'
-        f'    last_error: {tm.last_error_message or "(none)"}'
+        f'    transition: {transition_message.transition_name}\n'
+        f'    is_completed: {transition_message.is_completed}\n'
+        f'    errors_count: {transition_message.errors_count}\n'
+        f'    last_error: {transition_message.last_error_message or "(none)"}'
     )
 
 
-def format_failure(message: str, timeline: list[dict], *, tm=None) -> str:
+def format_failure(message: str, timeline: list[dict], *, transition_message=None) -> str:
     parts = [message, '', format_timeline(timeline)]
-    tm_block = format_tm(tm)
-    if tm_block:
-        parts.append(tm_block)
+    message_block = format_transition_message(transition_message)
+    if message_block:
+        parts.append(message_block)
     return '\n'.join(parts)

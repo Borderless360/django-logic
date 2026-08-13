@@ -25,7 +25,7 @@ def background_execution() -> str:
     """Return the configured execution mode.
 
     Defaults to ``'celery'`` — background transitions are Celery tasks.
-    ``'sync'`` runs phase 2 inline in the same process and exists for
+    ``'sync'`` runs the worker inline in the same process and exists for
     tests, CI, management commands, and the shell.
     """
     configured = _conf().get('BACKGROUND_EXECUTION')
@@ -183,7 +183,7 @@ def validate_on_ready() -> None:
     # Surface value errors now rather than on first use.
     default_queue()
     starter_queue()
-    # Safety settings (#149): every numeric knob the retry/cleanup/lock
+    # Safety settings: every numeric knob the retry/cleanup/lock
     # machinery depends on is validated at boot in EVERY mode — a bad
     # value must not wait for its first use (which may be a 3am retry
     # tick) to explode, or worse, silently misbehave.
@@ -198,7 +198,7 @@ def validate_on_ready() -> None:
     if mode == EXECUTION_CELERY:
         _reject_sqlite_in_celery_mode()
         _check_lock_cache_in_celery_mode()
-        # NB: broker liveness is NOT checked here — validate_on_ready runs
+        # NB: whether the broker is reachable is NOT checked here — validate_on_ready runs
         # at Django app-ready, which in the standard celery.py pattern is
         # *before* the project's Celery app sets broker_url, so it would
         # false-warn on every boot. The check lives in dispatch (where the
@@ -207,7 +207,7 @@ def validate_on_ready() -> None:
 
 def _reject_sqlite_in_celery_mode() -> None:
     """SQLite doesn't support ``select_for_update(nowait=True)`` nor
-    partial unique indexes, so the phase-2 concurrency guard silently
+    partial unique indexes, so the worker concurrency guard silently
     degrades to "serialize everything" — which masks real bugs in dev
     and fails in prod.
 
@@ -269,7 +269,7 @@ def _check_lock_cache_in_celery_mode() -> None:
 
 
 def _validate_bool(key: str) -> None:
-    """Reject a non-bool on a setting that gates behaviour (#182).
+    """Reject a non-bool on a setting that gates behaviour.
 
     Truthiness coercion is unsafe for these: the strings 'false'/'no'/'0'
     are all truthy, so a value meant to disable a feature enabled it.
@@ -284,16 +284,16 @@ def _validate_bool(key: str) -> None:
 
 
 def strict_kwargs_serialization() -> bool:
-    """When True, phase-1 kwargs serialization raises on silently-droppable
+    """When True, enqueue kwargs serialization raises on silently-droppable
     caller kwargs (``request``) instead of logging a warning.
 
     Default False: generic API layers commonly pass ``request`` to every
     transition uniformly, so raising by default would break them. Enable
     once call sites are clean to turn the drop into a hard contract.
 
-    Only a literal ``True`` enables it (#182). It used to be
+    Only a literal ``True`` enables it. It used to be
     ``bool(...)``-coerced, so any non-empty string switched strict mode ON —
-    reading ``DL_STRICT=false`` from an env var made phase 1 start raising.
+    reading ``DL_STRICT=false`` from an env var made enqueue start raising.
     Mirrors ``conf.defer_unlock_until_commit``; boot validation rejects
     non-bools and this reader stays safe where that has not run.
     """

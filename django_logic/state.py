@@ -18,7 +18,7 @@ class State(object):
 
         Subclasses must NOT override this with a cached read — it is the
         authoritative source used by the under-the-lock revalidation and
-        the phase-2 state guard.
+        the worker's state guard.
 
         Uses ``_base_manager`` so a filtered default manager (archived /
         soft-deleted rows hidden) cannot make a framework-level reload of
@@ -29,7 +29,7 @@ class State(object):
         # instance-aware (Model.save and refresh_from_db pass
         # hints={'instance': ...}; _release_lock reads instance._state.db), but
         # this read was unrouted, so on a non-default alias the under-lock
-        # revalidation and the phase-2 state guard compared against whatever
+        # revalidation and the worker's state guard compared against whatever
         # row the DEFAULT database happened to hold.
         using = self.instance._state.db or DEFAULT_DB_ALIAS
         return (

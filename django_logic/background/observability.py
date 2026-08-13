@@ -18,23 +18,27 @@ Both are best-effort and never affect transition execution.
 from __future__ import annotations
 
 
-def task_label(tm) -> str:
+def task_label(transition_message) -> str:
     """Stable, readable per-transition label, e.g. ``django_logic.orders.fulfill``."""
-    return f'django_logic.{tm.app_label}.{tm.transition_name}'
+    return (
+        f'django_logic.{transition_message.app_label}.'
+        f'{transition_message.transition_name}'
+    )
 
 
-def set_sentry_context(tm) -> None:
+def set_sentry_context(transition_message) -> None:
     """Name + tag the current Sentry scope per transition. No-op if sentry-sdk
     is absent. Never raises."""
     try:
         import sentry_sdk
 
         scope = sentry_sdk.get_current_scope()
-        scope.set_transaction_name(task_label(tm), source='custom')
-        scope.set_tag('dl.app', tm.app_label)
-        scope.set_tag('dl.model', tm.model_name)
-        scope.set_tag('dl.transition', tm.transition_name)
-        scope.set_tag('dl.instance_id', tm.instance_id)
-        scope.set_tag('dl.queue', tm.queue_name)
+        scope.set_transaction_name(
+            task_label(transition_message), source='custom')
+        scope.set_tag('dl.app', transition_message.app_label)
+        scope.set_tag('dl.model', transition_message.model_name)
+        scope.set_tag('dl.transition', transition_message.transition_name)
+        scope.set_tag('dl.instance_id', transition_message.instance_id)
+        scope.set_tag('dl.queue', transition_message.queue_name)
     except Exception:
         pass

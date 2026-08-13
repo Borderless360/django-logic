@@ -1,16 +1,17 @@
 """TransitionMessage — the durable record of an in-progress transition.
 
-Every ``BackgroundTransition`` / ``BackgroundAction`` creates one row in
-phase 1, atomically with the ``in_progress_state`` write on the target
-instance. Phase 2 reads the row under ``select_for_update(nowait=True)``
-and marks it completed at the end of a successful execution.
+Every ``BackgroundTransition`` / ``BackgroundAction`` creates one row
+when it enqueues, atomically with the ``in_progress_state`` write on the
+target instance. The worker reads the row under
+``select_for_update(nowait=True)`` and marks it completed at the end of
+a successful execution.
 
 The partial unique constraint ``(app_label, model_name, instance_id,
 process_name)`` where ``is_completed=False`` is the concurrency guard —
 only one uncompleted message can exist per instance *per process* at a
 time. Two processes bound to different state fields of the same model
 are independent state machines and may both have background work in
-flight.
+progress.
 """
 from __future__ import annotations
 
@@ -64,48 +65,50 @@ class TransitionMessage(TimeStampedModel):
     # branch in the first place.
     failure_side_effect_error = models.TextField(blank=True)
 
-    # Phase-2 timing. ``started_at`` is (re)written at the top of every
-    # phase-2 attempt, so on retry it reflects the *current* attempt —
-    # a watchdog can scan ``is_completed=False AND started_at < cutoff``
+    # Worker timing. ``started_at`` is (re)written at the top of every
+    # attempt, so on retry it reflects the *current* attempt — a
+    # watchdog can scan ``is_completed=False AND started_at < cutoff``
     # to find hung attempts. ``completed_at`` is set once when the row
     # is marked completed (success or terminal failure). ``duration_ms``
-    # measures the last attempt only; null if phase 2 never ran.
+    # measures the last attempt only; null if the worker never ran.
     started_at = models.DateTimeField(blank=True, null=True)
     completed_at = models.DateTimeField(blank=True, null=True)
     duration_ms = models.PositiveIntegerField(blank=True, null=True)
 
     app_label = models.CharField(max_length=100)
     model_name = models.CharField(max_length=100)
-    # Stored as text (``str(instance.pk)``) rather than an integer so the
-    # background path supports every primary-key type the synchronous core
-    # already supports: BigAutoField PKs beyond 2**31-1, UUIDField, and
+    # Stored as text (``str(instance.pk)``) so the background path
+    # supports every primary-key type the synchronous core already
+    # supports: BigAutoField PKs beyond 2**31-1, UUIDField, and
     # CharField primary keys. ``_restore`` looks the instance up with
     # ``model._base_manager.get(pk=instance_id)`` (immune to filtered
-    # default managers — issue #90), which coerces the string back
-    # to the model's real pk type.
+    # default managers), which coerces the string back to the model's
+    # real pk type.
     instance_id = models.CharField(max_length=255)
     process_name = models.CharField(max_length=100)
-    # The model field the process is bound to. Lets phase 2 reconstruct
+    # The model field the process is bound to. Lets the worker reconstruct
     # the process from the recorded ``process_class`` without guessing
-    # the field name when the model property has been renamed/rebound
-    # between phases. Blank on rows created before 0.4.0.
+    # the field name when the model property has been renamed or rebound
+    # between enqueue and execute. Blank on rows created before 0.4.0.
     field_name = models.CharField(max_length=100, blank=True, default='')
     transition_name = models.CharField(max_length=100)
-    # Dotted path of the (possibly nested) Process class that DECLARES the
-    # transition. Phase 2 uses it to restore the EXACT background transition when
-    # an ``action_name`` is shared across condition-disambiguated nested
-    # processes (e.g. per-integration Gmail/Dummy sub-processes). It is recorded
-    # for EVERY background transition started through the Process entrypoint —
-    # for a transition on the bound process itself it equals the bound class
-    # path; for a nested one it is the nested class path. Blank only on rows
-    # created before this discriminator existed (pre-0.4.x) or, rarely, ones
-    # enqueued outside the Process entrypoint; phase 2 then resolves by
-    # ``transition_name`` (only when that name is unambiguous across the tree).
+    # Dotted path of the (possibly nested) Process class that declared the
+    # transition. The worker uses it to restore that exact background
+    # transition when an ``action_name`` is shared across nested processes
+    # that use conditions to choose (e.g. per-integration Gmail/Dummy
+    # sub-processes). It is recorded for every background transition
+    # started through the Process entrypoint — for a transition on the
+    # bound process itself it equals the bound class path; for a nested
+    # one it is the nested class path. Blank only on rows created before
+    # this column existed (pre-0.4.x) or, rarely, ones enqueued outside
+    # the Process entrypoint; the worker then resolves by
+    # ``transition_name`` (only when that name is unambiguous across the
+    # tree).
     #
     # TextField (not a length-capped CharField) to mirror the unbounded
-    # ``process_class`` stored in ``kwargs``: a deeply-namespaced dotted path
-    # must never overflow and abort phase 1. Never indexed — only read by pk in
-    # phase-2 restore and compared for equality.
+    # ``process_class`` stored in ``kwargs``: a deeply-namespaced dotted
+    # path must never overflow and abort enqueue. Never indexed — only
+    # read by pk when the worker restores and compared for equality.
     owning_process_class = models.TextField(blank=True, default='')
     queue_name = models.CharField(max_length=100)
 
@@ -134,7 +137,7 @@ class TransitionMessage(TimeStampedModel):
             ),
         ]
         constraints = [
-            # One in-flight background transition per instance PER PROCESS.
+            # One uncompleted background transition per instance PER PROCESS.
             # Without process_name in the constraint, two independent state
             # machines on the same model (e.g. ``status`` and
             # ``payment_status``) would falsely conflict.
@@ -154,13 +157,11 @@ class TransitionMessage(TimeStampedModel):
 
     @classmethod
     def in_flight_for(cls, instance, process_name: str):
-        """The uncompleted rows for ``instance`` + ``process_name`` — the
-        durable in-flight marker (#197).
+        """The uncompleted rows for ``instance`` + ``process_name``.
 
-        The ONE place the marker filter is written. The sync gate, the
-        Action failure path, and the public ``in_flight()`` probe all read
-        through it, so a future change to the marker's keying (the
-        #184/#186 identity rework) changes it exactly once.
+        The one place this filter is written. The sync gate, the Action
+        failure path, and the public ``in_flight()`` probe all read
+        through it, so a future change to the keying changes it once.
         """
         return cls.objects.filter(
             app_label=instance._meta.app_label,
@@ -170,34 +171,36 @@ class TransitionMessage(TimeStampedModel):
             is_completed=False,
         )
 
-    LIVENESS_LIVE = 'live'
-    LIVENESS_STRANDED = 'stranded'
+    RETRYING = 'retrying'
+    STRANDED = 'stranded'
 
     #: Grace between an attempt exhausting its declared budget and the
     #: watchdog abandoning it (which writes ``modified`` via record_error,
-    #: putting the row back on the horizon clock).
-    LIVENESS_SLACK = timedelta(minutes=5)
+    #: putting the row back on the retry-window clock).
+    RETRY_SLACK = timedelta(minutes=5)
 
     @classmethod
-    def in_flight_liveness(cls, instance, process_name: str):
-        """``None`` (no uncompleted row), ``LIVENESS_LIVE``, or
-        ``LIVENESS_STRANDED`` (#195) — one classification shared by the
-        sync gate, phase 1's constraint rejection, and ``in_flight()``, so
-        they can never disagree about the same row.
+    def retry_status(cls, instance, process_name: str):
+        """``None`` (no uncompleted row), ``RETRYING``, or ``STRANDED``.
 
-        Liveness signals, in order:
+        One classification shared by the sync gate, enqueue's constraint
+        rejection, and ``in_flight()``, so they can never disagree about
+        the same row.
+
+        In order:
 
         * a running attempt inside its declared per-attempt budget
-          (``started_at + timeout_seconds`` plus slack) is LIVE — the
-          watchdog's own definition, so the gate cannot call an attempt
-          stranded while the watchdog still calls it live;
-        * otherwise a row whose newest activity (``modified``, refreshed at
-          attempt start / on every recorded error, or ``started_at``) is
-          within the retry horizon is LIVE;
-        * past the horizon it is STRANDED: nothing has driven it for longer
-          than the whole retry pipeline's span. This cannot distinguish a
-          truly lost row from a queue backlogged for that long — the
-          stranded message names both causes.
+          (``started_at + timeout_seconds`` plus slack) is still being
+          retried — the watchdog's own definition, so the gate cannot
+          call an attempt stranded while the watchdog still treats it
+          as live;
+        * otherwise a row whose newest activity (``modified``, refreshed
+          at attempt start / on every recorded error, or ``started_at``)
+          is within the retry window is still being retried;
+        * past the window it is stranded: nothing has retried it for
+          longer than the whole retry pipeline's span. This cannot
+          distinguish a truly lost row from a queue backlogged for that
+          long — the stranded message names both causes.
         """
         from django_logic.background import settings as bg_settings
 
@@ -213,26 +216,26 @@ class TransitionMessage(TimeStampedModel):
         started, timeout = row['started_at'], row['timeout_seconds']
         if (
             started is not None and timeout is not None
-            and now < started + timedelta(seconds=timeout) + cls.LIVENESS_SLACK
+            and now < started + timedelta(seconds=timeout) + cls.RETRY_SLACK
         ):
-            return cls.LIVENESS_LIVE
+            return cls.RETRYING
         newest = max(t for t in (row['modified'], started) if t is not None)
         # The whole retry pipeline's span plus slack, floored so short
         # test/dev retry configs don't classify a fresh row as stale.
-        horizon = max(
+        retry_window = max(
             bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
         )
-        if now - newest > timedelta(minutes=horizon):
-            return cls.LIVENESS_STRANDED
-        return cls.LIVENESS_LIVE
+        if now - newest > timedelta(minutes=retry_window):
+            return cls.STRANDED
+        return cls.RETRYING
 
     @classmethod
-    def stamp_attempt_started(cls, tm_id: int) -> bool:
+    def stamp_attempt_started(cls, transition_message_id: int) -> bool:
         """Mark an attempt as beginning, in its own committed statement.
 
-        Deliberately called from *outside* the attempt's ``atomic`` block
-        (#179). ``started_at`` is the only field that must be visible to
-        other connections *while* the attempt runs, and must survive the
+        Deliberately called from *outside* the attempt's ``atomic`` block.
+        ``started_at`` is the only field that must be visible to other
+        connections *while* the attempt runs, and must survive the
         attempt rolling back:
 
         * A hung attempt holds its transaction open, so a ``started_at``
@@ -251,18 +254,19 @@ class TransitionMessage(TimeStampedModel):
         Durability is mode-dependent, as for
         ``runner._mark_unrestorable_completed``:
 
-        * **Celery mode** — phase 2 is the top-level unit of work with no
-          surrounding transaction, so this UPDATE autocommits and is visible
-          to the watchdog immediately. Verified against real PostgreSQL from
-          a second connection. This is the mode the watchdog exists for.
+        * **Celery mode** — the worker is the top-level unit of work with
+          no surrounding transaction, so this UPDATE autocommits and is
+          visible to the watchdog immediately. Verified against real
+          PostgreSQL from a second connection. This is the mode the
+          watchdog exists for.
         * **Sync mode inside a caller's ``atomic()``** — it is part of the
-          caller's transaction and invisible to other connections until the
-          caller commits. Harmless: the phase-1 INSERT that created the row
-          is in that same transaction, so on rollback there is no surviving
-          row to abandon, and on commit the row and this marker become
-          visible together. There is also no worker to abandon — the
-          "attempt" is the caller's own thread, which a watchdog could not
-          rescue anyway.
+          caller's transaction and invisible to other connections until
+          the caller commits. Harmless: the INSERT that created the row
+          is in that same transaction, so on rollback there is no
+          surviving row to abandon, and on commit the row and this stamp
+          become visible together. There is also no worker to abandon —
+          the "attempt" is the caller's own thread, which a watchdog
+          could not rescue anyway.
 
         Acquires the row lock with ``nowait`` first and gives up if another
         attempt holds it. That is not an optimisation — a bare ``UPDATE``
@@ -285,12 +289,14 @@ class TransitionMessage(TimeStampedModel):
                 held = (
                     cls.objects
                     .select_for_update(nowait=True)
-                    .filter(pk=tm_id, is_completed=False)
+                    .filter(pk=transition_message_id, is_completed=False)
                     .exists()
                 )
                 if not held:
                     return False
-                cls.objects.filter(pk=tm_id, is_completed=False).update(
+                cls.objects.filter(
+                    pk=transition_message_id, is_completed=False
+                ).update(
                     started_at=now, modified=now,
                 )
         except OperationalError:
@@ -303,7 +309,7 @@ class TransitionMessage(TimeStampedModel):
 
         ``measure_duration`` must be ``False`` when the row is finalized by
         a safety-net task (watchdog / detect_stuck) rather than by an actual
-        phase-2 attempt. In that case ``started_at`` belongs to an abandoned
+        worker attempt. In that case ``started_at`` belongs to an abandoned
         attempt that may be minutes or hours old, so ``now - started_at`` is
         the time-to-finalize, not an execution time — recording it as
         ``duration_ms`` would grossly inflate latency metrics. Leaving
@@ -325,7 +331,7 @@ class TransitionMessage(TimeStampedModel):
         """Terminal outcome for a row whose instance was moved by something
         else (manual ops fix, external write) while the row was pending.
 
-        The phase-2 state guard calls this instead of running side-effects:
+        The worker's state guard calls this instead of running side-effects:
         the row completes (so retries stop), the external state wins, and
         the reason is recorded on ``last_error_message`` for the audit
         trail. ``errors_count`` is NOT incremented — nothing failed.

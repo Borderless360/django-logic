@@ -27,12 +27,12 @@ _transition_context: ContextVar[dict | None] = ContextVar(
 #: Transition-initiation observers. Each callable is invoked as
 #: ``observer(owning_process_cls, action_name, instance, transition)``
 #: after a transition resolves, before it executes — for every initiation
-#: path (direct calls, next_transition follow-ups, background phase 1;
-#: phase-2 restore does not re-notify). ``transition`` is the resolved
-#: declaration object, so condition-disambiguated same-name transitions
-#: are distinguishable (#146; the argument was added in 0.9 — observers
-#: written against the 0.8 three-argument form need a ``transition=None``
-#: parameter added). Observers must never break a transition: exceptions
+#: path (direct calls, next_transition follow-ups, background enqueue;
+#: worker restore does not re-notify). ``transition`` is the resolved
+#: declaration object, so same-name transitions chosen by conditions
+#: are distinguishable (observers written against the 0.8
+#: three-argument form need a ``transition=None`` parameter added).
+#: Observers must never break a transition: exceptions
 #: are logged and swallowed. Registered by ``django_logic.coverage``;
 #: open to consumer metrics/tracing hooks.
 transition_observers: list = []
@@ -81,8 +81,9 @@ class Process:
     ``process_name``, and ``state_class``.
 
     Class-time validation enforces that a background transition is
-    uniquely identifiable by ``(owning process class, action_name)``,
-    which is what phase-2 restore resolves a ``TransitionMessage`` by.
+    uniquely identifiable by ``(process class that declared it,
+    action_name)``, which is what the worker uses to restore a
+    ``TransitionMessage``.
     """
 
     nested_processes = []
@@ -159,7 +160,7 @@ class Process:
 
         # Django's template engine CALLS any callable it resolves, so
         # ``{{ order.process.approve }}`` used to drive the state machine
-        # while rendering a page and print the tr_id (#181). ``alters_data``
+        # while rendering a page and print the tr_id. ``alters_data``
         # is the framework's opt-out — the same marker Model.save/delete
         # carry — and makes the engine render '' instead of calling.
         transition_method.alters_data = True
@@ -251,13 +252,13 @@ class Process:
         ``(transition, owning_process)`` pairs.
 
         ``owning_process`` is the (possibly nested) ``Process`` instance that
-        declared the transition — what phase 1 records so phase-2 restore can
-        identify the exact background transition among condition-disambiguated
-        siblings sharing an ``action_name``. Iteration order and filtering are
-        identical to ``get_available_transitions``; that method is a thin
-        wrapper that drops the owner.
+        declared the transition — what enqueue records so the worker can
+        identify the exact background transition among siblings that share
+        an ``action_name`` and use conditions to choose. Iteration order
+        and filtering are identical to ``get_available_transitions``; that
+        method is a thin wrapper that drops the owner.
         """
-        # Visit each Process CLASS once per walk (#180). Without this, a
+        # Visit each Process CLASS once per walk. Without this, a
         # nested process reachable by two paths — a diamond, or a duplicated
         # entry in ``nested_processes`` — yielded every one of its
         # transitions twice, and ``_resolve_transition_with_owner`` rejected
@@ -304,7 +305,7 @@ class Process:
 
         Exactly one match is required, after conditions/permissions
         filtering with ``ignore_state=True``. Also returns the declaring
-        process so the caller can record the owner for phase-2 restore.
+        process so the caller can record it for worker restore.
         """
         matches = list(
             self._iter_available_with_owner(
@@ -356,7 +357,7 @@ def _iter_process_tree(process_cls, _seen=None):
 
 def _validate_action_names_not_shadowed(process_cls):
     """Reject an ``action_name`` that a real attribute of the ROOT process
-    shadows (raised at class creation, #182).
+    shadows (raised at class creation).
 
     ``__getattr__`` only runs when normal attribute lookup *fails*, so a
     transition named ``state``, ``is_valid``, ``transitions``,
@@ -404,38 +405,40 @@ def _validate_action_names_not_shadowed(process_cls):
 
 def _validate_unique_background_action_names(process_cls):
     """A background transition must be uniquely identifiable by
-    ``(owning process class, action_name)`` across a Process *and its nested
-    processes*.
+    ``(process class that declared it, action_name)`` across a Process
+    *and its nested processes*.
 
-    Phase 1 records the owning (possibly nested) process class on the
-    ``TransitionMessage`` (``owning_process_class``); phase-2 restore
+    Enqueue records the (possibly nested) process class that declared
+    the transition on the ``TransitionMessage``
+    (``owning_process_class``); worker restore
     (``runner._find_transition``) uses it to select the exact background
-    transition. So the only configuration phase 2 genuinely cannot resolve —
-    and the only one rejected here — is **two background transitions sharing
-    an ``action_name`` within a single process class**: the owner + name pair
-    no longer identifies one transition.
+    transition. So the only configuration the worker genuinely cannot
+    resolve — and the only one rejected here — is **two background
+    transitions sharing an ``action_name`` within a single process
+    class**: the class + name pair no longer identifies one transition.
 
-    Everything else is allowed, because phase 2 can always resolve it:
+    Everything else is allowed, because the worker can always resolve it:
 
-    * The same background ``action_name`` on **distinct** nested process classes
-      — the condition-disambiguated pattern (e.g. per-integration ``Gmail`` /
-      ``Dummy`` sub-processes each declaring a background
-      ``send_message_via_integration`` selected by a condition on the instance).
-      Phase 1's transition resolution picks exactly one (the
-      conditions are mutually exclusive); phase 2 restores that exact one via
-      the recorded owner.
+    * The same background ``action_name`` on **distinct** nested process
+      classes — the pattern that uses conditions to choose (e.g.
+      per-integration ``Gmail`` / ``Dummy`` sub-processes each declaring
+      a background ``send_message_via_integration``). Enqueue's
+      transition resolution picks exactly one (the conditions are
+      mutually exclusive); the worker restores that exact one via the
+      recorded class.
     * A background ``action_name`` that **coincides with a synchronous
-      ``Transition``** of the same name. Phase 2 only ever restores background
-      transitions and ``runner._find_transition`` filters to ``is_background``,
-      so a synchronous namesake is invisible to restore. Phase 1 resolves the
-      *call* by conditions/permissions exactly as it does for duplicate
-      synchronous names — a genuinely ambiguous call raises
-      ``TransitionNotAllowed`` at runtime, the same runtime-validated contract
-      that already governs duplicate synchronous ``action_name``s (courier-style
-      polymorphism).
+      ``Transition``** of the same name. The worker only ever restores
+      background transitions and ``runner._find_transition`` filters to
+      ``is_background``, so a synchronous namesake is invisible to
+      restore. Enqueue resolves the *call* by conditions/permissions
+      exactly as it does for duplicate synchronous names — a genuinely
+      ambiguous call raises ``TransitionNotAllowed`` at runtime, the
+      same runtime-validated contract that already governs duplicate
+      synchronous ``action_name``s (courier-style polymorphism).
 
-    So the single structural invariant phase 2 needs — and all this validator
-    enforces — is background-``action_name`` uniqueness *within one class*.
+    So the single structural invariant the worker needs — and all this
+    validator enforces — is background-``action_name`` uniqueness
+    *within one class*.
     """
     def _where(proc_cls, transition):
         return (
@@ -445,10 +448,11 @@ def _validate_unique_background_action_names(process_cls):
 
     for proc_cls in _iter_process_tree(process_cls):
         # Within ONE process class a background action_name must be unique —
-        # (owning class, action_name) is phase 2's whole key, so two in the
-        # same class are indistinguishable. Across classes, and against
-        # synchronous transitions, duplicates are fine (resolved by conditions
-        # at phase 1, by the owner + is_background filter at phase 2).
+        # (declaring class, action_name) is the worker's whole key, so two
+        # in the same class are indistinguishable. Across classes, and
+        # against synchronous transitions, duplicates are fine (resolved
+        # by conditions at enqueue, by the class + is_background filter
+        # at execute).
         local_background: dict[str, str] = {}
         for transition in proc_cls.transitions or []:
             if not getattr(transition, 'is_background', False):
@@ -461,9 +465,10 @@ def _validate_unique_background_action_names(process_cls):
                     f"has two background transitions sharing "
                     f"action_name='{name}' within a single process class "
                     f"({local_background[name]} and "
-                    f"{_where(proc_cls, transition)}). Phase-2 restore "
-                    f"identifies a background transition by (owning "
-                    f"process class, action_name) — two in the same class "
+                    f"{_where(proc_cls, transition)}). The worker "
+                    f"identifies a background transition by (process "
+                    f"class that declared it, action_name) — two in the "
+                    f"same class "
                     f"are indistinguishable, so background action_names "
                     f"must be unique within a process class. Move one to "
                     f"a separate nested process (duplicates across "
@@ -493,7 +498,7 @@ def _validate_hook_signatures(process_cls) -> None:
     if not offenders:
         return
     message = _hook_signature_message(offenders)
-    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION (#182).
+    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION.
     if strict_hook_signatures():
         raise ImproperlyConfigured(message)
     transition_logger.warning(message)
@@ -584,7 +589,7 @@ class ProcessManager:
         if binding in cls.bindings:
             # Identical re-bind (an AppConfig.ready() running twice, a
             # test re-import) is a harmless no-op — the model property
-            # and registry entry are already in place (#143).
+            # and registry entry are already in place.
             return
 
         # The state field must be a concrete column: a typo, a property,
@@ -609,7 +614,7 @@ class ProcessManager:
         # overwrite the model property while its registry entry kept
         # claiming the old machine — every registry consumer (coverage,
         # system checks, stranded recovery) would then disagree with
-        # runtime dispatch (#143).
+        # runtime dispatch.
         for existing in cls.bindings:
             if (existing.model is model
                     and existing.process_class.process_name
