@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Comments, exception text, and a handful of internal names** now use
+  ordinary English. Enqueue vs execute, not phase 1 / phase 2. Ticket
+  numbers stay in this changelog, not in `.py` comments. The README,
+  testing guide, logger notes, and nested-process recipe use the same
+  words. Public APIs that already made sense are unchanged
+  (`BackgroundTransition`, `TransitionMessage`, `in_progress_state`,
+  `in_flight()`). `TransitionMessage.retry_status()` replaces
+  `in_flight_liveness()`; `RETRYING` / `STRANDED` / `RETRY_SLACK`
+  replace `LIVENESS_*`. `_enqueue_atomic` replaces `_phase_one_atomic`.
+  Stranded-row exceptions no longer mention `W002`, `retry horizon`,
+  or `re-drive`.
+
 ## [0.13.1] — 2026-08-10
 
 Five fixes from the 0.13.0 adoption review (raised by the gv consumer as

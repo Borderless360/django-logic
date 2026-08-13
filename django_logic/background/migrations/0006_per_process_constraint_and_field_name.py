@@ -8,9 +8,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # Record the state field the process is bound to, so phase 2 can
-        # reconstruct the process from the stored process_class without
-        # guessing the field name. Blank on pre-0.4 rows.
+        # Record the state field the process is bound to, so the worker
+        # can reconstruct the process from the stored process_class
+        # without guessing the field name. Blank on pre-0.4 rows.
         migrations.AddField(
             model_name='transitionmessage',
             name='field_name',

@@ -16,7 +16,7 @@ failures across state machines.
    `BackgroundTransition` with its own `failed_state`. A child failure is
    *contained* on the child row, never raised.
 2. **The parent fans out, it does not drive.** The parent transition only
-   *starts* each child's background transition (phase 1) and returns. No child
+   *starts* each child's background transition (enqueue) and returns. No child
    work runs inside the parent transition, so no child exception can reach it.
 3. **Children report back via best-effort callbacks** (`Callbacks.execute`
    swallows exceptions) that run an **idempotent, guarded completion check**.
@@ -73,7 +73,7 @@ class OrderProcess(Process):                         # the parent (synchronous)
 def fan_out(order, **kw):
     for child in order.fulfillments.all():
         try:
-            child.process.fulfill()        # phase 1 only — dispatches the child's task
+            child.process.fulfill()        # enqueue only — dispatches the child's task
         except Exception as exc:           # contain: one child that can't START ≠ failed fan-out
             log.warning('could not start fulfillment %s: %s', child.pk, exc)
 

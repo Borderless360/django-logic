@@ -2,11 +2,11 @@
 
 Celery is a core dependency of django-logic: background transitions are
 Celery tasks. (Sync execution mode never schedules these tasks — it runs
-phase 2 inline — but the tasks are always importable and registered.)
+the worker inline — but the tasks are always importable and registered.)
 
 Tasks defined here:
 
-* :func:`run_background_transition_task` — executes phase 2 for one
+* :func:`run_background_transition_task` — executes the worker for one
   ``TransitionMessage``.
 * :func:`retry_stale_transitions` — periodic; re-dispatches uncompleted
   messages back to their own queue.
@@ -15,7 +15,7 @@ Tasks defined here:
 * :func:`detect_stuck_transitions` — periodic; finalizes messages
   stuck at ``MAX_ERRORS`` (writes ``failed_state``, runs
   ``failure_side_effects``, marks completed) so the retry loop stops.
-* :func:`watchdog_stale_attempts` — periodic; abandons phase-2
+* :func:`watchdog_stale_attempts` — periodic; abandons worker
   attempts whose current run has exceeded their declared
   ``timeout_seconds``.
 
@@ -47,13 +47,13 @@ from django_logic.logger import logger
     bind=False,
 )
 def run_background_transition_task(transition_message_id: int) -> None:
-    """Phase-2 entrypoint for one transition.
+    """Worker entrypoint for one transition.
 
     ``acks_late=True`` + ``reject_on_worker_lost=True`` are set per-task so
     a worker killed mid-execution (SIGKILL / OOM / deploy) re-delivers the
     message regardless of the project's global Celery configuration — the
     pair is what the crash-redelivery guarantee depends on, so it is not
-    left to consumer settings (issue #91).
+    left to consumer settings.
 
     Side-effect failures are recorded on the TransitionMessage row and NOT
     re-raised in celery mode (monitor the row, not Celery task failures —
@@ -84,7 +84,7 @@ def _retry_pending_inline() -> int:
     # Mirror dispatch_transition's mode awareness: in Sync mode there is
     # no Celery worker to consume an apply_async message (with no broker
     # configured Celery silently publishes to an in-memory transport that
-    # nobody drains), so phase 2 must run inline. In Celery mode we
+    # nobody drains), so the worker must run inline. In Celery mode we
     # re-dispatch to the row's own queue. The check also honours an
     # active sync_execution() block.
     from django_logic.background.dispatch import _current_mode
@@ -135,7 +135,7 @@ def _retry_pending_inline() -> int:
             dispatched += 1
         except Exception as e:
             # A dispatch-layer error (broker down, serialization, etc.)
-            # or an inline phase-2 failure shouldn't stop us from trying
+            # or an inline worker failure shouldn't stop us from trying
             # the remaining rows.
             logger.error(
                 'retry_stale_transitions: failed to dispatch '
@@ -218,7 +218,7 @@ def detect_stuck_transitions() -> int:
     bind=False,
 )
 def watchdog_stale_attempts() -> int:
-    """Periodic: abandon phase-2 attempts that have been running beyond
+    """Periodic: abandon worker attempts that have been running beyond
     their declared ``timeout_seconds``.
 
     Only rows that opted in via ``BackgroundTransition(timeout=N)`` are

@@ -17,10 +17,10 @@ class BackgroundConfig(AppConfig):
         )
 
         # Idempotent — covers an install shape where only the background
-        # app's ready() runs before denials are raised or caught (#190).
+        # app's ready() runs before denials are raised or caught.
         install_legacy_exception_base()
 
-        # Transition-coverage recording (#132). Activated here (not in the
+        # Transition-coverage recording. Activated here (not in the
         # recorder module) so spawn-based parallel test workers, which re-run
         # ready(), self-activate; fork-based workers inherit the parent's. The
         # path is type-validated by validate_on_ready above — open() accepts a

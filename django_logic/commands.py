@@ -33,7 +33,7 @@ def _deferred_unlocks(conn) -> list:
 
 
 def note_deferred_unlock(using: str, state: State) -> None:
-    """Record a DEFER_UNLOCK_UNTIL_COMMIT unlock (#141) so hook
+    """Record a DEFER_UNLOCK_UNTIL_COMMIT unlock so hook
     savepoints can release it if their rollback discards the
     ``transaction.on_commit`` registration (see ``_run_in_savepoint``).
     Called by ``Transition._release_lock`` right after registering the
@@ -86,7 +86,7 @@ def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
 
     When the savepoint rolls back, Django discards every
     ``transaction.on_commit`` hook registered inside it — including the
-    DEFER_UNLOCK_UNTIL_COMMIT unlocks (#141) of transitions the hook
+    DEFER_UNLOCK_UNTIL_COMMIT unlocks of transitions the hook
     drove. Their state writes roll back with the savepoint, so those
     locks protect nothing anymore; dropping the hooks would leak them
     until TTL *while the outer transaction commits successfully*.
@@ -153,10 +153,10 @@ def _release_dropped(registry, before) -> None:
 
 def _log_hook_error(message: str, error: BaseException, **log_kwargs) -> None:
     """Log a hook failure at ERROR — or WARNING when it is a transient
-    concurrency outcome (#154, #191).
+    concurrency outcome.
 
-    ``TransitionTemporarilyUnavailable`` means "another flight owns this
-    instance right now": the designed outcome of two drives racing, and
+    ``TransitionTemporarilyUnavailable`` means "another transition owns
+    this instance right now": the designed outcome of two drives racing, and
     the common shape when a background transition is invoked from another
     transition's side-effects. At ERROR it pages an on-call for healthy
     contention. Every other exception stays at ERROR. Consumer subclasses
@@ -228,7 +228,7 @@ class SideEffects(BaseCommand):
 class Callbacks(BaseCommand):
     """Best-effort follow-ups. Exceptions are logged and swallowed.
 
-    Each callback is isolated (#138): one failing callback does not
+    Each callback is isolated: one failing callback does not
     prevent the later ones from being attempted, and when the caller is
     inside an open transaction each callback runs in its own savepoint —
     a database error would otherwise mark the whole outer transaction
@@ -292,7 +292,7 @@ class FailureSideEffects(BaseCommand):
     the ``TransitionMessage`` (otherwise broken cleanup is invisible).
 
     When the caller is inside an open transaction, the bundle runs in a
-    savepoint that rolls back on error (#138): the same contract phase 2
+    savepoint that rolls back on error: the same contract the worker
     applies — a broken cleanup path neither poisons the outer transaction
     nor commits its partial writes. A savepoint discarded silently (a hook
     suppressing a database error without a nested ``atomic``) is returned
@@ -315,7 +315,7 @@ class FailureSideEffects(BaseCommand):
             # TransitionMessage, so a cleanup bundle whose writes were
             # silently discarded must be returned as the failure it is —
             # not left as success-shaped bookkeeping over rolled-back work
-            # (the #189 class, third savepoint).
+            # (a discarded savepoint must not look like success).
             _run_in_savepoint(using, _bundle, require_commit=True)
         except _FailureSideEffectsRollback as rollback:
             return rollback.error
@@ -347,8 +347,8 @@ class NextTransition:
     A dedicated slot because the follow-up must run in the same call
     frame, after the state unlock: side-effects run before unlock (the
     follow-up would deadlock on its own lock acquisition), and callbacks
-    execute in phase 2 on a Celery worker for background transitions —
-    only for synchronous transitions do they run inline.
+    execute on a Celery worker for background transitions — only for
+    synchronous transitions do they run inline.
     """
 
     def __init__(self, next_transition: str | None = None):
@@ -381,10 +381,10 @@ class NextTransition:
             return None
 
         if getattr(transitions[0], 'is_background', False):
-            # request is phase-1-only and unserializable; forwarding it into
-            # a background follow-up would fail phase-1 serialization under
-            # STRICT_KWARGS_SERIALIZATION — and that failure is swallowed
-            # below, silently killing the chain (#129).
+            # request is enqueue-only and unserializable; forwarding it
+            # into a background follow-up would fail kwargs serialization
+            # under STRICT_KWARGS_SERIALIZATION — and that failure is
+            # swallowed below, silently killing the chain.
             kwargs = {k: v for k, v in kwargs.items() if k != 'request'}
 
         using, in_transaction = _in_open_transaction(state.instance)
@@ -395,7 +395,7 @@ class NextTransition:
             # parent's tr_id via a direct change_state call. Failures of the
             # follow-up must not bubble into the current transition — and,
             # like Callbacks, a swallowed database error inside an open
-            # transaction must not poison it (#138), so the follow-up runs
+            # transaction must not poison it, so the follow-up runs
             # in a savepoint there.
             if in_transaction:
                 return _run_in_savepoint(

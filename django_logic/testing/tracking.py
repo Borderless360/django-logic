@@ -9,7 +9,7 @@ callables on the transition's hook bundles (``side_effects``, ``callbacks``,
   running a named hook — exercising the real failure path.
 
 Transition objects are class-level and shared, and both the synchronous
-``SideEffects.execute`` path and the background phase-2 runner iterate
+``SideEffects.execute`` path and the background worker runner iterate
 ``transition.side_effects.commands`` — so wrapping ``_commands`` instruments
 both execution modes. Everything is restored on exit.
 """
@@ -38,7 +38,7 @@ class ExecutionTracker:
         self.injected_exception: BaseException | None = None
         self.failed_side_effect: str | None = None
         # What the caller ASKED to fail — so the scenario can detect an
-        # injection that never fired (issue #94: a silent no-op would turn
+        # injection that never fired (a silent no-op would turn
         # a failure test into a happy-path run).
         self.requested_fail_side_effect: str | None = None
         # Ordered sequence of states written to the instance during this
@@ -88,7 +88,7 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
 
     ``transitions`` is the list of class-level ``Transition`` objects to
     instrument — the scenario passes every transition reachable from the
-    process class (issue #96: a single drive can execute more than the named
+    process class (a single drive can execute more than the named
     action via ``next_transition`` and callback-triggered transitions, and
     those hooks must be visible to the assertions too). Yields an
     :class:`ExecutionTracker`. Injection only targets ``side_effects`` hooks.
@@ -96,7 +96,7 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
     When ``fail_side_effect`` names a hook that exists on none of the
     instrumented transitions, ``ValueError`` is raised immediately — a typo
     or a renamed hook must not silently turn a failure test into a
-    happy-path run (issue #94).
+    happy-path run.
     """
     tracker = ExecutionTracker()
     tracker.requested_fail_side_effect = fail_side_effect

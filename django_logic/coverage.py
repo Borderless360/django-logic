@@ -1,4 +1,4 @@
-"""Transition-execution coverage (#132).
+"""Transition-execution coverage.
 
 Static analysis of a consumer's test tree cannot see transitive execution
 (a test drives a view/task which calls ``instance.process.action()``) or
@@ -6,7 +6,7 @@ dynamic dispatch (``getattr(process, action_name)()``). The engine can:
 every initiation resolves ``(transition, owning_process)`` in one place and
 notifies ``django_logic.process.transition_observers``.
 
-This module records those notifications as ``(owning process class, action)``
+This module records those notifications as ``(process class that declared it, action)``
 pairs and diffs them against every transition declared by every bound
 process (``ProcessManager.bindings``, nested processes included), so a test
 run can answer "which transitions did the suite never drive?" exactly.
@@ -27,8 +27,8 @@ Two front-ends:
 
 Initiation semantics: a pair is recorded when a transition is *resolved* —
 an initiation refused later (lock contention, under-lock revalidation,
-``AlreadyInProgress``) still counts as driven. Phase-2 background restore
-and retries do not re-notify — phase 1 already recorded the pair.
+``AlreadyInProgress``) still counts as driven. Worker restore
+and retries do not re-notify — enqueue already recorded the pair.
 
 One footgun worth knowing:
 
@@ -36,7 +36,7 @@ One footgun worth knowing:
   fresh path (or delete the old file first), or stale pairs from earlier
   runs silently count as covered.
 
-Declaration identity (#146, #153): keys carry the declaration's kind
+Declaration identity: keys carry the declaration's kind
 (sync/background), shape (sources → target), and a conditions fingerprint
 (the condition callables' sorted qualnames, plus the *configuration* of
 partials and callable instances) besides the class and action name, so

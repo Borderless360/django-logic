@@ -27,7 +27,7 @@ class DjangoLogicConfig(AppConfig):
         validate_core_settings()
         install_legacy_exception_base()
 
-        # Transition-coverage recording (#132). Activated in ready() so
+        # Transition-coverage recording. Activated in ready() so
         # spawn-based parallel test workers, which re-run it, self-activate;
         # fork-based workers inherit the parent's recorder. The path is
         # type-validated by validate_core_settings above — open() accepts a
