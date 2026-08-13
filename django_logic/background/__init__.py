@@ -9,7 +9,7 @@ Public API:
 * :func:`retry_pending` — run the periodic safety-net task once inline.
 * :func:`in_flight` — racy read of the durable in-flight marker, for
   shaping "busy, try again shortly" answers at API seams (#197).
-* :func:`beat_schedule` — ready-made Celery beat entries for the five
+* :func:`beat_schedule` — ready-made Celery beat entries for the four
   safety-net tasks, routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
 All symbols are importable after Django's app registry is ready

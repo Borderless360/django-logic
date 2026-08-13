@@ -1200,7 +1200,7 @@ including background transitions — **inline, with no Celery broker**.
 
 Two principles keep these tests worth writing: **test your process, not the
 machinery**, and **assert what the object became, not that a hook ran**. Full
-rationale, and the 18-scenario catalog, in
+rationale, and the scenario catalog, in
 [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md#journeys-not-mirrors).
 
 ```python
@@ -1294,7 +1294,7 @@ Side-effects and callbacks are **tracked, not mocked** (identified by function `
 `TransitionMessage` as JSON — from a shell, an admin action, Sentry or a log —
 and `self.from_snapshot('fixtures/bug_12345.json')` rebuilds it in a test, which
 turns a production bug into a regression test. See
-[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) §13.
+[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) §5.
 
 **AI-readable failure output.** When an assertion fails, the error includes a numbered timeline of every step and the relevant `TransitionMessage`, so a person or an agent can see where the process diverged without reading stack traces.
 
