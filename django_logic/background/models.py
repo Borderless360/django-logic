@@ -21,9 +21,6 @@ from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
 
-#: Characters PostgreSQL text/jsonb columns cannot store, however happily
-#: Python and SQLite carry them. An exception message that echoes back bytes,
-#: scraped HTML or a CSV cell can contain either.
 #: Ceiling for the text columns this module writes (``last_error_message``,
 #: ``failure_side_effect_error``).
 _TEXT_LIMIT = 10_000
@@ -32,13 +29,10 @@ _TEXT_LIMIT = 10_000
 def db_safe_text(value: str, limit: int = _TEXT_LIMIT) -> str:
     """Make ``value`` storable in a Postgres text column.
 
-    NUL (U+0000) and lone surrogates are rejected by PostgreSQL, so writing an
-    exception message that contains one raises ``DataError`` *from the
-    accounting write itself* — which used to escape ``_handle_failure``, roll
-    back ``errors_count`` and ``mark_as_completed`` with it, and leave the row
-    retrying forever with the instance permanently blocked. The bookkeeping
-    must never be the thing that fails, so the characters are escaped rather
-    than passed through.
+    NUL (U+0000) and lone surrogates are rejected by PostgreSQL, so an
+    exception message that contains one raises ``DataError`` from the
+    accounting write itself. The bookkeeping must never be the thing that
+    fails, so the characters are escaped rather than passed through.
     """
     text = str(value)
     if '\x00' in text:
@@ -233,46 +227,30 @@ class TransitionMessage(TimeStampedModel):
         Deliberately called from *outside* the attempt's ``atomic`` block
         (#179). ``started_at`` is the only field that must be visible to
         other connections *while* the attempt runs, and must survive the
-        attempt rolling back:
-
-        * A hung attempt holds its transaction open, so a ``started_at``
-          written inside it is invisible to the watchdog — which filtered
-          on ``started_at__isnull=False`` and therefore could never see the
-          attempts it exists to abandon.
-        * A crashed worker rolls its transaction back, taking the marker
-          with it, so the crash was invisible too.
-
-        The consequence was that the watchdog only ever matched rows whose
-        attempt had already *committed* a failure — rows that had already
-        charged themselves an error — and then charged them again on every
-        tick. Written here it survives both cases, which is what makes
-        ``timeout=`` mean anything.
+        attempt rolling back: a hung attempt holds its transaction open
+        (an in-block write is invisible to the watchdog), and a crashed
+        worker rolls the marker back with it. Written here it survives
+        both cases, which is what makes ``timeout=`` mean anything.
 
         Durability is mode-dependent, as for
         ``runner._mark_unrestorable_completed``:
 
         * **Celery mode** — phase 2 is the top-level unit of work with no
           surrounding transaction, so this UPDATE autocommits and is visible
-          to the watchdog immediately. Verified against real PostgreSQL from
-          a second connection. This is the mode the watchdog exists for.
-        * **Sync mode inside a caller's ``atomic()``** — it is part of the
-          caller's transaction and invisible to other connections until the
-          caller commits. Harmless: the phase-1 INSERT that created the row
-          is in that same transaction, so on rollback there is no surviving
-          row to abandon, and on commit the row and this marker become
-          visible together. There is also no worker to abandon — the
-          "attempt" is the caller's own thread, which a watchdog could not
-          rescue anyway.
+          to the watchdog immediately.
+        * **Sync mode inside a caller's ``atomic()``** — part of the
+          caller's transaction, invisible until the caller commits.
+          Harmless: the phase-1 INSERT is in that same transaction, so the
+          row and this marker become visible (or roll back) together — and
+          the "attempt" is the caller's own thread, which no watchdog
+          could rescue anyway.
 
         Acquires the row lock with ``nowait`` first and gives up if another
-        attempt holds it. That is not an optimisation — a bare ``UPDATE``
-        here BLOCKS on PostgreSQL, and because this runs before
-        ``_run_atomic``'s ``select_for_update(nowait=True)`` it defeated the
-        whole skip-if-locked design: a duplicate dispatch waited out the
-        entire live attempt and then ran it again, with no retry backoff.
-        (``tests/background/test_concurrency_pg.py`` pins this.) A held row
-        means an attempt is already live and has already stamped itself, so
-        there is nothing to record and ``_run_atomic`` will skip anyway.
+        attempt holds it. Not an optimisation: a bare ``UPDATE`` BLOCKS on
+        the live attempt's row lock, defeating the skip-if-locked design
+        (``tests/background/test_concurrency_pg.py`` pins this). A held row
+        means a live attempt has already stamped itself, so there is
+        nothing to record and ``_run_atomic`` will skip anyway.
 
         Because a losing dispatcher never writes, ``started_at`` only ever
         moves forward, and ``duration_ms`` cannot absorb lock wait.
@@ -374,10 +352,9 @@ class TransitionMessage(TimeStampedModel):
             note = f'{label}: {note}'
         existing = self.failure_side_effect_error
         if existing:
-            # Budget for the note FIRST: db_safe_text truncates the head, so
-            # once the accumulated text approaches the limit, appending and
-            # re-truncating silently dropped the note just added — the newest
-            # and most relevant diagnostic. Trim the older text instead.
+            # Budget for the new note FIRST: appending then re-truncating
+            # would drop the newest (most relevant) note near the limit —
+            # trim the older text instead.
             room = _TEXT_LIMIT - len(note) - 2
             existing = existing[:room] if room > 0 else ''
         self.failure_side_effect_error = db_safe_text(

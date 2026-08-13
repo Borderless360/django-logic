@@ -47,15 +47,12 @@ from django_logic.state import State
 
 
 #: Names of the engine's OWN method parameters on the state-change path.
-#: A caller kwarg carrying one of these reaches an engine call that already
-#: passes it positionally — ``fail_transition(state, error, **kwargs)``,
-#: ``_release_lock(state, deferrable=…, **kwargs)`` — and raises TypeError
-#: there, on the failure path, *after* the lock was taken: ``failed_state``
-#: was never applied, the real exception was replaced by the TypeError, and
-#: the lock leaked until its TTL (hours). Refused up front instead, before
-#: anything is acquired. Distinct from ``process._RESERVED_KWARGS`` (lineage
-#: names the engine forwards itself, so it cannot tell its own forwarding from
-#: a caller's — those are documented, not refused).
+#: A caller kwarg carrying one raises TypeError inside ``fail_transition``/
+#: ``_release_lock`` — on the failure path, after the lock was taken: no
+#: ``failed_state``, the real exception replaced, the lock leaked until TTL.
+#: Refused up front, before anything is acquired. Distinct from
+#: ``process._RESERVED_KWARGS`` (names the engine forwards itself —
+#: documented, not refused).
 _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception', 'deferrable'})
 
 
@@ -134,19 +131,11 @@ class Transition:
         self.sources = list(sources)
         self.in_progress_state = kwargs.get('in_progress_state')
         if self.in_progress_state and not self.is_background:
-            # Background-only (0.12.0). On a background transition the marker
-            # is written atomically with the TransitionMessage row, so every
-            # marked instance has a recovery owner (the TM safety nets). A
-            # synchronous transition wrote it under a cache lock with NO
-            # durable record: a hard-killed worker left the instance parked in
-            # a state with no outbound edges and nothing that could ever move
-            # it (#136) — the engine grew a whole sweeping subsystem to find
-            # those, and the sweep was the most defect-dense code in four
-            # review passes. Without the marker a killed sync run rolls back
-            # to its source state and is simply re-drivable: self-healing, no
-            # machinery. Model a visible "busy" phase as a real state instead:
-            # a fast transition into it, chained via next_transition to the
-            # transition that does the work (see the README migration note).
+            # Background-only (0.12.0): there the marker is written atomically
+            # with the durable TransitionMessage row, so recovery has an
+            # owner. A sync marker has no record — a hard-killed worker parks
+            # the instance forever (#136); without it a killed sync run rolls
+            # back to its source and is simply re-drivable.
             raise ImproperlyConfigured(
                 f"Transition {action_name!r}: in_progress_state is only "
                 f"supported on BackgroundTransition, where it is written "
@@ -168,10 +157,8 @@ class Transition:
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
         if self.failed_state and self.failed_state == self.in_progress_state:
-            # The state field is what operators, UIs and the phase-2 guard
-            # read to tell "failed" from "still running"; identical, every
-            # failed instance is indistinguishable from a busy one and the
-            # terminal write is a silent no-op.
+            # The state field is the only failed-vs-running discriminator
+            # operators, UIs and the phase-2 guard have.
             raise ImproperlyConfigured(
                 f"Transition {action_name!r}: failed_state and "
                 f"in_progress_state are both {self.failed_state!r}. A failed "

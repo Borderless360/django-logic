@@ -79,20 +79,14 @@ def run_background_transition(transition_message_id: int) -> None:
     Designed to be call-compatible from both a Celery task and an
     inline sync dispatcher.
     """
-    # Committed BEFORE the attempt's atomic block, and deliberately not
-    # rolled back with it (#179) — see TransitionMessage.stamp_attempt_started.
-    # This is the marker the watchdog and the retry starter's recency guard
-    # read; written inside the atomic it was invisible to both.
+    # Committed BEFORE the attempt's atomic block and deliberately not rolled
+    # back with it (#179): the watchdog and the retry starter's recency guard
+    # must see the marker while the attempt runs — see
+    # TransitionMessage.stamp_attempt_started.
     if not TransitionMessage.stamp_attempt_started(transition_message_id):
-        # Refused: the row is held by a live attempt, or already completed /
-        # gone. Both are the documented "exit silently" cases. Proceeding
-        # anyway used to run a full attempt whose started_at belonged to the
-        # PREVIOUS one whenever the holder committed in the window before
-        # _run_atomic took its own lock — duration_ms then reported the old
-        # attempt's age, the retry starter's recency guard was defeated for
-        # that attempt's whole life, and the watchdog's one-charge-per-attempt
-        # guard was already satisfied by the previous error. The periodic
-        # starter re-dispatches, so nothing is lost by skipping.
+        # Row held by a live attempt, or already completed / gone — the
+        # documented "exit silently" cases. The periodic starter
+        # re-dispatches, so nothing is lost by skipping.
         transition_logger.info(
             f'TransitionMessage#{transition_message_id}: another attempt holds '
             f'the row (or it is already completed); skipping this dispatch.'
@@ -119,15 +113,10 @@ def run_background_transition(transition_message_id: int) -> None:
         )
 
     if outcome.exception is not None:
-        # Sync mode propagates the exception so the inline caller / tests
-        # can react (assertRaises, surface the failure to the request).
-        # Celery mode must NOT re-raise: the outcome is already fully
-        # recorded on the row (errors_count + last_error for a retryable
-        # failure; failed_state + is_completed for a terminal one), the
-        # periodic starter owns retries, and re-raising out of an
-        # acks_late task would both spam task-failure alerts for an
-        # already-resolved row and risk broker redelivery on top of the
-        # periodic retry.
+        # Sync mode propagates so the inline caller / tests can react.
+        # Celery mode must NOT re-raise: the outcome is fully recorded on the
+        # row, the periodic starter owns retries, and re-raising out of an
+        # acks_late task risks broker redelivery + task-failure alert spam.
         from django_logic.background.dispatch import _current_mode
         if _current_mode() == bg_settings.EXECUTION_SYNC:
             raise outcome.exception
