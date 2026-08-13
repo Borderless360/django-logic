@@ -149,7 +149,7 @@ class SafetyNetGuardTests(TestCase):
         # to 'cancelled'. Finalization still completes the row (retries
         # stop), and the manual fix wins WHOLE: no failed_state, and no
         # failure hooks either. Guarding only the write meant the safety net
-        # still ran failure_side_effects and failure_callbacks against an
+        # still ran failure hooks against an
         # instance an operator had already resolved, and completed the row
         # with no marker explaining why (found reviewing 0.12.0's own diff).
         widget = Widget.objects.create(status='fulfilling')

@@ -203,8 +203,8 @@ def abandon_timed_out_attempt(tm_id: int) -> bool:
     Skips rows currently held by a worker (``select_for_update(nowait)``
     → OperationalError) — we only act on abandoned attempts. When the
     error count reaches ``MAX_ERRORS`` the row is finalized in the same
-    atomic block (failed_state + failure_side_effects + mark_as_completed)
-    so the retry loop stops.
+    atomic block (failed_state + mark_as_completed) so the retry loop
+    stops.
 
     .. note::
 
@@ -309,8 +309,7 @@ def abandon_timed_out_attempt(tm_id: int) -> bool:
 
 def finalize_stuck_attempt(tm_id: int) -> bool:
     """Force a stuck (``errors_count >= MAX_ERRORS``, uncompleted) TM
-    into a terminal state (``failed_state`` + ``failure_side_effects``
-    + ``mark_as_completed``).
+    into a terminal state (``failed_state`` + ``mark_as_completed``).
 
     Called by ``detect_stuck_transitions``. If the row is currently
     locked by a worker running phase 2 we exit silently — the running
@@ -343,9 +342,9 @@ def finalize_stuck_attempt(tm_id: int) -> bool:
             f'errors={tm.errors_count} '
             f'last_error={tm.last_error_message!r}; forcing terminal state'
         )
-        # Rehydrate an exception from the stored last_error_message so
-        # failure_side_effects see the same error shape the final in-task
-        # attempt would have seen.
+        # Rehydrate an exception from the stored last_error_message so the
+        # failure hooks see the same error shape the final in-task attempt
+        # would have seen.
         err = RuntimeError(
             f'[detect_stuck] {tm.last_error_message or "transition stuck"}'
         )
@@ -366,13 +365,11 @@ def _finalize_terminal_from_watchdog(
 
     Must run inside the caller's atomic block, with the TM row already
     locked. Mirrors ``_handle_failure``'s terminal branch: set
-    failed_state, run failure_side_effects (capturing swallowed errors
-    onto the TM), mark completed.
+    failed_state, mark completed.
 
     If the transition can't be restored (model uninstalled / transition
-    renamed), we still mark_as_completed so the retry loop stops;
-    failed_state and failure_side_effects are skipped — there's nothing
-    to call them on.
+    renamed), we still mark_as_completed so the retry loop stops; the
+    failed_state write is skipped — there's nothing to call it on.
 
     Returns the ``(transition, state, kwargs, exception)`` tuple the caller
     needs to run ``failure_callbacks`` *after* its atomic block commits
@@ -430,9 +427,8 @@ def _finalize_terminal_from_watchdog(
     # Same state guard as the phase-2 attempt path, and with the same verdict:
     # a manual ops fix wins WHOLE (CLAUDE.md contract 7), not just against the
     # failed_state write. Guarding only the write meant a safety net still ran
-    # failure_side_effects and failure_callbacks against an instance an
-    # operator had already resolved — destructive cleanup (refunds, releases)
-    # and report-back callbacks for a child that was fixed by hand — and
+    # failure hooks against an instance an operator had already resolved —
+    # report-back callbacks for a child that was fixed by hand — and
     # completed the row with no ``[superseded]`` marker to explain it.
     matches, expected, current = _state_guard_matches(transition, state)
     if not matches:
@@ -489,15 +485,6 @@ def _finalize_terminal_from_watchdog(
                 f'on {state.instance_key}'
             )
 
-    # FailureSideEffects.execute savepoints itself inside an open
-    # transaction and returns the swallowed exception; record it on the TM
-    # so a broken cleanup path is not invisible.
-    fse_error = transition.failure_side_effects.execute(
-        state, exception=exception, **kwargs
-    )
-    if fse_error is not None:
-        tm.record_failure_side_effect_error(
-            fse_error, label='failure_side_effects')
     # A safety-net finalization is not a worker attempt; started_at points
     # at the abandoned attempt, so don't let it inflate duration_ms.
     tm.mark_as_completed(measure_duration=False)
@@ -857,14 +844,6 @@ def _handle_failure(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                 f'{transition.failed_state}'
             )
-    # As above: the bundle owns its savepoint, so a broken cleanup path
-    # rolls back its own writes without poisoning the outer transaction.
-    fse_error = transition.failure_side_effects.execute(
-        state, exception=error, **kwargs
-    )
-    if fse_error is not None:
-        tm.record_failure_side_effect_error(
-            fse_error, label='failure_side_effects')
     tm.mark_as_completed()
     return _Outcome(
         terminal=True,

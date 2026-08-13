@@ -238,7 +238,6 @@ def test_validation_failure_voids_the_order(self):
                     expect_raises=ValueError)          # <- the caller sees it
     self.assert_state(order, 'draft')                  # or failed_state if declared
     # If approve declared failure hooks, assert they ran:
-    # self.assert_failure_side_effects_ran(['void_reservation'])
     # self.assert_failure_callbacks_ran(['notify_ops'])
 ```
 
@@ -499,7 +498,6 @@ flipped. Pin which one each transition relies on:
 | `side_effects` | runs `fail_transition`, then **re-raises** | `expect_raises=Err` / `assert_raised(Err)` |
 | `callbacks` | **swallowed** (best-effort) | `expect_raises=False` / `assert_not_raised()` |
 | `next_transition` follow-up | follow-up failure **swallowed** | `expect_raises=False` |
-| `failure_side_effects` | **swallowed**, does not mask the original | `expect_raises=OriginalErr` |
 
 ```python
 def test_side_effect_failure_reaches_the_caller(self):
@@ -618,7 +616,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 |---|---|
 | `assert_side_effects_ran(names)` / `assert_side_effects_not_ran(names)` | Which side-effects executed in the last tracked drive (by function `__name__` — tracked, not mocked: the real code ran). Tracking covers the whole process tree, including `next_transition` follow-ups. |
 | `assert_callbacks_ran(names)` | Which callbacks executed. |
-| `assert_failure_side_effects_ran(names)` / `assert_failure_callbacks_ran(names)` | Which failure hooks executed (for failure-path scenarios). |
+| `assert_failure_callbacks_ran(names)` | Which failure hooks executed (for failure-path scenarios). |
 
 *Caller boundary & durable row*
 

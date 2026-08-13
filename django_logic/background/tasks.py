@@ -13,8 +13,8 @@ Tasks defined here:
 * :func:`cleanup_completed_transitions` — periodic; deletes old
   completed messages.
 * :func:`detect_stuck_transitions` — periodic; finalizes messages
-  stuck at ``MAX_ERRORS`` (writes ``failed_state``, runs
-  ``failure_side_effects``, marks completed) so the retry loop stops.
+  stuck at ``MAX_ERRORS`` (writes ``failed_state``, marks completed)
+  so the retry loop stops.
 * :func:`watchdog_stale_attempts` — periodic; abandons phase-2
   attempts whose current run has exceeded their declared
   ``timeout_seconds``.

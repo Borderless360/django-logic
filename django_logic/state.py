@@ -57,7 +57,7 @@ class State(object):
             # holding a value the database never had — harmless while the
             # exception escaped everything, but the failure paths now swallow
             # a rejected state write, so this phantom instance reaches
-            # failure_side_effects, failure_callbacks and the sync caller.
+            # failure_callbacks and the sync caller.
             setattr(self.instance, self.field_name, previous)
             raise
         self.instance.refresh_from_db(fields=[self.field_name])

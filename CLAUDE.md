@@ -12,8 +12,7 @@ workers + induced worker crashes, deploys, broker loss, and pgbouncer).
 
 Model a workflow as a `Process` subclass: a list of `transitions` (edges).
 Each transition has `sources`, `target`, and optional `conditions`,
-`permissions`, `side_effects`, `callbacks`, `failure_side_effects`,
-`failure_callbacks`. **Bind the model to its process in exactly one place — the
+`permissions`, `side_effects`, `callbacks`, `failure_callbacks`. **Bind the model to its process in exactly one place — the
 app's `AppConfig.ready()`** — with
 `ProcessManager.bind_model_process(Model, MyProcess, state_field='status')`
 (import the model and process *inside* `ready()`). Never bind at module import

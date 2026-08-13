@@ -58,10 +58,10 @@ class TransitionMessage(TimeStampedModel):
     last_error_dt = models.DateTimeField(blank=True, null=True)
     last_error_message = models.TextField(blank=True)
 
-    # Records exceptions swallowed by ``FailureSideEffects`` so broken
-    # cleanup paths don't fail silently. Separate from ``last_error_*``
-    # which tracks the side-effect exception that triggered the failure
-    # branch in the first place.
+    # Records an exception swallowed while finalizing a terminal failure
+    # (a rejected ``failed_state`` write) so it doesn't fail silently.
+    # Separate from ``last_error_*`` which tracks the side-effect exception
+    # that triggered the failure branch in the first place.
     failure_side_effect_error = models.TextField(blank=True)
 
     # Phase-2 timing. ``started_at`` is (re)written at the top of every
@@ -358,20 +358,16 @@ class TransitionMessage(TimeStampedModel):
     def record_failure_side_effect_error(
         self, exception: BaseException, *, label: str = '',
     ) -> None:
-        """Record an exception raised while finalizing a terminal failure.
+        """Record an exception raised while finalizing a terminal failure
+        (a rejected ``failed_state`` write).
 
         Separate from ``record_error`` because the original side-effect
         error (which triggered the failure branch) must stay visible in
-        ``last_error_message`` — we just annotate that the cleanup path
+        ``last_error_message`` — we just annotate that the finalization
         also broke.
 
-        **Appends** rather than replaces. The terminal path can now record two
-        independent problems on the same row — a rejected ``failed_state``
-        write and a broken ``failure_side_effects`` bundle — and overwriting
-        meant whichever came second silently erased the other, leaving an
-        operator with half the story.
-
-        ``label`` names which of them it was.
+        **Appends** rather than replaces, so a second problem on the same
+        row cannot silently erase the first. ``label`` names the source.
         """
         note = db_safe_text(f'{type(exception).__name__}: {exception}')
         if label:

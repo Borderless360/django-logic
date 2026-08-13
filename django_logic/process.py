@@ -506,8 +506,8 @@ def collect_hook_signature_offenders(process_cls) -> list:
             )
 
     _HOOK_ATTRS = (
-        'side_effects', 'callbacks', 'failure_side_effects',
-        'failure_callbacks', 'conditions', 'permissions',
+        'side_effects', 'callbacks', 'failure_callbacks',
+        'conditions', 'permissions',
     )
     for proc_cls in _iter_process_tree(process_cls):
         owner = f'{proc_cls.__module__}.{proc_cls.__name__}'

@@ -27,7 +27,6 @@ from django.db import DEFAULT_DB_ALIAS, transaction
 from django_logic.commands import (
     Callbacks,
     Conditions,
-    FailureSideEffects,
     NextTransition,
     Permissions,
     SideEffects,
@@ -84,8 +83,7 @@ class Transition:
       3. run side-effects
       4. on success: set ``target``, unlock, run callbacks, run ``next_transition``
       5. on failure: set ``failed_state`` (so failure hooks observe the
-         contained state), run ``failure_side_effects``, unlock, run
-         ``failure_callbacks`` (and re-raise)
+         contained state), unlock, run ``failure_callbacks`` (and re-raise)
 
     The state field does not change until the transition finishes:
     ``in_progress_state`` is background-only (0.12.0), where it is written
@@ -97,7 +95,6 @@ class Transition:
 
     side_effects_class = SideEffects
     callbacks_class = Callbacks
-    failure_side_effects_class = FailureSideEffects
     failure_callbacks_class = Callbacks
     permissions_class = Permissions
     conditions_class = Conditions
@@ -113,6 +110,17 @@ class Transition:
     def __init__(self, action_name: str, sources: list, target: str, **kwargs):
         self.action_name = action_name
         self.target = target
+        # Removed in 0.14.0; unknown kwargs are otherwise ignored, so a
+        # declaration carrying one would silently lose behavior on upgrade.
+        for removed, hint in (
+            ('failure_side_effects', 'use failure_callbacks'),
+            ('lock_timeout', "use the global DJANGO_LOGIC['LOCK_TIMEOUT']"),
+        ):
+            if removed in kwargs:
+                raise ImproperlyConfigured(
+                    f"Transition {action_name!r}: {removed}= was removed in "
+                    f"0.14.0 — {hint}."
+                )
         if isinstance(sources, str):
             # list('draft') is ['d','r','a','f','t'], which matches no state:
             # the transition becomes invisible to get_available_actions() and
@@ -173,15 +181,10 @@ class Transition:
             )
         # Only SideEffects dereferences its transition (to drive
         # complete/fail); the other command bundles never read it.
-        # Built through class attributes like the other four, so all six
-        # bundles are swappable — the two failure bundles used to be
-        # hardcoded, which made FailureSideEffects a top-level export with
-        # no way to substitute it.
+        # Built through class attributes like the other four, so all five
+        # bundles are swappable.
         self.failure_callbacks = self.failure_callbacks_class(
             kwargs.get('failure_callbacks', [])
-        )
-        self.failure_side_effects = self.failure_side_effects_class(
-            kwargs.get('failure_side_effects', [])
         )
         self.side_effects = self.side_effects_class(
             kwargs.get('side_effects', []), transition=self
@@ -316,9 +319,8 @@ class Transition:
         self.next_transition.execute(state, **kwargs)
 
     def fail_transition(self, state: State, exception: Exception, **kwargs):
-        # try/finally: a failed failed_state write (or a malformed
-        # failure_side_effects bundle) must still release the lock; the
-        # original side-effect exception keeps propagating out of
+        # try/finally: a failed failed_state write must still release the
+        # lock; the original side-effect exception keeps propagating out of
         # SideEffects.execute either way.
         #
         # Deferral (#141) only applies when a state write actually
@@ -372,8 +374,6 @@ class Transition:
                         f'{TransitionEventType.SET_STATE.value} '
                         f'{self.failed_state}'
                     )
-
-            self.failure_side_effects.execute(state, exception=exception, **kwargs)
         finally:
             self._release_lock(state, deferrable=wrote_state, **kwargs)
 
@@ -653,5 +653,4 @@ class Action(Transition):
                     # line (#188) and honours DEFER_UNLOCK_UNTIL_COMMIT when
                     # a state write landed under the lock (#141).
                     self._release_lock(state, deferrable=wrote_state, **kwargs)
-        self.failure_side_effects.execute(state, exception=exception, **kwargs)
         self.failure_callbacks.execute(state, exception=exception, **kwargs)

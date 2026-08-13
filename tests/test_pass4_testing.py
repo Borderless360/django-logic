@@ -73,8 +73,6 @@ class BareStringNameArgumentTests(ProcessScenario):
                 lambda: self.assert_side_effects_not_ran('se_a'),
             'assert_callbacks_ran':
                 lambda: self.assert_callbacks_ran('cb_after_approve'),
-            'assert_failure_side_effects_ran':
-                lambda: self.assert_failure_side_effects_ran('fse_cleanup'),
             'assert_failure_callbacks_ran':
                 lambda: self.assert_failure_callbacks_ran('fcb_on_fail'),
             'capture': lambda: self.capture(widget, 'status'),

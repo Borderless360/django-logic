@@ -292,16 +292,12 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
             # receiver-free version of the poisoned-connection shape.
             Widget.objects.create(pk=instance.pk)
 
-        def record_fse(instance, exception, **kwargs):
-            hooks.append('failure_side_effects')
-
         def record_fcb(instance, exception, **kwargs):
             hooks.append('failure_callbacks')
 
         action = Action(
             'poke_fail', sources=['draft'], failed_state='poke_failed',
             side_effects=[poison_then_fail],
-            failure_side_effects=[record_fse],
             failure_callbacks=[record_fcb],
         )
         state = State(widget, 'status', 'process')
@@ -312,8 +308,7 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
                 # fail_transition itself before re-raising.
                 action.change_state(state)
 
-        self.assertEqual(
-            hooks, ['failure_side_effects', 'failure_callbacks'])
+        self.assertEqual(hooks, ['failure_callbacks'])
         self.assertFalse(state.is_locked())
         self.assertIn('could not probe', '\n'.join(logs.output))
 

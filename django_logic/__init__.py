@@ -1,4 +1,4 @@
-from .commands import Permissions, Conditions, SideEffects, Callbacks, FailureSideEffects
+from .commands import Permissions, Conditions, SideEffects, Callbacks
 from .process import Process, ProcessManager
 from .transition import Transition, Action
 
@@ -17,5 +17,4 @@ __all__ = [
     'Permissions',
     'SideEffects',
     'Callbacks',
-    'FailureSideEffects',
 ]

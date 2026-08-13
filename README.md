@@ -617,12 +617,11 @@ Transition(
     sources=['pending'],
     target='paid',
     side_effects=[process_payment, another_side_effect],
-    failure_side_effects=[compensate_payment],  # runs before unlock (while instance is locked)
     failure_callbacks=[notify_admin],            # runs after unlock
 )
 ```
 
-When a side-effect fails, execution order is: set `failed_state` (if configured) → **failure_side_effects** → unlock → **failure_callbacks**. Use failure_side_effects for cleanup that must run before other processes can access the instance.
+When a side-effect fails, execution order is: set `failed_state` (if configured) → unlock → **failure_callbacks**.
 
 ## Django-Logic vs Django FSM 
 [Django FSM](https://github.com/viewflow/django-fsm) is a predecessor of Django-Logic. 
@@ -1027,7 +1026,7 @@ Four periodic tasks (run them on `STARTER_QUEUE` via Celery beat) keep the durab
 
 - `retry_stale_transitions` — re-dispatches uncompleted rows older than `RETRY_MINUTES` (skipping rows whose current attempt is still within `RETRY_MINUTES`, so a live attempt isn't re-dispatched on every tick).
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
-- `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_side_effects` **and** `failure_callbacks`, marks completed) so the retry loop stops.
+- `detect_stuck_transitions` — finalizes rows stuck at `MAX_ERRORS` (writes `failed_state`, runs `failure_callbacks`, marks completed) so the retry loop stops.
 - `watchdog_stale_attempts` — abandons attempts that exceeded their declared `timeout` (see below).
 
 ### Per-attempt timeouts
@@ -1279,13 +1278,13 @@ class TestOrderFulfilment(ProcessScenario):
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` phase 1 **and** phase 2 inline |
 | `retry_transition(obj)` | Re-run the instance's uncompleted transition — simulates the periodic starter |
 
-Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. Add `expect_raises=SomeError` to assert the failure **propagated to the caller** (the `side_effects` re-raise contract), or `expect_raises=False` to assert it was **swallowed** (`callbacks` / `next_transition` / `failure_side_effects`); omit it to absorb the injected exception and assert on the recorded error instead.
+Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. Add `expect_raises=SomeError` to assert the failure **propagated to the caller** (the `side_effects` re-raise contract), or `expect_raises=False` to assert it was **swallowed** (`callbacks` / `next_transition`); omit it to absorb the injected exception and assert on the recorded error instead.
 
 **Assertions**
 
 - *State & availability:* `assert_state` · `assert_state_trace` · `assert_available` / `assert_not_available` (optional `user=`).
 - *Domain outcome* — what the object *became*: `capture` → `assert_changed` / `assert_unchanged` · `assert_related_count`.
-- *Wiring* — that a hook ran (pair with an outcome assertion): `assert_side_effects_ran` / `assert_side_effects_not_ran` · `assert_callbacks_ran` · `assert_failure_side_effects_ran` / `assert_failure_callbacks_ran`.
+- *Wiring* — that a hook ran (pair with an outcome assertion): `assert_side_effects_ran` / `assert_side_effects_not_ran` · `assert_callbacks_ran` · `assert_failure_callbacks_ran`.
 - *Caller boundary & durable row:* `assert_raised` / `assert_not_raised` · `assert_error_recorded` · `assert_error_count` · `assert_transition_owner`.
 - *The whole journey:* `assert_journey([JourneyStep(...)])`.
 

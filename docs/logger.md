@@ -42,7 +42,7 @@ Every transition-lifecycle line carries a `tr_id` in the message body so all
 lines for one logical transition can be grepped together. The event vocabulary
 is the `django_logic.logger.TransitionEventType` enum:
 
-`Start`, `Complete`, `Fail`, `SideEffect`, `Callback`, `FailureSideEffect`,
+`Start`, `Complete`, `Fail`, `SideEffect`, `Callback`,
 `Set State`, `Lock`, `Unlock`, `Next Transition`.
 
 ### Transition log format
@@ -88,7 +88,7 @@ with `Unlock instance_key after revalidation failure`.
 `Unlock` + `Callback` lines.)
 
 On failure the side-effect raises, `Fail` is logged, the state is set to
-`failed_state` (if declared), `failure_side_effects` run, the lock is
+`failed_state` (if declared), the lock is
 released, and `failure_callbacks` run.
 
 ## Background transitions
