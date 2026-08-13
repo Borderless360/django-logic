@@ -750,7 +750,7 @@ Add `'django_logic.background'` to `INSTALLED_APPS` and configure:
 
 ```python
 DJANGO_LOGIC = {
-    'LOCK_TIMEOUT': 7200,   # per-transition override: Transition(..., lock_timeout=...)
+    'LOCK_TIMEOUT': 7200,   # the state lock's TTL, seconds
     'BACKGROUND_EXECUTION': 'celery',   # the default; set 'sync' in test settings
     'DEFAULT_QUEUE': 'django_logic',    # queue for transitions without queue=
     'STARTER_QUEUE': 'django_logic.starter',
@@ -1082,7 +1082,7 @@ Because the in-flight marker is a database row rather than a held lock, nothing 
 DJANGO_LOGIC = {..., 'DEFER_UNLOCK_UNTIL_COMMIT': True}
 ```
 
-The unlock then rides `transaction.on_commit`. Trade-offs to design for: on **rollback** the hook never fires, so the lock expires via its TTL — a bounded lockout, the same failure mode as a crashed process (give rollback-prone flows a per-transition `lock_timeout`); and same-instance follow-ups (`callbacks` / `next_transition`) inside the atomic block find the state still locked and are skipped — chain them from `transaction.on_commit` in the caller instead. Alternatively, keep the default and invoke transitions via `transaction.on_commit` so they start only once the surrounding write is visible.
+The unlock then rides `transaction.on_commit`. Trade-offs to design for: on **rollback** the hook never fires, so the lock expires via its TTL — a bounded lockout, the same failure mode as a crashed process; and same-instance follow-ups (`callbacks` / `next_transition`) inside the atomic block find the state still locked and are skipped — chain them from `transaction.on_commit` in the caller instead. Alternatively, keep the default and invoke transitions via `transaction.on_commit` so they start only once the surrounding write is visible.
 
 Practical consequence: you **cannot** chain a background transition from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 

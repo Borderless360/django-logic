@@ -19,7 +19,6 @@ executes the side-effects and writes the final state. Definitions live
 in ``django_logic.background.transitions`` (phase 1) and
 ``django_logic.background.runner`` (phase 2).
 """
-import math
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
@@ -172,24 +171,6 @@ class Transition:
                 f"the terminal write a silent no-op. Give the failure its "
                 f"own state."
             )
-        # Per-transition override of the global LOCK_TIMEOUT for the
-        # synchronous execution path — for transitions whose side-effects
-        # legitimately run long (report generation, large exports) — size it
-        # above the longest expected run so mutual exclusion holds for the
-        # whole run instead of expiring mid-flight. Background
-        # transitions don't need this: their phase-1 critical section is
-        # short and their in-flight marker is the TransitionMessage row.
-        self.lock_timeout = kwargs.get('lock_timeout')
-        if self.lock_timeout is not None and (
-            not isinstance(self.lock_timeout, (int, float))
-            or isinstance(self.lock_timeout, bool)
-            or self.lock_timeout <= 0
-            or not math.isfinite(self.lock_timeout)
-        ):
-            raise ImproperlyConfigured(
-                f"Transition '{action_name}': lock_timeout must be a "
-                f"positive number of seconds, got {self.lock_timeout!r}."
-            )
         # Only SideEffects dereferences its transition (to drive
         # complete/fail); the other command bundles never read it.
         # Built through class attributes like the other four, so all six
@@ -245,15 +226,7 @@ class Transition:
         # A separate is_locked() pre-check only adds a TOCTOU window and a
         # redundant round-trip (a stale is_locked()==True could even reject
         # a transition the atomic lock() would have granted).
-        #
-        # No-arg call when no per-transition override is configured, so
-        # custom State subclasses written against the pre-lock_timeout
-        # ``lock(self)`` signature keep working (#142).
-        locked = (
-            state.lock()
-            if self.lock_timeout is None
-            else state.lock(self.lock_timeout)
-        )
+        locked = state.lock()
         if not locked:
             # Logged BEFORE the raise, or a permanently frozen instance is
             # indistinguishable from a healthy start: both emit one Start line

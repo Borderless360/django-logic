@@ -75,7 +75,7 @@ class State(object):
     def _get_hash(self):
         return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
 
-    def lock(self, timeout=None):
+    def lock(self):
         """
         Atomically locks the state.
         Returns True if the lock was acquired, False if already locked.
@@ -83,13 +83,9 @@ class State(object):
         Stores a unique ownership token as the lock value, so a stale
         holder whose lock TTL-expired cannot release a successor's lock
         (see ``unlock``).
-
-        ``timeout`` overrides the global ``LOCK_TIMEOUT`` for this lock
-        (per-transition ``lock_timeout``).
         """
-        effective = timeout if timeout is not None else _get_lock_timeout()
         token = uuid4().hex
-        if cache.add(self._get_hash(), token, effective):
+        if cache.add(self._get_hash(), token, _get_lock_timeout()):
             self._lock_token = token
             return True
         return False
