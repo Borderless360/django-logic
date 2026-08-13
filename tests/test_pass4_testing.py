@@ -1,13 +1,9 @@
-"""Pass-4 review pins for ``django_logic.testing`` + the coverage key.
+"""Pass-4 review pins for ``django_logic.testing``.
 
 Every test here fails if the fix it names is reverted — the findings were all
 of the "the guard/report says PASS while checking nothing" kind, so each needs
 a test that only the fixed code can satisfy:
 
-* condition fingerprints must separate per-variant callable-instance
-  conditions (``CourierIs('ups')`` vs ``CourierIs('dhl')``) and must be
-  byte-identical across processes (the spawn-parallel / separate-report-process
-  flow merges keys written by other interpreters).
 * a bare string where a list of names belongs is a vacuous assertion.
 * ``from_snapshot`` must reject a foreign snapshot and must own the restored
   instance's ``TransitionMessage`` row.
@@ -18,25 +14,13 @@ a test that only the fixed code can satisfy:
   does not declare one.
 """
 import datetime
-import functools
-import subprocess
-import sys
-from pathlib import Path
 
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import override_settings
 from django.utils import timezone
 
-import django_logic
 from django_logic.background.models import TransitionMessage
-from django_logic.coverage import (
-    TransitionCoverage,
-    _condition_fingerprint,
-    coverage_report,
-)
-from django_logic.process import Process, ProcessManager
 from django_logic.testing import ProcessScenario
 from django_logic.testing.snapshot import from_snapshot, snapshot
-from django_logic.transition import Transition
 from tests import dl_settings
 from tests.background.models import (
     Conversation,
@@ -48,168 +32,6 @@ from tests.background.models import (
     WidgetSyncProcess,
 )
 from tests.models import Invoice
-
-
-# --- B-K4 + B1: condition fingerprint identity & cross-process stability ---
-
-
-class _CourierIs:
-    """The idiomatic per-variant condition: one class, one instance per
-    courier. Its identity as a *declaration* is the courier it carries."""
-
-    def __init__(self, courier):
-        self.courier = courier
-
-    def __call__(self, instance, **kwargs):
-        return getattr(instance, '_courier', None) == self.courier
-
-
-class _SlottedCourierIs:
-    __slots__ = ('courier',)
-
-    def __init__(self, courier):
-        self.courier = courier
-
-    def __call__(self, instance, **kwargs):
-        return getattr(instance, '_courier', None) == self.courier
-
-
-def _is_courier(instance, courier=None, client=None, **kwargs):
-    return getattr(instance, '_courier', None) == courier
-
-
-class _Opaque:
-    """No stable ``repr``: the default one embeds a process-local address."""
-
-
-# Run in a FRESH interpreter (twice) — the addresses in a default repr differ
-# per process, which is exactly what breaks a merged coverage log.
-_FINGERPRINT_SNIPPET = '''
-import functools
-from django_logic.coverage import _condition_fingerprint
-
-
-class Opaque:
-    pass
-
-
-class CourierIs:
-    def __init__(self, courier, client):
-        self.courier = courier
-        self.client = client
-
-    def __call__(self, instance, **kwargs):
-        return True
-
-
-def is_courier(instance, courier=None, client=None, **kwargs):
-    return True
-
-
-print(_condition_fingerprint(CourierIs('ups', Opaque())))
-print(_condition_fingerprint(
-    functools.partial(is_courier, 'ups', client=Opaque())))
-'''
-
-
-class ConditionFingerprintTests(SimpleTestCase):
-    def test_same_class_different_config_are_different_keys(self):
-        ups = _condition_fingerprint(_CourierIs('ups'))
-        dhl = _condition_fingerprint(_CourierIs('dhl'))
-        self.assertNotEqual(ups, dhl)
-        self.assertIn("courier='ups'", ups)
-        self.assertIn("courier='dhl'", dhl)
-
-    def test_slotted_instances_without_a_dict_still_differ(self):
-        ups = _condition_fingerprint(_SlottedCourierIs('ups'))
-        dhl = _condition_fingerprint(_SlottedCourierIs('dhl'))
-        self.assertNotEqual(ups, dhl)
-        self.assertIn('_SlottedCourierIs', ups)
-
-    def test_instance_config_without_a_stable_repr_degrades_to_a_class_path(self):
-        fingerprint = _condition_fingerprint(_CourierIs(_Opaque()))
-        self.assertNotIn('0x', fingerprint)
-        self.assertIn('_Opaque', fingerprint)
-
-    def test_partial_keeps_primitive_config_readable(self):
-        fingerprint = _condition_fingerprint(
-            functools.partial(_is_courier, 'ups', client=None))
-        self.assertIn('_is_courier', fingerprint)
-        self.assertIn("'ups'", fingerprint)
-        self.assertIn('client=None', fingerprint)
-        self.assertNotIn('0x', fingerprint)
-
-    def test_partial_config_types_still_separate_declarations(self):
-        self.assertNotEqual(
-            _condition_fingerprint(functools.partial(_is_courier, courier='ups')),
-            _condition_fingerprint(functools.partial(_is_courier, courier='dhl')),
-        )
-
-    def test_fingerprints_are_identical_in_two_separate_processes(self):
-        first = self._fingerprints_from_a_fresh_process()
-        second = self._fingerprints_from_a_fresh_process()
-        self.assertEqual(first, second)
-        # The reason they used to differ: an address baked into the key.
-        self.assertNotIn('0x', first)
-
-    def _fingerprints_from_a_fresh_process(self) -> str:
-        repo_root = Path(django_logic.__file__).resolve().parent.parent
-        result = subprocess.run(
-            [sys.executable, '-c', _FINGERPRINT_SNIPPET],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=120,
-            env={'PYTHONPATH': str(repo_root), 'PATH': '/usr/bin:/bin'},
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return result.stdout
-
-
-class CallableConditionCoverageIdentityTests(TestCase):
-    """Two per-courier variants of one action must count — and cover —
-    separately. Sharing a key made driving ``ups`` mark ``dhl`` covered, i.e.
-    the coverage gate greenlit a transition no test ever drove."""
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-
-        class Pass4CourierProcess(Process):
-            process_name = 'pass4_courier_process'
-            transitions = [
-                Transition('ship', sources=['ready'], target='shipped',
-                           conditions=[_CourierIs('ups')]),
-                Transition('ship', sources=['ready'], target='shipped',
-                           conditions=[_CourierIs('dhl')]),
-            ]
-
-        cls.process_class = Pass4CourierProcess
-        ProcessManager.bind_model_process(Invoice, Pass4CourierProcess,
-                                          state_field='status')
-
-    @classmethod
-    def tearDownClass(cls):
-        ProcessManager.bindings = [
-            b for b in ProcessManager.bindings
-            if b.process_class is not cls.process_class
-        ]
-        if 'pass4_courier_process' in vars(Invoice):
-            delattr(Invoice, 'pass4_courier_process')
-        super().tearDownClass()
-
-    def _ours(self, report):
-        return [u for u in report['uncovered']
-                if u['process'].endswith('Pass4CourierProcess')]
-
-    def test_each_configured_variant_counts_separately(self):
-        self.assertEqual(len(self._ours(coverage_report(executed=()))), 2)
-
-    def test_driving_one_courier_leaves_the_other_uncovered(self):
-        invoice = Invoice.objects.create(status='ready')
-        invoice._courier = 'ups'
-        with TransitionCoverage() as cov:
-            invoice.pass4_courier_process.ship()
-        invoice.refresh_from_db()
-        self.assertEqual(invoice.status, 'shipped')
-        self.assertEqual(len(self._ours(cov.report())), 1)
 
 
 # --- B2: a bare string where a list of names belongs ------------------------

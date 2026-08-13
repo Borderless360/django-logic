@@ -11,7 +11,6 @@ function as part of its full safety gate (both paths are idempotent —
 pure reads, no state).
 """
 import math
-import os
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -58,12 +57,6 @@ def strict_hook_signatures() -> bool:
     return _conf().get('STRICT_HOOK_SIGNATURES', False) is True
 
 
-def transition_coverage_log():
-    """Path the transition-coverage recorder appends to, or ``None`` when
-    recording is off. Validated by :func:`validate_core_settings`."""
-    return _conf().get('TRANSITION_COVERAGE_LOG') or None
-
-
 def legacy_exception_base():
     """Dotted path of an extra base class to mix into
     ``TransitionNotAllowed`` (coexistence with a differently-named fork
@@ -99,19 +92,6 @@ def validate_core_settings() -> None:
                 f"{value!r}. Strings are not accepted — 'false' would "
                 f"otherwise read as truthy."
             )
-    # The coverage log goes straight to open(path, 'a'), where a bool is not
-    # a type error: open(True) writes to file descriptor 1, so
-    # TRANSITION_COVERAGE_LOG = True silently appends coverage lines to
-    # stdout. Anything that is not a path is refused at boot, where it is
-    # attributable, rather than per transition inside a swallowed observer
-    # exception.
-    value = _conf().get('TRANSITION_COVERAGE_LOG')
-    if value is not None and not isinstance(value, (str, os.PathLike)):
-        raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['TRANSITION_COVERAGE_LOG'] must be a filesystem "
-            f"path (str or os.PathLike), or None to disable recording, got "
-            f"{value!r}."
-        )
     # Type check only — resolving the dotted path imports consumer code,
     # which does not belong in a pure-read validator. The import happens in
     # install_legacy_exception_base(), where failures are equally loud and

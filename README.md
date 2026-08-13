@@ -760,7 +760,6 @@ DJANGO_LOGIC = {
     'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
     'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
     'DEFER_UNLOCK_UNTIL_COMMIT': False,  # True: sync unlocks ride transaction.on_commit (see "Concurrency and locking")
-    # 'TRANSITION_COVERAGE_LOG': '...',  # opt-in: record driven transitions to a file (see "Transition-execution coverage")
     # 'LEGACY_EXCEPTION_BASE': '...',  # opt-in: dotted path of a fork's TransitionNotAllowed to mix in during a migration (see below)
 }
 ```
@@ -1301,59 +1300,6 @@ turns a production bug into a regression test. See
 **AI-readable failure output.** When an assertion fails, the error includes a numbered timeline of every step and the relevant `TransitionMessage`, so a person or an agent can see where the process diverged without reading stack traces.
 
 `ProcessScenario` extends `TransactionTestCase`, so it works with the durable `TransitionMessage` + atomic-block machinery.
-
-### Transition-execution coverage
-
-Which transitions does your test suite actually drive? Static analysis of the
-test tree can't tell — a test that exercises a view or Celery task which calls
-`instance.process.action()` looks uncovered, and dynamically-dispatched drives
-(`getattr(process, name)()`) can't be attributed at all. The engine can answer
-exactly: every initiation resolves the transition and its declaring (possibly
-nested) process in one place, and notifies
-`django_logic.process.transition_observers`.
-
-```python
-from django_logic.coverage import TransitionCoverage
-
-with TransitionCoverage() as cov:
-    ...  # drive processes / run tests
-report = cov.report()
-report['uncovered']  # [{'process': ..., 'action': ..., 'background': ..., 'models': [...]}]
-```
-
-Coverage is keyed **per declaration**, not per action name: legal same-name
-transitions (condition-disambiguated variants, or a synchronous + background
-namesake pair in one class) count and cover separately — the entry carries the
-declaration's `sources`/`target`/`background` so you can tell them apart.
-
-For parallel test runs (fork or spawn), record to a file instead — every
-worker appends unique declaration keys:
-
-```python
-# settings used for the coverage run
-DJANGO_LOGIC = {..., 'TRANSITION_COVERAGE_LOG': '/tmp/fsm_coverage.log'}
-```
-
-```python
-from django_logic.coverage import coverage_report
-report = coverage_report(log_path='/tmp/fsm_coverage.log')
-```
-
-A pair is recorded at *initiation* (direct calls, `next_transition`
-follow-ups, background phase 1); phase-2 restore and retries don't re-notify.
-Diffing `report['uncovered']` in CI catches transitions that silently stop
-being exercised. Logs written by 0.8/0.9.0 recorders are **no longer read** —
-0.10.0 removed the cross-version readers, so a log in an older format reports
-everything as uncovered. Re-measure against the current release rather than
-carrying an old log forward. The observer list is public — consumers can
-register their own hooks (metrics, tracing), called as
-`observer(owning_process_cls, action_name, instance, transition)` (the
-resolved declaration object was added as a fourth argument in 0.9); a raising
-observer is logged and never breaks a transition.
-
-The log is **append-only and never truncated** — point each run at a fresh
-path (or delete the old file first), or stale pairs from earlier runs count
-as covered.
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
