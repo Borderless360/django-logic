@@ -1,12 +1,37 @@
 # django-logic — guidance for AI assistants
 
-This repo is the **django-logic** library: declarative business logic & state
+This repo is the **django-logic** library: declarative business logic and state
 machines for Django, with durable, queue-routed background transitions
 (`django_logic.background`). This file tells an AI how to **use the library
 correctly** when generating or reviewing code that depends on it. The rules
 below are distilled from a full
 production-style validation on Heroku (RabbitMQ + PostgreSQL + multiple
 workers + induced worker crashes, deploys, broker loss, and pgbouncer).
+
+## Voice — write like a person
+
+This library was largely written by AI tools. Much of the existing prose is a
+private dialect (numbered “phases”, “liveness”, “retry horizon”, ticket ids in
+comments). **Do not copy that voice.** Write as you would to a colleague.
+
+- Short sentences. One meaning per word. No metaphors.
+- Names are full words: `transition_message`, not `tm`.
+- Comments explain a non-obvious *why* in one or two sentences. Do not narrate
+  the next line, and do not cite GitHub issues, PRs, or check ids (`#195`,
+  `W002`). `CHANGELOG.md` owns that provenance.
+- Exception text is for operators. Say what happened and what to do.
+- If you would not say it out loud, rewrite it.
+- When you touch a file, rewrite dialect in the lines you touch. Do not add
+  more of it.
+
+**Allowed words:** transition, background transition, `TransitionMessage`,
+source state, retry window, stranded (nothing is retrying it), enqueue (save
+the row and send it to the queue), execute (the worker runs the side-effects),
+uncompleted, in progress.
+
+**Do not use:** `phase 1` / `phase 2`, `liveness`, `retry horizon`, `re-drive`,
+`in-flight marker`, `speculative-insert`, `owning process`, `finishing flight`,
+clipped locals (`tm`, `msg`, `inst`).
 
 ## What to generate
 
@@ -18,7 +43,7 @@ app's `AppConfig.ready()`** — with
 `ProcessManager.bind_model_process(Model, MyProcess, state_field='status')`
 (import the model and process *inside* `ready()`). Never bind at module import
 time in `models.py`/`process.py`: that forces a
-`model → process → actions → model` circular import (issue #100), because the
+`model → process → actions → model` circular import, because the
 process and its action functions both reference the model. `ready()` runs after
 every app's models are loaded, so the cycle never forms and action modules can
 import the model at the top level. Then drive it via
@@ -52,29 +77,30 @@ change on success) for anything slow, external, or retriable.
    state). Never re-raise a child error into the parent.
 4. **Set a `failed_state`** so failures are contained. `in_progress_state`
    is **background-only** (0.12.0): on a `BackgroundTransition` it is written
-   atomically with the `TransitionMessage` row; declaring it on a synchronous
-   `Transition`/`Action` raises at class creation. It may be shared freely —
-   every marked instance carries its exact transition on the row, so recovery
-   never guesses an owner (the old `django_logic.E001` ownership check is
-   retired). A synchronous "busy" phase is modelled as a real state: a fast
-   transition into it chained via `next_transition` to a
-   `BackgroundTransition` that does the work, plus a small periodic re-drive
+   in the same transaction as the `TransitionMessage` row; declaring it on a
+   synchronous `Transition`/`Action` raises at class creation. It may be shared
+   freely — every marked instance carries its exact transition on the row, so
+   recovery never guesses which transition it belongs to (the old
+   `django_logic.E001` check is retired). A synchronous "busy" step is a real
+   state: a fast transition into it chained via `next_transition` to a
+   `BackgroundTransition` that does the work, plus a small periodic retry
    for the crash window (see the README migration note).
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
-   `sync_execution()` context manager) runs phase 2 inline with no broker and
-   propagates exceptions; `retry_pending()` simulates the periodic starter.
-   The global default is `'celery'`, so test settings must opt into sync.
-   See `docs/TESTING_GUIDE.md` for the full scenario catalog.
-6. **One in-flight background transition per instance per process.** While an
+   `sync_execution()` context manager) runs the worker path inline with no
+   broker and propagates exceptions; `retry_pending()` simulates the periodic
+   starter. The global default is `'celery'`, so test settings must opt into
+   sync. See `docs/TESTING_GUIDE.md` for the full scenario catalog.
+6. **One uncompleted background transition per instance per process.** While an
    uncompleted `TransitionMessage` exists, a second background transition
    raises `AlreadyInProgress` and a *synchronous* transition on the same
    instance+process raises `TransitionTemporarilyUnavailable` (both subclass
    `TransitionNotAllowed`; catch the transient type first to answer
    "retry shortly") — design flows so follow-up work chains from terminal
-   hooks, not mid-flight. A failing `Action`'s `failed_state` write is
-   skipped while the row is uncompleted: phase 2 owns the state field.
+   hooks, not while another transition is still running. A failing `Action`'s
+   `failed_state` write is skipped while the row is uncompleted: the worker
+   owns the state field.
 7. **Manual state fixes win.** If an instance is moved externally while a
-   background row is pending, phase 2 completes the row as *superseded*
+   background row is pending, the worker completes the row as *superseded*
    (`'[superseded]'` in `last_error_message`) and skips side-effects. This is
    unconditional since 0.10.0.
 
@@ -91,7 +117,7 @@ change on success) for anything slow, external, or retriable.
 - Crash re-delivery is built in (every django-logic task sets
   `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
   pair only for your *own* tasks. You still need a **single beat**
-  scheduling the four `django_logic.*` safety-net tasks — and a worker for
+  scheduling the four `django_logic.*` periodic tasks — and a worker for
   every queue you use. Install them by writing the `CELERY_`-namespaced key,
   because a plain `app.conf.beat_schedule = …` assignment is silently ignored
   when the project also defines `CELERY_BEAT_SCHEDULE` in Django settings:
@@ -103,7 +129,7 @@ change on success) for anything slow, external, or retriable.
   }
   ```
 
-  `django_logic.W002` reports missing entries on `manage.py check` — a
+  `manage.py check` reports missing entries as `django_logic.W002` — a
   *warning*, so it does not fail the command unless you run
   `check --fail-level WARNING`.
 - Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
@@ -117,9 +143,9 @@ change on success) for anything slow, external, or retriable.
   PostgreSQL concurrency + stability suites under `tests/stability`,
   `tests/background`. There is no pytest configuration — do not add one
   without wiring `DJANGO_SETTINGS_MODULE`.
-- `django_logic/background/` is the durable engine: `transitions.py`,
-  `dispatch.py`, `runner.py` (phase 2), `tasks.py` (Celery + periodic),
-  `models.py` (`TransitionMessage`), `settings.py`.
+- `django_logic/background/` is the durable engine: `transitions.py`
+  (enqueue), `dispatch.py`, `runner.py` (execute on the worker), `tasks.py`
+  (Celery + periodic), `models.py` (`TransitionMessage`), `settings.py`.
 - Read `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md` and
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
@@ -127,10 +153,3 @@ change on success) for anything slow, external, or retriable.
 - `CHANGELOG.md` is the record of what shipped and why; `TODO.md` holds what
   has not. Neither is a design document — do not add planning docs that
   duplicate them.
-
-## Comments and docstrings: explain *why*, never narrate *what*
-
-A comment earns its place only when it captures non-obvious intent or a gotcha
-the code cannot express — and then it is terse. Do not restate the next line,
-narrate a change, or record issue archaeology: `CHANGELOG.md` owns history.
-A bare `(#NNN)` marker is enough when a guard needs provenance.
