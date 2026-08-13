@@ -2,7 +2,56 @@
 
 ## [Unreleased]
 
+### Removed (breaking) — the second diet
+
+Every removal below had zero consumers in gv, the reference consumer, and
+zero consumers in the Heroku harness beyond tests of the feature itself.
+This is the follow-through on the overengineering review of 2026-08-13
+(engine grew from 6,305 to 7,621 lines in three releases; most of the
+growth defended the engine's own machinery).
+
+- **The transition-coverage subsystem** (`django_logic.coverage`, the
+  `transition_observers` seam in `process.py`, the
+  `TRANSITION_COVERAGE_LOG` setting and its boot validation, both
+  `ready()` activations, the README section). #132/#146 surface;
+  nobody ever set the knob. A leftover setting key is reported by
+  `django_logic.W004` with migration advice.
+- **Per-transition `lock_timeout=`** on `Transition`. Zero declarations
+  across 175 consumer transitions; the sweep that motivated it died in
+  0.12.0. The global `DJANGO_LOGIC['LOCK_TIMEOUT']` is the only TTL, and
+  `State.lock()` takes no arguments again. A leftover `lock_timeout=`
+  kwarg raises `ImproperlyConfigured` at class creation.
+- **The `failure_side_effects` hook family** (`FailureSideEffects`
+  bundle, the `failure_side_effects=` kwarg, the tracking slot and the
+  `assert_failure_side_effects_ran` scenario assertion). Consumers
+  declared it never (0 uses vs 41 `failure_callbacks`), and the bundle
+  hosted its own savepoint fix chain (#138, #189) for hooks nobody had.
+  On failure the engine now writes `failed_state`, unlocks, and runs
+  `failure_callbacks`. A leftover `failure_side_effects=` kwarg raises
+  `ImproperlyConfigured` at class creation.
+  `TransitionMessage.failure_side_effect_error` stays: it records a
+  rejected `failed_state` write.
+- **`to_json`** from `django_logic.testing` (zero consumers; `snapshot()`
+  returns a dict that `json.dumps` handles).
+- **The separate removed-settings check (`W003`)** — folded into `W004`:
+  one check now owns "the engine does not read this key", answering with
+  per-key migration advice for removed keys and the typo hint otherwise.
+
+### Added
+
+- `CLAUDE.md` now carries the **architecture rule** (the cache may lie
+  briefly; the database row never lies; everything recoverable recovers
+  from a row) and an **anti-spiral release policy**: no hardening without
+  a consumer-reproduced failure, adversarial self-review capped at one
+  pass, and a third fix on one defect class triggers a design cut.
+
 ### Changed
+
+- The testing-guide scenario catalog is five canonical scenarios; the
+  other shapes stay pinned in `tests/` and the guide points there.
+- Kept, deviating from the diet plan: `retry_pending` and
+  `unbind_model_process` stay public — both are documented testing API
+  with harness consumers, and demoting them saves nothing.
 
 - **Comments, exception text, and a handful of internal names** now use
   ordinary English. Enqueue vs execute, not phase 1 / phase 2. Ticket
