@@ -14,5 +14,5 @@ class BackgroundConfig(AppConfig):
         from django_logic.conf import install_legacy_exception_base
 
         # Idempotent — covers an install shape where only the background
-        # app's ready() runs before denials are raised or caught (#190).
+        # app's ready() runs before denials are raised or caught.
         install_legacy_exception_base()

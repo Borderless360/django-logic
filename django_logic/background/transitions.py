@@ -1,7 +1,6 @@
 """BackgroundTransition / BackgroundAction — durable, queue-routed Celery tasks.
 
-Phase 1 (what ``change_state`` does) is identical in both Celery and
-Sync execution modes:
+``change_state`` enqueues the work (same steps in Celery and Sync mode):
 
 * validate conditions + permissions,
 * acquire the state lock for the critical section and revalidate the
@@ -9,12 +8,12 @@ Sync execution modes:
 * atomically write ``in_progress_state`` (for ``BackgroundTransition``)
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
-  row is the durable in-flight marker that gates concurrent transitions,
+  row is what gates concurrent transitions,
 * hand the row id to the dispatcher, which either ``apply_async`` the
-  Celery task (Celery mode) or call phase 2 inline (Sync mode).
+  Celery task (Celery mode) or executes the worker path inline (Sync mode).
 
-Phase 2 lives in :mod:`django_logic.background.runner` and is shared
-between both modes.
+The worker path lives in :mod:`django_logic.background.runner` and is
+shared between both modes.
 """
 from __future__ import annotations
 
@@ -52,12 +51,12 @@ class BackgroundTransition(Transition):
 
     Recommended:
         - ``in_progress_state`` — if omitted, the state field does not
-          change until phase 2 finishes. Providing it is strongly
+          change until the worker finishes. Providing it is strongly
           recommended so concurrent readers see "in progress" rather
           than the pre-transition state. Transitions may share one
           freely: it is written atomically with the ``TransitionMessage``
-          row, which names the exact transition in flight, so nothing has
-          to infer an owner from the state value.
+          row, which names the exact transition, so nothing has to infer
+          an owner from the state value.
     """
 
     is_background = True
@@ -101,8 +100,8 @@ class BackgroundTransition(Transition):
         return self.queue or bg_settings.default_queue()
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
-        # Before the lock, and before the kwargs are serialized into a row that
-        # phase 2 would fail on for the same reason.
+        # Before the lock, and before the kwargs are serialized into a row
+        # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
@@ -116,8 +115,7 @@ class BackgroundTransition(Transition):
         )
 
         if not self.is_valid(state.instance, kwargs.get('user')):
-            # Same observability rule as the failed lock below (#188): a
-            # rejection with no log line leaves a Start with no explanation.
+            # A rejection with no log line leaves a Start with no explanation.
             transition_logger.info(
                 f'{kwargs.get("tr_id")} {self.action_name} '
                 f'{state.instance_key} rejected by conditions or permissions'
@@ -130,15 +128,15 @@ class BackgroundTransition(Transition):
         # The cache lock guards only this critical section (validate →
         # create the TransitionMessage → write in_progress_state). It is
         # released in the finally below; from then on the uncompleted
-        # TransitionMessage row is the durable in-flight marker. Holding
-        # the cache lock for the whole background flight would leak it if
+        # TransitionMessage row is what gates concurrent transitions.
+        # Holding the cache lock for the whole worker run would leak it if
         # a caller's surrounding transaction rolled back (a cache write
         # does not roll back with the database), and a DB row needs no TTL
         # refresh across long retries.
         if not state.lock():
-            # See Transition.change_state (#188): logged before the raise, at
-            # INFO per #154, with the instance key — a frozen instance must
-            # not read as "the transition starts and the worker drops it".
+            # Logged before the raise, at INFO, with the instance key — a
+            # frozen instance must not read as "the transition starts and
+            # the worker drops it".
             transition_logger.info(
                 f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
                 f'failed {state.instance_key} — state is locked'
@@ -153,27 +151,27 @@ class BackgroundTransition(Transition):
             # the source check ran before the lock was acquired.
             self._ensure_db_state_in_sources(state)
             try:
-                tm = self._phase_one_atomic(state, kwargs, queue_name)
+                transition_message = self._enqueue_atomic(
+                    state, kwargs, queue_name)
             except AlreadyInProgress:
-                # Same liveness classification as the sync gate (#195): the
-                # constraint held by a STRANDED row is not "retry shortly" —
-                # that answer would be wrong forever, at WARNING. Queried
-                # here, after _phase_one_atomic's rolled-back atomic, so the
-                # connection is healthy; still under the cache lock. A row
-                # that completed in the window keeps AlreadyInProgress —
-                # it JUST finished, so retrying is exactly right.
-                if TransitionMessage.in_flight_liveness(
+                # Nothing is retrying a stranded row, so "try again shortly"
+                # would be wrong forever. Queried here, after
+                # _enqueue_atomic's rolled-back atomic, so the connection is
+                # healthy; still under the cache lock. A row that completed
+                # in the window keeps AlreadyInProgress — it just finished,
+                # so retrying is exactly right.
+                if TransitionMessage.retry_status(
                     state.instance, state.process_name,
-                ) == TransitionMessage.LIVENESS_STRANDED:
+                ) == TransitionMessage.STRANDED:
                     raise TransitionNotAllowed(
                         f"BackgroundTransition '{self.action_name}' is not "
-                        f"allowed: the in-flight marker for "
-                        f"{state.instance_key} is past the retry horizon — "
-                        f"stranded, not in flight. Likely causes: the "
-                        f"safety-net beat tasks are not scheduled "
-                        f"(django_logic.W002), a queue backlog or worker "
-                        f"outage longer than the horizon, or a lost broker "
-                        f"message. Re-drive or complete the row."
+                        f"allowed: an uncompleted TransitionMessage for "
+                        f"{state.instance_key} is stranded — nothing is "
+                        f"retrying it. Likely causes: the safety-net beat "
+                        f"tasks are not scheduled, a queue backlog or "
+                        f"worker outage longer than the retry window, or a "
+                        f"lost broker message. Complete the row, or start "
+                        f"the beat tasks so it is retried."
                     )
                 raise
         finally:
@@ -184,31 +182,31 @@ class BackgroundTransition(Transition):
             )
 
         from django_logic.background.dispatch import dispatch_transition
-        dispatch_transition(tm)
+        dispatch_transition(transition_message)
 
         return kwargs.get('tr_id')
 
-    def _phase_one_atomic(
+    def _enqueue_atomic(
         self, state: State, kwargs: dict, queue_name: str
     ) -> TransitionMessage:
         """Atomic: set in_progress_state + create TransitionMessage row.
 
         Raises :class:`AlreadyInProgress` if the partial unique
-        constraint fires (another uncompleted TM exists for the same
-        instance + process).
+        constraint fires (another uncompleted TransitionMessage exists
+        for the same instance + process).
         """
         instance_lookup = {
             'app_label': state.instance._meta.app_label,
             'model_name': state.instance._meta.model_name,
-            # str() so UUID / CharField / big-int PKs all round-trip through
-            # the TextField; _restore coerces it back via get(pk=...).
+            # Models use different primary-key types (int, UUID, string).
+            # Store the key as text; _restore looks it up with get(pk=...).
             'instance_id': str(state.instance.pk),
         }
         try:
             serialized = serialize_kwargs(kwargs)
         except KwargsSerializationError:
-            # Strict-mode contract violation — the message is already
-            # precise; wrapping it as "not JSON-serializable" would mislead.
+            # Re-raise so the precise strict-mode message is not wrapped
+            # as "not JSON-serializable".
             raise
         except TypeError as e:
             raise ImproperlyConfigured(
@@ -227,19 +225,20 @@ class BackgroundTransition(Transition):
             # column (CHECK, NOT NULL, FK, trigger) surface as the
             # misleading "another transition is already in progress".
             try:
-                tm = TransitionMessage.objects.create(
+                transition_message = TransitionMessage.objects.create(
                     process_name=state.process_name,
-                    # Recorded so phase 2 can reconstruct the process from
-                    # the stored process_class even when the model property
-                    # was renamed/rebound between phases.
+                    # Recorded so the worker can reconstruct the process
+                    # from the stored process_class even when the model
+                    # property was renamed or rebound in between.
                     field_name=state.field_name,
                     transition_name=self.action_name,
-                    # The (possibly nested) process class that declares this
-                    # transition, resolved by Process._get_transition_method.
-                    # Lets phase 2 pick the exact transition when an
-                    # action_name is shared across condition-disambiguated
-                    # nested processes. Empty when invoked outside that path
-                    # (e.g. a directly-constructed transition) — phase 2 then
+                    # The (possibly nested) process class that declared
+                    # this transition, resolved by
+                    # Process._get_transition_method. Lets the worker pick
+                    # the exact transition when an action_name is shared
+                    # across nested processes that use conditions to
+                    # choose. Empty when invoked outside that path (e.g. a
+                    # directly-constructed transition) — the worker then
                     # falls back to first-match by transition_name.
                     owning_process_class=kwargs.get('owning_process_class', ''),
                     queue_name=queue_name,
@@ -255,23 +254,22 @@ class BackgroundTransition(Transition):
                 ) from exc
 
             # Recheck the persisted state AFTER the create. On PostgreSQL
-            # the insert can block in a speculative-insert wait while a
-            # concurrent flight's phase 2 finishes (its row leaves the
-            # partial unique index the moment is_completed flips) — we are
-            # then admitted seconds after our under-the-lock revalidation,
-            # against an instance the finished flight has already moved to
-            # its target/failed state. Without this recheck, two concurrent
-            # phase 1s on one instance can BOTH be accepted and the
-            # transition silently re-runs from a non-source state
+            # the insert can block while a concurrent worker finishes and
+            # flips is_completed (the row then leaves the partial unique
+            # index). We are admitted after our under-the-lock
+            # revalidation, against an instance that worker has already
+            # moved to its target or failed state. Without this recheck,
+            # two concurrent enqueues on one instance can both be accepted
+            # and the transition silently re-runs from a non-source state
             # (reproduced under real worker concurrency).
             current = state.get_persisted_state()
             if current not in self.sources:
-                # The atomic block rolls the TM row back.
+                # The atomic block rolls the TransitionMessage row back.
                 raise SourceStateChanged(
                     f"BackgroundTransition '{self.action_name}' is not "
                     f"allowed: the persisted state moved to {current!r} "
-                    f"while phase 1 waited on a finishing flight — it is "
-                    f"no longer one of the source states."
+                    f"while the insert waited on the unique constraint — "
+                    f"it is no longer one of the source states."
                 )
 
             if self.in_progress_state:
@@ -286,10 +284,10 @@ class BackgroundTransition(Transition):
                 )
 
         transition_logger.info(
-            f'{kwargs.get("tr_id")} TransitionMessage#{tm.pk} created '
-            f'(queue={queue_name})'
+            f'{kwargs.get("tr_id")} TransitionMessage#{transition_message.pk} '
+            f'created (queue={queue_name})'
         )
-        return tm
+        return transition_message
 
 
 class BackgroundAction(BackgroundTransition):
@@ -328,8 +326,8 @@ class BackgroundAction(BackgroundTransition):
 
     def complete_transition(self, state: State, **kwargs):
         # Defensive no-op for direct/manual invocation only — the engine
-        # never calls this: phase 1 stops at the TransitionMessage row and
-        # phase 2 writes state / runs hooks itself (_handle_success /
+        # never calls this: enqueue stops at the TransitionMessage row and
+        # the worker writes state / runs hooks itself (_handle_success /
         # _run_success_hooks). The inherited implementation would write an
         # empty target state; an action must not change state on success.
         pass

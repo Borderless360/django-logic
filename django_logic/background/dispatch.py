@@ -1,13 +1,13 @@
-"""Dispatch — where phase 1 hands off to phase 2.
+"""Dispatch — where enqueue hands off to the worker.
 
 Two modes:
 
 * **Celery mode** (``DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'celery'``):
   schedule a Celery task on the transition's queue via
-  ``transaction.on_commit``. The worker picks it up and runs phase 2.
+  ``transaction.on_commit``. The worker picks it up and executes.
 
-* **Sync mode** (``'sync'``): run phase 2 inline, immediately after the
-  phase-1 atomic block exits. Bypasses ``transaction.on_commit`` so it
+* **Sync mode** (``'sync'``): execute inline, immediately after the
+  enqueue atomic block exits. Bypasses ``transaction.on_commit`` so it
   works correctly under Django's ``TestCase`` (which wraps every test
   in a transaction that never commits).
 
@@ -32,7 +32,8 @@ def sync_execution():
     """Force Sync mode for the duration of the ``with`` block.
 
     Useful inside a test / management command when the global setting
-    is ``'celery'`` but you want phase 2 to run inline for this block.
+    is ``'celery'`` but you want the worker path to run inline for this
+    block.
     """
     token = _force_sync.set(True)
     try:
@@ -47,18 +48,18 @@ def _current_mode() -> str:
     return bg_settings.background_execution()
 
 
-def dispatch_transition(tm) -> None:
-    """Hand a fresh TransitionMessage off to phase 2.
+def dispatch_transition(transition_message) -> None:
+    """Hand a fresh TransitionMessage off to the worker.
 
     In Celery mode, schedules the Celery task via ``transaction.on_commit``
     so the DB row is visible to the worker.
 
-    In Sync mode, runs phase 2 inline. Exceptions propagate to the caller.
+    In Sync mode, executes inline. Exceptions propagate to the caller.
     """
     mode = _current_mode()
     if mode == bg_settings.EXECUTION_SYNC:
         from django_logic.background.runner import run_background_transition
-        run_background_transition(tm.pk)
+        run_background_transition(transition_message.pk)
         return
 
     # Celery mode — deferred import avoids loading the task module (and
@@ -70,11 +71,13 @@ def dispatch_transition(tm) -> None:
 
     # `shadow` gives this dispatch a per-transition name in Celery events /
     # Flower / RabbitMQ management, even though it's the one shared task.
-    shadow = task_label(tm)
+    shadow = task_label(transition_message)
 
     def _enqueue():
         run_background_transition_task.apply_async(
-            args=[tm.pk], queue=tm.queue_name, shadow=shadow
+            args=[transition_message.pk],
+            queue=transition_message.queue_name,
+            shadow=shadow,
         )
 
     transaction.on_commit(_enqueue)
@@ -95,11 +98,8 @@ def _warn_once_about_celery_config(task) -> None:
     in-memory transport no worker drains: ``apply_async`` succeeds but the
     task never runs, leaving the instance stuck in ``in_progress_state``.
 
-    (The old acks_late/reject_on_worker_lost warning is gone: it read the
-    *global* ``conf.task_acks_late`` and so never fired for the per-task
-    ``acks_late=True`` that actually creates the hazard — issue #91. The
-    hazard itself is now eliminated at the source: every django-logic task
-    sets ``reject_on_worker_lost=True`` alongside ``acks_late=True``.)
+    Every django-logic task sets ``reject_on_worker_lost=True`` alongside
+    ``acks_late=True``, so a worker crash redelivers the message.
     """
     global _celery_config_warned
     if _celery_config_warned:
@@ -136,18 +136,18 @@ def retry_pending() -> int:
 
 
 def in_flight(instance, process_name: str = 'process') -> bool:
-    """Whether a background transition is LIVE for ``instance`` +
-    ``process_name`` (#197) — an uncompleted ``TransitionMessage`` exists
-    and is inside its liveness window.
+    """Whether a background transition is still being retried for
+    ``instance`` + ``process_name`` — an uncompleted ``TransitionMessage``
+    exists and is inside its retry window.
 
     For shaping answers at API seams ("busy, try again shortly"), NOT as a
-    pre-flight gate: the read is racy — a flight can start or complete
+    pre-flight gate: the read is racy — a transition can start or complete
     between this call and whatever the caller does next. The engine's own
-    guards (phase 1's unique constraint, the sync gate's under-lock check)
+    guards (enqueue's unique constraint, the sync gate's under-lock check)
     stay authoritative.
 
-    A STRANDED row (past the retry horizon, #195) answers ``False``: it is
-    not "busy, retry shortly", and the engine's gates raise the plain
+    A stranded row (nothing is retrying it) answers ``False``: it is not
+    "busy, retry shortly", and the engine's gates raise the plain
     ``TransitionNotAllowed`` for it — so a consumer answering 409 on this
     probe and 400 on the plain base stays consistent. The engine's own
     failure-path write-skip deliberately uses bare existence instead —
@@ -162,6 +162,6 @@ def in_flight(instance, process_name: str = 'process') -> bool:
     from django_logic.background.models import TransitionMessage
 
     return (
-        TransitionMessage.in_flight_liveness(instance, process_name)
-        == TransitionMessage.LIVENESS_LIVE
+        TransitionMessage.retry_status(instance, process_name)
+        == TransitionMessage.RETRYING
     )

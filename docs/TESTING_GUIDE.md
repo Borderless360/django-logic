@@ -93,8 +93,8 @@ or a direct DB read).
 
 Background transitions execute through Celery by default
 (`BACKGROUND_EXECUTION` defaults to `'celery'`). Tests opt into **sync
-execution mode**, where phase 1 (validate + persist the `TransitionMessage` +
-write `in_progress_state`) and phase 2 (side-effects + target state) run
+execution mode**, where enqueue (validate + persist the `TransitionMessage` +
+write `in_progress_state`) and execute (side-effects + target state) run
 inline in the test process — the *real* code paths, not a re-implementation:
 
 ```python
@@ -178,7 +178,7 @@ def test_order_lifecycle(self):
     self.transition(order, 'approve', user=self.staff)
     self.assert_state(order, 'approved')
 
-    self.background_transition(order, 'fulfil')   # phase 1 + 2 inline, no Celery
+    self.background_transition(order, 'fulfil')   # enqueue + execute inline, no Celery
     self.assert_state(order, 'fulfilled')
     self.assert_side_effects_ran(['reserve_stock', 'call_courier'])
     self.assert_callbacks_ran(['send_confirmation_email'])
@@ -297,7 +297,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 |---|---|
 | `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg). Override for factories. |
 | `transition(obj, action, **kwargs)` | Run a synchronous transition through the normal entrypoint. |
-| `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` phase 1 **and** phase 2 inline. |
+| `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` enqueue **and** execute inline. |
 | `retry_transition(obj)` | Re-run the instance's uncompleted `TransitionMessage` — simulates the periodic starter. |
 | `snapshot(obj)` / `from_snapshot(data_or_path)` | Capture / rebuild instance + `TransitionMessage` state. |
 
@@ -398,7 +398,7 @@ from django_logic.background.dispatch import retry_pending
 retry_pending()   # one tick of the periodic starter, inline (sync mode)
 
 from django_logic.background.runner import run_background_transition
-run_background_transition(tm.pk)   # one phase-2 attempt for a specific row
+run_background_transition(tm.pk)   # one worker attempt for a specific row
 ```
 
 Use `TransactionTestCase` (or `ProcessScenario`, which extends it) when your
@@ -415,7 +415,7 @@ pyramid backing it:
 1. **Unit + regression suite** (`python tests/manage.py test`, SQLite,
    ~340 tests): every reproduced defect from the 0.3 stability review has a
    permanent regression test — savepoint isolation of side-effects
-   (`tests/background/test_savepoint_isolation.py`), the phase-2 state guard
+   (`tests/background/test_savepoint_isolation.py`), the worker's state guard
    (`test_phase2_state_guard.py`), the per-process in-flight constraint
    (`test_constraint_per_process.py`), restore verification
    (`test_restore_verification.py`), sync/background mutual exclusion

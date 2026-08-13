@@ -2,7 +2,7 @@
 retries inline, without Celery.
 
 Built on the library's own ``sync_execution()`` context manager (which forces
-phase 2 to run in-process) so tests exercise the *real* phase-1 + phase-2 code,
+the worker to run in-process) so tests exercise the *real* enqueue + worker code,
 not a reimplementation.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ def all_transitions(process_class) -> list:
 
 
 def run_background_sync(instance, process_name, action_name, kwargs):
-    """Run a BackgroundTransition's phase 1 + phase 2 inline (no broker)."""
+    """Run a BackgroundTransition's enqueue + the worker inline (no broker)."""
     from django_logic.background import sync_execution
     with sync_execution():
         process = getattr(instance, process_name)
@@ -44,7 +44,7 @@ def _messages(instance, process_name, **filters):
     """Base queryset for one bound process's ``TransitionMessage`` rows,
     newest first. Scoping is mandatory: two processes on different state
     fields of the same model are independent state machines and their rows
-    must not be confused (#150)."""
+    must not be confused."""
     from django_logic.background.models import TransitionMessage
     return TransitionMessage.objects.filter(
         app_label=instance._meta.app_label,
@@ -72,7 +72,7 @@ def message_for(instance, transition_name, process_name):
 
     Used by ``assert_transition_owner`` to pin the recorded
     ``owning_process_class`` of a specific transition in a chained/next-
-    transition workflow, where several TMs exist for one instance.
+    transition workflow, where several TransitionMessage rows exist for one instance.
     """
     return _messages(instance, process_name,
                      transition_name=transition_name).first()

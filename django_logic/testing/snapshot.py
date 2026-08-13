@@ -24,7 +24,7 @@ def _jsonable(value):
 
     Dicts/lists (JSONField values) pass through recursively — stringifying
     them produced a Python repr that round-tripped as a corrupted string
-    column (issue #95). Anything unsupported fails loudly rather than being
+    column. Anything unsupported fails loudly rather than being
     silently captured as ``str(value)``.
     """
     if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
@@ -65,33 +65,33 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
     # The most recent TransitionMessage for this instance's process (if the
     # background app is installed and a row exists). Scoped by process_name so
     # a second process bound to another state field of the same model can't
-    # leak its row into this snapshot (issue #150).
+    # leak its row into this snapshot.
     try:
         from django_logic.testing.runner import latest_message
-        tm = latest_message(instance, process_name=process_name)
-        if tm is not None:
+        transition_message = latest_message(instance, process_name=process_name)
+        if transition_message is not None:
             data['transition_message'] = {
-                'transition_name': tm.transition_name,
-                'process_name': tm.process_name,
-                'field_name': tm.field_name,
-                'owning_process_class': tm.owning_process_class,
-                'queue_name': tm.queue_name,
-                'is_completed': tm.is_completed,
-                'errors_count': tm.errors_count,
-                'last_error_message': tm.last_error_message,
-                'timeout_seconds': tm.timeout_seconds,
-                'kwargs': tm.kwargs,
+                'transition_name': transition_message.transition_name,
+                'process_name': transition_message.process_name,
+                'field_name': transition_message.field_name,
+                'owning_process_class': transition_message.owning_process_class,
+                'queue_name': transition_message.queue_name,
+                'is_completed': transition_message.is_completed,
+                'errors_count': transition_message.errors_count,
+                'last_error_message': transition_message.last_error_message,
+                'timeout_seconds': transition_message.timeout_seconds,
+                'kwargs': transition_message.kwargs,
                 # The retry/watchdog clock. Without these a snapshot of a hung
                 # or timed-out production row replays as a pristine row: the
                 # retry backoff, the stale-attempt watchdog and the
                 # stuck-transition detector all read them, so the very
                 # behaviour the snapshot was taken to reproduce could not be
                 # reproduced.
-                'last_error_dt': _jsonable(tm.last_error_dt),
-                'failure_side_effect_error': tm.failure_side_effect_error,
-                'started_at': _jsonable(tm.started_at),
-                'completed_at': _jsonable(tm.completed_at),
-                'duration_ms': tm.duration_ms,
+                'last_error_dt': _jsonable(transition_message.last_error_dt),
+                'failure_side_effect_error': transition_message.failure_side_effect_error,
+                'started_at': _jsonable(transition_message.started_at),
+                'completed_at': _jsonable(transition_message.completed_at),
+                'duration_ms': transition_message.duration_ms,
             }
     except Exception:
         pass
@@ -120,7 +120,7 @@ def _load(data_or_path):
 def _restore_dt(value):
     """ISO string (as captured) -> ``datetime``. The DB adapter would coerce
     the string too, but the created row is read back by callers, so keep the
-    in-memory attributes real field types (issue #95's lesson)."""
+    in-memory attributes real field types."""
     if not value:
         return None
     if isinstance(value, str):
@@ -167,7 +167,7 @@ def from_snapshot(data_or_path, *, model=None):
     # the save coerced them in the DATABASE, but the in-memory instance still
     # carries the strings — a condition like ``if instance.band:`` would see
     # ``bool('0.000') == True`` where production saw ``bool(Decimal('0.000'))
-    # == False`` (issue #95). Re-read so attributes are real field types.
+    # == False``. Re-read so attributes are real field types.
     instance.refresh_from_db()
 
     tm_data = data.get('transition_message')
@@ -191,12 +191,12 @@ def from_snapshot(data_or_path, *, model=None):
             model_name=instance._meta.model_name,
             instance_id=str(instance.pk),
             process_name=tm_process_name,
-            # Restore the recorded field so phase 2 takes the same
+            # Restore the recorded field so the worker takes the same
             # recorded-field path the production row would have used
             # ('' = legacy pre-0.4 row, inference fallback).
             field_name=tm_data.get('field_name', ''),
             transition_name=tm_data['transition_name'],
-            # Restore the owning-process discriminator so phase-2 replay
+            # Restore the owning-process discriminator so worker replay
             # resolves the exact transition (blank on legacy snapshots →
             # first-match fallback, unchanged behaviour).
             owning_process_class=tm_data.get('owning_process_class', ''),

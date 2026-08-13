@@ -23,7 +23,7 @@ Carried over from the Heroku validation round.
 - [ ] Document the Postgres **connection budget**: each in-flight task holds a
       connection (two if the app opens a second one per task), so size
       `concurrency × workers` against the DB limit (pgbouncer or plan cap).
-- [ ] Document a beat-liveness alert recipe — e.g. Sentry cron monitors via
+- [ ] Document a beat-is-running alert recipe — e.g. Sentry cron monitors via
       `CeleryIntegration(monitor_beat_tasks=True)`. See also the system check
       added for a schedule that never installed the safety-net entries.
 - [ ] Log level for handled safety-net conditions: `detect_stuck`

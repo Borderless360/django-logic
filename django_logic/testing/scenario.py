@@ -113,9 +113,9 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         self._record(label, 'OK' if ok else 'FAILED', detail)
 
     def _fail(self, message, instance=None):
-        tm = (latest_message(instance, process_name=self._process_name)
+        transition_message = (latest_message(instance, process_name=self._process_name)
               if instance is not None else None)
-        self.fail(format_failure(message, self._timeline, tm=tm))
+        self.fail(format_failure(message, self._timeline, transition_message=transition_message))
 
     def _state(self, instance):
         return getattr(instance, self.state_field)
@@ -166,7 +166,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def background_transition(self, instance, action, *, fail_side_effect=None,
                              fail_with=None, expect_raises=None, **kwargs):
-        """Run a BackgroundTransition's phase 1 + phase 2 inline (no Celery).
+        """Run a BackgroundTransition's enqueue + the worker inline (no Celery).
 
         ``fail_side_effect`` / ``fail_with`` make the named side-effect raise,
         exercising the real failure path. ``expect_raises`` pins the
@@ -181,27 +181,27 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                          expect_raises=None):
         """Re-run the instance's uncompleted transition inline — what the
         periodic starter would do."""
-        tm = uncompleted_message(instance, process_name=self._process_name)
-        if tm is None:
+        transition_message = uncompleted_message(instance, process_name=self._process_name)
+        if transition_message is None:
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
             self._fail('retry_transition(): no uncompleted TransitionMessage for '
                        'this instance — nothing to retry.', instance=instance)
-        if not transitions_for(self.process_class, tm.transition_name):
+        if not transitions_for(self.process_class, transition_message.transition_name):
             self._record('retry_transition', 'FAILED',
-                         f'no transition named {tm.transition_name!r}')
+                         f'no transition named {transition_message.transition_name!r}')
             self._fail(f'retry_transition(): the uncompleted TransitionMessage '
-                       f'names {tm.transition_name!r}, which does not exist on '
+                       f'names {transition_message.transition_name!r}, which does not exist on '
                        f'{self.process_class.__name__}.', instance=instance)
         before = self._state(instance)
         # Track the WHOLE process tree, not just the retried action — the
         # retry can run follow-up transitions (next_transition, callbacks)
-        # whose hooks the assertions must see (issue #96).
+        # whose hooks the assertions must see.
         with track(all_transitions(self.process_class),
                    fail_side_effect=fail_side_effect,
                    fail_with=fail_with) as tracker:
-            raised = self._call(lambda: rerun_message(tm.pk))
+            raised = self._call(lambda: rerun_message(transition_message.pk))
         self._finish('retry_transition', instance, tracker, raised, before,
-                     action=tm.transition_name, expect_raises=expect_raises)
+                     action=transition_message.transition_name, expect_raises=expect_raises)
         return instance
 
     # --- shared execution path ------------------------------------------
@@ -224,8 +224,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                          'background transition')
             self._fail(
                 f'transition({action!r}) drives a BackgroundTransition — use '
-                f'background_transition({action!r}), which runs phase 1 and '
-                f'phase 2 inline. Under the global default '
+                f'background_transition({action!r}), which runs enqueue and '
+                f'the worker inline. Under the global default '
                 f"BACKGROUND_EXECUTION='celery' this call only ENQUEUES a "
                 f'Celery task (no worker runs it here), so the drive returns '
                 f'with the instance in its in_progress_state, an uncompleted '
@@ -236,7 +236,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # Track the WHOLE process tree, not just the named action — one drive
         # can also execute next_transition follow-ups and callback-triggered
         # transitions, and their hooks must be visible to the side-effect
-        # assertions (issue #96).
+        # assertions.
         with track(all_transitions(self.process_class),
                    fail_side_effect=fail_side_effect,
                    fail_with=fail_with) as tracker:
@@ -305,7 +305,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                 self._fail(f'{label} raised unexpectedly: '
                            f'{type(raised).__name__}: {raised}', instance=instance)
         # A requested injection that never fired silently turns a failure
-        # test into a happy-path run (issue #94). track() already rejects
+        # test into a happy-path run. track() already rejects
         # names that exist nowhere; this catches a hook that exists but did
         # not execute during this drive (e.g. wrong action, gated earlier).
         # An exception that DID propagate is no evidence the injection fired:

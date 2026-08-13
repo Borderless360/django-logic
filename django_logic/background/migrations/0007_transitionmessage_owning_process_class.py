@@ -2,18 +2,19 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    """Add the phase-2 owner discriminator (issue #98).
+    """Add the column that records which process class declared the transition.
 
-    Records the (possibly nested) Process class that DECLARES the transition, so
-    phase-2 restore can pick the exact background transition when an action_name
-    is shared across condition-disambiguated nested processes. Blank on rows
-    created before this field existed — phase 2 then resolves by transition_name
-    only when that name is unambiguous across the tree (see runner._find_transition).
+    Records the (possibly nested) Process class that declared the
+    transition, so the worker can pick the exact background transition
+    when an action_name is shared across nested processes that use
+    conditions to choose. Blank on rows created before this field
+    existed — the worker then resolves by transition_name only when that
+    name is unambiguous across the tree (see runner._find_transition).
 
     Deploy note (PostgreSQL): this AddField does NOT rewrite the table (a
     constant default on PG 11+ is metadata-only), but ADD COLUMN still takes a
     brief ACCESS EXCLUSIVE lock on ``transitionmessage`` — the engine's hottest
-    table (phase 1 inserts into it; phase 2 holds rows under
+    table (enqueue inserts into it; the worker holds rows under
     ``select_for_update(nowait=True)``). If a worker is holding a row lock in a
     long-open transaction, the ALTER queues at the head of the lock queue and
     briefly blocks other access. django-logic transactions are short by design,

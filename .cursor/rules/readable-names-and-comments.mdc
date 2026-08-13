@@ -1,0 +1,44 @@
+---
+description: Plain English for names, comments, and exceptions. Do not copy the repo's old private dialect.
+alwaysApply: true
+---
+
+# Plain English
+
+Write as you would to a colleague. Short sentences. One meaning per word. No metaphors.
+
+Existing comments in this repo are often a private dialect (`phase 1`, `liveness`, `#195`). Do not copy them. Rewrite what you touch.
+
+## Allowed words
+
+transition, background transition, `TransitionMessage`, source state, retry window, stranded (nothing is retrying it), enqueue (save the row and send it), execute (the worker runs the side-effects), uncompleted, in progress.
+
+## Banned
+
+`tm`, `msg`, `inst`, `bg`, `phase 1`, `phase 2`, `liveness`, `retry horizon`, `re-drive`, `in-flight marker`, `speculative-insert`, `owning process`, `finishing flight`, `#123`, `issue #N`, `W002` in exceptions.
+
+Ticket numbers belong in `CHANGELOG.md` only.
+
+## Names
+
+```python
+# BAD
+tm = self._phase_one_atomic(state, kwargs, queue_name)
+
+# GOOD
+transition_message = self._enqueue_atomic(state, kwargs, queue_name)
+```
+
+Use full words. Type names (`State`, `TransitionMessage`) and Python conventions (`self`, `kwargs`, `exc`) are fine.
+
+## Comments and exceptions
+
+```python
+# BAD
+# Same liveness classification as the sync gate (#195).
+
+# GOOD
+# Nothing is retrying this row, so "try again shortly" would be wrong forever.
+```
+
+If you would not say it out loud, rewrite it.

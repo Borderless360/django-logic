@@ -3,31 +3,31 @@
 ``TransitionMessage.kwargs`` is a JSONField, so everything we write must
 be JSON-serializable. Values that JSON cannot represent natively are
 stored with a self-describing type tag and restored to their original
-Python type in phase 2, so a side-effect receives the same types whether
+Python type in the worker, so a side-effect receives the same types whether
 its transition is synchronous or background.
 
 Deliberate handling:
 
 * ``request`` — dropped, loudly: a warning is logged, and
   ``DJANGO_LOGIC['STRICT_KWARGS_SERIALIZATION'] = True`` raises instead.
-  A live request cannot cross the phase boundary; extract ``user`` (which
+  A live request cannot cross the queue; extract ``user`` (which
   is rehydrated) or pass plain values.
-* ``user`` — replaced with ``user_id`` (restored on the phase-2 side).
+* ``user`` — replaced with ``user_id`` (restored on the worker side).
 * ``datetime`` / ``date`` / ``time`` / ``Decimal`` / ``UUID`` / ``tuple``
-  / ``set`` / ``frozenset`` — tag-encoded, restored in phase 2 with the
+  / ``set`` / ``frozenset`` — tag-encoded, restored in the worker with the
   original type (recursively, inside dicts/lists/tuples/sets). Two known
   fidelity limits of the isoformat round-trip: a ``ZoneInfo`` tzinfo
   degrades to a fixed-offset ``timezone`` (the UTC instant is preserved,
   the zone identity is not), and ``datetime.fold`` is not preserved.
 * ``_transition_context``-managed keys (``tr_id``, ``root_id``,
   ``parent_id``) — stringified when present.
-* Model instances and arbitrary objects — rejected at phase 1 via
+* Model instances and arbitrary objects — rejected at enqueue via
   ``json.dumps`` (``TypeError``). Pass a pk and re-fetch in the hook:
-  phase 2 may run much later and must see fresh rows, not a stale
+  the worker may run much later and must see fresh rows, not a stale
   snapshot.
 * Non-string dict keys — JSON objects only have string keys, so these are
   stringified in storage and do **not** round-trip. Flagged loudly at
-  phase 1 (warning, or ``TypeError`` under the strict setting).
+  enqueue (warning, or ``TypeError`` under the strict setting).
 
 .. note::
 
@@ -49,11 +49,11 @@ from django_logic.logger import transition_logger
 
 
 class KwargsSerializationError(TypeError):
-    """Strict-mode rejection of kwargs that phase 1 would otherwise mutate
+    """Strict-mode rejection of kwargs that enqueue would otherwise mutate
     silently (a dropped ``request``, stringified non-string dict keys).
 
     A ``TypeError`` subclass, so the documented "raises ``TypeError``"
-    contract holds — but distinct, so the phase-1 dispatcher re-raises it
+    contract holds — but distinct, so the enqueue dispatcher re-raises it
     as-is instead of wrapping it in the generic "not JSON-serializable"
     ``ImproperlyConfigured``.
     """
@@ -127,7 +127,7 @@ def decode_value(value):
         except Exception as e:
             # A known tag whose payload no longer decodes (hand-edited row,
             # cross-version writer bug): mirror the unknown-tag passthrough
-            # below rather than crash phase 2 — the raw tagged form stays
+            # below rather than crash the worker — the raw tagged form stays
             # visible to the side-effect and the log says why.
             transition_logger.warning(
                 f"malformed payload for kwargs type tag {tag!r} "
@@ -135,7 +135,7 @@ def decode_value(value):
             )
             return value
         # A row written by a newer version than this worker: pass the
-        # tagged form through rather than crash phase 2.
+        # tagged form through rather than crash the worker.
         transition_logger.warning(
             f"unknown kwargs type tag {tag!r} — passing value through "
             f"undecoded (worker older than the row writer?)"
@@ -150,8 +150,8 @@ def _non_string_key_paths(value, path='kwargs'):
     JSON objects only have string keys, so ``{1: 'a'}`` is persisted as
     ``{"1": "a"}`` — silently, since ``json.dumps`` stringifies int/float/
     bool/None keys instead of raising. That breaks the type-faithful
-    round-trip (a phase-2 hook sees ``'1'`` where the synchronous path saw
-    ``1``), so phase 1 flags it loudly instead.
+    round-trip (a worker hook sees ``'1'`` where the synchronous path saw
+    ``1``), so enqueue flags it loudly instead.
     """
     if isinstance(value, dict):
         for k, v in value.items():
@@ -193,29 +193,29 @@ def serialize_kwargs(kwargs: dict) -> dict:
     Drops ``request`` and a caller-supplied ``user_id`` (warning, or
     ``KwargsSerializationError`` under ``STRICT_KWARGS_SERIALIZATION``) —
     both are reserved. Replaces ``user`` with ``user_id``.
-    Tag-encodes non-JSON-native values so phase 2 restores real types.
+    Tag-encodes non-JSON-native values so the worker restores real types.
     Non-string dict keys are stringified by JSON persistence and cannot
     round-trip — flagged with a warning (or ``TypeError`` under the strict
     setting). Non-finite floats (``float('nan')`` / ``float('inf')``) are
     not valid JSON despite passing ``json.dumps`` — rejected with a
     ``TypeError`` naming the offending value. Raises ``TypeError`` via
     ``json.dumps`` if something unexpected slips through — the caller
-    should let that propagate so the failure is visible at phase 1 rather
-    than at phase 2.
+    should let that propagate so the failure is visible at enqueue rather
+    than at the worker.
     """
     out = dict(kwargs)
     if 'request' in out:
         out.pop('request')
         message = (
             f"{out.get('tr_id')} 'request' dropped at kwargs serialization "
-            f"— phase-2 hooks must not read it (the engine rehydrates "
+            f"— worker hooks must not read it (the engine rehydrates "
             f"'user'; pass anything else as plain values)"
         )
         if bg_settings.strict_kwargs_serialization():
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
     # ``user_id`` is the engine's own wire form for ``user`` (restored in
-    # phase 2 by restore_user). A caller passing it as ordinary data used to
+    # the worker by restore_user). A caller passing it as ordinary data used to
     # be silently consumed: restore_user popped it and replaced it with a
     # live ``user``, so the hook never saw the value — and the same call ran
     # correctly in sync mode, a parity break that only showed up in
@@ -224,22 +224,22 @@ def serialize_kwargs(kwargs: dict) -> dict:
         out.pop('user_id')
         message = (
             f"{out.get('tr_id')} 'user_id' dropped at kwargs serialization "
-            f"— it is the engine's wire form for 'user' and phase 2 replaces "
+            f"— it is the engine's wire form for 'user' and the worker replaces "
             f"it with a live user object, so a caller-supplied value could "
             f"never reach a hook. Pass it under a different name."
         )
         if bg_settings.strict_kwargs_serialization():
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
-    out.pop('context', None)  # rebuilt in phase 2
+    out.pop('context', None)  # rebuilt in the worker
     # Persisted on its own TransitionMessage column, not in the kwargs JSON:
-    # phase 2 reads it from the column, and it must not leak into the kwargs
+    # the worker reads it from the column, and it must not leak into the kwargs
     # passed to side-effects (it is engine bookkeeping, not caller data).
     out.pop('owning_process_class', None)
 
     user = out.pop('user', None)
     if user is not None:
-        # Read .pk (not .id) to match the phase-2 restore (get(pk=user_id))
+        # Read .pk (not .id) to match the worker restore (get(pk=user_id))
         # and to support custom user models whose primary key isn't named
         # 'id'. AnonymousUser (pk is None) is dropped, as before.
         user_id = getattr(user, 'pk', None)
@@ -252,7 +252,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
 
     # PostgreSQL jsonb rejects NUL and lone surrogates, which json.dumps
     # happily encodes — the same class of value as the non-finite floats
-    # rejected below, and with the same consequence: phase 1 would die with a
+    # rejected below, and with the same consequence: enqueue would die with a
     # raw backend DataError at the row write instead of a named TypeError here.
     unstorable = sorted(set(_unstorable_text_paths(out)))
     if unstorable:
@@ -269,7 +269,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
         message = (
             f"{out.get('tr_id')} non-string dict keys in background "
             f"transition kwargs ({', '.join(bad_keys)}) are stringified by "
-            f"JSON persistence — a phase-2 hook sees '1' where the "
+            f"JSON persistence — a worker hook sees '1' where the "
             f"synchronous path saw 1, and colliding keys ({{1: …, '1': …}}) "
             f"silently lose data. Use string keys, or a list of pairs."
         )
@@ -280,7 +280,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
     out = encode_value(out)
 
     # Round-trip through json to surface any remaining non-serializable
-    # types at phase 1. Cheap on small dicts and invaluable in tests.
+    # types at enqueue. Cheap on small dicts and invaluable in tests.
     # allow_nan=False: Python's json emits the non-standard NaN/Infinity
     # tokens by default, which would then fail backend-dependently at the
     # row write. Translated to TypeError to keep the dispatcher contract
@@ -295,7 +295,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
 
 
 def deserialize_kwargs(raw: dict | None) -> dict:
-    """Phase-2 inverse of :func:`serialize_kwargs`.
+    """Worker inverse of :func:`serialize_kwargs`.
 
     Restores tag-encoded values to their original Python types and swaps
     ``user_id`` back for a live ``user``.
@@ -308,7 +308,7 @@ def deserialize_kwargs(raw: dict | None) -> dict:
 def restore_user(kwargs: dict) -> None:
     """In-place: if ``user_id`` is set, swap it for a live ``user`` object.
 
-    Called in phase 2 (via :func:`deserialize_kwargs`). No-op if
+    Called in the worker (via :func:`deserialize_kwargs`). No-op if
     ``user_id`` is absent.
     """
     user_id = kwargs.pop('user_id', None)
@@ -319,6 +319,6 @@ def restore_user(kwargs: dict) -> None:
     try:
         kwargs['user'] = get_user_model().objects.get(pk=user_id)
     except get_user_model().DoesNotExist:
-        # The user disappeared between phases; leave user=None so
+        # The user disappeared between enqueue and execute; leave user=None so
         # permission checks treat the work as system-initiated.
         kwargs['user'] = None

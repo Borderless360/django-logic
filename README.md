@@ -230,7 +230,7 @@ Use next_transition to automatically continue the process.
 
 > `next_transition` chains from a **completion**, so a synchronous `Action`
 > ignores it — an Action changes no state and has no completion to chain from.
-> (A `BackgroundAction` *does* run it, from phase 2.) Drive the follow-up from
+> (A `BackgroundAction` *does* run it, from the worker.) Drive the follow-up from
 > a callback instead, or use a `Transition`.
 
 ```python 
@@ -560,13 +560,14 @@ handler should answer them differently:
 
 **Transient concurrency** — the action is fine, retry shortly. These raise
 `TransitionTemporarilyUnavailable` (a `TransitionNotAllowed` subclass, importable
-from `django_logic.exceptions`): another flight owns the instance right now
-(`AlreadyInProgress`, or the sync gate while a **live** background row is
-uncompleted), or the state moved while phase 1 waited (`SourceStateChanged`).
-A row past its liveness window is stranded, not busy — both the sync gate and
-a background re-drive then raise the plain base again, so "retry shortly" is
-never a forever answer. (A running attempt inside its declared `timeout=`
-budget always counts as live.) Catch the transient type **ahead of** the base
+from `django_logic.exceptions`): another transition owns the instance right now
+(`AlreadyInProgress`, or the sync gate while a background row is still
+being retried), or the state moved while enqueue waited
+(`SourceStateChanged`). A stranded row — nothing is retrying it — is
+not busy: both the sync gate and a later enqueue then raise the plain
+base again, so "retry shortly" is never a forever answer. (A running
+attempt inside its declared `timeout=` budget always counts as still
+being retried.) Catch the transient type **ahead of** the base
 class:
 
 ```python
@@ -597,8 +598,8 @@ If the state field is not updating:
 Multiple processes trying to transition the same object can cause race conditions.
 
 **Solution**: Django-Logic serializes work on a state field with two mechanisms (see [Concurrency and locking](#concurrency-and-locking)):
-- a **cache lock** (atomic set-if-absent on the `default` cache) held for a synchronous transition's whole flight and for a background transition's phase-1 critical section, with the persisted state re-validated under the lock; and
-- the **`TransitionMessage` row** — while a background transition is in flight, a second one raises `AlreadyInProgress` and a synchronous transition on the same instance + process raises `TransitionTemporarilyUnavailable` (both are `TransitionNotAllowed` subclasses).
+- a **cache lock** (atomic set-if-absent on the `default` cache) held for a synchronous transition's whole run and for a background transition's enqueue critical section, with the persisted state re-validated under the lock; and
+- the **`TransitionMessage` row** — while a background transition is in progress, a second one raises `AlreadyInProgress` and a synchronous transition on the same instance + process raises `TransitionTemporarilyUnavailable` (both are `TransitionNotAllowed` subclasses).
 
 Use a cross-process cache so the lock is shared between web processes and workers.
 
@@ -689,7 +690,7 @@ class OrderProcess(Process):
     transitions = [...]
 ```
 
-Every state read and write for that process then goes through your class, including the ones the background engine performs (phase-1's `in_progress_state`, phase-2's target and `failed_state`). Two rules: `get_persisted_state()` must keep reading the database row — the under-the-lock revalidation and the phase-2 state guard rely on it being authoritative, so never override it with a cached read — and `set_state` must call `super()`.
+Every state read and write for that process then goes through your class, including the ones the background engine performs (enqueue's `in_progress_state`, the worker's target and `failed_state`). Two rules: `get_persisted_state()` must keep reading the database row — the under-the-lock revalidation and the worker's state guard rely on it being authoritative, so never override it with a cached read — and `set_state` must call `super()`.
 
 ### Context Passing
 Pass data between side effects and callbacks:
@@ -698,14 +699,14 @@ Pass data between side effects and callbacks:
 > `process_class` and `owning_process_class` on every drive (they carry
 > transition identity and lineage, and are forwarded to `next_transition`
 > follow-ups), replaces `user` with `user_id` on the background wire, and
-> rebuilds `context` in phase 2. Passing any of those as your own data means
+> rebuilds `context` on the worker. Passing any of those as your own data means
 > the engine overwrites it. Use different names.
 
 > `context` is scoped to **one execution**, not persisted. A caller-supplied
 > `context=` reaches a synchronous transition's hooks, but for a *background*
-> transition phase 1 drops it and phase 2 rebuilds an empty one — it is a
+> transition enqueue drops it and the worker rebuilds an empty one — it is a
 > channel between hooks within a run, not a way to pass data across the queue.
-> Anything phase 2 must see belongs in ordinary kwargs (which are serialized)
+> Anything the worker must see belongs in ordinary kwargs (which are serialized)
 > or on the instance.
 
 
@@ -731,16 +732,16 @@ Transition(
 
 For long-running side-effects (payment processing, PDF generation, external API calls), use `BackgroundTransition` / `BackgroundAction` from `django_logic.background`. **Background transitions are Celery tasks** — Celery ships as a core dependency and `'celery'` is the default execution mode.
 
-**How execution is split (the "two phases").** A synchronous `Transition` does everything at once, in the caller's call frame. A background transition *cannot* — its work runs later, on another machine — so it follows the standard transactional-outbox pattern, and the docs/code refer to the two halves as:
+**How execution is split.** A synchronous `Transition` does everything at once, in the caller's call frame. A background transition *cannot* — its work runs later, on another machine — so it follows the standard transactional-outbox pattern:
 
-- **Phase 1** (synchronous, in your request): validate, then in **one** database transaction write `in_progress_state` and a durable `TransitionMessage` row (the recorded intent), then enqueue the Celery task on commit. Fast — milliseconds.
-- **Phase 2** (on a Celery worker): load the row, run the side-effects, write the target state, mark the row completed — all in one atomic block. If the worker crashes or the broker loses the message, the durable row from phase 1 is what lets the safety-net tasks retry or finalize the work. (Success/failure *callbacks* run after phase 2's transaction commits — best-effort by contract, sometimes called "phase 3" in the runner's comments; there is nothing beyond that.)
+- **Enqueue** (synchronous, in your request): validate, then in **one** database transaction write `in_progress_state` and a durable `TransitionMessage` row (the recorded intent), then send the Celery task on commit. Fast — milliseconds.
+- **Execute** (on a Celery worker): load the row, run the side-effects, write the target state, mark the row completed — all in one atomic block. If the worker crashes or the broker loses the message, the durable row from enqueue is what lets the safety-net tasks retry or finalize the work. Success/failure *callbacks* run after the worker's transaction commits — best-effort by contract.
 
 They provide:
 
 - **Durable execution.** Every background transition is persisted as a `TransitionMessage` row inside the same atomic block that writes `in_progress_state`. Worker crashes, broker losses, and dropped `transaction.on_commit` hooks are all recovered by a periodic safety-net task.
 - **Queue routing per transition.** `queue=` is optional — transitions without it run on `DJANGO_LOGIC['DEFAULT_QUEUE']` (`'django_logic'`). Name queues per SLA (`critical` / `slow` / `fast`) and give each its own worker to manage performance per queue.
-- **Sync mode for tests.** `'sync'` runs phase 2 inline in the same process — for unit tests, CI, management commands, and the Django shell. No Celery broker is needed to test business processes; see [Testing Your Processes](#testing-your-processes).
+- **Sync mode for tests.** `'sync'` runs the worker path inline in the same process — for unit tests, CI, management commands, and the Django shell. No Celery broker is needed to test business processes; see [Testing Your Processes](#testing-your-processes).
 - **Single-task, all-or-nothing attempts.** All side-effects plus the target-state write happen inside **one** Celery task with `acks_late=True`, inside **one** atomic block, with the side-effects in a savepoint: a failed attempt **rolls back every database write it made**. A worker crash re-delivers the whole task; the state never gets stuck mid-flight between side-effects. The idempotency you owe is for *external* calls only — a retried attempt re-runs side-effects from scratch.
 
 ### Install
@@ -857,7 +858,7 @@ class ShopConfig(AppConfig):
 ### Call it
 
 ```python
-# In a view — returns immediately (Celery mode) or after phase 2 completes (Sync mode).
+# In a view — returns immediately (Celery mode) or after the worker completes (Sync mode).
 tr_id = order.process.fulfil(user=request.user)
 ```
 
@@ -916,33 +917,33 @@ class MessagingConfig(AppConfig):
 conversation.process.send_message_via_integration(user=request.user)
 ```
 
-Phase 1 resolves exactly one transition (the conditions are mutually exclusive)
-and records the **owning nested process class** on the `TransitionMessage`;
-phase 2 restores that exact transition from the recorded owner — it does not
+Enqueue resolves exactly one transition (the conditions are mutually exclusive)
+and records the **nested process class that declared it** on the `TransitionMessage`;
+the worker restores that exact transition from the recorded class — it does not
 re-evaluate the condition, so routing is deterministic even if the instance
-changes mid-flight. Constraints: a background `action_name` must only be
+changes while the row is pending. Constraints: a background `action_name` must only be
 **unique within a single process class** (two in one class are
 indistinguishable at restore). `in_progress_state` may be shared freely —
 useful when a UI only knows one "busy" value: every marked instance carries
 its exact transition on the `TransitionMessage` row, so recovery never has to
 guess an owner (the `django_logic.E001` ownership check that used to police
 sharing was retired in 0.12.0 along with the stranded sweep). A background `action_name` *may* coincide with a
-synchronous transition of the same name (phase 2 restores only background
-transitions; phase 1 routes the call by condition) — so a synchronous fast-path
+synchronous transition of the same name (the worker restores only background
+transitions; enqueue routes the call by condition) — so a synchronous fast-path
 and a durable background slow-path can share one `action_name`.
 
 > **`in_progress_state` is background-only (0.12.0).** On a `BackgroundTransition`
 > the marker is written atomically with the `TransitionMessage` row, so every
 > marked instance has a recovery owner. A *synchronous* transition used to write
 > it under a cache lock with no durable record — a hard-killed worker left the
-> instance parked in a state with no outbound edges (#136), and the engine
+> instance parked in a state with no outbound edges, and the engine
 > needed a whole sweeping subsystem (`recover_stranded_states`, retired) to find
 > those. Declaring it on a plain `Transition`/`Action` now raises
-> `ImproperlyConfigured`. Without a marker, a killed synchronous run simply
-> rolls back to its source state and is re-drivable once the lock TTL expires —
+> `ImproperlyConfigured`. Without that write, a killed synchronous run simply
+> rolls back to its source state and can be run again once the lock TTL expires —
 > nothing to sweep.
 >
-> **Migrating a sync transition that used the marker:** model the busy phase as
+> **Migrating a sync transition that used the marker:** model the busy step as
 > a real state with explicit edges —
 >
 > ```python
@@ -955,8 +956,8 @@ and a durable background slow-path can share one `action_name`.
 > Readers see `fulfilling` exactly as before, and the work itself is TM-durable.
 > The pattern accepts one narrow window the old atomic marker did not have: a
 > crash between `submit`'s commit and the chained dispatch parks the instance at
-> `fulfilling` with no row. The recovery is a three-line periodic re-drive,
-> safe by construction — instances genuinely in flight raise
+> `fulfilling` with no row. The recovery is a three-line periodic retry,
+> safe by construction — instances genuinely in progress raise
 > `AlreadyInProgress` and are skipped, parked ones retry *forward*:
 >
 > ```python
@@ -972,13 +973,13 @@ and a durable background slow-path can share one `action_name`.
 > transition into this shared-name nested pattern, deploy it with no in-flight
 > rows for that action (or split it across two deploys). Rows enqueued by older
 > code don't carry the owning-process discriminator; once the name becomes
-> shared, phase 2 can't tell which nested sibling such a row meant and finalizes
+> shared, the worker can't tell which nested sibling such a row meant and finalizes
 > it without running its side-effects (safe, but the work won't run). Rows
 > enqueued after the upgrade always record their owner.
 
 ### Testing background transitions
 
-Set `BACKGROUND_EXECUTION='sync'` in your test settings — the global default is `'celery'`, so this opt-in is required — and every `instance.process.fulfil(...)` call runs phase 1 **and** phase 2 inline, no broker involved:
+Set `BACKGROUND_EXECUTION='sync'` in your test settings — the global default is `'celery'`, so this opt-in is required — and every `instance.process.fulfil(...)` call enqueues **and** executes inline, no broker involved:
 
 ```python
 class FulfilmentTests(TestCase):
@@ -1046,19 +1047,19 @@ BackgroundTransition(
 )
 ```
 
-`watchdog_stale_attempts` scans in-flight rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. An attempt is charged **at most once**: if it has already recorded an error of its own since it started, the watchdog leaves it alone rather than spending a second retry on it. `started_at` is written in its own committed statement before the attempt begins, precisely so it stays visible while the attempt runs and survives a worker dying mid-flight — which is what makes a hung or crashed attempt observable at all. Because the watchdog cannot tell a crashed attempt from a merely slow one, a re-dispatched attempt may run side-effects again while the original is still executing — **side-effects must be idempotent against external systems** (their database writes are per-attempt atomic and roll back on failure, but an external API call made by both attempts happens twice).
+`watchdog_stale_attempts` scans uncompleted rows whose current attempt (`started_at`) has run past `timeout`, records a synthetic `TimeoutError` as a failed attempt, and — once `errors_count` reaches `MAX_ERRORS` — finalizes the row to `failed_state`. Rows without `timeout` are never watched. An attempt is charged **at most once**: if it has already recorded an error of its own since it started, the watchdog leaves it alone rather than spending a second retry on it. `started_at` is written in its own committed statement before the attempt begins, precisely so it stays visible while the attempt runs and survives a worker dying mid-flight — which is what makes a hung or crashed attempt observable at all. Because the watchdog cannot tell a crashed attempt from a merely slow one, a re-dispatched attempt may run side-effects again while the original is still executing — **side-effects must be idempotent against external systems** (their database writes are per-attempt atomic and roll back on failure, but an external API call made by both attempts happens twice).
 
 ### Concurrency and locking
 
 Two mechanisms serialize work on a state field, each with a precise scope:
 
-1. **The cache lock** (atomic set-if-absent on the `default` cache) is held for a *synchronous* transition's whole flight, and for a background transition's **phase-1 critical section only** (validate → create the `TransitionMessage` → write `in_progress_state`, then released). Both re-validate the **persisted** state under the lock before proceeding, so two requests racing to transition the same instance can't both win.
-2. **The uncompleted `TransitionMessage` row** is the durable in-flight marker for background work. While one exists for an instance + process:
+1. **The cache lock** (atomic set-if-absent on the `default` cache) is held for a *synchronous* transition's whole run, and for a background transition's **enqueue critical section only** (validate → create the `TransitionMessage` → write `in_progress_state`, then released). Both re-validate the **persisted** state under the lock before proceeding, so two requests racing to transition the same instance can't both win.
+2. **The uncompleted `TransitionMessage` row** is what gates concurrent background work. While one exists for an instance + process:
    - a second background transition raises `AlreadyInProgress` (`from django_logic.background.exceptions import AlreadyInProgress`; also catchable as `TransitionTemporarilyUnavailable` from `django_logic.exceptions` without importing the background subpackage) — enforced by a partial unique constraint, so it holds across processes and dynos;
-   - a **synchronous transition on the same instance + process raises `TransitionTemporarilyUnavailable`** — phase 2 owns the state field until the row completes;
+   - a **synchronous transition on the same instance + process raises `TransitionTemporarilyUnavailable`** — the worker owns the state field until the row completes;
    - synchronous `Action`s still run (they don't change state on success); a failing Action's `failed_state` write is skipped while the row is uncompleted, for the same ownership reason.
 
-The constraint is scoped **per process**: two independent state machines bound to different fields of the same model (say `status` and `payment_status`) can both have background work in flight.
+The constraint is scoped **per process**: two independent state machines bound to different fields of the same model (say `status` and `payment_status`) can both have background work in progress.
 
 To shape answers at your own API seams ("busy, try again shortly"), read the marker through the documented probe instead of duplicating the filter:
 
@@ -1069,9 +1070,9 @@ if in_flight(order, 'process'):
     return Response(status=409, data={'detail': 'Busy — please retry shortly.'})
 ```
 
-The read is racy — a flight can start or complete right after it — so use it for shaping answers, not as a pre-flight gate; the engine's own guards stay authoritative. It answers the *busy* question: a stranded row (uncompleted but past the retry horizon) is `False`, matching the plain `TransitionNotAllowed` the engine's gates raise for it.
+The read is racy — a transition can start or complete right after it — so use it for shaping answers, not as a pre-flight gate; the engine's own guards stay authoritative. It answers the *busy* question: a stranded row (uncompleted, nothing retrying it) is `False`, matching the plain `TransitionNotAllowed` the engine's gates raise for it.
 
-Because the in-flight marker is a database row rather than a held lock, nothing leaks if the caller's surrounding transaction rolls back — the row, the `in_progress_state` write, and the dispatch all disappear together.
+Because the gate is a database row rather than a held lock, nothing leaks if the caller's surrounding transaction rolls back — the row, the `in_progress_state` write, and the dispatch all disappear together.
 
 **Lock ownership.** Every acquisition stores a unique ownership token, and release is a compare-and-delete: a synchronous run that outlives its lock TTL can no longer delete the lock a successor legitimately acquired — the token no longer matches, so it leaves it intact and returns silently. A `State` object that never locked keeps the historical unconditional delete as a manual force-release path.
 
@@ -1083,9 +1084,9 @@ DJANGO_LOGIC = {..., 'DEFER_UNLOCK_UNTIL_COMMIT': True}
 
 The unlock then rides `transaction.on_commit`. Trade-offs to design for: on **rollback** the hook never fires, so the lock expires via its TTL — a bounded lockout, the same failure mode as a crashed process; and same-instance follow-ups (`callbacks` / `next_transition`) inside the atomic block find the state still locked and are skipped — chain them from `transaction.on_commit` in the caller instead. Alternatively, keep the default and invoke transitions via `transaction.on_commit` so they start only once the surrounding write is visible.
 
-Practical consequence: you **cannot** chain a background transition from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained phase 1 will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
+Practical consequence: you **cannot** chain a background transition from another transition's `callbacks`/`next_transition` on the *same* instance while the first row is still uncompleted — the chained enqueue will hit `AlreadyInProgress`. Chain follow-up background work from a *terminal* hook (success/failure callback that fires after the first row is marked completed), or target a different instance.
 
-> ⚠️ **Swallow-dedup loses mid-execution updates.** Catching `AlreadyInProgress` as "already queued — the running job will pick up my changes" is only safe while the existing attempt has **not started**. If phase 2 is already executing, it has already read its inputs: your update lands after the read, the in-flight run commits a result computed from pre-update data, and nothing ever re-runs. For recompute-style transitions, persist a dirty flag (or version) *before* dispatching, clear it inside the side-effect, and re-dispatch from a success callback if it is set again:
+> ⚠️ **Swallow-dedup loses mid-execution updates.** Catching `AlreadyInProgress` as "already queued — the running job will pick up my changes" is only safe while the existing attempt has **not started**. If the worker is already executing, it has already read its inputs: your update lands after the read, that run commits a result computed from pre-update data, and nothing ever re-runs. For recompute-style transitions, persist a dirty flag (or version) *before* dispatching, clear it inside the side-effect, and dispatch again from a success callback if it is set again:
 >
 > ```python
 > def recompute(instance, **kwargs):
@@ -1098,11 +1099,11 @@ Practical consequence: you **cannot** chain a background transition from another
 >         instance.process.recompute_rates()
 > ```
 
-### The phase-2 state guard
+### The worker's state guard
 
-Phase 2 restores the transition by name and deliberately bypasses the source-state gate — so what happens if the instance was moved by something *else* while the row was pending (a manual ops fix in the admin, a data migration, a support script)? With retries spanning `RETRY_MINUTES × MAX_ERRORS`, that collision is a realistic production event.
+The worker restores the transition by name and deliberately bypasses the source-state gate — so what happens if the instance was moved by something *else* while the row was pending (a manual ops fix in the admin, a data migration, a support script)? With retries spanning `RETRY_MINUTES × MAX_ERRORS`, that collision is a realistic production event.
 
-Before running side-effects, phase 2 verifies the persisted state still matches what phase 1 left behind (`in_progress_state`, or a declared source when the transition has none). On mismatch the row is completed as **superseded**: side-effects are skipped, the external state change wins, and the reason is recorded on the row (`last_error_message` starts with `[superseded]`) and logged at ERROR.
+Before running side-effects, the worker verifies the persisted state still matches what enqueue left behind (`in_progress_state`, or a declared source when the transition has none). On mismatch the row is completed as **superseded**: side-effects are skipped, the external state change wins, and the reason is recorded on the row (`last_error_message` starts with `[superseded]`) and logged at ERROR.
 
 The same guard protects the `failed_state` writes made by the safety-net tasks, so a watchdog finalizing a long-stranded row never clobbers a manual fix.
 
@@ -1165,7 +1166,7 @@ DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
 
 Also do **not** force `sslmode=require` on the app→pgbouncer connection (it's
 local/plaintext; pgbouncer terminates TLS upstream). If you skip
-`prepare_threshold=None`, phase 2 will intermittently fail/hang with
+`prepare_threshold=None`, the worker will intermittently fail/hang with
 prepared-statement errors. (Validated end-to-end on Heroku behind an in-dyno
 pgbouncer.)
 
@@ -1186,7 +1187,7 @@ SELECT count(*) FROM django_logic_background_transitionmessage
  WHERE last_error_message LIKE '[superseded]%';
 ```
 
-Also alert on beat liveness — if beat stops, the safety net stops.
+Also alert if beat stops — the safety net stops with it.
 
 **Migrating an existing deployment.** Migration `0005` widens `instance_id` from integer to `varchar(255)` via `ALTER COLUMN ... TYPE` (Django emits the `USING ...::varchar` cast, so existing integer rows convert in place). On a very large `TransitionMessage` table this rewrites the column under a lock — run it in a maintenance window or with your usual online-migration tooling. Migration `0006` (0.4.0) adds the `field_name` column and swaps the partial unique constraint from per-instance (`dl_bg_only_one_uncompleted_per_instance`) to per-process (`dl_bg_one_uncompleted_per_process`) — a quick metadata + index change, safe to run in place.
 
@@ -1218,7 +1219,7 @@ class TestOrderFulfilment(ProcessScenario):
         order = self.create_instance(status='approved')
         self.assert_available(order, ['fulfil', 'cancel'])
 
-        self.background_transition(order, 'fulfil')      # phase 1 + phase 2, no Celery
+        self.background_transition(order, 'fulfil')      # enqueue + execute, no Celery
         self.assert_state(order, 'fulfilled')
         self.assert_side_effects_ran(['reserve_stock', 'call_courier'])
         self.assert_callbacks_ran(['send_confirmation_email'])
@@ -1275,7 +1276,7 @@ class TestOrderFulfilment(ProcessScenario):
 |--------|--------------|
 | `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg) |
 | `transition(obj, action, **kwargs)` | Run a synchronous transition |
-| `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` phase 1 **and** phase 2 inline |
+| `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` enqueue **and** execute inline |
 | `retry_transition(obj)` | Re-run the instance's uncompleted transition — simulates the periodic starter |
 
 Add `fail_side_effect='name'`, `fail_with=SomeError(...)` to `background_transition`/`retry_transition`/`transition` to make a named side-effect raise. Only that side-effect is wrapped — every other one runs for real, so you exercise the true failure path. Add `expect_raises=SomeError` to assert the failure **propagated to the caller** (the `side_effects` re-raise contract), or `expect_raises=False` to assert it was **swallowed** (`callbacks` / `next_transition`); omit it to absorb the injected exception and assert on the recorded error instead.

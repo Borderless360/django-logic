@@ -60,7 +60,7 @@ def strict_hook_signatures() -> bool:
 def legacy_exception_base():
     """Dotted path of an extra base class to mix into
     ``TransitionNotAllowed`` (coexistence with a differently-named fork
-    during a migration, #190), or ``None``."""
+    during a migration), or ``None``."""
     return _conf().get('LEGACY_EXCEPTION_BASE') or None
 
 
@@ -105,8 +105,7 @@ def validate_core_settings() -> None:
 
 
 def install_legacy_exception_base() -> None:
-    """Mix the settings-declared legacy base into ``TransitionNotAllowed``
-    (#190). Idempotent — called from both apps' ``ready()``.
+    """Mix the settings-declared legacy base into ``TransitionNotAllowed``. Idempotent — called from both apps' ``ready()``.
 
     A consumer migrating off a differently-named fork must run both engines
     side by side, with shared handlers that catch the *fork's*
@@ -155,7 +154,7 @@ def install_legacy_exception_base() -> None:
     try:
         probe = TransitionNotAllowed(probe_msg)
     except BaseException as exc:
-        # BaseException, not Exception (#196): a fork __init__ that raises
+        # BaseException, not Exception: a fork __init__ that raises
         # SystemExit/KeyboardInterrupt during boot must not leave the class
         # half-mutated. Unwind always; translate only Exception.
         TransitionNotAllowed.__bases__ = original_bases
@@ -171,7 +170,7 @@ def install_legacy_exception_base() -> None:
         # A message-eating base (the `self.message = message;
         # super().__init__()` idiom) blanks str() and args for every denial,
         # and args=() breaks exception (un)pickling wherever celery/tblib
-        # serialize exception info (#196). `in`, not equality, for str(): a
+        # serialize exception info. `in`, not equality, for str(): a
         # fork __str__ that FORMATS the preserved message (prefixes, codes)
         # is a working bridge, not a broken one.
         TransitionNotAllowed.__bases__ = original_bases

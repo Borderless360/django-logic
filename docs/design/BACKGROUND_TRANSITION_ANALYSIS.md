@@ -3,7 +3,8 @@
 > Design document for `BackgroundTransition` / `BackgroundAction`, first
 > shipped in Django Logic v0.3.0. This file is the rationale and the
 > crash-by-crash analysis behind the chosen design; the README documents the
-> resulting API.
+> resulting API. Current docs say **enqueue** and **execute**. "Phase 1"
+> and "Phase 2" in this file mean those two halves.
 
 ---
 
