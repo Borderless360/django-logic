@@ -47,7 +47,7 @@ from django_logic.logger import logger
     bind=False,
 )
 def run_background_transition_task(transition_message_id: int) -> None:
-    """Phase-2 entrypoint for one transition.
+    """Worker entrypoint for one transition.
 
     ``acks_late=True`` + ``reject_on_worker_lost=True`` are set per-task so
     a worker killed mid-execution (SIGKILL / OOM / deploy) re-delivers the

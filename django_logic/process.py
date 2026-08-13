@@ -199,7 +199,7 @@ class Process:
             # Record the process class that DECLARES this transition. For a
             # nested transition this differs from ``process_class`` (the bound
             # process this call entered through); for a transition on the bound
-            # process itself the two coincide. Phase-2 restore
+            # process itself the two coincide. Worker restore
             # (runner._find_transition) uses it to pick the exact background
             # transition when an ``action_name`` is shared across
             # condition-disambiguated nested processes. Overwrite, never

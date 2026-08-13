@@ -93,14 +93,14 @@ released, and `failure_callbacks` run.
 
 ## Background transitions
 
-A `BackgroundTransition` runs in two phases. Phase 1 (the synchronous call)
-logs the `Start [background queue=...]` line, then its critical section:
-`Lock`, optionally `Set State in_progress_state`, the
-`TransitionMessage#<pk> created` line, and `Unlock` (since 0.4 phase 1 holds
-the state lock only for this section — the uncompleted row is the in-flight
-marker afterwards). Phase 2 (the
-worker, or inline in Sync mode) logs `Phase2 Start`, the `SideEffect` lines,
-`Set State target`, and `Complete`.
+A `BackgroundTransition` is split into enqueue and execute. Enqueue (the
+synchronous call) logs the `Start [background queue=...]` line, then its
+critical section: `Lock`, optionally `Set State in_progress_state`, the
+`TransitionMessage#<pk> created` line, and `Unlock` (since 0.4 enqueue
+holds the state lock only for this section — the uncompleted row is the
+gate afterwards). Execute (the worker, or inline in Sync mode) logs
+`Phase2 Start`, the `SideEffect` lines, `Set State target`, and
+`Complete`. (`Phase2 Start` is the existing log event name.)
 
 All side-effects **and** the target-state write run inside a single Celery task
 (`acks_late=True`) — there is no per-callback Celery fan-out. There are no

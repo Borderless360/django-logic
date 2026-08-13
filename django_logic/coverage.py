@@ -27,7 +27,7 @@ Two front-ends:
 
 Initiation semantics: a pair is recorded when a transition is *resolved* —
 an initiation refused later (lock contention, under-lock revalidation,
-``AlreadyInProgress``) still counts as driven. Phase-2 background restore
+``AlreadyInProgress``) still counts as driven. Worker restore
 and retries do not re-notify — enqueue already recorded the pair.
 
 One footgun worth knowing:

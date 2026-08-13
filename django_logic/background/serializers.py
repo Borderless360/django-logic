@@ -295,7 +295,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
 
 
 def deserialize_kwargs(raw: dict | None) -> dict:
-    """Phase-2 inverse of :func:`serialize_kwargs`.
+    """Worker inverse of :func:`serialize_kwargs`.
 
     Restores tag-encoded values to their original Python types and swaps
     ``user_id`` back for a live ``user``.
@@ -319,6 +319,6 @@ def restore_user(kwargs: dict) -> None:
     try:
         kwargs['user'] = get_user_model().objects.get(pk=user_id)
     except get_user_model().DoesNotExist:
-        # The user disappeared between phases; leave user=None so
+        # The user disappeared between enqueue and execute; leave user=None so
         # permission checks treat the work as system-initiated.
         kwargs['user'] = None
