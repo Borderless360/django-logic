@@ -246,10 +246,11 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     )]
 
 
-#: Settings removed in 0.10.0, mapped to what to do instead. ``DJANGO_LOGIC``
-#: has no unknown-key rejection, so a leftover key is silently ignored — and
-#: for the two redaction knobs that means an upgrade quietly starts logging
-#: kwargs a deployment had deliberately scrubbed.
+#: Settings a past release removed, mapped to what to do instead. Folded into
+#: the unknown-key report below: ``DJANGO_LOGIC`` has no unknown-key
+#: rejection, so a leftover key would fail open silently — the sharpest case
+#: is a deployment that set ``LOG_KWARGS_REDACTOR`` for PII compliance,
+#: upgrades, and starts writing raw kwargs to its logs with no signal.
 _REMOVED_SETTINGS = {
     'LOG_KWARGS':
         'kwargs are always attached to log records now; scrub them with a '
@@ -263,31 +264,9 @@ _REMOVED_SETTINGS = {
         'Sentry transactions are always named per transition',
     'PROCESS_CLASS_ALIASES':
         'drain in-flight rows before renaming a Process class',
+    'TRANSITION_COVERAGE_LOG':
+        'transition-coverage recording was removed in 0.14.0',
 }
-
-
-@checks.register('django_logic')
-def check_no_removed_settings(app_configs, **kwargs):
-    """Report ``DJANGO_LOGIC`` keys that 0.10.0 removed (``django_logic.W003``).
-
-    Without this the removals fail *open* and silently: the sharpest case is a
-    deployment that set ``LOG_KWARGS_REDACTOR`` for PII compliance, upgrades,
-    and starts writing raw kwargs to its logs with no signal anywhere.
-    """
-    from django.conf import settings
-
-    conf = getattr(settings, 'DJANGO_LOGIC', None) or {}
-    if not isinstance(conf, dict):
-        return []
-    return [
-        checks.Warning(
-            f"DJANGO_LOGIC['{key}'] was removed in django-logic 0.10.0 and is "
-            f"now ignored: {advice}.",
-            hint='Delete the key from DJANGO_LOGIC.',
-            id='django_logic.W003',
-        )
-        for key, advice in _REMOVED_SETTINGS.items() if key in conf
-    ]
 
 
 #: Every key the engine reads. The set is closed, so anything outside it (and
@@ -318,26 +297,35 @@ def check_no_unknown_settings(app_configs, **kwargs):
     "I set the retry limit and it did nothing" report. The known set is
     closed and small, so reporting the complement is cheap and precise.
 
-    Removed keys are excluded here because ``W003`` already names them with
-    migration advice; flagging them twice would just be noise.
+    A key a past release removed gets its own warning carrying the
+    migration advice from ``_REMOVED_SETTINGS`` instead of the typo hint.
     """
     from django.conf import settings
 
     conf = getattr(settings, 'DJANGO_LOGIC', None) or {}
     if not isinstance(conf, dict):
         return []
+    messages = [
+        checks.Warning(
+            f"DJANGO_LOGIC['{key}'] was removed and is now ignored: "
+            f"{advice}.",
+            hint='Delete the key from DJANGO_LOGIC.',
+            id='django_logic.W004',
+        )
+        for key, advice in _REMOVED_SETTINGS.items() if key in conf
+    ]
     unknown = sorted(
         set(conf) - _KNOWN_SETTINGS - set(_REMOVED_SETTINGS)
     )
-    if not unknown:
-        return []
-    return [checks.Warning(
-        f"DJANGO_LOGIC contains {'a key' if len(unknown) == 1 else 'keys'} "
-        f"django-logic does not read: {', '.join(repr(k) for k in unknown)}. "
-        f"The value has no effect and the documented default applies.",
-        hint=f"Check for a typo against the documented settings: "
-             f"{', '.join(sorted(_KNOWN_SETTINGS))}. If you keep unrelated "
-             f"keys in DJANGO_LOGIC on purpose, silence this with "
-             f"SILENCED_SYSTEM_CHECKS = ['django_logic.W004'].",
-        id='django_logic.W004',
-    )]
+    if unknown:
+        messages.append(checks.Warning(
+            f"DJANGO_LOGIC contains {'a key' if len(unknown) == 1 else 'keys'} "
+            f"django-logic does not read: {', '.join(repr(k) for k in unknown)}. "
+            f"The value has no effect and the documented default applies.",
+            hint=f"Check for a typo against the documented settings: "
+                 f"{', '.join(sorted(_KNOWN_SETTINGS))}. If you keep unrelated "
+                 f"keys in DJANGO_LOGIC on purpose, silence this with "
+                 f"SILENCED_SYSTEM_CHECKS = ['django_logic.W004'].",
+            id='django_logic.W004',
+        ))
+    return messages

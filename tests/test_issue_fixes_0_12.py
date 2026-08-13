@@ -433,10 +433,11 @@ class UnknownSettingsCheckTests(TestCase):
         'BACKGROUND_EXECUTION': 'sync',
         'PHASE2_STATE_GUARD': 'enforce',        # removed in 0.10.0
     })
-    def test_removed_keys_are_left_to_w003(self):
-        """W003 already names removed keys with migration advice; W004 must
-        not duplicate the report."""
-        self.assertEqual(check_no_unknown_settings(None), [])
+    def test_removed_keys_get_the_migration_advice_not_the_typo_hint(self):
+        findings = check_no_unknown_settings(None)
+        self.assertEqual(len(findings), 1)
+        self.assertIn('removed', findings[0].msg)
+        self.assertNotIn('typo', findings[0].msg)
 
 
 # --- the low-severity sweep -----------------------------------------------

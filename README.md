@@ -763,7 +763,7 @@ DJANGO_LOGIC = {
 }
 ```
 
-Every key has the default shown above, so an empty `DJANGO_LOGIC = {}` is a valid production start. Keys removed in 0.10.0 are reported by `manage.py check` as `django_logic.W003` rather than ignored in silence. Numeric and safety-critical settings are validated at boot — a bad value raises `ImproperlyConfigured` naming the setting instead of failing inside a worker at 3 a.m. Run `manage.py migrate` to create the `TransitionMessage` table.
+Every key has the default shown above, so an empty `DJANGO_LOGIC = {}` is a valid production start. Keys the engine does not read — typos and keys a past release removed — are reported by `manage.py check` as `django_logic.W004` rather than ignored in silence. Numeric and safety-critical settings are validated at boot — a bad value raises `ImproperlyConfigured` naming the setting instead of failing inside a worker at 3 a.m. Run `manage.py migrate` to create the `TransitionMessage` table.
 
 #### Migrating off a fork: `LEGACY_EXCEPTION_BASE`
 

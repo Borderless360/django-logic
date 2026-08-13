@@ -344,7 +344,7 @@ routes to `DEFAULT_QUEUE`.
 
 `manage.py check` reports a key this list does not contain
 (`django_logic.W004`) and a key an earlier release removed
-(`django_logic.W003`), so a typo is not silently ignored.
+(`django_logic.W004`), so a typo is not silently ignored.
 
 ---
 

@@ -110,11 +110,6 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
     return data
 
 
-def to_json(instance, **kwargs) -> str:
-    """``snapshot()`` rendered as an indented JSON string (for logs/Sentry)."""
-    return json.dumps(snapshot(instance, **kwargs), indent=2, default=str)
-
-
 def _load(data_or_path):
     if isinstance(data_or_path, dict):
         return data_or_path
