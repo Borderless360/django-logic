@@ -128,7 +128,6 @@ order.process.pay()  # Changes status from 'pending' to 'paid'
 - **Action** - Similar to transition but doesn't change the state. Useful for operations that need permissions and side effects without state change.
 - **Side-effects** - Functions executed during a transition before reaching the target state. If any fail, the state does not advance (`failed_state` is applied if declared). Background transitions additionally roll back the failed attempt's database writes (savepoint); synchronous side-effect writes are **not** rolled back automatically.
 - **Callbacks** - Functions executed after successfully reaching the target state.
-- **Failure side-effects** - Functions executed when side-effects fail, before the state is unlocked. Useful for cleanup or compensation that must run while the instance is still locked.
 - **Failure callbacks** - Functions executed after side-effects fail, after the state is unlocked.
 - **Conditions** - Functions that must return True for a transition to be allowed.
 - **Permissions** - Functions that check if a user can perform a transition.
@@ -1115,7 +1114,7 @@ Celery mode has three things you **must** wire up, or the durability guarantees 
 
 **2. The four periodic safety-net tasks, scheduled via Celery beat.** They are registered automatically (`@shared_task`, names `django_logic.*`) once your Celery app imports/auto-discovers `django_logic.background.tasks`. **If you don't schedule them, retries, stuck-row finalization, the timeout watchdog, and cleanup never run** — a single lost broker message then leaves an instance waiting forever.
 
-Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended intervals (retry 60s, detect-stuck 300s, watchdog 120s, cleanup daily), each overridable by keyword:
+Use the ready-made schedule — it routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']` with the recommended schedules (retry 60s, detect-stuck 300s, watchdog 120s, cleanup at 03:17 by crontab — a wall-clock schedule, because interval entries reset on every beat restart and a day-scale interval never fires on a platform that deploys or cycles dynos daily), each overridable by keyword:
 
 ```python
 # celery.py — after the app is configured

@@ -76,10 +76,17 @@ def beat_schedule(
     retry_seconds: float = 60.0,
     detect_stuck_seconds: float = 300.0,
     watchdog_seconds: float = 120.0,
-    cleanup_seconds: float = 86_400.0,
+    cleanup_schedule=None,
 ) -> dict:
     """Ready-made Celery beat entries for the four safety-net tasks,
     routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
+
+    Cleanup runs on a ``crontab`` (03:17 by default), not an interval.
+    Interval entries count from beat start-up, and beat restarts on every
+    deploy — plus platforms like Heroku restart dynos daily and store the
+    scheduler state on an ephemeral disk — so a day-scale interval can
+    starve forever. A crontab fires by wall clock and survives restarts.
+    Pass ``cleanup_schedule=`` to override (any Celery schedule value).
 
     Use it from your project's ``celery.py`` (after the app is configured)
     so the safety net cannot be forgotten or routed to the wrong queue::
@@ -96,9 +103,13 @@ def beat_schedule(
     first, so a plain attribute assignment is accepted and then silently
     ignored. ``django_logic.W002`` catches that.
 
-    The intervals are overridable per task; the defaults match the
+    The schedules are overridable per task; the defaults match the
     README's recommended schedule.
     """
+    from celery.schedules import crontab
+
+    if cleanup_schedule is None:
+        cleanup_schedule = crontab(hour=3, minute=17)
     queue = starter_queue()
 
     def entry(task: str, seconds: float) -> dict:
@@ -112,7 +123,7 @@ def beat_schedule(
         'django-logic-watchdog': entry(
             'django_logic.watchdog_stale_attempts', watchdog_seconds),
         'django-logic-cleanup': entry(
-            'django_logic.cleanup_completed_transitions', cleanup_seconds),
+            'django_logic.cleanup_completed_transitions', cleanup_schedule),
     }
 
 
