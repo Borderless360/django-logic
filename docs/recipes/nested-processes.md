@@ -118,3 +118,15 @@ its callback fires when it finally reaches a terminal state.
 A full, tested implementation lives in the validation harness:
 [django-logic-test `fulfillment/`](https://github.com/Borderless360/django-logic-test/tree/main/fulfillment)
 + `docs/design/NESTED_PROCESS_ERROR_HANDLING.md`.
+
+
+## Write each sibling process in full
+
+Some designs go further than this sketch: several nested processes declare
+the **same** action name, and each carries a condition that selects it for
+its own kind of instance — say, one `send_message` per integration type.
+That shared-name case is the strongest reason to write each sibling out in
+full: its sources, its condition, its side effects, its queue. A reader can
+then review one sibling's behaviour without reconstructing it from a
+helper. Do not fold the siblings into a builder to remove the repetition —
+the repetition is the specification.

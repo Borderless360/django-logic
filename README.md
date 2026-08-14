@@ -314,7 +314,38 @@ These business rules do not know about each other. You can also test every
 function on its own, because Django-Logic connects them into the business
 process for you.
 
-### 7. Execute in the code
+### 7. Declarations are specifications
+
+A process declaration is read by the person asking "how does this process
+behave?" — not "how is this code structured?". Write it for that reader:
+
+- **Write every process and every transition out in full.** Explicit
+  `sources`, `target`, `conditions`, `side_effects`, `callbacks` per
+  declaration — even when sibling processes repeat the same shape.
+- **Duplication in declarations is acceptable, and usually preferable.**
+  That is abnormal for ordinary code, and deliberate here: repeated
+  declarations tell how the *process* works; a builder that assembles
+  transitions tells how the *code* works, and hides the one line the
+  reader came to check.
+- **The same rule applies where the process is used.** Code that runs a
+  process reads `instance.process.approve(...)` literally — not
+  `getattr(process, action_name)` with the name held in a variable, and
+  not a wrapper that hides which transition runs.
+
+```python
+# Hard to review: what are refund's sources? Which hooks run on cancel?
+transitions = [_build_money_transition(name, hooks) for name, hooks in TABLE]
+
+# Reviewable: each behaviour is stated where the reader looks for it.
+transitions = [
+    Transition(action_name='refund', sources=['paid'], target='refunded',
+               side_effects=[reverse_charge], callbacks=[notify_customer]),
+    Transition(action_name='cancel', sources=['draft', 'approved'], target='cancelled',
+               side_effects=[release_stock]),
+]
+```
+
+### 8. Execute in the code
 ```python
 from invoices.models import Invoice
 
@@ -335,7 +366,7 @@ Use context to pass data between side-effects and callbacks.
 > task or a management command. It is dangerous when you forget it in an API
 > view. In a request handler, always pass `user=request.user`.
 
-### 8. Handle state field overrides
+### 9. Handle state field overrides
 If you want to override the value of the state field, it must be done explicitly. For example: 
 ```python
 Invoice.objects.filter(my_state='draft').update(my_state='approved')
@@ -346,7 +377,7 @@ invoice.save(update_fields=['my_state'])
 ```
 When you change the state field by hand, always pass `update_fields=['my_state']`, as shown above. django-logic writes the state the same way. A transition therefore touches only the state column, and it never overwrites a field that a side-effect changed. Follow the same pattern in your own code. A plain `instance.save()` still saves the field like any other field — django-logic does not intercept it.
 
-### 9. Error handling
+### 10. Error handling
 ```python 
 from django_logic.exceptions import TransitionNotAllowed
 
@@ -1061,6 +1092,30 @@ Two mechanisms serialize work on a state field, each with its own scope:
    - a synchronous `Action` still runs, because it changes no state on success. django-logic skips a failing Action's `failed_state` write while the row is uncompleted, for the same reason.
 
 The constraint is scoped **per process**. Two independent state machines bound to different fields of the same model — say `status` and `payment_status` — can both have background work in progress.
+
+**Data-dependent outcomes ("verdicts").** A background side effect cannot run a synchronous transition on its own instance: its own row is still uncompleted, so the gate above refuses it. When the side effect's result decides the next state (a validation that ends valid or invalid), write the decided call explicitly and run it from the transition's `callbacks`, which execute after the row completes:
+
+```python
+from functools import partial
+
+def fetch_sheet(import_obj, **kwargs):
+    rows = read_sheet(import_obj)
+    if all(row.valid for row in rows):
+        import_obj.run_verdict = partial(import_obj.process.mark_as_valid, data=rows)
+    else:
+        import_obj.run_verdict = partial(import_obj.process.mark_as_invalid,
+                                         errors=errors_of(rows))
+
+def apply_verdict(import_obj, **kwargs):
+    run_verdict = import_obj.__dict__.pop('run_verdict', None)
+    if run_verdict is not None:
+        run_verdict()
+
+BackgroundAction(action_name='run_validation', sources=['validating'],
+                 side_effects=[fetch_sheet], callbacks=[apply_verdict])
+```
+
+Each decision point names the exact transition it runs. Callbacks are best-effort: a worker that dies between completing the row and the callback loses the verdict. The instance stays in its current state, and the operator can run the action again — nothing is corrupted.
 
 To answer "busy, try again shortly" in your own API, read the row through `in_flight()` instead of writing the filter yourself:
 
