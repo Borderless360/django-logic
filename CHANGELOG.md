@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The Voice rule covers writing to people.** A summary, a pull-request
+  description, a review reply, or a chat message must stand on its own:
+  say the thing, not a self-coined label for the thing, and define any
+  unavoidable name in the same message. Added to `CLAUDE.md` and the
+  Cursor rule.
+
 ## [0.14.1] — 2026-08-14
 
 Documentation only. No engine change, so upgrading from 0.14.0 changes no

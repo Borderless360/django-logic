@@ -75,4 +75,8 @@ A comment says the non-obvious *why* in one or two sentences.
 
 Exception text and log text are for the operator on call at 3am. Say what happened and what to do. No internal jargon.
 
+## Writing to people — no riddles
+
+A summary, a pull-request description, a review reply, or a chat message must stand on its own. The reader did not watch the work happen. Say the thing, not a name for the thing. Do not coin labels for plans or findings — no letters, no code names, no wave or phase numbers. If a name is unavoidable, define it in the same message, every time it appears. Before you send, ask: does every word work for someone who did not watch the work?
+
 If you would not say it out loud, rewrite it.
