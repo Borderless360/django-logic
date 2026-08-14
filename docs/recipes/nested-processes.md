@@ -118,3 +118,13 @@ its callback fires when it finally reaches a terminal state.
 A full, tested implementation lives in the validation harness:
 [django-logic-test `fulfillment/`](https://github.com/Borderless360/django-logic-test/tree/main/fulfillment)
 + `docs/design/NESTED_PROCESS_ERROR_HANDLING.md`.
+
+
+## Write each sibling in full
+
+Condition-disambiguated siblings are the strongest case for explicit
+declarations. When several nested processes share an action name and a
+condition picks one, the full declaration — sources, condition, hooks,
+queue — is what makes each sibling's behaviour reviewable on its own.
+Do not fold the siblings into a builder to remove the repetition: the
+repetition is the specification.

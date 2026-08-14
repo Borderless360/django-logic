@@ -78,6 +78,15 @@ Use `BackgroundTransition` (durable, runs side-effects on a Celery worker,
 writes target/`failed_state`) or `BackgroundAction` (same durability, no state
 change on success) for anything slow, external, or retriable.
 
+**Declarations are specifications.** Write every process and its transitions
+out in full — explicit `sources`, `target`, `conditions`, `side_effects`,
+`callbacks` per declaration, even when sibling processes repeat one shape.
+Duplication in declarations is acceptable and usually preferable: it tells
+how the process behaves; a builder that assembles transitions tells how the
+code works and hides the line a reviewer came to check. The same rule holds
+at usage sites: drive `instance.process.action(...)` literally, never through
+name-string dispatch.
+
 ## Non-negotiable rules
 
 1. **Side-effects must be idempotent against external systems.** Background
