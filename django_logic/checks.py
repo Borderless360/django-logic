@@ -1,10 +1,10 @@
 """Django system checks for django-logic.
 
-Bind-time validation warns through the transition logger, which runs
-during ``AppConfig.ready()`` — before test/dev logging is configured, so
-warn-mode consumers can miss it entirely. The checks framework runs after
-setup and is surfaced by ``manage.py check``, every test run, and deploy
-checks, regardless of logging configuration.
+Validation at bind time warns through the transition logger during
+``AppConfig.ready()``, which runs before test and development logging is
+configured, so a consumer can miss the warning. The checks framework runs
+after setup, and ``manage.py check``, every test run and deploy checks report
+it whatever the logging configuration is.
 """
 from django.core import checks
 
@@ -38,13 +38,13 @@ def check_hook_signatures(app_configs, **kwargs):
     return findings
 
 
-# django_logic.E001 (shared in_progress_state with divergent recovery) was
-# retired in 0.12.0 along with recover_stranded_states. The check existed to
-# scope the sweep: a record-less stranded instance carried no provenance, so
-# transitions sharing a marker had to agree on how to recover it. With
-# in_progress_state now background-only — written atomically with the
-# TransitionMessage row — every marked instance has its exact transition on
-# the row, recovery is TM-scoped, and sharing a marker is harmless.
+# A check used to refuse two transitions that shared an in_progress_state but
+# recovered differently. It was removed in 0.12.0 with the stranded sweep it
+# guarded: that sweep found a stranded instance with no row to explain it, so
+# transitions sharing the state had to agree on how to recover. in_progress_state
+# is now background-only and is written in the same transaction as the
+# TransitionMessage row. Every marked instance therefore names its transition on
+# its own row, recovery works from that row, and sharing the state is harmless.
 
 
 def _process_tree_has_background_transition(process_class) -> bool:
@@ -74,11 +74,11 @@ def check_background_app_is_installed(app_configs, **kwargs):
     """A bound ``BackgroundTransition`` needs ``django_logic.background`` in
     ``INSTALLED_APPS`` (``django_logic.E003``).
 
-    The app owns the ``TransitionMessage`` table and its migrations. Without
-    it, enqueue has nowhere to write the outbox row, so the first background
-    transition dies with a raw ``OperationalError: no such table`` from deep
-    inside the engine — and the other background checks (E002, W002) gate on
-    the very same missing app, so ``manage.py check`` said nothing at all.
+    The app owns the ``TransitionMessage`` table and its migrations. Without it,
+    enqueue has nowhere to write the row, so the first background transition
+    fails with ``OperationalError: no such table`` from deep inside the engine.
+    The other background checks also skip an install without the app, so
+    ``manage.py check`` used to report nothing at all.
     """
     from django.apps import apps
 
@@ -106,27 +106,25 @@ def check_background_database_routing(app_configs, **kwargs):
     """Database routers must not split the background engine across
     databases (``django_logic.E002``).
 
-    The durability contract is an *atomic outbox*: enqueue writes the
-    instance's ``in_progress_state`` and the ``TransitionMessage`` row in
-    ONE transaction, and the runtime uses unqualified managers and bare
-    ``transaction.atomic()`` throughout — both resolve to the ``default``
-    alias. A router that sends ``TransitionMessage`` (or a background-bound
-    model) elsewhere silently breaks that invariant: the state write and
-    the outbox row commit (or roll back) independently, so a crash strands
-    instances with no durable record — exactly what the engine exists to
-    prevent. The supported topology is ``TransitionMessage`` and every
-    background-bound model on the shared ``default`` alias; anything else
-    is refused here at check time.
+    Enqueue writes the instance's ``in_progress_state`` and the
+    ``TransitionMessage`` row in ONE transaction. The engine uses plain managers
+    and bare ``transaction.atomic()`` throughout, and both resolve to the
+    ``default`` alias. A router that sends ``TransitionMessage``, or a model
+    bound to a background transition, somewhere else breaks that rule. The state
+    write and the row then commit or roll back on their own, so a crash strands
+    instances with no row to recover them. Keep ``TransitionMessage`` and every
+    background-bound model on the shared ``default`` alias. This check refuses
+    anything else.
 
-    Static routing only: a router that decides from ``hints`` (an
-    ``instance``, a ``model_name``) can answer ``default`` to the
-    model-class questions asked here and still send a real write elsewhere,
-    so passing this check is not proof the invariant holds at runtime.
+    It reads static routing only. A router that decides from ``hints``, such as
+    an ``instance`` or a ``model_name``, can answer ``default`` to the
+    model-class questions asked here and still send a real write elsewhere. So
+    passing this check does not prove the rule holds at runtime.
     """
     from django.apps import apps
 
-    # Nothing to route without the app; a bound background transition with
-    # the app missing is django_logic.E003, not a routing finding.
+    # Nothing to route without the app. A bound background transition with the
+    # app missing is its own error, reported by the check above.
     if not apps.is_installed('django_logic.background'):
         return []
 
@@ -141,10 +139,10 @@ def check_background_database_routing(app_configs, **kwargs):
         findings.append(checks.Error(
             f"A database router routes TransitionMessage to "
             f"write={tm_write!r} / read={tm_read!r}, but the background "
-            f"engine's unqualified managers and bare transaction.atomic() "
-            f"blocks resolve to {DEFAULT_DB_ALIAS!r}. The atomic outbox "
-            f"invariant (state write + TransitionMessage row in one "
-            f"transaction) cannot hold across databases.",
+            f"engine's plain managers and bare transaction.atomic() blocks "
+            f"resolve to {DEFAULT_DB_ALIAS!r}. The atomic outbox rule — the "
+            f"state write and the TransitionMessage row commit in one "
+            f"transaction — cannot hold across two databases.",
             hint="Route TransitionMessage (app_label "
                  "'django_logic_background') to the 'default' alias. The "
                  "supported topology is TransitionMessage and every "
@@ -166,12 +164,12 @@ def check_background_database_routing(app_configs, **kwargs):
                 f"{binding.model._meta.label} is bound to a process with "
                 f"background transitions but a database router sends its "
                 f"writes to {model_write!r} while TransitionMessage writes "
-                f"go to {tm_write!r}. The atomic outbox invariant (state "
-                f"write + TransitionMessage row in one transaction) cannot "
-                f"hold across databases.",
+                f"go to {tm_write!r}. The atomic outbox rule — the state "
+                f"write and the TransitionMessage row commit in one "
+                f"transaction — cannot hold across two databases.",
                 hint="Keep every background-bound model on the same "
-                     "'default' alias as TransitionMessage — split "
-                     "topologies are unsupported.",
+                     "'default' alias as TransitionMessage. Split databases "
+                     "are not supported.",
                 obj=binding.model._meta.label,
                 id='django_logic.E002',
             ))
@@ -183,24 +181,24 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     """In celery mode, the periodic safety-net tasks must actually be in the
     running app's beat schedule (``django_logic.W002``).
 
-    They are the durability half of ``BACKGROUND_EXECUTION='celery'``: without
-    them a lost worker message is never re-dispatched, an attempt that dies
-    without raising is never terminalized, and completed rows are never pruned.
-    Nothing else notices — a consumer ran seven weeks with them all silently
-    unscheduled, accumulating 36 stranded rows, because
+    They carry the durability half of ``BACKGROUND_EXECUTION='celery'``.
+    Without them a lost worker message is never sent to the queue again, an
+    attempt that dies without raising never reaches a terminal state, and
+    completed rows are never deleted. Nothing else reports it: one consumer ran
+    seven weeks with none of them scheduled and collected 36 stranded rows.
     ``app.conf.beat_schedule = {...}`` is ignored when the project also defines
-    the ``CELERY_``-namespaced setting (Celery resolves the namespaced key
-    first). Assign ``app.conf['CELERY_BEAT_SCHEDULE']`` instead.
+    the ``CELERY_``-namespaced setting, because Celery reads the namespaced key
+    first. Assign ``app.conf['CELERY_BEAT_SCHEDULE']`` instead.
 
-    Matched by task name, not entry key, so renamed entries still pass.
+    Matched by task name, not by entry key, so renamed entries still pass.
     """
     from django.apps import apps
 
     # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
-    # checks too, so without this an install that never added the background
-    # app would get a false warning on every `manage.py check` — and fail any
-    # CI running `check --fail-level WARNING`. Same gate as E002; an install
-    # that *does* bind background transitions without the app is E003.
+    # checks too. Without this line an install that never added the background
+    # app would get a false warning on every `manage.py check`, and would fail
+    # any CI that runs `check --fail-level WARNING`. An install that does bind
+    # background transitions without the app is reported as an error above.
     if not apps.is_installed('django_logic.background'):
         return []
 
@@ -230,8 +228,8 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
         return []
     return [checks.Warning(
         "BACKGROUND_EXECUTION='celery' but these periodic safety-net tasks "
-        "are not in the Celery beat schedule: %s. Lost worker messages will "
-        "never be re-dispatched and completed rows will never be pruned."
+        "are not in the Celery beat schedule: %s. Lost worker messages are "
+        "never sent to the queue again and completed rows are never deleted."
         % ', '.join(missing),
         hint="Install them with "
              "app.conf['CELERY_BEAT_SCHEDULE'] = "
@@ -246,11 +244,11 @@ def check_safety_net_is_scheduled(app_configs, **kwargs):
     )]
 
 
-#: Settings a past release removed, mapped to what to do instead. Folded into
-#: the unknown-key report below: ``DJANGO_LOGIC`` has no unknown-key
-#: rejection, so a leftover key would fail open silently — the sharpest case
-#: is a deployment that set ``LOG_KWARGS_REDACTOR`` for PII compliance,
-#: upgrades, and starts writing raw kwargs to its logs with no signal.
+#: Settings a past release removed, mapped to what to do instead. The
+#: unknown-key check below reports them under their own id. ``DJANGO_LOGIC``
+#: rejects nothing, so a leftover key is simply ignored. The worst case is a
+#: deployment that set ``LOG_KWARGS_REDACTOR`` to keep personal data out of its
+#: logs, upgrades, and starts logging raw kwargs with no warning.
 _REMOVED_SETTINGS = {
     'LOG_KWARGS':
         'kwargs are always attached to log records now; scrub them with a '
@@ -263,7 +261,7 @@ _REMOVED_SETTINGS = {
     'SENTRY_TRANSACTION_NAMING':
         'Sentry transactions are always named per transition',
     'PROCESS_CLASS_ALIASES':
-        'drain in-flight rows before renaming a Process class',
+        'let pending rows complete before renaming a Process class',
     'TRANSITION_COVERAGE_LOG':
         'transition-coverage recording was removed in 0.14.0',
 }
@@ -288,17 +286,21 @@ _KNOWN_SETTINGS = frozenset({
 
 @checks.register('django_logic')
 def check_no_unknown_settings(app_configs, **kwargs):
-    """Report ``DJANGO_LOGIC`` keys the engine never reads
+    """Report ``DJANGO_LOGIC`` keys the engine never reads — a key a past
+    release removed (``django_logic.W003``) or a typo
     (``django_logic.W004``).
 
-    ``DJANGO_LOGIC`` is a plain dict with no schema, so a typo —
-    ``TRANSITION_MESSAGE_MAX_ERROR``, ``LOCK_TIMOUT`` — is silently ignored
-    and the default silently applies. That is the failure mode behind every
-    "I set the retry limit and it did nothing" report. The known set is
-    closed and small, so reporting the complement is cheap and precise.
+    ``DJANGO_LOGIC`` is a plain dict with no schema. A typo such as
+    ``TRANSITION_MESSAGE_MAX_ERROR`` or ``LOCK_TIMOUT`` is ignored and the
+    default applies, which is the cause behind every "I set the retry limit and
+    it did nothing" report. The known set is closed and small, so listing
+    everything outside it is cheap and precise.
 
-    A key a past release removed gets its own warning carrying the
-    migration advice from ``_REMOVED_SETTINGS`` instead of the typo hint.
+    A key a past release removed gets its own warning, carrying the upgrade
+    advice from ``_REMOVED_SETTINGS`` instead of the typo hint. One function
+    reports both, and the two ids stay separate on purpose. The typo hint tells
+    you how to silence it when you keep extra keys deliberately, and that must
+    not silence the upgrade advice as well.
     """
     from django.conf import settings
 
@@ -310,7 +312,7 @@ def check_no_unknown_settings(app_configs, **kwargs):
             f"DJANGO_LOGIC['{key}'] was removed and is now ignored: "
             f"{advice}.",
             hint='Delete the key from DJANGO_LOGIC.',
-            id='django_logic.W004',
+            id='django_logic.W003',
         )
         for key, advice in _REMOVED_SETTINGS.items() if key in conf
     ]

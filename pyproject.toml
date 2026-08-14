@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "0.13.1"
+version = "0.14.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -34,37 +34,36 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    # Floor matches the tested matrix (classifiers + CI); 5.0 is explicitly
-    # excluded — support for 4.0/4.1/5.0 was dropped in 0.5.0 (see CHANGELOG).
-    # No upper bound by design: the django-main CI job is the early warning.
+    # The floor matches the tested matrix in the classifiers and CI. Version
+    # 0.5.0 dropped 4.0, 4.1 and 5.0, so this excludes 5.0. There is no upper
+    # bound: the django-main CI job warns about an unreleased Django instead.
     "django>=4.2,!=5.0.*",
     "django-model-utils>=4.5.1",
-    # Celery is a core dependency, not an extra: background transitions
-    # always execute through Celery in production ('sync' execution exists
-    # only for tests/CI), and background/tasks.py imports shared_task at
-    # module level.
+    # Celery is a core dependency, not an extra. In production every
+    # background transition executes through Celery, and background/tasks.py
+    # imports shared_task at module level. 'sync' execution exists only for
+    # tests and CI.
     "celery>=5.0",
 ]
 
 [project.optional-dependencies]
-# Celery is still a core dependency, so [celery] stays an empty alias purely
-# so existing `pip install django-logic[celery,redis]` pins keep resolving.
+# Celery is a core dependency, so [celery] is an empty alias. It stays here so
+# an existing `pip install django-logic[celery,redis]` pin still resolves.
 celery = []
-# [redis] has meaning again as of 0.11.0. The engine never imports
-# django_redis — the state lock goes through Django's cache API
-# (`State.lock` → `cache.add`) — so any cross-process backend works,
-# including the `django.core.cache.backends.redis.RedisCache` Django has
-# shipped since 4.0. This extra installs the third-party backend for
-# deployments whose settings name `django_redis.cache.RedisCache`.
+# The engine never imports django_redis: the state lock goes through Django's
+# cache API (`State.lock` calls `cache.add`), so any cross-process backend
+# works, including the RedisCache that Django itself ships. This extra
+# installs the third-party backend for settings that name
+# `django_redis.cache.RedisCache`.
 redis = ["django-redis>=5.0.0"]
 dev = [
     "coverage>=7.0",
     # Driver for the PostgreSQL stability suite (make stability-*) and the
-    # Postgres concurrency tests. Without it, `uv sync --extra dev` runs the
+    # PostgreSQL concurrency tests. Without it, `uv sync --extra dev` runs the
     # SQLite suite but not tests.stability.
     "psycopg[binary]>=3.1",
-    # Client for Django's built-in Redis cache backend, which the
-    # real-Redis and stability test settings use for the state lock.
+    # Client for Django's built-in Redis cache backend. The real-Redis and
+    # stability test settings use that backend for the state lock.
     "redis>=4.2",
 ]
 

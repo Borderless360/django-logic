@@ -1,15 +1,8 @@
-"""
-Category 4.2, 4.6, 4.7: Transaction Integration Tests
+"""How transitions behave with Django's transaction machinery.
 
-Tests the interaction between django-logic transitions and Django's
-transaction machinery:
-
-  4.2 - transaction.on_commit ordering with outer atomic blocks
-  4.6 - Broker message loss (on_commit fires but dispatch fails)
-  4.7 - Database connection loss during phase 2
-
-These tests validate that the framework behaves correctly when the
-infrastructure layer (DB transactions, Celery broker) fails.
+Covers on_commit ordering inside an outer atomic block, a lost broker message
+after on_commit fires, and a database connection lost while the worker runs.
+These tests check the framework when the infrastructure under it fails.
 """
 import threading
 import unittest
@@ -33,19 +26,14 @@ from tests.stability.models import (
 
 @tag('stability')
 class TestTransactionOnCommitOrdering(StabilityTestCase):
-    """
-    4.2 -- When phase 1 is nested inside an outer transaction.atomic(),
-    on_commit fires only when the OUTER transaction commits.
-
-    If the outer transaction rolls back, the state change must also
-    roll back (no orphan state writes in the DB).
+    """Inside an outer transaction.atomic(), on_commit fires only when that
+    outer transaction commits. If it rolls back instead, the state change rolls
+    back with it and leaves no orphan write in the database.
     """
 
     def test_state_change_inside_outer_atomic_persists_on_commit(self):
-        """
-        State changes inside an atomic block are visible only after
-        the outer transaction commits.
-        """
+        """A state change made inside an atomic block becomes visible to other
+        connections only after the outer transaction commits."""
         order = Order.objects.create(status='draft')
 
         with transaction.atomic():
@@ -59,10 +47,8 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
         self.assertEqual(order.status, 'approved')
 
     def test_state_change_rolled_back_on_outer_atomic_failure(self):
-        """
-        If the outer transaction rolls back, the state change must
-        also be rolled back. This prevents orphan state changes.
-        """
+        """When the outer transaction rolls back, the state change rolls back
+        with it. Otherwise the instance keeps an orphan state."""
         order = Order.objects.create(status='draft')
 
         try:
@@ -81,10 +67,8 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
         self.assertEqual(order.status, 'draft')
 
     def test_lock_state_after_rollback(self):
-        """
-        After a rollback, the cache-based lock may still exist
-        (cache ops are not transactional). Verify this edge case.
-        """
+        """Cache writes are not transactional, so a rollback cannot restore the
+        lock. This test pins what the lock looks like afterwards."""
         order = Order.objects.create(status='draft')
         state = State(order, 'status', process_name='process')
         self.track_lock(state)
@@ -100,30 +84,27 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'draft')
 
-        # Default mode: the cache lock was released by complete_transition
-        # before the rollback (lock -> side_effects -> set_target -> unlock
-        # -> callbacks). The DB state rolls back while the lock is already
-        # gone — the next transition attempt works, but there is a
-        # documented stale-read window between unlock and commit (#141;
-        # see TestDeferUnlockTwoConnections below). Projects that need
-        # exclusion to cover the whole uncommitted span opt into
-        # DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT'] — with the trade-off
-        # that a rollback then leaves the lock to expire via its TTL
-        # (tests/test_defer_unlock.py pins both behaviors).
+        # In default mode complete_transition released the lock before the
+        # rollback (lock -> side_effects -> set_target -> unlock -> callbacks).
+        # The database state rolls back while the lock is already gone, so the
+        # next attempt works. Another connection can still read the old
+        # committed state between unlock and commit, which is what
+        # TestDeferUnlockTwoConnections below reproduces. Projects that need
+        # exclusion over the whole uncommitted span set
+        # DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT']; a rollback then leaves the
+        # lock to expire on its own timeout.
 
 
 @tag('stability')
 class TestBrokerMessageLoss(StabilityTestCase):
-    """
-    4.6 -- on_commit fires but Celery apply_async fails (broker down).
-
-    A durable state write and the advisory cache lock have independent
-    lifetimes; recovery of a lost run is a plain re-drive.
+    """on_commit fires but Celery apply_async fails, because the broker is
+    down. The durable state write and the advisory cache lock have independent
+    lifetimes, so recovering a lost run is an ordinary re-dispatch.
     """
 
     def test_committed_state_write_persists_with_the_lock(self):
-        """A committed set_state persists independently of the cache lock —
-        the write is durable, the lock is advisory and TTL-bounded."""
+        """A committed set_state persists whatever happens to the cache lock.
+        The write is durable; the lock is advisory and expires on a timeout."""
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
         self.track_lock(state)
@@ -138,10 +119,9 @@ class TestBrokerMessageLoss(StabilityTestCase):
         state.unlock()
         self._tracked_cache_keys.discard(state._get_hash())
 
-    def test_recovery_is_a_plain_redrive_from_the_source(self):
-        """A lost run leaves the instance at its source state (0.12.0: sync
-        writes no marker), so recovery is an ordinary re-drive — no special
-        in-progress source needed."""
+    def test_recovery_is_a_plain_re_dispatch_from_the_source(self):
+        """A synchronous run writes no marker, so a lost run leaves the instance
+        at its source state and recovery just runs the transition again."""
         order = Order.objects.create(status='approved')
 
         process = OrderProcess(field_name='status', instance=order)
@@ -156,23 +136,16 @@ class TestBrokerMessageLoss(StabilityTestCase):
 
 @tag('stability')
 class TestDatabaseConnectionLoss(StabilityTestCase):
-    """
-    4.7 -- Worker's DB connection drops mid-side-effect.
+    """The worker loses its database connection while a side effect runs.
 
-    When the DB connection is lost:
-    - The side effect that uses DB will raise OperationalError
-    - fail_transition runs (which also needs DB)
-    - If fail_transition also fails, the lock should still be released
-      (cache-based, independent of DB)
-
-    The periodic starter should eventually re-dispatch.
+    The side effect raises OperationalError, then fail_transition runs and needs
+    the database too. If fail_transition also fails, the lock is still released,
+    because it lives in the cache. The periodic starter re-dispatches later.
     """
 
     def test_db_error_in_side_effect_triggers_failure_path(self):
-        """
-        A side effect that encounters a DB error triggers the failure path.
-        The failed_state should be set (if the DB is available for that).
-        """
+        """A database error inside a side effect runs the failure path, which
+        writes failed_state when the database is reachable again."""
         from django.db.utils import OperationalError
 
         order = Order.objects.create(status='approved')
@@ -203,8 +176,8 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
         self.assert_unlocked(state)
 
     def test_side_effect_db_error_without_failed_state(self):
-        """Without failed_state, a DB error leaves the instance at its source
-        (0.12.0: no in-progress marker) — re-drivable, not parked."""
+        """Without a failed_state, a database error leaves the instance at its
+        source state. The transition can simply run again."""
         from django.db.utils import OperationalError
 
         order = Order.objects.create(status='approved')
@@ -236,17 +209,15 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
 @tag('stability')
 class TestDeferUnlockTwoConnections(StabilityTestCase):
-    """
-    #141 -- the unlock-before-commit window, reproduced on two real
-    database connections.
+    """The unlock-before-commit window, on two real database connections.
 
-    T1 runs a synchronous transition inside an outer atomic block and
-    holds the transaction open. In default mode T1 has already released
-    the cache lock, so T2 (another connection) reads the OLD committed
-    state, finds it a valid source, and runs the same transition again --
-    both executed side-effects and the final state depends on commit
-    ordering. With DEFER_UNLOCK_UNTIL_COMMIT the lock is held until T1's
-    commit and T2 is rejected while the window is open.
+    T1 runs a synchronous transition inside an outer atomic block and holds the
+    transaction open. In default mode T1 has already released the cache lock, so
+    T2 on another connection reads the old committed state, accepts it as a
+    source, and runs the same transition again. Both attempts run the
+    side-effects, and the final state depends on commit order. With
+    DEFER_UNLOCK_UNTIL_COMMIT, T1 holds the lock until it commits and T2 is
+    rejected.
     """
 
     def _run_t1_holding_transaction_open(self, order, t1_transitioned, t2_probed):
@@ -271,16 +242,16 @@ class TestDeferUnlockTwoConnections(StabilityTestCase):
     @unittest.skipUnless(connection.vendor == 'postgresql',
                          'needs two concurrent writer connections')
     def test_default_mode_second_transition_reads_stale_committed_state(self):
-        """Default mode: the documented window exists — pin it."""
+        """Default mode leaves the window open. Pin that."""
         order = Order.objects.create(status='draft')
         t1_transitioned, t2_probed = threading.Event(), threading.Event()
         thread = self._run_t1_holding_transaction_open(
             order, t1_transitioned, t2_probed)
         try:
             self.assertTrue(t1_transitioned.wait(10))
-            # T1 unlocked on completion, but its 'approved' write is
-            # invisible to this connection: the committed state is still
-            # 'draft', so the SAME transition validates and runs again.
+            # T1 unlocked when it finished, but this connection cannot see its
+            # 'approved' write. The committed state is still 'draft', so the
+            # same transition validates and runs a second time.
             OrderProcess(
                 field_name='status',
                 instance=Order.objects.get(pk=order.pk),
@@ -306,8 +277,8 @@ class TestDeferUnlockTwoConnections(StabilityTestCase):
                 order, t1_transitioned, t2_probed)
             try:
                 self.assertTrue(t1_transitioned.wait(10))
-                # T1 still holds the lock: T2 must not execute from the
-                # old committed source while T1's write is uncommitted.
+                # T1 still holds the lock, so T2 must not run from the old
+                # committed source while T1's write is uncommitted.
                 with self.assertRaises(TransitionNotAllowed):
                     OrderProcess(
                         field_name='status',
@@ -318,12 +289,12 @@ class TestDeferUnlockTwoConnections(StabilityTestCase):
                 thread.join(timeout=15)
             self.assertFalse(thread.is_alive())
 
-        # T1's commit ran the deferred unlock (on_commit, in its thread).
+        # T1's commit ran the deferred unlock, on_commit, in its own thread.
         self.assertFalse(state.is_locked())
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')
 
-        # And the follow-up transition proceeds normally after commit.
+        # The follow-up transition then proceeds normally.
         OrderProcess(field_name='status', instance=order).fulfill()
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfilled')

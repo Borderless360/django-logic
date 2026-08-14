@@ -1,9 +1,9 @@
-"""django_logic.W002 — celery mode with an unscheduled safety net.
+"""The check that warns when celery mode has an unscheduled safety net.
 
 The five periodic tasks are the durability half of
-``BACKGROUND_EXECUTION='celery'``. A consumer ran seven weeks with all of them
-silently unscheduled because ``app.conf.beat_schedule = {...}`` is ignored when
-the project also defines the ``CELERY_``-namespaced setting.
+``BACKGROUND_EXECUTION='celery'``. A consumer ran seven weeks with none of them
+scheduled, because Celery ignores ``app.conf.beat_schedule = {...}`` when the
+project also defines the ``CELERY_``-namespaced setting.
 """
 from celery import current_app
 from django.test import SimpleTestCase, modify_settings, override_settings
@@ -26,8 +26,8 @@ class SafetyNetScheduledCheckTests(SimpleTestCase):
     @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='celery'))
     def test_not_checked_without_the_background_app(self):
         # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
-        # checks too, so an install that never added the background app must
-        # not be warned at — it has no durable rows to lose.
+        # the checks, so an install that never added the background app would
+        # otherwise be warned about rows it cannot have.
         with self._beat({}):
             self.assertEqual(self._run(), [])
 

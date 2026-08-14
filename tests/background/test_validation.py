@@ -1,7 +1,8 @@
-"""Class-time validation: queue optional but non-empty when given,
-background action_names unique within a Process. Sharing an
-in_progress_state is legal — the recovery-ownership rule that replaced the
-old uniqueness raise lives in tests/test_binding_validation.py."""
+"""Validation at class creation: ``queue`` is optional but must not be empty,
+and background ``action_name`` values must be unique inside one Process.
+Sharing an ``in_progress_state`` is legal; tests/test_binding_validation.py
+covers the rule that replaced the old uniqueness check.
+"""
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, override_settings
 
@@ -147,13 +148,10 @@ class SharedInProgressStateTests(SimpleTestCase):
 
 
 class UniqueBackgroundActionNameTests(SimpleTestCase):
-    """Phase-2 restore identifies a background transition by ``(owning process
-    class, action_name)`` and filters to ``is_background``, so the ONLY rejected
-    configuration is two background transitions sharing a name within a single
-    Process. Duplicate background names across *distinct* nested processes, and
-    a background name coinciding with a synchronous one, are both allowed —
-    resolved by conditions at phase 1, by the owner + is_background filter at
-    phase 2.
+    """The worker finds a background transition by its process class and its
+    ``action_name``, so only two background transitions with the same name in
+    one Process are ambiguous. The same name in two different nested processes,
+    or shared with a synchronous transition, stays legal.
     """
 
     def test_two_background_transitions_same_name_rejected(self):
@@ -199,10 +197,9 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
         self.assertIn("action_name='dup'", str(ctx.exception))
 
     def test_sync_transition_sharing_name_with_background_allowed(self):
-        # A synchronous transition may share an action_name with a background
-        # one: phase 2 only restores background transitions (is_background
-        # filter), so the synchronous namesake is invisible to restore; phase 1
-        # resolves the call by conditions/permissions like any duplicate name.
+        # The worker only restores background transitions, so a synchronous
+        # transition with the same name is invisible to it. The call itself
+        # resolves by conditions, like any other duplicate name.
         class _MixedProcess(Process):
             process_name = 'sync_bg_share'
             transitions = [
@@ -225,8 +222,8 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
         self.assertEqual(len(_MixedProcess.transitions), 2)
 
     def test_sync_transitions_same_name_still_allowed(self):
-        """Duplicate sync action_names remain legal — the sync call
-        path disambiguates via conditions/permissions at runtime.
+        """Duplicate synchronous action_names stay legal: conditions and
+        permissions pick one at call time.
         """
         class _SyncDupProcess(Process):
             process_name = 'sync_dup'
@@ -258,19 +255,17 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
 
 
 class NestedTreeBackgroundActionNameTests(SimpleTestCase):
-    """Phase-2 ``_find_transition`` descends into ``nested_processes`` and
-    selects the transition by ``(owning process class, action_name)``. So a
-    background ``action_name`` may be reused across *distinct* nested processes
-    (the condition-disambiguated pattern) and may coincide with a synchronous
-    transition; it must only stay unique *within* any single process class.
+    """The worker searches ``nested_processes`` and selects a transition by its
+    process class and its ``action_name``. A background ``action_name`` must
+    therefore be unique inside one process class, but it may repeat across
+    different nested processes.
     """
 
     def test_background_name_duplication_across_nested_processes_allowed(self):
-        # Issue #98: the condition-disambiguated nested-process pattern. Two
-        # nested processes each declare a background transition with the SAME
-        # action_name, selected by a condition on the instance. Phase 1
-        # resolves exactly one; phase 2 restores it via the recorded owning
-        # process class. This must no longer raise at class creation.
+        # Two nested processes declare the same background action_name and a
+        # condition on the instance picks one. The enqueue resolves exactly one
+        # transition, and the worker restores it from the process class on the
+        # row.
         class _ChildA(Process):
             process_name = 'child_a'
             transitions = [
@@ -302,8 +297,8 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         self.assertEqual(_Parent.nested_processes, [_ChildA, _ChildB])
 
     def test_background_action_duplication_across_nested_processes_allowed(self):
-        # Same as above but with BackgroundAction (no in_progress_state), so
-        # the only discriminator is the owning process class.
+        # Same with BackgroundAction, which has no in_progress_state: the
+        # process class is the only thing that tells the two apart.
         class _ChildA(Process):
             process_name = 'act_child_a'
             transitions = [
@@ -323,10 +318,10 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         self.assertEqual(_Parent.nested_processes, [_ChildA, _ChildB])
 
     def test_two_background_transitions_same_name_within_a_class_rejected(self):
-        # Within-class duplication is still genuinely ambiguous: (owning class,
-        # action_name) no longer identifies one transition. Each Process
-        # validates itself at creation, so a process that nests such a child
-        # raises when the CHILD class is defined.
+        # Two of the same name inside one class stay ambiguous: the process
+        # class and the action_name no longer identify one transition. Each
+        # Process validates itself, so the child class raises when it is
+        # defined.
         with self.assertRaises(ImproperlyConfigured) as ctx:
             class _Child(Process):
                 process_name = 'dup_within_child'
@@ -351,9 +346,9 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         self.assertIn('within a single process class', msg)
 
     def test_parent_background_sharing_name_with_nested_sync_allowed(self):
-        # A parent background transition may share an action_name with a nested
-        # synchronous one: phase 2 (is_background filter) never restores the
-        # synchronous transition, and phase 1 resolves the call by conditions.
+        # The worker never restores a synchronous transition, so a nested
+        # synchronous namesake cannot be mistaken for the parent's background
+        # transition.
         class _Child(Process):
             process_name = 'sync_child'
             transitions = [
@@ -410,9 +405,9 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         self.assertEqual(_Parent.nested_processes, [_Child])
 
     def test_sync_name_duplication_across_nested_still_allowed(self):
-        # Courier-style polymorphism: many nested sub-processes share a sync
-        # action_name, disambiguated by conditions at runtime. With no
-        # background transition involved, this stays legal.
+        # Several nested processes share one synchronous action_name and
+        # conditions pick one at call time. No background transition is
+        # involved, so this stays legal.
         class _CourierA(Process):
             process_name = 'courier_a'
             transitions = [

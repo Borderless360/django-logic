@@ -1,9 +1,13 @@
-"""Removed DJANGO_LOGIC keys are reported by the unknown-key check (W004).
+"""Removed DJANGO_LOGIC keys are reported as W003, typos as W004.
 
 DJANGO_LOGIC has no unknown-key rejection, so every removal fails *open* and
 silently. The case that motivated the report: a deployment that set
 LOG_KWARGS_REDACTOR for PII compliance upgrades and starts writing raw kwargs
 to its logs, with nothing anywhere saying so.
+
+One function makes both reports, but the ids stay separate. The typo hint
+tells you to silence W004 when you keep extra keys on purpose; if the
+migration advice shared that id, following the hint would hide it.
 """
 from django.test import SimpleTestCase, override_settings
 
@@ -24,7 +28,7 @@ class RemovedSettingsCheckTests(SimpleTestCase):
                 with override_settings(DJANGO_LOGIC=dl_settings(**{key: 'x'})):
                     findings = self._run()
                 self.assertEqual(len(findings), 1)
-                self.assertEqual(findings[0].id, 'django_logic.W004')
+                self.assertEqual(findings[0].id, 'django_logic.W003')
                 self.assertIn(key, findings[0].msg)
                 self.assertIn('removed', findings[0].msg)
 
@@ -34,7 +38,25 @@ class RemovedSettingsCheckTests(SimpleTestCase):
         findings = self._run()
 
         self.assertEqual(len(findings), 2)
-        self.assertEqual({f.id for f in findings}, {'django_logic.W004'})
+        self.assertEqual({f.id for f in findings}, {'django_logic.W003'})
+
+    @override_settings(DJANGO_LOGIC=dl_settings(
+        LOG_KWARGS_REDACTOR='myapp.redact', MY_OWN_KEY=1))
+    def test_a_removed_key_and_a_typo_keep_separate_ids(self):
+        # Silencing one must never silence the other. The typo hint tells the
+        # reader to silence W004 for keys they keep on purpose; a shared id
+        # would hide the migration advice from everyone who did that.
+        findings = self._run()
+
+        self.assertEqual(
+            {f.id for f in findings},
+            {'django_logic.W003', 'django_logic.W004'},
+        )
+        removed = next(f for f in findings if f.id == 'django_logic.W003')
+        typo = next(f for f in findings if f.id == 'django_logic.W004')
+        self.assertIn('LOG_KWARGS_REDACTOR', removed.msg)
+        self.assertIn('MY_OWN_KEY', typo.msg)
+        self.assertNotIn('SILENCED_SYSTEM_CHECKS', removed.hint)
 
     @override_settings(DJANGO_LOGIC=dl_settings(LOG_KWARGS=False))
     def test_the_redaction_case_names_the_replacement(self):

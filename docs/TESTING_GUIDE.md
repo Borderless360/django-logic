@@ -73,10 +73,11 @@ Mock only true externals (an HTTP client, a courier API, a payment gateway),
 Reject a process test that:
 
 - **(a)** asserts `get_available_transitions` / the transition list back
-  against the definition instead of asserting *availability behaviour* (a
-  blocked-by-condition or permission-denied journey — see scenarios
-  [2](#2-condition-gating), [3](#3-permission-gating),
-  [14](#14-conditions-in-the-blocking-direction));
+  against the definition instead of asserting *availability behaviour*. Write
+  a blocked-by-condition or permission-denied journey instead: call
+  `assert_not_available`, then force the transition and assert it raises
+  `TransitionNotAllowed` and changed no state. Worked examples live in the
+  library's own `tests/test_process_guards.py`;
 - **(b)** `patch`es any `django_logic` internal (use `fail_side_effect=` to
   inject a failure into the real path instead);
 - **(c)** contains no assertion against a persisted instance (a test that only
@@ -387,8 +388,8 @@ class FulfilmentTests(TestCase):     # DJANGO_LOGIC['BACKGROUND_EXECUTION']='syn
         with patch('myapp.services.courier_client.book', side_effect=CourierError):
             with self.assertRaises(CourierError):
                 order.process.fulfil()
-        tm = TransitionMessage.objects.get(instance_id=str(order.pk))
-        self.assertEqual(tm.errors_count, 1)
+        transition_message = TransitionMessage.objects.get(instance_id=str(order.pk))
+        self.assertEqual(transition_message.errors_count, 1)
 ```
 
 Two lower-level helpers mirror production behaviour exactly:
@@ -398,7 +399,7 @@ from django_logic.background.dispatch import retry_pending
 retry_pending()   # one tick of the periodic starter, inline (sync mode)
 
 from django_logic.background.runner import run_background_transition
-run_background_transition(tm.pk)   # one worker attempt for a specific row
+run_background_transition(transition_message.pk)   # one worker attempt for a specific row
 ```
 
 Use `TransactionTestCase` (or `ProcessScenario`, which extends it) when your
@@ -416,7 +417,7 @@ pyramid backing it:
    ~340 tests): every reproduced defect from the 0.3 stability review has a
    permanent regression test — savepoint isolation of side-effects
    (`tests/background/test_savepoint_isolation.py`), the worker's state guard
-   (`test_phase2_state_guard.py`), the per-process in-flight constraint
+   (`test_worker_state_guard.py`), the per-process in-flight constraint
    (`test_constraint_per_process.py`), restore verification
    (`test_restore_verification.py`), sync/background mutual exclusion
    (`test_sync_background_mutex.py`), and lock revalidation

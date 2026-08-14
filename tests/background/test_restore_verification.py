@@ -1,14 +1,10 @@
-"""R6 regressions — phase-2 restore resolves the process phase 1 enqueued.
+"""The worker restores the process that enqueued the transition.
 
-Every Process defaults to ``process_name='process'``, so phase 2's
-attribute lookup (``getattr(instance, tm.process_name)``) can silently
-resolve a *different* class than the one that enqueued the transition —
-a directly-instantiated process colliding with the bound one, or a
-rename/rebind between the deploy that ran phase 1 and the one running
-phase 2. Pre-fix, phase 2 then ran the bound process's side-effects (code
-the caller never asked for) and reported success. Post-fix, ``_restore``
-verifies the resolved class against the recorded ``process_class`` and
-prefers the recorded one, using the ``field_name`` recorded on the message.
+Every Process defaults to ``process_name='process'``, so the worker's
+attribute lookup can resolve a different class than the one that enqueued
+the row: a directly instantiated process that collides with the bound one,
+or a rename between two deploys. The worker therefore checks the resolved
+class against the recorded ``process_class`` and prefers the recorded one.
 """
 from django.test import TestCase, override_settings
 
@@ -20,7 +16,7 @@ from tests.background.models import Widget
 from tests import dl_settings
 
 
-# Module-level marker — proves WHICH process's side-effects ran.
+# Records which process's side-effects ran.
 RAN: list = []
 
 
@@ -29,10 +25,9 @@ def rogue_side_effect(instance, **kwargs):
 
 
 class RogueProcess(Process):
-    """Deliberately collides with the bound WidgetProcess: same
-    ``process_name`` AND a background transition with the same
-    ``action_name`` ('fulfil') — but a different target and side-effects.
-    Never bound to Widget; only ever instantiated directly."""
+    """Collides with the bound WidgetProcess on both ``process_name`` and
+    ``action_name``, but has a different target and side-effects. It is never
+    bound to Widget — tests instantiate it directly."""
 
     process_name = 'process'
     transitions = [
@@ -53,37 +48,34 @@ class RestoreVerificationTests(TestCase):
         self.widget = Widget.objects.create()
 
     def test_name_collision_restores_the_recorded_process_class(self):
-        # R6: phase 1 through a directly-instantiated RogueProcess. The TM
-        # records process_name='process' (colliding with the bound
-        # WidgetProcess) and process_class='...RogueProcess'. Pre-fix,
-        # phase 2 resolved the BOUND class and ran WidgetProcess.fulfil's
-        # side-effects with target 'fulfilled'.
+        # Enqueue through a directly instantiated RogueProcess. Its row shares
+        # process_name with the bound WidgetProcess, so only the recorded
+        # process_class tells the worker which side-effects to run.
         process = RogueProcess(field_name='status', instance=self.widget)
         with self.assertLogs('django-logic.transition', level='WARNING') as logs:
             with sync_execution():
                 process.fulfil()
 
         self.widget.refresh_from_db()
-        # The rogue transition ran — not the bound one.
+        # The rogue transition ran, not the bound one.
         self.assertEqual(self.widget.status, 'rogue_fulfilled')
         self.assertEqual(RAN, ['rogue_side_effect'])
-        self.assertEqual(self.widget.se_log, '')  # bound side-effects didn't run
+        self.assertEqual(self.widget.se_log, '')
         self.assertTrue(any('using the recorded class' in line for line in logs.output))
 
-        tm = TransitionMessage.objects.get(instance_id=str(self.widget.pk))
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.field_name, 'status')
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(self.widget.pk))
+        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(transition_message.field_name, 'status')
 
     def test_unimportable_recorded_class_fails_closed(self):
-        # The recorded class vanished (deploy renamed it, no alias
-        # configured). Phase 2 must FAIL CLOSED (#140): running the
-        # attribute-resolved bound process instead would execute
-        # side-effects phase 1 never asked for. The row completes as
-        # unrestorable — no side-effects, no state write — with the
-        # reason on last_error_message for the audit trail.
+        # The recorded class is gone: a deploy renamed it and no alias exists.
+        # Falling back to the bound process would run side-effects the caller
+        # never asked for, so the row completes as unrestorable with no
+        # side-effects and no state write. last_error_message says why.
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
-        tm = TransitionMessage.objects.create(
+        transition_message = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
             instance_id=str(self.widget.pk),
@@ -98,34 +90,33 @@ class RestoreVerificationTests(TestCase):
         )
 
         with self.assertLogs('django-logic.transition', level='ERROR') as logs:
-            run_background_transition(tm.pk)
+            run_background_transition(transition_message.pk)
 
         self.widget.refresh_from_db()
-        # NO substitute side-effects ran, state untouched by them.
         self.assertEqual(self.widget.status, 'fulfilling')
         self.assertEqual(self.widget.se_log, '')
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)  # retries stop
-        self.assertIn('[unrestorable]', tm.last_error_message)
-        self.assertIn('could not be loaded', tm.last_error_message)
-        self.assertIsNotNone(tm.last_error_dt)
+        transition_message.refresh_from_db()
+        # Completed, so retries stop.
+        self.assertTrue(transition_message.is_completed)
+        self.assertIn('[unrestorable]', transition_message.last_error_message)
+        self.assertIn('could not be loaded',
+                      transition_message.last_error_message)
+        self.assertIsNotNone(transition_message.last_error_dt)
         self.assertTrue(
             any('could not be loaded' in line for line in logs.output)
         )
 
-
-    def test_unimportable_path_via_attribute_error_branch_terminates(self):
-        # The instance has NO attribute for the recorded process_name, so
-        # restore goes through the process_class fallback — and that path
-        # is unimportable. Pre-#140 the raw ImportError escaped _run_atomic
-        # (which only catches _RestoreError), the attempt rolled back with
-        # errors_count still 0, and retry_stale_transitions re-dispatched
-        # the row forever. Now the row terminates cleanly.
+    def test_unimportable_path_through_the_attribute_fallback_terminates(self):
+        # The instance has no attribute for the recorded process_name, so
+        # restore falls back to process_class — which is also unimportable.
+        # The row must terminate here. Earlier the ImportError escaped, the
+        # attempt rolled back with errors_count still 0, and the periodic
+        # starter sent the row to the queue again forever.
         from django_logic.background.tasks import _retry_pending_inline
 
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
-        tm = TransitionMessage.objects.create(
+        transition_message = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
             instance_id=str(self.widget.pk),
@@ -139,36 +130,40 @@ class RestoreVerificationTests(TestCase):
         )
 
         with self.assertLogs('django-logic.transition', level='ERROR'):
-            run_background_transition(tm.pk)
+            run_background_transition(transition_message.pk)
 
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.errors_count, 0)  # unrestorable, not "failing"
-        self.assertIn('[unrestorable]', tm.last_error_message)
+        transition_message.refresh_from_db()
+        self.assertTrue(transition_message.is_completed)
+        # Unrestorable, not failing, so no error is charged.
+        self.assertEqual(transition_message.errors_count, 0)
+        self.assertIn('[unrestorable]', transition_message.last_error_message)
 
-        # No infinite retry: the starter has nothing left to re-dispatch.
+        # The starter has nothing left to send to the queue again.
         with override_settings(
                 DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_RETRY_MINUTES=0)):
             self.assertEqual(_retry_pending_inline(), 0)
-        tm.refresh_from_db()
-        self.assertEqual(tm.errors_count, 0, 'errors must not grow')
+        transition_message.refresh_from_db()
+        self.assertEqual(transition_message.errors_count, 0,
+                         'errors must not grow')
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilling',
                          'no substitute side-effects, no state write')
 
-    def test_phase_one_records_the_bound_field_name(self):
+    def test_enqueue_records_the_bound_field_name(self):
         with sync_execution():
             self.widget.process.fulfil()
-        tm = TransitionMessage.objects.get(instance_id=str(self.widget.pk))
-        self.assertEqual(tm.field_name, 'status')
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(self.widget.pk))
+        self.assertEqual(transition_message.field_name, 'status')
 
     def test_row_without_field_name_fails_closed(self):
-        # Phase 1 has recorded field_name since 0.4. A row without one is
+        # Enqueue has recorded field_name since 0.4. A row without one is
         # unrestorable: guessing 'state' could drive the wrong machine on a
-        # multi-process model, so it terminates instead of running hooks.
+        # model with several processes, so it terminates instead of running
+        # hooks.
         self.widget.status = 'rogue_fulfilling'
         self.widget.save(update_fields=['status'])
-        tm = TransitionMessage.objects.create(
+        transition_message = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
             instance_id=str(self.widget.pk),
@@ -182,11 +177,12 @@ class RestoreVerificationTests(TestCase):
             },
         )
 
-        run_background_transition(tm.pk)
+        run_background_transition(transition_message.pk)
 
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'rogue_fulfilling')  # untouched
-        self.assertEqual(RAN, [])                                 # no hooks ran
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)   # completed, so the retry loop stops
-        self.assertIn('[unrestorable]', tm.last_error_message)
+        self.assertEqual(self.widget.status, 'rogue_fulfilling')
+        self.assertEqual(RAN, [])
+        transition_message.refresh_from_db()
+        # Completed, so the retry loop stops.
+        self.assertTrue(transition_message.is_completed)
+        self.assertIn('[unrestorable]', transition_message.last_error_message)

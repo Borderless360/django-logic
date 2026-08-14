@@ -1,17 +1,15 @@
-"""A phase-2 attempt discarded by a silent savepoint rollback is a failure.
+"""An attempt whose writes are silently rolled back counts as a failure.
 
-Django's ``mark_for_rollback_on_error`` — which ``Model.save_base`` wraps every
-write in — flags the connection when a database error is raised inside an
-atomic block *even if the caller catches it*. ``Atomic.__exit__`` then takes
-the rollback branch with no exception propagating, so an attempt whose writes
-were all discarded returns as though it had worked.
+Django's ``mark_for_rollback_on_error`` wraps every model write. It flags the
+connection when a database error is raised inside an atomic block, even if the
+caller catches that error. ``Atomic.__exit__`` then rolls back and raises
+nothing, so an attempt that lost all its writes looks like a success.
 
-A ``BackgroundTransition`` is protected by accident: its target ``set_state``
-is the last statement inside the attempt and hits a poisoned connection, so it
-raises ``TransactionManagementError`` and is accounted. A ``BackgroundAction``
-writes no state, so nothing after the suppression touches the database and the
-attempt returned clean — a completed row, ``errors_count=0`` and success
-callbacks on top of work that was thrown away.
+A ``BackgroundTransition`` escapes this by luck: its target ``set_state`` is
+the last statement in the attempt, so it hits the flagged connection and
+raises ``TransactionManagementError``. A ``BackgroundAction`` writes no state,
+so nothing runs after the caught error and the row completed with
+``errors_count=0`` and success callbacks over discarded work.
 """
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
@@ -30,8 +28,8 @@ CALLBACKS_RAN: list = []
 
 
 def _work_then_suppress_db_error(instance, **kwargs):
-    """The create-or-ignore idiom *without* the nested atomic it needs — the
-    common way real consumer code reaches this."""
+    """The create-or-ignore idiom without the nested atomic it needs. This is
+    how consumer code usually reaches this failure."""
     instance.customer_received = True
     instance.save(update_fields=['customer_received'])
     try:
@@ -41,8 +39,8 @@ def _work_then_suppress_db_error(instance, **kwargs):
 
 
 def _work_then_suppress_db_error_correctly(instance, **kwargs):
-    """The same intent written correctly: the nested atomic absorbs the error
-    and clears ``needs_rollback``, so the attempt really did commit."""
+    """The same intent written correctly. The nested atomic absorbs the error
+    and clears ``needs_rollback``, so the attempt really commits."""
     instance.customer_received = True
     instance.save(update_fields=['customer_received'])
     try:
@@ -96,55 +94,58 @@ class _Base(TestCase):
 @override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 3})
 class RetriesRemainTests(_Base):
     def test_the_discarded_attempt_is_charged_an_error_and_retried(self):
-        inv = Invoice.objects.create(status='draft')
+        invoice = Invoice.objects.create(status='draft')
 
         with self.assertRaises(_SilentRollback):
-            inv.suppressed_error_proc.sync_out()
+            invoice.suppressed_error_proc.sync_out()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        inv.refresh_from_db()
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(invoice.pk))
+        invoice.refresh_from_db()
         # Charged and left uncompleted, so the periodic starter retries it.
-        self.assertEqual(tm.errors_count, 1)
-        self.assertFalse(tm.is_completed)
-        # The proof the attempt really was discarded: its write is gone.
-        self.assertFalse(inv.customer_received)
-        # …and nothing announced the work as done.
+        self.assertEqual(transition_message.errors_count, 1)
+        self.assertFalse(transition_message.is_completed)
+        # The attempt's write is gone, so the rollback really happened.
+        self.assertFalse(invoice.customer_received)
+        # Nothing reported the work as done.
         self.assertEqual(CALLBACKS_RAN, [])
 
 
 @override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
 class TerminalTests(_Base):
     def test_at_max_errors_it_lands_in_failed_state(self):
-        inv = Invoice.objects.create(status='draft')
+        invoice = Invoice.objects.create(status='draft')
 
         with self.assertRaises(_SilentRollback):
-            inv.suppressed_error_proc.sync_out()
+            invoice.suppressed_error_proc.sync_out()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        inv.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(inv.status, 'failed')
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(invoice.pk))
+        invoice.refresh_from_db()
+        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(invoice.status, 'failed')
         self.assertEqual(CALLBACKS_RAN, [])
 
 
 @override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 3})
 class CorrectlyNestedIsUntouchedTests(_Base):
-    """The guard must fire only on the broken idiom: an inner ``atomic``
-    absorbs the error, so this attempt commits and succeeds as before."""
+    """The guard must fire only on the broken idiom. Here an inner ``atomic``
+    absorbs the error, so the attempt commits and succeeds."""
 
     process = CorrectlyNestedProcess
 
     def test_a_nested_atomic_still_succeeds(self):
-        inv = Invoice.objects.create(status='draft')
+        invoice = Invoice.objects.create(status='draft')
 
-        inv.correctly_nested_proc.sync_out()
+        invoice.correctly_nested_proc.sync_out()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        inv.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.errors_count, 0)
-        self.assertTrue(inv.customer_received)
-        self.assertEqual(CALLBACKS_RAN, [inv.pk])
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(invoice.pk))
+        invoice.refresh_from_db()
+        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(transition_message.errors_count, 0)
+        self.assertTrue(invoice.customer_received)
+        self.assertEqual(CALLBACKS_RAN, [invoice.pk])
 
 
 def _fail_attempt(instance, **kwargs):
@@ -152,14 +153,13 @@ def _fail_attempt(instance, **kwargs):
 
 
 def _suppress_db_error_on_failed_materialization(sender, instance, **kwargs):
-    """Poisons the terminal ``failed_state`` write's savepoint (#189).
+    """Flags the connection inside the terminal ``failed_state`` savepoint.
 
-    ``post_init`` because ``set_state`` ends with ``refresh_from_db``: a
-    receiver firing there suppresses the error with NO query following it
-    inside the savepoint, which is the genuinely silent shape —
-    ``pre_save``/``post_save`` receivers poison the connection while queries
-    still remain, so those raise ``TransactionManagementError`` and were
-    already accounted honestly.
+    It hooks ``post_init`` because ``set_state`` ends with
+    ``refresh_from_db``: a receiver there catches the error with no query
+    left in the savepoint, which is the silent shape. A ``pre_save`` or
+    ``post_save`` receiver still has queries after it, so the attempt raises
+    ``TransactionManagementError`` and was always accounted.
     """
     if instance.pk is None or instance.status != 'failed':
         return
@@ -188,8 +188,8 @@ def _record_fse_observed_status(instance, **kwargs):
     FSE_SAW.append(instance.status)
 
 
-class TerminalWritePoisonProcess(Process):
-    process_name = 'terminal_write_poison_proc'
+class TerminalWriteDiscardProcess(Process):
+    process_name = 'terminal_write_discard_proc'
     transitions = [
         BackgroundTransition(
             'sync_out', sources=['draft'], target='done',
@@ -202,11 +202,11 @@ class TerminalWritePoisonProcess(Process):
 
 
 @override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
-class TerminalFailedStateWritePoisonedTests(_Base):
-    """A silently-discarded terminal ``failed_state`` write must be recorded
-    as the failure it is, not logged as a landed ``SET_STATE`` (#189)."""
+class TerminalFailedStateWriteDiscardedTests(_Base):
+    """A terminal ``failed_state`` write that is silently rolled back must be
+    recorded as a failure, not logged as a state change that landed."""
 
-    process = TerminalWritePoisonProcess
+    process = TerminalWriteDiscardProcess
 
     def setUp(self):
         super().setUp()
@@ -219,50 +219,51 @@ class TerminalFailedStateWritePoisonedTests(_Base):
     def test_discarded_write_is_reported_not_logged_as_landed(self):
         FSE_SAW.clear()
         self.addCleanup(FSE_SAW.clear)
-        inv = Invoice.objects.create(status='draft')
+        invoice = Invoice.objects.create(status='draft')
 
         with self.assertLogs('django-logic.transition', level='INFO') as logs:
             with self.assertRaises(ValueError):
-                inv.terminal_write_poison_proc.sync_out()
+                invoice.terminal_write_discard_proc.sync_out()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        inv.refresh_from_db()
-        # The #178 invariant holds: the row still terminalises.
-        self.assertTrue(tm.is_completed)
-        # The proof the write was discarded: the instance stays parked.
-        self.assertEqual(inv.status, 'syncing')
-        # The failure hooks saw the restored state, not the phantom value
-        # the discarded savepoint left on the in-memory instance.
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(invoice.pk))
+        invoice.refresh_from_db()
+        # The row still completes, so nothing keeps retrying it.
+        self.assertTrue(transition_message.is_completed)
+        # The write was discarded, so the instance stays where it was.
+        self.assertEqual(invoice.status, 'syncing')
+        # The failure hooks read the stored state, not the value the
+        # rolled-back savepoint left on the in-memory instance.
         self.assertEqual(FSE_SAW, ['syncing'])
-        # …and both problems are visible where an operator looks.
-        self.assertIn('failed_state write', tm.failure_side_effect_error)
-        self.assertIn('boom', tm.last_error_message)
+        # An operator can see both problems on the row.
+        self.assertIn('failed_state write',
+                      transition_message.failure_side_effect_error)
+        self.assertIn('boom', transition_message.last_error_message)
         self.assertEqual(CALLBACKS_RAN, [])
         output = '\n'.join(logs.output)
         self.assertIn('could not write failed_state', output)
         self.assertNotIn('Set State failed', output)
 
 
-class SyncFailPoisonProcess(Process):
-    process_name = 'sync_fail_poison_proc'
+class SyncFailDiscardProcess(Process):
+    process_name = 'sync_fail_discard_proc'
     transitions = [
         Transition('go', sources=['draft'], target='done',
                    failed_state='failed', side_effects=[_fail_attempt]),
     ]
 
 
-class ActionWritePoisonProcess(Process):
-    process_name = 'action_write_poison_proc'
+class ActionWriteDiscardProcess(Process):
+    process_name = 'action_write_discard_proc'
     transitions = [
         Action('go', sources=['draft'], failed_state='failed',
                side_effects=[_fail_attempt]),
     ]
 
 
-class _SyncPoisonBase(_Base):
-    """The #192 shape: the sync failure paths' ``failed_state`` savepoints
-    must not log a false SET_STATE when a receiver silently discards them
-    (the sync analog of #189; same ``post_init`` receiver spot)."""
+class _SyncDiscardBase(_Base):
+    """The synchronous failure paths must not log a state change when a
+    receiver silently rolls back their ``failed_state`` savepoint."""
 
     def setUp(self):
         super().setUp()
@@ -273,48 +274,47 @@ class _SyncPoisonBase(_Base):
             _suppress_db_error_on_failed_materialization, sender=Invoice)
 
     def assert_discarded_write_reported(self, drive):
-        inv = Invoice.objects.create(status='draft')
+        invoice = Invoice.objects.create(status='draft')
 
         with self.assertLogs('django-logic.transition', level='INFO') as logs:
             with self.assertRaises(ValueError):
-                drive(inv)
+                drive(invoice)
 
-        # BEFORE the refresh: the in-memory attribute must not hold the
-        # discarded value — the failure hooks and the sync caller read it,
-        # and a phantom 'failed' here is a state the database never had.
-        self.assertEqual(inv.status, 'draft')
-        inv.refresh_from_db()
-        # The write really was discarded — the instance stays at its source.
-        self.assertEqual(inv.status, 'draft')
+        # Check before the refresh. The failure hooks and the caller read the
+        # in-memory attribute, so it must not hold a state the database never
+        # had.
+        self.assertEqual(invoice.status, 'draft')
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'draft')
         output = '\n'.join(logs.output)
         self.assertIn('could not write failed_state', output)
         self.assertNotIn('Set State failed', output)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC)
-class SyncTransitionWritePoisonedTests(_SyncPoisonBase):
-    process = SyncFailPoisonProcess
+class SyncTransitionWriteDiscardedTests(_SyncDiscardBase):
+    process = SyncFailDiscardProcess
 
     def test_discarded_write_is_reported_not_logged_as_landed(self):
         self.assert_discarded_write_reported(
-            lambda inv: inv.sync_fail_poison_proc.go())
+            lambda invoice: invoice.sync_fail_discard_proc.go())
 
 
 @override_settings(DJANGO_LOGIC=_SYNC)
-class SyncActionWritePoisonedTests(_SyncPoisonBase):
-    process = ActionWritePoisonProcess
+class SyncActionWriteDiscardedTests(_SyncDiscardBase):
+    process = ActionWriteDiscardProcess
 
     def test_discarded_write_is_reported_not_logged_as_landed(self):
         self.assert_discarded_write_reported(
-            lambda inv: inv.action_write_poison_proc.go())
+            lambda invoice: invoice.action_write_discard_proc.go())
 
 
 @override_settings(DJANGO_LOGIC=_SYNC)
 class SyncTransitionWriteCorrectlyNestedTests(_Base):
-    """Control: the nested-atomic idiom in the same receiver spot must
-    leave both sync writers untouched — no over-firing."""
+    """Control: with the nested atomic in the same receiver, both synchronous
+    writers must be left alone."""
 
-    process = SyncFailPoisonProcess
+    process = SyncFailDiscardProcess
 
     def setUp(self):
         super().setUp()
@@ -327,23 +327,23 @@ class SyncTransitionWriteCorrectlyNestedTests(_Base):
             sender=Invoice)
 
     def test_the_write_lands_and_set_state_is_logged(self):
-        inv = Invoice.objects.create(status='draft')
+        invoice = Invoice.objects.create(status='draft')
 
         with self.assertLogs('django-logic.transition', level='INFO') as logs:
             with self.assertRaises(ValueError):
-                inv.sync_fail_poison_proc.go()
+                invoice.sync_fail_discard_proc.go()
 
-        inv.refresh_from_db()
-        self.assertEqual(inv.status, 'failed')
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'failed')
         self.assertIn('Set State failed', '\n'.join(logs.output))
 
 
 @override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
 class TerminalWriteCorrectlyNestedTests(_Base):
-    """Control: the correct nested-atomic idiom in the same receiver spot
-    must leave the terminal write untouched — no over-firing."""
+    """Control: with the nested atomic in the same receiver, the terminal
+    write must be left alone."""
 
-    process = TerminalWritePoisonProcess
+    process = TerminalWriteDiscardProcess
 
     def setUp(self):
         super().setUp()
@@ -356,15 +356,16 @@ class TerminalWriteCorrectlyNestedTests(_Base):
             sender=Invoice)
 
     def test_the_write_lands_and_nothing_is_recorded(self):
-        inv = Invoice.objects.create(status='draft')
+        invoice = Invoice.objects.create(status='draft')
 
         with self.assertLogs('django-logic.transition', level='INFO') as logs:
             with self.assertRaises(ValueError):
-                inv.terminal_write_poison_proc.sync_out()
+                invoice.terminal_write_discard_proc.sync_out()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        inv.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(inv.status, 'failed')
-        self.assertEqual(tm.failure_side_effect_error, '')
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(invoice.pk))
+        invoice.refresh_from_db()
+        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(invoice.status, 'failed')
+        self.assertEqual(transition_message.failure_side_effect_error, '')
         self.assertIn('Set State failed', '\n'.join(logs.output))

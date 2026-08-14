@@ -5,7 +5,8 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install dependencies first (cached unless pyproject.toml changes)
+# Install the dependencies before the source copy, so this layer stays cached
+# until pyproject.toml changes.
 COPY pyproject.toml README.md ./
 RUN mkdir -p django_logic && touch django_logic/__init__.py && \
     pip install --no-cache-dir -e ".[dev]" && \

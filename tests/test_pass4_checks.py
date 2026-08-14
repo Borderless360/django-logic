@@ -213,4 +213,4 @@ class ActionNameShadowingTests(_BindingHelper, TestCase):
 
 # (InheritedColumnAmbiguityTests retired with collect_ambiguous_in_progress_states
 # in 0.12.0 — see tests/test_binding_validation.py::SharedMarkerIsLegalTests for
-# the replacement contract: marker sharing is legal, recovery is TM-scoped.)
+# the replacement contract: marker sharing is legal, recovery works from that row.)

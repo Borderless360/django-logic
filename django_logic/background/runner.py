@@ -15,13 +15,13 @@ Structure:
      caller exits silently),
    * restores the instance + transition,
    * verifies the instance is still in the state enqueue left behind
-     (the *state guard* — on mismatch the row completes as superseded
-     and side-effects are skipped, so a manual ops fix is never
-     overwritten),
-   * runs each side-effect in order **inside a savepoint** — a failed
-     attempt rolls back every side-effect write (and keeps the outer
-     transaction healthy even when the side-effect raised a genuine
-     ``DatabaseError``, so the error bookkeeping below always works),
+     (the *state guard*). On a mismatch the row completes as superseded
+     and the side-effects are skipped, so a manual fix is never
+     overwritten,
+   * runs each side-effect in order **inside a savepoint**, so a failed
+     attempt rolls back every side-effect write. The savepoint also
+     keeps the outer transaction healthy when a side-effect raises
+     ``DatabaseError``, so the error bookkeeping below still runs,
    * on success, writes ``target`` state (for ``BackgroundTransition``)
      and marks the TransitionMessage completed,
    * on failure, records the error and either leaves the row for retry
@@ -34,11 +34,11 @@ Structure:
 
 Side-effect exceptions re-raise out of ``run_background_transition``
 only in **sync mode**, so inline callers and tests can ``assertRaises``
-directly. In **Celery mode** they are swallowed after being fully
-recorded on the row (``errors_count`` + ``last_error``, or terminal
-``failed_state`` + completion) — the periodic starter owns retries, and
-re-raising out of an ``acks_late`` task would spam task-failure alerts
-and risk broker redelivery on top of the periodic retry.
+directly. In **Celery mode** the runner swallows them once it has
+recorded the outcome on the row (``errors_count`` + ``last_error``, or
+``failed_state`` + completion). The periodic starter owns retries, and
+re-raising out of an ``acks_late`` task would raise task-failure alerts
+and let the broker redeliver the message on top of the periodic retry.
 """
 from __future__ import annotations
 
@@ -79,14 +79,14 @@ def run_background_transition(transition_message_id: int) -> None:
     Designed to be call-compatible from both a Celery task and an
     inline sync dispatcher.
     """
-    # Committed BEFORE the attempt's atomic block, and deliberately not
-    # rolled back with it — see TransitionMessage.stamp_attempt_started.
-    # This is the marker the watchdog and the retry starter's recency guard
-    # read; written inside the atomic it was invisible to both.
+    # Committed BEFORE the attempt's atomic block, and deliberately not rolled
+    # back with it (see TransitionMessage.stamp_attempt_started). The watchdog
+    # and the retry starter both read this stamp, and inside the atomic block
+    # it was invisible to them.
     if not TransitionMessage.stamp_attempt_started(transition_message_id):
-        # Row held by a live attempt, or already completed / gone — the
-        # documented "exit silently" cases. The periodic starter
-        # re-dispatches, so nothing is lost by skipping.
+        # Another attempt holds the row, or the row is completed or gone. Both
+        # are exit-silently cases: the periodic starter sends the row to the
+        # queue again, so skipping loses nothing.
         transition_logger.info(
             f'TransitionMessage#{transition_message_id}: another attempt holds '
             f'the row (or it is already completed); skipping this dispatch.'
@@ -95,9 +95,9 @@ def run_background_transition(transition_message_id: int) -> None:
     try:
         outcome = _run_atomic(transition_message_id)
     except _StopRetry as exc:
-        # The atomic block rolled back, so we couldn't mark_as_completed
-        # from inside it. Do it here, in its own statement, to stop the
-        # retry loop from picking the row up forever.
+        # The atomic block rolled back, so mark_as_completed could not run
+        # inside it. Run it here, in its own statement, so the retry loop
+        # stops picking the row up.
         _mark_unrestorable_completed(exc.transition_message_id, exc.reason)
         return
     except _NothingToDo:
@@ -113,10 +113,10 @@ def run_background_transition(transition_message_id: int) -> None:
         )
 
     if outcome.exception is not None:
-        # Sync mode propagates so the inline caller / tests can react.
-        # Celery mode must NOT re-raise: the outcome is fully recorded on the
-        # row, the periodic starter owns retries, and re-raising out of an
-        # acks_late task risks broker redelivery + task-failure alert spam.
+        # Sync mode propagates so the inline caller and tests can react.
+        # Celery mode must NOT re-raise. The outcome is already recorded on the
+        # row and the periodic starter owns retries, so re-raising out of an
+        # acks_late task would only add alerts and a broker redelivery.
         from django_logic.background.dispatch import _current_mode
         if _current_mode() == bg_settings.EXECUTION_SYNC:
             raise outcome.exception
@@ -128,11 +128,10 @@ class _NothingToDo(Exception):
 
 
 class _StopRetry(Exception):
-    """Internal signal: the row refers to a model/transition that no
-    longer exists. The atomic block rolled back; the outer handler
-    marks the row completed in its own statement so retries stop.
-    ``reason`` carries the restore-failure description for the audit
-    trail on ``last_error_message``."""
+    """Internal signal: the row refers to a model or transition that no
+    longer exists. The atomic block rolled back, so the outer handler marks
+    the row completed in its own statement and retries stop. ``reason``
+    describes the restore failure for ``last_error_message``."""
 
     def __init__(self, transition_message_id: int, reason: str = ''):
         self.transition_message_id = transition_message_id
@@ -144,31 +143,31 @@ UNRESTORABLE_MARKER = '[unrestorable]'
 
 def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -> None:
     """Mark an unrestorable row completed so the periodic starter stops
-    re-dispatching it forever, recording WHY on ``last_error_message``
-    (mirroring the ``'[superseded]'`` convention — see
-    ``TransitionMessage.mark_as_superseded``) so an operator reading the
-    row later isn't left with a completed row and no explanation.
+    sending it to the queue, and record why on ``last_error_message``. The
+    note follows the ``'[superseded]'`` convention (see
+    ``TransitionMessage.mark_as_superseded``) so an operator who reads the
+    row later finds an explanation next to the completion.
 
-    Runs as a single UPDATE outside the (already-exited, rolled-back)
-    worker atomic block. Durability depends on the execution mode:
+    Runs as a single UPDATE outside the worker atomic block, which has
+    already exited and rolled back. What survives depends on the execution
+    mode:
 
-    * Celery mode — the worker runs as the top-level unit of work with no
-      surrounding transaction, so this UPDATE autocommits and is durable.
-      This is the path the original infinite-retry bug lived on.
-    * Sync mode — enqueue (which created the row) and execute run in the
-      same call stack and share the caller's transaction state. If the
-      caller wraps the whole call in ``atomic()`` and later rolls back,
-      this UPDATE rolls back too — but so does the enqueue INSERT, so there
-      is no surviving row to re-dispatch and the stop-retry guarantee still
-      holds. It is NOT a write that survives an *independent* parent
-      rollback on its own; correcting an earlier docstring that claimed so.
+    * Celery mode — the worker is the top-level unit of work with no
+      surrounding transaction, so this UPDATE commits on its own. This is
+      the path the original infinite-retry bug lived on.
+    * Sync mode — enqueue (which created the row) and execute share the
+      caller's transaction. If the caller wraps the whole call in
+      ``atomic()`` and later rolls back, this UPDATE rolls back with it, and
+      so does the enqueue INSERT. No row survives to be retried, so the
+      stop-retry promise still holds. This write does not survive a parent
+      rollback on its own.
     """
     now = timezone.now()
-    # db_safe_text, not a bare slice: ``reason`` embeds arbitrary exception
-    # text (a consumer module failing to import), and a NUL or lone surrogate
-    # in it made this very UPDATE the statement PostgreSQL rejected — the row
-    # then never completed and was re-dispatched forever, defeating the
-    # stop-retry guarantee this function exists to provide.
+    # db_safe_text, not a plain slice: ``reason`` carries arbitrary exception
+    # text, such as a consumer module that failed to import. A NUL byte or a
+    # lone surrogate in it made PostgreSQL reject this very UPDATE, so the row
+    # never completed and was retried forever — the exact outcome this
+    # function exists to prevent.
     note = db_safe_text(f'{UNRESTORABLE_MARKER} {reason or "restore failed"}')
     try:
         TransitionMessage.objects.filter(pk=transition_message_id, is_completed=False).update(
@@ -189,24 +188,22 @@ def abandon_timed_out_attempt(transition_message_id: int) -> bool:
     """Record a synthetic timeout error on a row whose current attempt
     has exceeded its declared ``timeout_seconds``.
 
-    Skips rows currently held by a worker (``select_for_update(nowait)``
-    → OperationalError) — we only act on abandoned attempts. When the
-    error count reaches ``MAX_ERRORS`` the row is finalized in the same
-    atomic block (failed_state + mark_as_completed) so the retry loop
-    stops.
+    Skips a row a worker holds (``select_for_update(nowait)`` raises
+    ``OperationalError``), because only abandoned attempts matter here. When
+    the error count reaches ``MAX_ERRORS`` the same atomic block finalizes the
+    row with ``failed_state`` and ``mark_as_completed``, so retries stop.
 
     .. note::
 
-        The watchdog cannot distinguish a genuinely abandoned attempt
-        (worker crashed / lost DB connection) from a live-but-slow one
-        that has kept its Python state but dropped its row lock. In the
-        latter case, the watchdog will acquire the row and re-dispatch
-        while the original worker is still executing side-effects. This
-        is safe per the reliability contract: side-effects MUST be
-        idempotent (§2.7), so re-running them from scratch is acceptable.
-        The original worker's eventual ``mark_as_completed`` / ``record_error``
-        will either succeed (completing the row) or fail harmlessly
-        against a completed row.
+        The watchdog cannot tell a genuinely abandoned attempt (the
+        worker crashed or lost its database connection) from a slow one
+        that still runs but has dropped its row lock. In the second case
+        the watchdog takes the row and sends it to the queue again while
+        the first worker is still running side-effects. Side-effects must
+        be idempotent, so running them again from scratch is safe. The
+        first worker's later ``mark_as_completed`` / ``record_error``
+        either completes the row or does nothing against a row that is
+        already completed.
 
     Returns True if the row was touched, False if skipped.
     """
@@ -227,15 +224,15 @@ def abandon_timed_out_attempt(transition_message_id: int) -> bool:
             )
             return False
 
-        # Re-verify staleness against the row we just LOCKED. The candidate
-        # scan runs unsynchronised, so a retry dispatch can stamp a fresh
-        # started_at (stamp_attempt_started) in the window between the scan
-        # and this lock. The one-charge guard below cannot catch that: the new
-        # stamp is NEWER than the previous attempt's error, so the guard sees
-        # "no error since this attempt started" and passes — and a healthy
-        # attempt milliseconds old was charged a timeout, then terminalised
-        # out from under its live worker at MAX_ERRORS. The scan's staleness
-        # verdict is only a hint; the locked read is the truth.
+        # Check the timeout again against the row we just LOCKED. The
+        # candidate scan is not synchronised, so a retry dispatch can stamp a
+        # fresh started_at between the scan and this lock. The one-charge
+        # guard below cannot catch that, because the new stamp is newer than
+        # the previous attempt's error: the guard sees no error since this
+        # attempt started and lets it through. A healthy attempt a few
+        # milliseconds old then took a timeout error, and at MAX_ERRORS the
+        # watchdog finalized it while its worker was still running. The scan
+        # only suggests a candidate; the locked read decides.
         if (
             transition_message.started_at is None
             or transition_message.timeout_seconds is None
@@ -250,13 +247,12 @@ def abandon_timed_out_attempt(transition_message_id: int) -> bool:
             )
             return False
 
-        # One charge per attempt. If an error has been recorded since
-        # this attempt started, the attempt already accounted for itself —
-        # it is not abandoned, and charging again would burn a retry the
-        # consumer never used. Left unguarded, the watchdog re-charged the
-        # same attempt on every tick (errors_count 1 -> 2 -> 3 -> 4 with no
-        # new attempts), so declaring timeout= made a transition strictly
-        # LESS reliable than omitting it.
+        # One timeout error per attempt. If the row already records an error
+        # from this attempt, the attempt is not abandoned and a second error
+        # would consume a retry the consumer never used. Without this guard
+        # the watchdog charged the same attempt on every run (errors_count
+        # 1 -> 2 -> 3 -> 4 with no new attempts), so declaring a timeout made
+        # a transition less reliable than leaving it out.
         if (
             transition_message.last_error_dt is not None
             and transition_message.started_at is not None
@@ -284,9 +280,8 @@ def abandon_timed_out_attempt(transition_message_id: int) -> bool:
 
         max_errors = bg_settings.max_errors()
         if transition_message.errors_count >= max_errors:
-            # Terminal. Finalize inside this same atomic — we already
-            # hold the row lock so we cannot recurse through
-            # finalize_stuck_attempt (deadlock).
+            # Terminal. Finalize inside this same atomic block: we already hold
+            # the row lock, so calling finalize_stuck_attempt would deadlock.
             hooks = _finalize_terminal_from_watchdog(transition_message, err, source='watchdog')
 
     # Run failure_callbacks after the atomic commits and the row lock is
@@ -300,10 +295,10 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
     """Force a stuck (``errors_count >= MAX_ERRORS``, uncompleted) row
     into a terminal state (``failed_state`` + ``mark_as_completed``).
 
-    Called by ``detect_stuck_transitions``. If the row is currently
-    locked by a worker we exit silently — the running
-    attempt will finalize on its own. Otherwise we restore the
-    transition, run the terminal-failure sequence, and mark completed.
+    Called by ``detect_stuck_transitions``. If a worker holds the row we exit
+    silently, because the running attempt finalizes it on its own. Otherwise we
+    restore the transition, run the terminal-failure steps, and mark the row
+    completed.
 
     Returns True if the row was finalized, False if skipped.
     """
@@ -331,9 +326,9 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
             f'errors={transition_message.errors_count} '
             f'last_error={transition_message.last_error_message!r}; forcing terminal state'
         )
-        # Rehydrate an exception from the stored last_error_message so the
-        # failure hooks see the same error shape the final in-task attempt
-        # would have seen.
+        # Build an exception from the stored last_error_message so the failure
+        # callbacks see the same kind of error the last attempt would have
+        # passed them.
         err = RuntimeError(
             f'[detect_stuck] {transition_message.last_error_message or "transition stuck"}'
         )
@@ -350,26 +345,25 @@ def _finalize_terminal_from_watchdog(
     exception: BaseException,
     source: str,
 ):
-    """Shared terminal-failure path for the watchdog / detect-stuck tasks.
+    """Shared terminal-failure path for the watchdog and detect-stuck tasks.
 
-    Must run inside the caller's atomic block, with the row already
-    locked. Mirrors ``_handle_failure``'s terminal branch: set
-    failed_state, mark completed.
+    Must run inside the caller's atomic block, with the row already locked. It
+    does what ``_handle_failure`` does on a terminal failure: write
+    failed_state, then mark the row completed.
 
-    If the transition can't be restored (model uninstalled / transition
-    renamed), we still mark_as_completed so the retry loop stops; the
-    failed_state write is skipped — there's nothing to call it on.
+    If the transition cannot be restored, because the model is uninstalled or
+    the transition was renamed, we still mark the row completed so retries
+    stop. The failed_state write is skipped: there is nothing to write it on.
 
     Returns the ``(transition, state, kwargs, exception)`` tuple the caller
-    needs to run ``failure_callbacks`` *after* its atomic block commits
-    (so callbacks don't run while holding the row lock, matching the
-    in-task hook timing), or ``None`` when the row was unrestorable
-    (nothing to run callbacks on).
+    needs to run ``failure_callbacks`` *after* its atomic block commits, so
+    the callbacks do not run while the row lock is held. Returns ``None`` when
+    the row could not be restored and there is nothing to call.
     """
     try:
-        # Savepointed: _restore queries (the instance, and restore_user hits
-        # the user table), so a genuine DatabaseError inside it would poison
-        # the caller's atomic and take the completion below down with it.
+        # In a savepoint: _restore reads the instance, and restore_user reads
+        # the user table. A DatabaseError there would break the caller's
+        # transaction and take the completion below down with it.
         with transaction.atomic():
             _, process, transition = _restore(transition_message)
     except _RestoreError:
@@ -378,18 +372,18 @@ def _finalize_terminal_from_watchdog(
         transition_message.mark_as_completed(measure_duration=False)
         return None
     except Exception as exc:
-        # Anything _restore did not classify as permanent (a consumer
-        # ``process`` property raising, a corrupt instance_id, a DB blip).
-        # Escaping here rolled back the whole finalization on every tick, so
-        # the safety net looped forever on this one row. Completing it stops
-        # the loop; the instance stays in its in_progress_state, which is an
-        # implicit source — an operator can run the transition again.
+        # Anything _restore did not treat as permanent: a consumer
+        # ``process`` property raising, a corrupt instance_id, a short
+        # database outage. Escaping here rolled the whole finalization back on
+        # every run, so the safety net looped forever on this one row.
+        # Completing it stops the loop, and the instance stays in its
+        # in_progress_state, which is an implicit source of the same
+        # transition.
         transition_logger.error(
             f'{source}: TransitionMessage#{transition_message.pk} could not be restored '
             f'({type(exc).__name__}: {exc}); completing it so the safety net '
-            f'stops retrying. The instance is left parked in its '
-            f'in_progress_state, which is an implicit source of the same '
-            f'transition — run it again to move it on.',
+            f'stops retrying. The instance stays in its in_progress_state; '
+            f'run the transition again from there to move it on.',
             exc_info=True,
         )
         transition_message.mark_as_completed(measure_duration=False)
@@ -399,11 +393,10 @@ def _finalize_terminal_from_watchdog(
         with transaction.atomic():
             kwargs = deserialize_kwargs(transition_message.kwargs)
     except Exception as exc:
-        # Terminal finalization must not be blocked by kwargs that no
-        # longer decode: proceed with empty kwargs so failed_state and
-        # completion still land and the retry loop stops. The savepoint
-        # keeps the outer transaction healthy if the failure was a
-        # genuine DatabaseError (restore_user queries the user table).
+        # kwargs that no longer decode must not block the finalization. Carry
+        # on with empty kwargs so failed_state and the completion still land
+        # and retries stop. The savepoint keeps the outer transaction healthy
+        # when the failure is a DatabaseError from reading the user table.
         transition_logger.error(
             f'{source}: TransitionMessage#{transition_message.pk} kwargs failed to decode '
             f'({type(exc).__name__}: {exc}); finalizing with empty kwargs.'
@@ -413,19 +406,18 @@ def _finalize_terminal_from_watchdog(
     kwargs.setdefault('context', {})
     state = process.state
 
-    # Same state guard as the worker attempt path, and with the same verdict:
-    # a manual ops fix wins WHOLE (CLAUDE.md contract 7), not just against the
-    # failed_state write. Guarding only the write meant a safety net still ran
-    # failure hooks against an instance an operator had already resolved —
-    # report-back callbacks for a child that was fixed by hand — and
-    # completed the row with no ``[superseded]`` marker to explain it.
+    # Same state guard as the worker attempt path, and with the same result: a
+    # manual fix wins over everything here, not only over the failed_state
+    # write. When the guard covered the write alone, this safety net still ran
+    # failure callbacks against an instance an operator had already fixed, and
+    # completed the row with no ``[superseded]`` note to explain it.
     matches, expected, current = _state_guard_matches(transition, state)
     if not matches:
         note = (
             f'[superseded] {source} state guard: expected {expected}, found '
-            f'{current!r} — the instance was moved by something else while '
-            f'this row was pending. failed_state and failure hooks skipped; '
-            f'the external state change wins. Prior error: '
+            f'{current!r}. Something else moved the instance while this row '
+            f'was pending, so failed_state and the failure callbacks are '
+            f'skipped and the other state change wins. Earlier error: '
             f'{transition_message.last_error_message or "(none recorded)"}'
         )
         transition_logger.error(
@@ -436,28 +428,28 @@ def _finalize_terminal_from_watchdog(
         return None
 
     if transition.failed_state:
-        # Savepointed and never allowed to escape: this runs inside the
-        # caller's atomic with the row locked, so a rejected write used to
-        # abort the whole finalization — leaving the row uncompleted with
-        # errors_count already at MAX_ERRORS, which detect_stuck retried on
-        # every tick forever. Completing the row is the thing that stops the
-        # loop. Opened on the instance's alias (set_state routes there) and
-        # through _run_in_savepoint, so a rollback releases any deferred
-        # unlock registered inside it instead of leaking it until TTL.
+        # The write runs in a savepoint and never escapes. It runs inside the
+        # caller's atomic block with the row locked, so a rejected write used
+        # to abort the whole finalization and leave the row uncompleted with
+        # errors_count at MAX_ERRORS, which detect_stuck then retried forever.
+        # Completing the row is what stops the loop. The savepoint opens on the
+        # instance's alias, where set_state writes, and through
+        # _run_in_savepoint, so a rollback releases any deferred unlock
+        # registered inside it instead of holding it until the TTL expires.
         previous = state.get_state()
         try:
-            # require_commit: the else-branch below logs the write as landed,
-            # so a silently discarded savepoint must surface as the failure
-            # it is and take the honest except-path instead.
+            # require_commit, because the else-branch below logs the write as
+            # done. A savepoint Django discards without an exception must
+            # surface as the failure it is and take the except-branch.
             _run_in_savepoint(
                 state.instance._state.db or DEFAULT_DB_ALIAS,
                 lambda: state.set_state(transition.failed_state),
                 require_commit=True,
             )
         except Exception as write_error:
-            # Restore the attribute a discarded savepoint left refreshed —
-            # the failure hooks below must not see a state the database
-            # never had.
+            # A discarded savepoint leaves the attribute holding a value the
+            # database never had, so put the previous one back before the
+            # failure callbacks read it.
             setattr(state.instance, state.field_name, previous)
             transition_logger.error(
                 f'{source}: could not write failed_state='
@@ -474,8 +466,8 @@ def _finalize_terminal_from_watchdog(
                 f'on {state.instance_key}'
             )
 
-    # A safety-net finalization is not a worker attempt; started_at points
-    # at the abandoned attempt, so don't let it inflate duration_ms.
+    # A safety-net finalization is not a worker attempt. started_at belongs to
+    # the abandoned attempt, so measuring from it would inflate duration_ms.
     transition_message.mark_as_completed(measure_duration=False)
     return (transition, state, kwargs, exception)
 
@@ -484,12 +476,10 @@ def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
     """Run a terminal row's ``failure_callbacks`` best-effort, *after* the
     finalizing atomic block has committed and released the row lock.
 
-    The single implementation for every terminal-failure path: a row that hit
-    MAX_ERRORS in-task, and one finalized by the watchdog / detect_stuck
-    tasks. (There used to be a second copy taking an ``_Outcome`` instead of
-    these four values, with a byte-identical body and log line.)
-    ``Callbacks.execute`` already swallows exceptions; the guard here is
-    belt-and-suspenders against a malformed hook list.
+    Every terminal-failure path runs through here: a row that reached
+    MAX_ERRORS during an attempt, and a row the watchdog or detect_stuck
+    finalized. ``Callbacks.execute`` already swallows exceptions; the guard
+    here also covers a malformed hook list.
     """
     try:
         transition.failure_callbacks.execute(
@@ -518,10 +508,10 @@ def _run_atomic(transition_message_id: int) -> _Outcome:
     mark_as_* / record_error calls out is what broke the unrestorable-row
     path (see _StopRetry). Don't do it.
 
-    started_at is the deliberate exception: it is a MARKER, not
-    accounting, and it has to be visible to other connections while the
-    attempt runs and to survive the attempt rolling back — so it is
-    stamped and committed by the caller before this block opens.
+    started_at is the one deliberate exception. It marks the attempt
+    instead of accounting for it: other connections must see it while the
+    attempt runs, and it must survive the attempt rolling back. The
+    caller therefore stamps and commits it before this block opens.
     """
     with transaction.atomic():
         transition_message = _lock_uncompleted_row(transition_message_id)
@@ -552,7 +542,7 @@ def _run_atomic(transition_message_id: int) -> _Outcome:
         )
         try:
             transition_logger.info(
-                f'{kwargs.get("tr_id")} Phase2 Start '
+                f'{kwargs.get("tr_id")} Execute Start '
                 f'{transition.action_name} {state.instance_key} '
                 f'queue={transition_message.queue_name}'
             )
@@ -601,13 +591,12 @@ def _lock_uncompleted_row(transition_message_id: int) -> TransitionMessage:
 def _decode_kwargs(transition_message) -> 'tuple[dict, BaseException | None]':
     """Decode the kwargs saved at enqueue. Returns ``(kwargs, error)``.
 
-    A decode failure must be accounted like any attempt failure — raised
-    here it would escape before record_error with errors_count still 0,
-    and retry_stale_transitions would re-dispatch the row forever. So the
-    error is returned, and the caller routes it through _handle_failure
-    once the row is restored. The savepoint keeps the outer transaction
-    healthy if the failure was a genuine DatabaseError (restore_user
-    queries the user table), so the error bookkeeping always works.
+    A decode failure counts like any other attempt failure. Raised here it
+    would escape before record_error, leaving errors_count at 0, and
+    retry_stale_transitions would send the row to the queue forever. So we
+    return the error and the caller passes it to _handle_failure once the
+    row is restored. The savepoint keeps the outer transaction healthy when
+    the failure is a DatabaseError, so the error bookkeeping still runs.
     """
     try:
         with transaction.atomic():
@@ -632,9 +621,9 @@ def _restore_for_attempt(transition_message):
     renamed), where retrying can never help.
     """
     try:
-        # Savepointed for the same reason as the decode: _restore queries
-        # the instance and (for user kwargs) the user table, so a genuine
-        # DatabaseError must poison only the savepoint or the error
+        # In a savepoint for the same reason as the decode: _restore reads
+        # the instance and (for user kwargs) the user table, so a
+        # DatabaseError must break only the savepoint. Otherwise the error
         # bookkeeping cannot run.
         with transaction.atomic():
             return _restore(transition_message), None
@@ -649,13 +638,13 @@ def _restore_for_attempt(transition_message):
         # fresh statement so the stop-retry flag actually persists.
         raise _StopRetry(transition_message.pk, str(exc)) from exc
     except Exception as exc:
-        # _restore only classifies the PERMANENT failures as _RestoreError.
-        # Anything else — a consumer ``process`` property raising, a
-        # corrupt instance_id failing pk coercion, a transient database
-        # error — used to escape the worker with errors_count still 0, so
-        # the starter re-dispatched the row forever. Account it like any
-        # other attempt failure instead: transient causes get their
-        # retries, permanent ones burn MAX_ERRORS and stop.
+        # _restore raises _RestoreError only for the permanent failures.
+        # Everything else — a consumer ``process`` property raising, a
+        # corrupt instance_id, a temporary database error — used to escape
+        # the worker with errors_count still 0, so the starter sent the row
+        # to the queue forever. Count it like any other attempt failure:
+        # temporary causes get their retries, permanent ones reach
+        # MAX_ERRORS and stop.
         return None, exc
 
 
@@ -664,11 +653,10 @@ def _superseded_outcome(
 ) -> '_Outcome | None':
     """The state guard: stop if something else moved the instance.
 
-    The worker restores by name and deliberately bypasses the
-    source-state gate, so without this check it would overwrite any state
-    change made while the row was pending — including a manual ops fix.
-    With retries spanning RETRY_MINUTES x MAX_ERRORS that collision is a
-    realistic production event.
+    The worker restores the transition by name and deliberately skips the
+    source-state check. Without this guard it would overwrite any state
+    change made while the row was pending, including a manual fix. Retries
+    span RETRY_MINUTES x MAX_ERRORS, so that clash happens in production.
 
     Returns the superseded ``_Outcome``, or ``None`` when the state still
     matches and the attempt should proceed.
@@ -691,32 +679,30 @@ def _superseded_outcome(
 
 
 def _execute_attempt(instance, transition, state, kwargs) -> None:
-    """Run the side-effects, then the target write, in ONE savepoint —
-    all-or-nothing per attempt. Raises whatever the attempt raised.
+    """Run the side-effects, then the target write, in ONE savepoint, so an
+    attempt writes everything or nothing. Raises whatever the attempt raised.
 
-    The savepoint is load-bearing twice over. A failed attempt rolls back
-    every side-effect write, and a genuine DatabaseError raised by a
-    side-effect poisons only the savepoint — the outer transaction stays
-    healthy so record_error / mark_as_completed always work. Without it,
-    a DB error here made record_error itself raise
-    TransactionManagementError: the error was never recorded, and the row
-    was re-dispatched forever while blocking every future background
+    The savepoint does two jobs. A failed attempt rolls back every
+    side-effect write, and a DatabaseError from a side-effect breaks only the
+    savepoint, so record_error and mark_as_completed still work in the outer
+    transaction. Without it, a database error here made record_error itself
+    raise TransactionManagementError: the error was never recorded, the row
+    was sent to the queue forever, and it blocked every later background
     transition on the instance.
 
-    Through _run_in_savepoint, and on the INSTANCE's alias: side-effects
-    are consumer code that may drive synchronous transitions on OTHER
-    instances, whose DEFER_UNLOCK unlocks ride transaction.on_commit. A
-    rollback here discards those hooks (Django drops them with the
-    savepoint) while the outer transaction still commits the bookkeeping
-    — leaking a lock on an instance whose state write was rolled back,
-    until its TTL.
+    It runs through _run_in_savepoint and on the INSTANCE's alias.
+    Side-effects are consumer code that may drive synchronous transitions on
+    other instances, and their DEFER_UNLOCK unlocks run on
+    transaction.on_commit. A rollback here drops those hooks with the
+    savepoint while the outer transaction still commits the bookkeeping, so
+    the other instance keeps its lock until the TTL expires.
 
-    require_commit, because the caller records the work as done: a
-    side-effect that raises a database error and suppresses it
-    (`try: obj.save() except IntegrityError: pass` without a nested
-    atomic) makes Django discard the savepoint with nothing propagating.
-    The attempt then "returns successfully" having committed none of its
-    writes. Accounted as a failure instead, which is what it is.
+    require_commit, because the caller records the work as done. A
+    side-effect that raises a database error and swallows it
+    (`try: obj.save() except IntegrityError: pass` with no nested atomic)
+    makes Django discard the savepoint and nothing propagates. The attempt
+    then returns as a success but committed none of its writes, so we count
+    it as the failure it is.
     """
     def _attempt():
         for command in transition.side_effects.commands:
@@ -726,13 +712,13 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
                 f'{getattr(command, "__name__", repr(command))}'
             )
             command(instance, **kwargs)
-        # The target write belongs INSIDE the attempt savepoint. It is
-        # part of the attempt, so a write the database rejects — CHECK
-        # constraint, pre_save receiver, save() override, column length —
-        # must roll the attempt back and be accounted like any other
-        # failure. Outside it, the exception escaped the outer atomic and
-        # took record_error with it: errors_count stayed 0, so the row
-        # was re-dispatched forever and no safety net could terminate it.
+        # The target write belongs INSIDE the attempt savepoint, because it
+        # is part of the attempt. A write the database rejects (a CHECK
+        # constraint, a pre_save receiver, a save() override, a column
+        # length) must roll the attempt back and count like any other
+        # failure. Outside the savepoint the exception escaped the outer
+        # atomic block and took record_error with it: errors_count stayed 0,
+        # so the row was retried forever and no safety net could stop it.
         if not isinstance(transition, BackgroundAction):
             state.set_state(transition.target)
             transition_logger.info(
@@ -750,16 +736,15 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
 def _handle_restore_failure(
     transition_message: TransitionMessage, error: BaseException,
 ) -> _Outcome:
-    """Account a restore failure that is not one of the permanent classes.
+    """Count a restore failure that is not one of the permanent kinds.
 
-    There is no transition object to fail through, so this is deliberately
-    thinner than ``_handle_failure``: record the error, retry while retries
-    remain, and at ``MAX_ERRORS`` complete the row loudly so the retry loop
-    stops. No ``failed_state`` is written (nothing restored to write it on),
-    so the instance is left parked in its ``in_progress_state`` — which is an
-    implicit source of the same transition, so it can be run again: a visible
-    parked state rather than an infinite loop, with the reason on the completed
-    row.
+    There is no transition object to fail through, so this is thinner than
+    ``_handle_failure``. It records the error, retries while retries remain,
+    and at ``MAX_ERRORS`` completes the row so the retry loop stops. Nothing
+    was restored, so no ``failed_state`` is written and the instance stays in
+    its ``in_progress_state``. That state is an implicit source of the same
+    transition, so an operator can run it again, and the completed row carries
+    the reason.
     """
     transition_message.record_error(error)
     transition_logger.error(
@@ -773,8 +758,8 @@ def _handle_restore_failure(
     transition_logger.error(
         f'TransitionMessage#{transition_message.pk} restore failed {transition_message.errors_count} times; '
         f'completing the row so it stops retrying. No failed_state could be '
-        f'written — the instance is left parked in its in_progress_state, '
-        f'ready to run again via the implicit source.'
+        f'written, so the instance stays in its in_progress_state; run the '
+        f'transition again from there to move it on.'
     )
     transition_message.mark_as_completed(measure_duration=False)
     return _Outcome(terminal=True, succeeded=False, exception=error)
@@ -830,40 +815,39 @@ def _handle_failure(
 
     # Terminal failure: write failed_state (if any) and mark completed.
     #
-    # Savepointed, and never allowed to escape. This write comes
-    # AFTER record_error, so letting it propagate rolled that error back and
-    # pinned errors_count one below MAX_ERRORS forever — the row could never
-    # terminalise and retried indefinitely. Completing the row is what stops
-    # the retry loop, so a rejected failed_state must not prevent it: log it,
-    # record it where an operator will see it, and carry on to
-    # mark_as_completed. The instance is then left in its in_progress_state
-    # and can be run again via the implicit source — a visible parked
-    # state rather than an infinite loop.
+    # The write runs in a savepoint and never escapes. It comes AFTER
+    # record_error, so letting it propagate rolled that error back and held
+    # errors_count one below MAX_ERRORS forever: the row never reached a
+    # terminal state and retried without end. Completing the row stops the
+    # retry loop, so a rejected failed_state must not block it. Log it, record
+    # it where an operator will see it, and go on to mark_as_completed. The
+    # instance then stays in its in_progress_state, which is an implicit
+    # source of the same transition, so it can be run again.
     if transition.failed_state:
         previous = state.get_state()
         try:
-            # On the instance's alias, and via _run_in_savepoint: see the
+            # On the instance's alias, and through _run_in_savepoint: see the
             # attempt savepoint in _run_atomic for why both matter.
-            # require_commit: the else-branch below logs SET_STATE, so a
-            # silently discarded savepoint must surface as the failure it is
-            # and take the honest except-path instead.
+            # require_commit, because the else-branch below logs SET_STATE. A
+            # savepoint Django discards without an exception must surface as
+            # the failure it is and take the except-branch.
             _run_in_savepoint(
                 state.instance._state.db or DEFAULT_DB_ALIAS,
                 lambda: state.set_state(transition.failed_state),
                 require_commit=True,
             )
         except Exception as write_error:
-            # Restore the attribute a discarded savepoint left refreshed —
-            # the failure hooks below must not see a state the database
-            # never had.
+            # A discarded savepoint leaves the attribute holding a value the
+            # database never had, so put the previous one back before the
+            # failure callbacks read it.
             setattr(state.instance, state.field_name, previous)
             transition_logger.error(
                 f'{kwargs.get("tr_id")} could not write failed_state '
                 f'{transition.failed_state!r} on {state.instance_key}: '
                 f'{type(write_error).__name__}: {write_error}. Completing the '
-                f'row anyway so it stops retrying; the instance stays parked '
-                f'in {transition.in_progress_state!r}, ready to run again '
-                f'via the implicit source.',
+                f'row anyway so it stops retrying. The instance stays in '
+                f'{transition.in_progress_state!r}; run the transition again '
+                f'from there to move it on.',
                 exc_info=True,
             )
             transition_message.record_failure_side_effect_error(
@@ -949,13 +933,12 @@ def _restore(transition_message: TransitionMessage):
         ) from exc
 
     try:
-        # _base_manager, not objects: a filtered default manager (e.g. one
-        # that hides archived/soft-deleted rows) would raise DoesNotExist
-        # for an instance that still exists, and the restore-error path
-        # would mark the message completed — stranding the instance in
-        # in_progress_state with no failed_state and no retries. Framework
-        # code reloading by pk must be immune to default-manager filtering
-        # (Django's own convention for related-object loading).
+        # _base_manager, not objects. A filtered default manager, such as one
+        # that hides archived rows, raises DoesNotExist for an instance that
+        # still exists. The restore-error path would then complete the row and
+        # strand the instance in in_progress_state with no failed_state and no
+        # retries. Framework code that reloads by pk must ignore default
+        # manager filters, as Django does for related objects.
         instance = model._base_manager.get(pk=transition_message.instance_id)
     except model.DoesNotExist as exc:
         raise _RestoreError(
@@ -975,22 +958,19 @@ def _restore(transition_message: TransitionMessage):
         try:
             process = _load_process_from_path(instance, recorded_path, transition_message)
         except Exception as exc:
-            # Fail closed, through the accounted stop-retry path. A raw
-            # ImportError here would escape _run_atomic (which only
-            # catches _RestoreError), roll the attempt back with
-            # errors_count still untouched, and retry_stale_transitions
-            # would re-dispatch the row forever.
+            # Fail closed through the stop-retry path. A bare ImportError
+            # would escape _run_atomic, which catches only _RestoreError, and
+            # roll the attempt back with errors_count unchanged, so
+            # retry_stale_transitions would retry the row forever.
             raise _RestoreError(
                 f'recorded process_class {recorded_path!r} could not be '
                 f'loaded: {exc}'
             ) from exc
     else:
-        # Verify the attribute resolved the same class enqueue recorded.
-        # Every Process defaults to process_name='process', so a name
-        # collision (directly-instantiated process vs the bound one, or a
-        # rebind between enqueue and execute) silently restores the WRONG
-        # class — the worker would run side-effects the caller never asked
-        # for. Prefer the recorded class on mismatch.
+        # Check that the attribute resolved to the class enqueue recorded.
+        # Every Process defaults to process_name='process', so two processes
+        # can share the name and the worker would restore the wrong class and
+        # run side-effects the caller never asked for. The recorded class wins.
         if recorded_path:
             resolved_path = f'{type(process).__module__}.{type(process).__name__}'
             if resolved_path != recorded_path:
@@ -1005,11 +985,11 @@ def _restore(transition_message: TransitionMessage):
                         instance, recorded_path, transition_message
                     )
                 except Exception as exc:
-                    # Fail closed: running the attribute-resolved process
-                    # instead would execute side-effects enqueue never
-                    # asked for. The row completes as unrestorable (no
-                    # side-effects, no state write): complete pending
-                    # rows before renaming a Process class.
+                    # Fail closed. Running the process the attribute resolved
+                    # to would execute side-effects enqueue never asked for.
+                    # The row completes as unrestorable, with no side-effects
+                    # and no state write. Let pending rows complete before you
+                    # rename a Process class.
                     raise _RestoreError(
                         f'recorded process_class {recorded_path!r} could '
                         f'not be loaded: {exc}'
@@ -1043,50 +1023,45 @@ def _find_transition(process, transition_message: TransitionMessage):
     """Resolve the exact background transition a ``TransitionMessage`` refers to.
 
     Enqueue can record a background transition declared on a *nested*
-    process (the sync lookup recurses into ``nested_processes``), but the
-    message records only the *bound* ``process_name``, so the worker
-    restores the parent and must descend the ``nested_processes`` tree —
-    each sub-process constructed with the parent's shared ``state``,
-    exactly the way ``Process.get_available_transitions`` does. Without
-    this descent the nested transition is never found: the message is
+    process, because the synchronous lookup recurses into
+    ``nested_processes``. The row records only the *bound* ``process_name``,
+    so the worker restores the parent and walks down the
+    ``nested_processes`` tree. It builds each sub-process with the parent's
+    shared ``state``, the way ``Process.get_available_transitions`` does.
+    Without that walk the nested transition is never found: the row is
     marked completed, the side-effects never run, and the instance is
     stranded in ``in_progress_state``.
 
-    Enqueue also records the (possibly nested) process class that
-    declared the transition on ``transition_message.owning_process_class``.
-    When present it pins the search to that exact class, so an
-    ``action_name`` shared across nested processes that use conditions
-    to choose resolves to the one enqueue actually chose (see
-    ``_validate_unique_background_action_names``). It is recorded for
-    *every* background transition started through the Process
-    entrypoint — for a transition on the bound process itself it equals
-    the bound class. It is blank only for rows enqueued before this
-    column existed (pre-0.4.x) or, rarely, outside the Process
-    entrypoint.
+    Enqueue also records the process class that declared the transition, on
+    ``transition_message.owning_process_class``. When it is set, the search
+    is limited to that class. An ``action_name`` shared by nested processes
+    that pick between themselves with conditions then resolves to the one
+    enqueue chose. Every background transition started through the Process
+    entrypoint records it; for a transition on the bound process it equals
+    the bound class. It is blank only for rows enqueued before the column
+    existed, or for the rare row created outside the Process entrypoint.
 
-    When the owner is blank or no longer in the tree, we fall back to matching by
-    ``action_name`` — but ONLY when the name identifies exactly one background
-    transition across the whole tree. The relaxed validator now allows the same
-    background ``action_name`` on distinct nested processes, so a fallback for an
-    *ambiguous* name would be a coin flip between condition-disambiguated
-    siblings: it could run the WRONG integration's side-effects (a
-    ``BackgroundAction``, whose state guard cannot tell siblings apart) or strand
-    the instance (a ``BackgroundTransition``, where the distinct
-    ``in_progress_state`` makes the state guard supersede the row). So when an
-    owner-less row's name is ambiguous we refuse to guess and raise
-    ``_RestoreError`` — the row is finalized (retries stop) without running any
-    side-effects, which is the safe, contained outcome. (This only arises for a
-    row in flight across the exact deploy that turns a unique background
-    ``action_name`` into a shared nested one; drain such rows before that
-    refactor — see the upgrade note in the changelog.)
+    When the owner is blank or no longer in the tree, we fall back to
+    matching by ``action_name``, and only when the name matches exactly one
+    background transition in the whole tree. The validator allows the same
+    background ``action_name`` on separate nested processes, so a fallback
+    for an ambiguous name would pick between siblings at random. It could
+    run the wrong integration's side-effects (a ``BackgroundAction``, whose
+    state guard cannot tell the siblings apart) or strand the instance (a
+    ``BackgroundTransition``, where the different ``in_progress_state``
+    makes the state guard supersede the row). So for an ambiguous name with
+    no owner we refuse to guess and raise ``_RestoreError``: the row is
+    finalized, retries stop, and no side-effects run. This only happens to a
+    row that is pending across the deploy which turns a unique background
+    ``action_name`` into a shared nested one. Let such rows complete before
+    that refactor.
 
-    Only ``is_background`` transitions are candidates: the worker never
-    restores a synchronous transition (a ``TransitionMessage`` is created
-    solely by enqueue). A state-aware lookup would not work here either
-    — the worker runs while the instance sits in ``in_progress_state``
-    (not in the transition's declared ``sources``), and the sync path's
-    lookup is gated on state membership; we bypass that gate
-    deliberately.
+    Only ``is_background`` transitions are candidates. The worker never
+    restores a synchronous transition, because only enqueue creates a
+    ``TransitionMessage``. A state-aware lookup would not work here either:
+    the worker runs while the instance sits in ``in_progress_state``, which
+    is not in the transition's declared ``sources``, and the synchronous
+    lookup requires state membership. We skip that check on purpose.
     """
     owning_path = (transition_message.owning_process_class or '').strip()
     if owning_path:
@@ -1095,10 +1070,10 @@ def _find_transition(process, transition_message: TransitionMessage):
         )
         if found is not None:
             return found
-        # The owner was recorded but is not in the tree — e.g. the nested
-        # process class was renamed/removed between enqueue and execute.
-        # Fall through to the name-based fallback (which refuses to guess
-        # if the name is ambiguous), logging so the mismatch is visible.
+        # The row records an owner that is not in the tree: the nested process
+        # class was renamed or removed between enqueue and execute. Fall
+        # through to the name-based fallback, which refuses to guess when the
+        # name is ambiguous, and log so the mismatch is visible.
         transition_logger.warning(
             f'TransitionMessage#{transition_message.pk}: recorded process class '
             f'{owning_path!r} for background transition '
@@ -1108,22 +1083,21 @@ def _find_transition(process, transition_message: TransitionMessage):
 
     matches = _background_transitions_named(process, transition_message.transition_name)
     if len(matches) == 1:
-        # Unambiguous — the legacy/pre-discriminator common case, safe to use.
+        # One match, so the name is enough: the common case for older rows.
         return matches[0]
     if len(matches) > 1:
-        # Ambiguous AND no resolvable owner: do NOT guess. Raising _RestoreError
-        # finalizes the row (stops retries) without running any side-effects —
-        # far safer than running the wrong condition-disambiguated sibling.
+        # The name is ambiguous and no owner resolved, so do NOT guess.
+        # _RestoreError finalizes the row and stops retries without running
+        # any side-effects, which beats running the wrong sibling.
         raise _RestoreError(
             f'background transition {transition_message.transition_name!r} matches '
             f'{len(matches)} transitions across the process tree and the '
             f'message has no resolvable owning_process_class '
             f'(recorded={transition_message.owning_process_class!r}); refusing to guess which '
-            f'condition-disambiguated sibling to run. This is an uncompleted '
-            f'row enqueued before the owner column existed, or whose nested '
-            f'process class was renamed or removed while the row was pending. '
-            f'Complete pending rows before refactoring a background '
-            f'action_name into shared nested processes.'
+            f'one to run. The row was enqueued before the owner column '
+            f'existed, or its nested process class was renamed or removed '
+            f'while the row was pending. Let pending rows complete before you '
+            f'move a background action_name onto shared nested processes.'
         )
     return None  # zero matches -> generic not-found _RestoreError in _restore
 
@@ -1132,10 +1106,9 @@ def _find_background_transition_in_owner(process, action_name, owning_path):
     """Return the background transition named ``action_name`` declared on the
     process in the tree whose dotted class path equals ``owning_path``.
 
-    Walks through ``_iter_process_tree`` for its cycle guard: a nested topology
-    that revisits a class (A nests B nests A — legal, and blessed by the sync
-    walk) recursed until ``RecursionError`` here, on the very
-    fall-through path the caller is written to handle gracefully.
+    Walks through ``_iter_process_tree`` for its cycle guard. A nested layout
+    that reaches a class twice (A nests B nests A) is legal and the
+    synchronous walk allows it, but here it recursed until ``RecursionError``.
     """
     for process_cls in _iter_process_tree(type(process)):
         proc_path = f'{process_cls.__module__}.{process_cls.__name__}'
@@ -1156,11 +1129,11 @@ def _background_transitions_named(process, action_name):
     """All distinct ``is_background`` transitions named ``action_name`` across the
     process and its nested tree.
 
-    De-duplicated by transition identity so a Process class legitimately reached
-    via two nested paths (its class-level ``transitions`` are shared objects)
-    counts once — otherwise the ambiguity check in ``_find_transition`` would
-    false-positive on a reused sub-process. ``_iter_process_tree`` supplies the
-    class-level cycle guard (see ``_find_background_transition_in_owner``).
+    Counts each transition object once. A Process class can be reached through
+    two nested paths, and its class-level ``transitions`` are shared objects,
+    so without that the ambiguity check in ``_find_transition`` would reject a
+    reused sub-process. ``_iter_process_tree`` supplies the cycle guard (see
+    ``_find_background_transition_in_owner``).
     """
     seen, out = set(), []
     for process_cls in _iter_process_tree(type(process)):

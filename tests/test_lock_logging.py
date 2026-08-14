@@ -1,12 +1,12 @@
-"""#188 — a failed lock acquisition must be visible in the logs.
+"""A failed lock acquisition must be visible in the logs.
 
-The incident that produced the issue: seven instances frozen by a leaked lock
-were re-driven every 20 minutes for ten days. Each attempt logged one ``Start``
-line and nothing else — `change_state` raised before logging anything — so the
-log read as "the transition starts and the worker drops it", and that wrong
-conclusion made it into a bug report. One line at the raise site, plus the
-``instance_key`` on the lifecycle lines, is what makes a frozen instance
-findable with a per-instance log filter.
+A leaked lock once froze seven instances. The retry sent each of them to the
+queue again every 20 minutes for ten days. Every attempt logged one ``Start``
+line and nothing more, because ``change_state`` raised before it logged
+anything. The log therefore read as "the transition starts and the worker drops
+it", which is the wrong conclusion, and it reached a bug report. One line at the
+raise site and the ``instance_key`` on the lifecycle lines make a frozen
+instance findable with a per-instance log filter.
 """
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -175,7 +175,7 @@ class LifecycleLinesCarryInstanceKeyTests(TestCase):
         inv.refresh_from_db()
         self.assertEqual(inv.status, 'll_act_failed')
 
-    def test_background_phase1_lock_and_unlock_name_the_instance(self):
+    def test_enqueue_lock_and_unlock_name_the_instance(self):
         inv = Invoice.objects.create(status='draft')
         key = inv.lock_logging_proc.state.instance_key
 

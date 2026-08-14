@@ -1,23 +1,19 @@
-"""R1/R2 regressions — savepoint isolation of user code in phase 2.
+"""The worker runs each attempt's database writes inside a savepoint.
 
-R1: a side-effect that raises a *genuine database error* through the ORM
-used to poison the phase-2 atomic block: ``record_error`` itself then
-raised ``TransactionManagementError``, the error was never recorded,
-``errors_count`` never reached ``MAX_ERRORS``, the periodic starter
-re-dispatched the row forever, and the partial-unique constraint blocked
-every future background transition on the instance. With the savepoint,
-the DB error is recorded like any other failure and the row reaches its
-terminal state.
+A side-effect that raised a real database error used to abort the whole
+transaction the worker was running in. Recording the error then failed too, so
+``errors_count`` never reached ``MAX_ERRORS``, the periodic starter sent the row
+to the queue forever, and the partial unique index blocked every later
+background transition on the instance. With the savepoint, the database error is
+recorded like any other failure and the row reaches its terminal state.
 
-R2: side-effect writes from a *failed* attempt used to commit together
-with the error bookkeeping (verified pre-fix: one surviving row), forcing
-users into perfect idempotency even for plain DB writes. With the
-savepoint, a failed attempt rolls back all of its side-effect writes —
-all-or-nothing per attempt.
+Side-effect writes from a failed attempt used to commit together with the error
+bookkeeping, which forced users to make even plain database writes idempotent.
+With the savepoint a failed attempt rolls back every write it made.
 
-The same isolation applies on the terminal
-path (their swallowed exception used to leave the connection aborted, so
-``record_failure_side_effect_error`` / ``mark_as_completed`` blew up).
+The terminal path has the same isolation. A swallowed exception there used to
+leave the connection unusable, so recording the failure and marking the row
+completed both failed.
 """
 from django.db import IntegrityError
 from django.test import TransactionTestCase, override_settings
@@ -32,17 +28,17 @@ from tests import dl_settings
 
 _SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=2, TRANSITION_MESSAGE_RETRY_MINUTES=0)
 
-# Module-level call log, reset per test. Lets tests assert which hooks ran
-# and lets a side-effect fail only on its first invocation.
+# Call log, cleared for each test. It lets a test assert which hooks ran, and
+# lets a side-effect fail only on its first call.
 CALLS: list = []
 
 
 def se_integrity_error(instance, **kwargs):
-    """Raise a real IntegrityError through the ORM (R1).
+    """Raise a real IntegrityError through the ORM.
 
-    Two identical uncompleted rows for an unrelated fake instance violate
-    the partial unique constraint; the second ``create`` raises. The first
-    row must roll back with the attempt's savepoint.
+    Two identical uncompleted rows for an unrelated instance id break the
+    partial unique index, so the second ``create`` raises. The first row must
+    roll back with the attempt's savepoint.
     """
     CALLS.append('se_integrity_error')
     for _ in range(2):
@@ -68,19 +64,19 @@ def se_boom(instance, **kwargs):
 
 
 def se_boom_once(instance, **kwargs):
-    """Fail only on the first invocation — the retry then succeeds."""
+    """Fail on the first call only, so the retry succeeds."""
     CALLS.append('se_boom_once')
     if CALLS.count('se_boom_once') == 1:
         raise ValueError('first attempt fails')
 
 
 class SavepointProcess(Process):
-    """Not bound to Widget — phase 2 restores it via the recorded
-    ``process_class`` (the AttributeError fallback path)."""
+    """Not bound to Widget. The worker restores it from the ``process_class``
+    recorded on the row."""
 
     process_name = 'sp_proc'
     transitions = [
-        # R1: genuine DB error in a side-effect.
+        # A real database error inside a side-effect.
         BackgroundTransition(
             action_name='break_db',
             sources=['draft'],
@@ -89,7 +85,7 @@ class SavepointProcess(Process):
             failed_state='broken',
             side_effects=[se_integrity_error],
         ),
-        # R2: partial write + plain failure.
+        # A write, then a plain failure.
         BackgroundTransition(
             action_name='partial_write',
             sources=['draft'],
@@ -98,7 +94,7 @@ class SavepointProcess(Process):
             failed_state='pw_failed',
             side_effects=[se_write_log, se_boom],
         ),
-        # R2 success path: fails once, then succeeds on retry.
+        # Fails once, then succeeds on retry.
         BackgroundTransition(
             action_name='flaky_write',
             sources=['draft'],
@@ -116,7 +112,7 @@ def _drive(widget, action, **kwargs):
         return getattr(process, action)(**kwargs)
 
 
-def _tm(widget):
+def _latest_message(widget):
     return (
         TransitionMessage.objects
         .filter(instance_id=str(widget.pk), process_name='sp_proc')
@@ -127,23 +123,23 @@ def _tm(widget):
 
 @override_settings(DJANGO_LOGIC=_SETTINGS)
 class DatabaseErrorInSideEffectTests(TransactionTestCase):
-    """R1 — the defect that used to retry forever and brick the instance."""
+    """A database error inside a side-effect used to retry forever."""
 
     def setUp(self):
         CALLS.clear()
         self.widget = Widget.objects.create()
 
     def test_integrity_error_is_recorded_not_transaction_management_error(self):
-        # Pre-fix this raised TransactionManagementError (the poisoned outer
-        # transaction), errors_count stayed 0 and the row never completed.
+        # Before the fix this raised TransactionManagementError, errors_count
+        # stayed at 0, and the row never completed.
         with self.assertRaises(IntegrityError):
             _drive(self.widget, 'break_db')
 
-        tm = _tm(self.widget)
-        self.assertIsNotNone(tm)
-        self.assertEqual(tm.errors_count, 1)
-        self.assertFalse(tm.is_completed)
-        self.assertIn('UNIQUE', tm.last_error_message.upper())
+        transition_message = _latest_message(self.widget)
+        self.assertIsNotNone(transition_message)
+        self.assertEqual(transition_message.errors_count, 1)
+        self.assertFalse(transition_message.is_completed)
+        self.assertIn('UNIQUE', transition_message.last_error_message.upper())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'breaking')
         # The side-effect's own writes rolled back with the savepoint.
@@ -155,26 +151,26 @@ class DatabaseErrorInSideEffectTests(TransactionTestCase):
         with self.assertRaises(IntegrityError):
             _drive(self.widget, 'break_db')
 
-        # One retry tick: the second attempt fails the same way, reaches
-        # MAX_ERRORS=2 and finalizes — failed_state + completed. Pre-fix
-        # the row stayed at errors_count=0 forever.
+        # One retry tick. The second attempt fails the same way, reaches
+        # MAX_ERRORS of 2, writes failed_state and completes the row. Before
+        # the fix the row stayed at errors_count 0 forever.
         retry_pending()
 
-        tm = _tm(self.widget)
-        self.assertEqual(tm.errors_count, 2)
-        self.assertTrue(tm.is_completed)
+        transition_message = _latest_message(self.widget)
+        self.assertEqual(transition_message.errors_count, 2)
+        self.assertTrue(transition_message.is_completed)
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'broken')
-        # No further retries are possible on a completed row.
+        # A completed row is never retried again.
         self.assertEqual(retry_pending(), 0)
 
-    def test_instance_is_not_bricked_after_terminal_failure(self):
-        # Pre-fix, the forever-uncompleted row made every future background
-        # transition raise AlreadyInProgress. Post-fix the row completes,
-        # so new background work on the instance is accepted again.
+    def test_instance_accepts_new_work_after_terminal_failure(self):
+        # Before the fix the row stayed uncompleted forever, so every later
+        # background transition raised AlreadyInProgress. Now the row
+        # completes and the instance accepts new background work.
         with self.assertRaises(IntegrityError):
             _drive(self.widget, 'break_db')
-        retry_pending()  # reaches terminal state
+        retry_pending()  # the row reaches its terminal state
 
         self.widget.refresh_from_db()
         self.widget.status = 'draft'
@@ -182,14 +178,14 @@ class DatabaseErrorInSideEffectTests(TransactionTestCase):
         CALLS.clear()
         with self.assertRaises(ValueError):
             _drive(self.widget, 'flaky_write')  # fails once, retried below
-        retry_pending()
+        retry_pending()  # the retry succeeds
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fw_done')
 
 
 @override_settings(DJANGO_LOGIC=_SETTINGS)
 class PartialWriteRollbackTests(TransactionTestCase):
-    """R2 — failed attempts are all-or-nothing for DB writes."""
+    """A failed attempt leaves no database write behind."""
 
     def setUp(self):
         CALLS.clear()
@@ -200,24 +196,24 @@ class PartialWriteRollbackTests(TransactionTestCase):
             _drive(self.widget, 'partial_write')
 
         self.widget.refresh_from_db()
-        # se_write_log ran (in memory) but its committed write rolled back.
+        # se_write_log ran, but its write rolled back.
         self.assertIn('se_write_log', CALLS)
         self.assertEqual(self.widget.se_log, '')
-        tm = _tm(self.widget)
-        self.assertEqual(tm.errors_count, 1)
-        self.assertFalse(tm.is_completed)
+        transition_message = _latest_message(self.widget)
+        self.assertEqual(transition_message.errors_count, 1)
+        self.assertFalse(transition_message.is_completed)
 
     def test_successful_retry_persists_the_writes_exactly_once(self):
         with self.assertRaises(ValueError):
             _drive(self.widget, 'flaky_write')
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.se_log, '')  # attempt 1 rolled back
+        self.assertEqual(self.widget.se_log, '')  # the first attempt rolled back
 
-        retry_pending()  # attempt 2 succeeds
+        retry_pending()  # the second attempt succeeds
 
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fw_done')
-        # Exactly one surviving write — no duplicate from the failed attempt.
+        # One surviving write, with no duplicate from the failed attempt.
         self.assertEqual(self.widget.se_log, 'written,')
-        tm = _tm(self.widget)
-        self.assertTrue(tm.is_completed)
+        transition_message = _latest_message(self.widget)
+        self.assertTrue(transition_message.is_completed)

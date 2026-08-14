@@ -1,22 +1,20 @@
-"""Pins for the instance-alias routing shipped in 0.12.0 (#187).
+"""Every engine write must land on the instance's own database alias.
 
-Mutation testing (M26) showed the whole fix was unguarded: reverting
-``State.get_persisted_state`` — and every engine savepoint — to ``default``
-left the suite green, because the test settings had a single database. The
-second ``other`` alias plus the routed fixtures here make each of those
-mutants fail:
+Mutation testing showed the routing fix was unguarded: pointing
+``State.get_persisted_state`` — and every engine savepoint — back at ``default``
+left the suite green, because the test settings had one database. The second
+``other`` alias and the routed fixtures here make each of those mutants fail:
 
 * ``get_persisted_state`` must read the instance's own alias;
-* the sync ``fail_transition`` savepoint must open on the instance's alias;
-* the background attempt savepoint and ``_handle_failure``'s terminal
-  ``failed_state`` savepoint likewise.
+* the synchronous ``fail_transition`` savepoint must open on that alias;
+* so must the background attempt savepoint and the terminal ``failed_state``
+  savepoint in ``_handle_failure``.
 
-``django_logic.E002`` statically refuses a router that sends a
-background-bound model off ``default`` — but only at check time, and an
-explicit ``.using()`` with no router passes it silently, which is exactly the
-case the engine's defensive routing covers. Bindings and the router are
-installed per-test (after startup checks), so the check suite still sees the
-default topology.
+A startup check refuses a router that sends a background-bound model off
+``default``, but it only runs at check time. An explicit ``.using()`` with no
+router passes it, and that is the case the engine's own routing covers. The
+bindings and the router are installed per test, after the startup checks, so the
+check suite still sees the default topology.
 """
 from datetime import timedelta
 
@@ -72,12 +70,13 @@ class GetPersistedStateAliasTests(TestCase):
     databases = {'default', 'other'}
 
     def test_reads_the_instance_alias_not_default(self):
-        w = Invoice.objects.using('other').create(status='real')
-        # The same pk on default holding a different value is the mutant
-        # detector: an unrouted read returns 'decoy'.
-        Invoice.objects.using('default').create(pk=w.pk, status='decoy')
-        self.assertEqual(w._state.db, 'other')
-        self.assertEqual(State(w, 'status').get_persisted_state(), 'real')
+        invoice = Invoice.objects.using('other').create(status='real')
+        # The same pk on 'default' holds a different value, so an unrouted read
+        # returns 'decoy'.
+        Invoice.objects.using('default').create(pk=invoice.pk, status='decoy')
+        self.assertEqual(invoice._state.db, 'other')
+        self.assertEqual(
+            State(invoice, 'status').get_persisted_state(), 'real')
 
 
 class SyncFailedStateAliasTests(TestCase):
@@ -92,21 +91,21 @@ class SyncFailedStateAliasTests(TestCase):
         self.addCleanup(cache.clear)
 
     def test_failed_state_lands_on_the_instance_alias(self):
-        w = Invoice.objects.using('other').create(status='draft')
+        invoice = Invoice.objects.using('other').create(status='draft')
         with self.assertRaises(ValueError):
-            w.routed_fail_proc.go()
+            invoice.routed_fail_proc.go()
         self.assertEqual(
-            Invoice.objects.using('other').get(pk=w.pk).status, 'failed')
+            Invoice.objects.using('other').get(pk=invoice.pk).status, 'failed')
         self.assertFalse(Invoice.objects.using('default').exists())
 
     def test_rejected_failed_state_write_rolls_back_on_the_instance_alias(self):
-        w = Invoice.objects.using('other').create(status='draft')
+        invoice = Invoice.objects.using('other').create(status='draft')
 
         def veto_failed(sender, instance, **kwargs):
             if instance.status == 'failed':
-                # A write inside set_state's span, then a failure: the
-                # fail_transition savepoint must roll BOTH back on 'other' —
-                # a savepoint opened on default guards nothing.
+                # A write inside set_state, then a failure. The
+                # fail_transition savepoint must roll both back on 'other'; a
+                # savepoint opened on 'default' guards nothing.
                 Invoice.objects.using(instance._state.db).create(
                     status='audit')
                 raise RuntimeError('db refuses failed')
@@ -115,9 +114,9 @@ class SyncFailedStateAliasTests(TestCase):
         self.addCleanup(post_save.disconnect, veto_failed, sender=Invoice)
 
         with self.assertRaises(ValueError):  # the original error, unchanged
-            w.routed_fail_proc.go()
+            invoice.routed_fail_proc.go()
         self.assertEqual(
-            Invoice.objects.using('other').get(pk=w.pk).status, 'draft')
+            Invoice.objects.using('other').get(pk=invoice.pk).status, 'draft')
         self.assertFalse(
             Invoice.objects.using('other').filter(status='audit').exists())
 
@@ -139,28 +138,30 @@ class BackgroundAliasTests(TestCase):
         'TRANSITION_MESSAGE_MAX_ERRORS': 1,
     })
     def test_attempt_savepoint_and_failed_state_use_the_instance_alias(self):
-        w = Invoice.objects.using('other').create(status='draft')
+        invoice = Invoice.objects.using('other').create(status='draft')
         with self.assertRaises(ValueError):
-            w.routed_bg_proc.go()
+            invoice.routed_bg_proc.go()
         # Attempt savepoint on 'other': the sibling write rolled back there.
         self.assertFalse(
             Invoice.objects.using('other').filter(status='sibling').exists())
-        # MAX_ERRORS=1 → terminal: _handle_failure's savepoint wrote
-        # failed_state on 'other'.
+        # MAX_ERRORS=1 makes this terminal, so _handle_failure's savepoint
+        # wrote failed_state on 'other'.
         self.assertEqual(
-            Invoice.objects.using('other').get(pk=w.pk).status, 'failed')
-        tm = TransitionMessage.objects.get(instance_id=str(w.pk))
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.errors_count, 1)
-        # The TM row stays on default; no instance rows leaked there.
+            Invoice.objects.using('other').get(pk=invoice.pk).status, 'failed')
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(invoice.pk))
+        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(transition_message.errors_count, 1)
+        # The TransitionMessage row stays on 'default', and no instance rows
+        # leaked there.
         self.assertFalse(Invoice.objects.using('default').exists())
 
 
 @override_settings(DATABASE_ROUTERS=[_InvoiceOnOtherRouter()])
 class WatchdogFinalizeAliasTests(TestCase):
-    """The OTHER terminal writer: _finalize_terminal_from_watchdog's
-    failed_state savepoint must open on the instance's alias too — without
-    this pin, reverting that site to DEFAULT leaves the suite green."""
+    """The watchdog is the other terminal writer, so its failed_state savepoint
+    must open on the instance's alias too. Without this test, pointing that
+    savepoint at 'default' leaves the suite green."""
 
     databases = {'default', 'other'}
 
@@ -172,11 +173,11 @@ class WatchdogFinalizeAliasTests(TestCase):
         cache.clear()
         self.addCleanup(cache.clear)
 
-    def _stale_tm(self, w):
+    def _stale_transition_message(self, invoice):
         return TransitionMessage.objects.create(
             app_label='tests',
             model_name='invoice',
-            instance_id=str(w.pk),
+            instance_id=str(invoice.pk),
             process_name='routed_bg_proc',
             transition_name='go',
             queue_name='django_logic',
@@ -190,15 +191,16 @@ class WatchdogFinalizeAliasTests(TestCase):
         'TRANSITION_MESSAGE_MAX_ERRORS': 2,
     })
     def test_watchdog_terminal_failed_state_lands_on_the_instance_alias(self):
-        w = Invoice.objects.using('other').create(status='running')
-        self._stale_tm(w)
+        invoice = Invoice.objects.using('other').create(status='running')
+        self._stale_transition_message(invoice)
 
         self.assertEqual(_watchdog_stale_attempts_inline(), 1)
 
         self.assertEqual(
-            Invoice.objects.using('other').get(pk=w.pk).status, 'failed')
-        tm = TransitionMessage.objects.get(instance_id=str(w.pk))
-        self.assertTrue(tm.is_completed)
+            Invoice.objects.using('other').get(pk=invoice.pk).status, 'failed')
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(invoice.pk))
+        self.assertTrue(transition_message.is_completed)
         self.assertFalse(Invoice.objects.using('default').exists())
 
     @override_settings(DJANGO_LOGIC={
@@ -206,13 +208,12 @@ class WatchdogFinalizeAliasTests(TestCase):
         'TRANSITION_MESSAGE_MAX_ERRORS': 2,
     })
     def test_vetoed_watchdog_write_rolls_back_on_the_instance_alias(self):
-        # The distinguishing pin: a landed-write assertion passes whichever
-        # connection the savepoint guards (set_state routes by instance
-        # regardless). Only a rolled-back write can tell the aliases apart —
-        # a savepoint opened on 'default' would leave BOTH writes standing
-        # on 'other'.
-        w = Invoice.objects.using('other').create(status='running')
-        tm = self._stale_tm(w)
+        # A landed write proves nothing here: set_state routes by instance
+        # whichever connection the savepoint guards. Only a rolled-back write
+        # tells the aliases apart, because a savepoint opened on 'default'
+        # leaves both writes standing on 'other'.
+        invoice = Invoice.objects.using('other').create(status='running')
+        transition_message = self._stale_transition_message(invoice)
 
         def veto_failed(sender, instance, **kwargs):
             if instance.status == 'failed':
@@ -225,10 +226,13 @@ class WatchdogFinalizeAliasTests(TestCase):
 
         self.assertEqual(_watchdog_stale_attempts_inline(), 1)
 
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)  # completes despite the veto
-        self.assertIn('failed_state write', tm.failure_side_effect_error)
+        transition_message.refresh_from_db()
+        # The row completes despite the veto.
+        self.assertTrue(transition_message.is_completed)
+        self.assertIn('failed_state write',
+                      transition_message.failure_side_effect_error)
         self.assertEqual(
-            Invoice.objects.using('other').get(pk=w.pk).status, 'running')
+            Invoice.objects.using('other').get(pk=invoice.pk).status,
+            'running')
         self.assertFalse(
             Invoice.objects.using('other').filter(status='audit').exists())
