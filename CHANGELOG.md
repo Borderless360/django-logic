@@ -67,6 +67,11 @@ every declaration and call that worked on 0.14.x works unchanged.
   in-memory verdict anyway. The README now says what the consumer owes: a
   callback that applies a recorded decision needs a periodic re-check
   behind it, or the follow-up becomes its own `BackgroundTransition`.
+- **The Voice rule covers writing to people** (#208, folded in). A summary,
+  a pull-request description, a review reply, or a chat message must stand
+  on its own: say the thing, not a self-coined label for the thing, and
+  define any unavoidable name in the same message. Added to `CLAUDE.md`
+  and the Cursor rule.
 
 ### Deferred, deliberately
 
@@ -76,7 +81,6 @@ every declaration and call that worked on 0.14.x works unchanged.
   disagree about what is locked for the length of a rolling deploy. That
   fix wants a release of its own with a drain note, not a seat in a
   correctness release.
-
 ## [0.14.1] — 2026-08-14
 
 Documentation only. No engine change, so upgrading from 0.14.0 changes no
