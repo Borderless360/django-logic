@@ -1,27 +1,13 @@
-"""Issue #150 — TransitionMessage helpers scoped to the selected process.
+"""Every TransitionMessage helper must be scoped to the process you asked about.
 
-Widget carries TWO independent state machines on one row: ``WidgetProcess``
-on ``status`` (process_name ``'process'``) and ``WidgetAuditProcess`` on
-``audit_status`` (process_name ``'audit_process'``). Both are driven into a
-failed background attempt on the SAME instance, with the audit row created
-LAST — so any helper that ignores ``process_name`` and just takes the newest
-row returns the AUDIT row while the scenario is about the MAIN process.
+Widget carries two independent state machines on one row: ``WidgetProcess`` on
+``status`` and ``WidgetAuditProcess`` on ``audit_status``. Both are driven into
+a failed background attempt on the same instance, and the audit row is saved
+last. So a helper that ignores ``process_name`` and takes the newest row hands
+back the audit row while the scenario is about the main process.
 
-These tests pin:
-
-* the runner helpers (``uncompleted_message`` / ``latest_message`` /
-  ``message_for``) return the right process's row when scoped by
-  ``process_name``, and keep the legacy unscoped (newest-row) behaviour when
-  it is omitted,
-* ``ProcessScenario.retry_transition`` retries its OWN process's message,
-* ``assert_error_recorded`` / ``assert_error_count`` /
-  ``assert_transition_owner`` read the scenario's process's row,
-* ``snapshot(process_name=...)`` captures the right TransitionMessage,
-* the failure output's TransitionMessage block shows the scenario's own row.
-
-Both processes are bound app-wide in ``tests/background/apps.py`` (the single
-binding site), so no test-local ``ProcessManager`` bindings — and no teardown
-purge — are needed here.
+Both processes are bound in ``tests/background/apps.py``, so this module needs
+no binding of its own and no teardown.
 """
 from django_logic.testing import ProcessScenario, snapshot
 from django_logic.testing.runner import (
@@ -40,9 +26,8 @@ _AUDIT_OWNER = 'tests.background.models.WidgetAuditProcess'
 
 
 class ProcessScopedMessageScenario(ProcessScenario):
-    """Scenario scoped to the MAIN machine (WidgetProcess on ``status``),
-    with the audit machine (``audit_process`` on ``audit_status``) driven
-    out-of-band into a failed attempt on the same instance."""
+    """Scoped to WidgetProcess on ``status``. The audit machine is driven into
+    a failed attempt on the same instance from outside the scenario."""
 
     process_class = WidgetProcess
     model = Widget
@@ -52,20 +37,20 @@ class ProcessScopedMessageScenario(ProcessScenario):
     # --- fixtures ---------------------------------------------------------
 
     def _fail_fulfil(self, widget, message='fulfil down'):
-        """Fail 'fulfil' on the MAIN process -> uncompleted TM
-        (process_name='process'), status left at 'fulfilling'."""
+        """Fail 'fulfil' on the main process. Its row stays uncompleted and
+        status stays at 'fulfilling'."""
         self.background_transition(
             widget, 'fulfil',
             fail_side_effect='bg_ok', fail_with=ValueError(message))
 
     @staticmethod
     def _fail_audit(widget, message='audit down'):
-        """Fail 'audit' on the OTHER machine -> uncompleted TM
-        (process_name='audit_process'), audit_status left at 'auditing'.
+        """Fail 'audit' on the other machine. Its row stays uncompleted and
+        audit_status stays at 'auditing'.
 
-        Driven through the raw runner + tracker because this scenario is
-        scoped to WidgetProcess; sync execution propagates the injected
-        exception to the caller, so it is absorbed here."""
+        This calls the runner directly, because the scenario is scoped to
+        WidgetProcess. Sync execution re-raises the injected error, so catch
+        it here."""
         with track(all_transitions(WidgetAuditProcess),
                    fail_side_effect='bg_audit_ok',
                    fail_with=ValueError(message)):
@@ -76,9 +61,8 @@ class ProcessScopedMessageScenario(ProcessScenario):
         widget.refresh_from_db()
 
     def _two_failed_processes(self):
-        """One instance, both machines mid-flight. The audit TM is created
-        SECOND, so it is the NEWEST row — an unscoped newest-row lookup
-        returns the wrong (audit) row for this 'process'-scoped scenario."""
+        """One instance, both machines in progress. The audit row is saved
+        second, so an unscoped newest-row lookup returns the wrong row."""
         widget = self.create_instance(status='draft', audit_status='clean')
         self._fail_fulfil(widget)
         self._fail_audit(widget)
@@ -86,7 +70,7 @@ class ProcessScopedMessageScenario(ProcessScenario):
         self.assertEqual(widget.audit_status, 'auditing')
         return widget
 
-    # --- (a) runner helpers -----------------------------------------------
+    # --- runner helpers ---------------------------------------------------
 
     def test_helpers_scoped_by_process_name(self):
         widget = self._two_failed_processes()
@@ -111,13 +95,13 @@ class ProcessScopedMessageScenario(ProcessScenario):
         self.assertEqual(
             message_for(widget, 'audit', process_name='audit_process').process_name,
             'audit_process')
-        # Scoped to the WRONG process, the action's row must not be found.
+        # Scoped to the other process, the row must not be found.
         self.assertIsNone(message_for(widget, 'fulfil', process_name='audit_process'))
         self.assertIsNone(message_for(widget, 'audit', process_name='process'))
 
     def test_helpers_require_a_process_name(self):
-        """Scoping is mandatory: an unscoped lookup on a two-process model
-        silently returned the other machine's row (#150)."""
+        """The scope is required. An unscoped lookup on a two-process model
+        used to return the other machine's row."""
         widget = self._two_failed_processes()
         for call in (lambda: uncompleted_message(widget),
                      lambda: latest_message(widget),
@@ -131,47 +115,45 @@ class ProcessScopedMessageScenario(ProcessScenario):
         self.retry_transition(widget)  # completes the 'process' row
         self.assert_state(widget, 'fulfilled')
 
-        # 'process': no uncompleted row left; latest is the completed fulfil.
+        # 'process' has no uncompleted row left; the latest is the completed one.
         self.assertIsNone(uncompleted_message(widget, process_name='process'))
-        tm = latest_message(widget, process_name='process')
-        self.assertEqual(tm.transition_name, 'fulfil')
-        self.assertTrue(tm.is_completed)
+        transition_message = latest_message(widget, process_name='process')
+        self.assertEqual(transition_message.transition_name, 'fulfil')
+        self.assertTrue(transition_message.is_completed)
 
-        # 'audit_process': its row is still in flight, untouched.
-        audit_tm = uncompleted_message(widget, process_name='audit_process')
-        self.assertIsNotNone(audit_tm)
-        self.assertFalse(audit_tm.is_completed)
+        # The audit row is still uncompleted and untouched.
+        audit_message = uncompleted_message(widget, process_name='audit_process')
+        self.assertIsNotNone(audit_message)
+        self.assertFalse(audit_message.is_completed)
 
-    # --- (b) retry_transition ---------------------------------------------
+    # --- retry_transition -------------------------------------------------
 
     def test_retry_transition_retries_only_its_own_process(self):
         widget = self._two_failed_processes()
 
-        # The audit TM is newer; an unscoped lookup would pick it and then
-        # refuse because WidgetProcess has no 'audit' transition. The scoped
-        # scenario must retry its own 'fulfil' row.
-        self.retry_transition(widget)  # no injection -> succeeds
+        # The audit row is newer. An unscoped lookup would pick it and then
+        # refuse, because WidgetProcess has no 'audit' transition.
+        self.retry_transition(widget)  # no injected failure
         self.assert_state(widget, 'fulfilled')
 
-        fulfil_tm = latest_message(widget, process_name='process')
-        self.assertEqual(fulfil_tm.transition_name, 'fulfil')
-        self.assertTrue(fulfil_tm.is_completed)
+        fulfil_message = latest_message(widget, process_name='process')
+        self.assertEqual(fulfil_message.transition_name, 'fulfil')
+        self.assertTrue(fulfil_message.is_completed)
 
-        # The audit machine is untouched: still mid-flight, still failed once.
+        # The audit machine is untouched: still uncompleted, still one error.
         widget.refresh_from_db()
         self.assertEqual(widget.audit_status, 'auditing')
-        audit_tm = uncompleted_message(widget, process_name='audit_process')
-        self.assertIsNotNone(audit_tm)
-        self.assertEqual(audit_tm.errors_count, 1)
-        self.assertIn('audit down', audit_tm.last_error_message)
+        audit_message = uncompleted_message(widget, process_name='audit_process')
+        self.assertIsNotNone(audit_message)
+        self.assertEqual(audit_message.errors_count, 1)
+        self.assertIn('audit down', audit_message.last_error_message)
 
-    # --- (c) error / owner assertions --------------------------------------
+    # --- error and owner assertions ---------------------------------------
 
     def test_error_assertions_read_own_process_row(self):
         widget = self._two_failed_processes()
 
-        # The NEWEST row is the audit one ('audit down'); the scoped scenario
-        # must read its own fulfil row.
+        # The newest row is the audit one, but the scenario reads its own.
         self.assert_error_recorded(widget, 'fulfil down')
         # The other process's error must NOT satisfy the scoped assertion.
         with self.assertRaises(AssertionError):
@@ -180,30 +162,30 @@ class ProcessScopedMessageScenario(ProcessScenario):
     def test_error_count_reads_own_process_row(self):
         widget = self.create_instance(status='draft', audit_status='clean')
         self._fail_fulfil(widget)
-        # Fail the fulfil retry too -> 'process' row has errors_count=2.
+        # Fail the retry too, so the 'process' row reaches errors_count=2.
         self.retry_transition(
             widget, fail_side_effect='bg_ok', fail_with=ValueError('fulfil down'))
         self._fail_audit(widget)  # newest row, errors_count=1
 
-        self.assert_error_count(widget, 2)  # own row, not the newer audit one
+        self.assert_error_count(widget, 2)  # its own row, not the newer one
         with self.assertRaises(AssertionError):
             self.assert_error_count(widget, 1)
 
     def test_transition_owner_reads_own_process_row(self):
         widget = self._two_failed_processes()
 
-        # latest_message branch: the newest TM records the AUDIT owner, but
-        # the scoped scenario must see its own process's owner.
+        # The newest row records the audit owner, but the scenario must read
+        # the owner on its own process's row.
         self.assert_transition_owner(widget, _MAIN_OWNER)
         with self.assertRaises(AssertionError):
             self.assert_transition_owner(widget, _AUDIT_OWNER)
 
-        # message_for branch, scoped as well.
+        # The lookup by transition name is scoped the same way.
         self.assert_transition_owner(widget, _MAIN_OWNER, transition_name='fulfil')
 
-    # --- (d) snapshot -------------------------------------------------------
+    # --- snapshot ----------------------------------------------------------
 
-    def test_snapshot_captures_own_process_tm(self):
+    def test_snapshot_captures_own_process_row(self):
         widget = self._two_failed_processes()
 
         snap_main = snapshot(widget, state_field='status',
@@ -222,19 +204,19 @@ class ProcessScopedMessageScenario(ProcessScenario):
         self.assertEqual(snap_audit['transition_message']['process_name'],
                          'audit_process')
 
-        # The scenario's own snapshot() threads its process scope.
+        # The scenario's own snapshot() passes its process scope through.
         snap = self.snapshot(widget)
         self.assertEqual(snap['transition_message']['transition_name'], 'fulfil')
 
-    # --- failure output (scenario._fail threads the scope) ------------------
+    # --- failure output ----------------------------------------------------
 
-    def test_failure_output_shows_own_process_tm(self):
+    def test_failure_output_shows_own_process_row(self):
         widget = self._two_failed_processes()
         with self.assertRaises(AssertionError) as ctx:
-            self.assert_state(widget, 'fulfilled')  # actual is 'fulfilling'
-        msg = str(ctx.exception)
+            self.assert_state(widget, 'fulfilled')  # the real state is 'fulfilling'
+        message = str(ctx.exception)
         # The TransitionMessage block shows the scenario's own row, not the
         # newer audit row.
-        self.assertIn('transition: fulfil', msg)
-        self.assertIn('fulfil down', msg)
-        self.assertNotIn('transition: audit', msg)
+        self.assertIn('transition: fulfil', message)
+        self.assertIn('fulfil down', message)
+        self.assertNotIn('transition: audit', message)

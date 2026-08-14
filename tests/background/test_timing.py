@@ -1,7 +1,7 @@
-"""Phase-2 timing fields on TransitionMessage.
+"""Timing fields the worker stamps on TransitionMessage.
 
-Covers ``started_at`` / ``completed_at`` / ``duration_ms`` across the
-happy path, terminal failure, retry, and the restore-failed bail-out.
+Covers ``started_at`` / ``completed_at`` / ``duration_ms`` on the happy path,
+on terminal failure, on retry, and when the transition cannot be restored.
 """
 from datetime import timedelta
 
@@ -25,16 +25,18 @@ class HappyPathTimingTests(TestCase):
         widget.process.fulfil()
         after = timezone.now()
 
-        tm = TransitionMessage.objects.get(instance_id=widget.pk)
-        self.assertTrue(tm.is_completed)
-        self.assertIsNotNone(tm.started_at)
-        self.assertIsNotNone(tm.completed_at)
-        self.assertIsNotNone(tm.duration_ms)
-        self.assertGreaterEqual(tm.duration_ms, 0)
-        # Bounds: start/complete both happened during this test.
-        self.assertGreaterEqual(tm.started_at, before)
-        self.assertLessEqual(tm.completed_at, after)
-        self.assertGreaterEqual(tm.completed_at, tm.started_at)
+        transition_message = TransitionMessage.objects.get(
+            instance_id=widget.pk)
+        self.assertTrue(transition_message.is_completed)
+        self.assertIsNotNone(transition_message.started_at)
+        self.assertIsNotNone(transition_message.completed_at)
+        self.assertIsNotNone(transition_message.duration_ms)
+        self.assertGreaterEqual(transition_message.duration_ms, 0)
+        # Both timestamps fall inside this test.
+        self.assertGreaterEqual(transition_message.started_at, before)
+        self.assertLessEqual(transition_message.completed_at, after)
+        self.assertGreaterEqual(transition_message.completed_at,
+                                transition_message.started_at)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
@@ -47,11 +49,12 @@ class TerminalFailureTimingTests(TestCase):
             with self.assertRaises(ValueError):
                 widget.process.crash()
 
-        tm = TransitionMessage.objects.get(transition_name='crash')
-        self.assertTrue(tm.is_completed)
-        self.assertIsNotNone(tm.started_at)
-        self.assertIsNotNone(tm.completed_at)
-        self.assertIsNotNone(tm.duration_ms)
+        transition_message = TransitionMessage.objects.get(
+            transition_name='crash')
+        self.assertTrue(transition_message.is_completed)
+        self.assertIsNotNone(transition_message.started_at)
+        self.assertIsNotNone(transition_message.completed_at)
+        self.assertIsNotNone(transition_message.duration_ms)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
@@ -61,43 +64,44 @@ class NonTerminalFailureTimingTests(TestCase):
         with self.assertRaises(ValueError):
             widget.process.crash()
 
-        tm = TransitionMessage.objects.get(transition_name='crash')
-        self.assertFalse(tm.is_completed)
-        self.assertIsNotNone(tm.started_at)
-        self.assertIsNone(tm.completed_at)
-        self.assertIsNone(tm.duration_ms)
+        transition_message = TransitionMessage.objects.get(
+            transition_name='crash')
+        self.assertFalse(transition_message.is_completed)
+        self.assertIsNotNone(transition_message.started_at)
+        self.assertIsNone(transition_message.completed_at)
+        self.assertIsNone(transition_message.duration_ms)
 
     def test_started_at_is_overwritten_on_retry(self):
         widget = Widget.objects.create()
         with self.assertRaises(ValueError):
             widget.process.crash()
 
-        tm = TransitionMessage.objects.get(transition_name='crash')
-        self.assertIsNotNone(tm.started_at)
+        transition_message = TransitionMessage.objects.get(
+            transition_name='crash')
+        self.assertIsNotNone(transition_message.started_at)
 
-        # Simulate "time passed since the first attempt".
+        # Pretend time passed since the first attempt.
         stale = timezone.now() - timedelta(minutes=10)
-        TransitionMessage.objects.filter(pk=tm.pk).update(started_at=stale)
+        TransitionMessage.objects.filter(
+            pk=transition_message.pk).update(started_at=stale)
 
-        # Attempt 2. Call the runner directly to observe the raised
-        # exception — retry_pending() swallows dispatch errors by design.
+        # Second attempt. Call the runner directly to see the exception:
+        # retry_pending() swallows dispatch errors by design.
         with self.assertRaises(ValueError):
-            run_background_transition(tm.pk)
+            run_background_transition(transition_message.pk)
 
-        tm.refresh_from_db()
-        self.assertIsNotNone(tm.started_at)
-        self.assertGreater(tm.started_at, stale)
+        transition_message.refresh_from_db()
+        self.assertIsNotNone(transition_message.started_at)
+        self.assertGreater(transition_message.started_at, stale)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class RestoreFailedTimingTests(TestCase):
     def test_restore_failure_marks_completed_without_timing(self):
         widget = Widget.objects.create()
-        # TM pointing at a transition that doesn't exist on the process, so
-        # _restore raises _RestoreError. stamp_attempt_started deliberately
-        # runs BEFORE restore (#179), so started_at is set and duration_ms
-        # stays null.
-        tm = TransitionMessage.objects.create(
+        # The row names a transition the process does not have, so the restore
+        # step fails before any work runs.
+        transition_message = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
             instance_id=widget.pk,
@@ -107,16 +111,14 @@ class RestoreFailedTimingTests(TestCase):
             kwargs={},
         )
 
-        run_background_transition(tm.pk)
+        run_background_transition(transition_message.pk)
 
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        # started_at IS set: it is stamped (and committed) when an attempt
-        # begins, before the atomic, so the watchdog can see a hung or
-        # crashed attempt (#179). What must stay null is duration_ms —
-        # nothing was measured, because no attempt actually ran.
-        self.assertIsNotNone(tm.started_at)
-        self.assertIsNone(tm.duration_ms)
-        # completed_at is set so the row can be distinguished from
-        # "never finished".
-        self.assertIsNotNone(tm.completed_at)
+        transition_message.refresh_from_db()
+        self.assertTrue(transition_message.is_completed)
+        # started_at is stamped and committed before the restore, so the
+        # watchdog can see a hung or crashed attempt. duration_ms stays null
+        # because no work was measured.
+        self.assertIsNotNone(transition_message.started_at)
+        self.assertIsNone(transition_message.duration_ms)
+        # completed_at is set so the row does not read as never finished.
+        self.assertIsNotNone(transition_message.completed_at)

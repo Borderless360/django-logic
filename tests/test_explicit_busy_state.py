@@ -1,11 +1,9 @@
-"""The explicit-busy-state pattern that replaces sync ``in_progress_state``.
+"""The explicit busy state that replaces a synchronous ``in_progress_state``.
 
-0.12.0 made the in-progress marker background-only. The README's migration
-note tells sync consumers to model a visible "busy" phase as a real state: a
-fast transition into it, chained via ``next_transition`` to the transition
-that does the work. This file proves that pattern end-to-end — happy path,
-failure containment, the crash-window recovery recipe, and the visibility the
-marker used to provide.
+``in_progress_state`` is background-only, so a synchronous consumer models a
+visible "busy" phase as a real state: a fast transition into it, chained by
+``next_transition`` to the transition that does the work. These tests cover the
+happy path, failure containment, and the recovery recipe for the crash window.
 """
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -28,8 +26,8 @@ def _broken_work(instance, **kwargs):
 
 
 class ExplicitBusyProcess(Process):
-    """``submit`` is the fast, visible edge into ``busy``; the chained
-    background transition does the work and owns the failure containment."""
+    """``submit`` is the fast, visible step into ``busy``. The chained
+    background transition does the work and contains its own failure."""
 
     process_name = 'explicit_busy_proc'
     transitions = [
@@ -77,11 +75,11 @@ class ExplicitBusyStatePatternTests(TestCase):
         inv = Invoice.objects.create(status='draft')
         inv.explicit_busy_proc.submit()
         inv.refresh_from_db()
-        # Sync mode chains inline, so the flow completes in one call; the
-        # busy state was a real, committed edge on the way through.
+        # Sync mode chains inline, so the flow finishes in one call. The busy
+        # state was a real committed state on the way through.
         self.assertEqual(inv.status, 'done')
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        self.assertTrue(tm.is_completed)
+        row = TransitionMessage.objects.get(instance_id=str(inv.pk))
+        self.assertTrue(row.is_completed)
 
     def test_failure_is_contained_by_the_working_transition(self):
         inv = Invoice.objects.create(status='busy')
@@ -89,32 +87,31 @@ class ExplicitBusyStatePatternTests(TestCase):
             inv.broken_busy_proc.do_work()
         inv.refresh_from_db()
         self.assertEqual(inv.status, 'work_failed')
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        self.assertTrue(tm.is_completed)
+        row = TransitionMessage.objects.get(instance_id=str(inv.pk))
+        self.assertTrue(row.is_completed)
 
     def test_a_swallowed_chained_failure_parks_at_busy(self):
-        """Chaining is best-effort: inside an open transaction a failing
-        chained flight rolls back with its savepoint (#138) and the swallow
-        leaves the instance AT ``busy`` — the same parked shape as the crash
-        window, recovered by the same re-drive recipe below. (In celery mode
-        the chain enqueues on_commit and the worker's TM machinery contains
-        the failure to ``work_failed`` — proven on the rig.)"""
+        """Chaining is best-effort. Inside an open transaction the chained
+        transition rolls back with its savepoint and the swallowed error leaves
+        the instance at ``busy`` — the same parked shape as the crash window
+        below, with the same recovery. In celery mode the chain enqueues on
+        commit and the worker contains the failure in ``work_failed``."""
         inv = Invoice.objects.create(status='draft')
         inv.broken_busy_proc.submit()
         inv.refresh_from_db()
         self.assertEqual(inv.status, 'busy')
 
     def test_the_crash_window_recovery_recipe(self):
-        """The window the pattern accepts: a crash between ``submit``'s
-        commit and the chained phase 1 parks the instance at ``busy`` with
-        no TransitionMessage. The documented recovery is a periodic
-        re-drive, safe by construction: instances genuinely in flight are
-        rejected by AlreadyInProgress, parked ones retry FORWARD."""
-        parked = Invoice.objects.create(status='busy')     # the crash victim
-        in_flight = Invoice.objects.create(status='busy')  # a live flight
+        """The pattern accepts one window: a crash between ``submit``'s commit
+        and the chained enqueue parks the instance at ``busy`` with no
+        TransitionMessage. The recovery is a periodic job that drives
+        ``do_work`` again — an instance that is really in progress is refused
+        with AlreadyInProgress, and a parked one moves forward."""
+        parked = Invoice.objects.create(status='busy')    # parked by the crash
+        running = Invoice.objects.create(status='busy')   # really in progress
         TransitionMessage.objects.create(
             app_label='tests', model_name='invoice',
-            instance_id=str(in_flight.pk),
+            instance_id=str(running.pk),
             process_name='explicit_busy_proc', transition_name='do_work',
             queue_name='django_logic',
         )
@@ -129,6 +126,6 @@ class ExplicitBusyStatePatternTests(TestCase):
 
         self.assertEqual((recovered, skipped), (1, 1))
         parked.refresh_from_db()
-        in_flight.refresh_from_db()
+        running.refresh_from_db()
         self.assertEqual(parked.status, 'done')
-        self.assertEqual(in_flight.status, 'busy')  # untouched, still theirs
+        self.assertEqual(running.status, 'busy')  # untouched

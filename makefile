@@ -15,8 +15,8 @@ info:
 	@echo "  stability-up     - Start Postgres + Redis via Docker Compose"
 	@echo "  stability-test   - Run stability tests (Postgres + Redis)"
 	@echo "  stability-down   - Stop Postgres + Redis"
-	@echo "  dist             - Build + twine-check sdist & wheel (see RELEASING.md)"
-	@echo "  publish          - Upload dist/* to PyPI via .pypirc (RUNS 'dist' first)"
+	@echo "  dist             - Build the sdist and wheel, then check them (see RELEASING.md)"
+	@echo "  publish          - Upload dist/* to PyPI via .pypirc (runs 'dist' first)"
 
 build:
 	docker build -t $(PROJECT_NAME) .

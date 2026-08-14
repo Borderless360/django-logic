@@ -1,9 +1,9 @@
 """Command objects wrapped around transition hook lists.
 
 Every hook slot on a ``Transition`` — conditions, permissions,
-side-effects, callbacks, failure side-effects, failure callbacks — is
-represented by a ``BaseCommand`` subclass that owns a list of callables
-and knows how to run them.
+side-effects, callbacks, failure callbacks — is represented by a
+``BaseCommand`` subclass that owns a list of callables and knows how to
+run them.
 """
 import logging
 

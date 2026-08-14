@@ -1,6 +1,8 @@
-"""Bindings registry + the django_logic.W001 system check (#125): warn-mode
-hook validation logs during ready(), before logging is configured, so the
-checks framework is the surface that cannot be missed."""
+"""The bindings registry and the hook-signature system check.
+
+Binding a process warns about a bad hook signature during ready(), before
+logging is configured, so `manage.py check` is the surface a developer sees.
+"""
 from django.core.checks import run_checks
 from django.test import SimpleTestCase
 
@@ -51,7 +53,7 @@ class BindingsRegistryTests(SimpleTestCase):
             ProcessManager.bindings,
         )
 
-    def test_w001_emitted_for_offending_hooks_only(self):
+    def test_check_reports_only_the_offending_hook(self):
         ProcessManager.bind_model_process(Invoice, _CleanProcess, state_field='status')
         with self.assertLogs('django-logic.transition', level='WARNING'):
             ProcessManager.bind_model_process(Invoice, _OffendingProcess, state_field='status')

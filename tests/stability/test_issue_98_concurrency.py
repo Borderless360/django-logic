@@ -1,17 +1,18 @@
-"""Issue #98 under real concurrency (PostgreSQL + real threads).
+"""Owner routing under real concurrency: PostgreSQL and real threads.
 
-The owner discriminator is resolved per call (via the per-thread
-``_transition_context`` and per-call kwargs) and written in the SAME atomic
-INSERT as ``in_progress_state`` + the ``TransitionMessage`` row. These tests
-prove, under genuine thread concurrency against PostgreSQL, that:
+The process that declares the transition is resolved per call, from the
+per-thread transition context and the call's kwargs, and written in the same
+atomic INSERT as the ``in_progress_state`` and the ``TransitionMessage`` row.
+These tests prove two things under real thread concurrency:
 
-* the owner recorded on each row is the one resolved for THAT call — no bleed
-  between concurrent threads driving different instances, and
-* recording the owner does not weaken the one-in-flight concurrency guard
-  (the partial-unique constraint) — concurrent attempts on one instance never
-  leave two uncompleted rows, and every row created carries the correct owner.
+* each row records the owner resolved for that call, with nothing bleeding
+  between threads that drive different instances;
+* recording the owner does not weaken the one-uncompleted-row guard (the
+  partial unique constraint), so concurrent attempts on one instance never
+  leave two uncompleted rows.
 
-Run under ``tests.settings_stability`` (Postgres + Redis); skipped on SQLite.
+Run under ``tests.settings_stability`` (PostgreSQL and Redis); skipped on
+SQLite.
 """
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
@@ -31,9 +32,9 @@ _DUMMY = 'tests.background.models.DummyConversationProcess'
 @requires_postgres
 class Issue98ConcurrentRoutingTests(StabilityTestCase):
     def test_concurrent_distinct_conversations_route_without_owner_bleed(self):
-        # Two integrations driven at the same instant in separate threads. If
-        # owner resolution leaked through any shared/global state, the rows
-        # would cross-record; they must not.
+        # Two integrations run at the same moment in separate threads. If owner
+        # resolution went through shared state, each row would record the other
+        # thread's owner.
         gmail = Conversation.objects.create(
             status='open', source_integration='gmail'
         )
@@ -66,10 +67,10 @@ class Issue98ConcurrentRoutingTests(StabilityTestCase):
         self.assertEqual(dummy_tm.owning_process_class, _DUMMY)
 
     def test_concurrent_same_instance_guard_holds_and_owner_correct(self):
-        # Several threads race to start the SAME background transition on one
-        # instance. The one-in-flight guard must hold (never two uncompleted
-        # rows), the only tolerated errors are the guard firing or the state
-        # having moved, and every row that IS created records the correct owner.
+        # Four threads race to start the same background transition on one
+        # instance. At most one uncompleted row may exist, the only allowed
+        # errors are the guard firing or the state having moved, and every row
+        # created records the correct owner.
         gmail = Conversation.objects.create(
             status='open', source_integration='gmail'
         )
@@ -88,7 +89,7 @@ class Issue98ConcurrentRoutingTests(StabilityTestCase):
                     f'unexpected error type: {error!r}',
                 )
 
-        # Invariant: at most one uncompleted row for this instance+process.
+        # Never two uncompleted rows for this instance and process.
         self.assertLessEqual(
             TransitionMessage.objects.filter(
                 instance_id=str(gmail.pk), is_completed=False
@@ -97,5 +98,5 @@ class Issue98ConcurrentRoutingTests(StabilityTestCase):
         )
         rows = TransitionMessage.objects.filter(instance_id=str(gmail.pk))
         self.assertGreaterEqual(rows.count(), 1)
-        for tm in rows:
-            self.assertEqual(tm.owning_process_class, _GMAIL)
+        for row in rows:
+            self.assertEqual(row.owning_process_class, _GMAIL)

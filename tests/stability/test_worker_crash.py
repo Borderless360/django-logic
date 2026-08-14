@@ -189,7 +189,7 @@ class TestCrashDuringCallbacks(StabilityTestCase):
 @tag('stability')
 class TestCrashBetweenCommitAndDispatch(StabilityTestCase):
     """
-    1.4 -- Phase 1 atomic block commits but on_commit never fires.
+    1.4 -- The enqueue atomic block commits but on_commit never fires.
 
     The TransitionMessage row exists in DB but no Celery task was dispatched.
     The periodic starter must find and re-dispatch the message.

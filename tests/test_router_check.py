@@ -1,7 +1,7 @@
 """django_logic.E002 (#148): database routers must not split the atomic
 outbox across databases.
 
-Phase 1 commits the instance's state write and the TransitionMessage row
+Enqueue commits the instance's state write and the TransitionMessage row
 in ONE transaction through unqualified managers and bare
 ``transaction.atomic()`` — both resolve to the 'default' alias. A router
 that sends TransitionMessage (or a background-bound model) elsewhere

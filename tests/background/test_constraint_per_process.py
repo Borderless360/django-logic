@@ -1,21 +1,18 @@
-"""R5 regression — the in-flight concurrency guard is per PROCESS, not
-per instance.
+"""The uncompleted-row guard is per process, not per instance.
 
-0.4 changed TransitionMessage's partial unique constraint from
-(app_label, model_name, instance_id) to (app_label, model_name,
-instance_id, process_name) WHERE is_completed=False (migration 0006,
-constraint 'dl_bg_one_uncompleted_per_process'). Two independent state
-machines bound to different fields of the same model row (here
-WidgetProcess on Widget.status and WidgetAuditProcess on
-Widget.audit_status) may now both have background work in flight.
+TransitionMessage's partial unique constraint covers (app_label, model_name,
+instance_id, process_name) where is_completed is false. Two state machines bound
+to different fields of the same model row — here WidgetProcess on Widget.status
+and WidgetAuditProcess on Widget.audit_status — may both have background work in
+progress.
 
 These tests pin:
-* (a) cross-process independence — an uncompleted row on one process no
-  longer blocks another process on the same instance,
-* (b) same-process duplicates are still rejected with AlreadyInProgress
-  and the cache lock is released,
-* (c) the DB constraint itself, exercised with direct row inserts,
-* (d) the DEFAULT_QUEUE fallback for transitions that declare no queue=
+* an uncompleted row on one process does not block another process on the same
+  instance,
+* a second background transition on the same process still raises
+  AlreadyInProgress, and the cache lock is released,
+* the constraint itself, under direct row inserts,
+* the DEFAULT_QUEUE fallback for a transition that declares no queue
   (WidgetAuditProcess.audit deliberately omits it).
 """
 from django.db import IntegrityError, transaction
@@ -29,10 +26,9 @@ from tests.background.models import Widget
 from tests import dl_settings
 
 
-def _make_inflight_process_tm(widget):
-    """Simulate phase 1 of WidgetProcess.fulfil left in flight: an
-    uncompleted TransitionMessage on process 'process' plus the
-    in_progress_state on the instance."""
+def _make_uncompleted_fulfil_row(widget):
+    """Write what enqueue leaves behind for WidgetProcess.fulfil: the
+    in_progress_state on the instance and an uncompleted TransitionMessage."""
     widget.status = 'fulfilling'
     widget.save(update_fields=['status'])
     return TransitionMessage.objects.create(
@@ -46,16 +42,16 @@ def _make_inflight_process_tm(widget):
     )
 
 
-class R5IndependentProcessesTests(TestCase):
-    """R5 (a): with 'process' work in flight, the independent
-    'audit_process' state machine on the same instance still runs."""
+class IndependentProcessesTests(TestCase):
+    """With 'process' work uncompleted, the independent 'audit_process' state
+    machine on the same instance still runs."""
 
-    def test_other_process_proceeds_while_one_is_in_flight(self):
+    def test_other_process_proceeds_while_one_is_uncompleted(self):
         widget = Widget.objects.create()
-        process_tm = _make_inflight_process_tm(widget)
+        process_row = _make_uncompleted_fulfil_row(widget)
 
-        # Pre-fix (instance-wide constraint) this raised AlreadyInProgress
-        # because the audit TM collided with the uncompleted 'process' row.
+        # With the old instance-wide constraint this raised AlreadyInProgress,
+        # because the audit row collided with the uncompleted 'process' row.
         with sync_execution():
             widget.audit_process.audit()
 
@@ -63,29 +59,27 @@ class R5IndependentProcessesTests(TestCase):
         self.assertEqual(widget.audit_status, 'audited')
         self.assertIn('audit_ok,', widget.se_log)
 
-        audit_tm = TransitionMessage.objects.get(process_name='audit_process')
-        self.assertTrue(audit_tm.is_completed)
-        self.assertEqual(audit_tm.instance_id, str(widget.pk))
+        audit_row = TransitionMessage.objects.get(process_name='audit_process')
+        self.assertTrue(audit_row.is_completed)
+        self.assertEqual(audit_row.instance_id, str(widget.pk))
 
-        # The 'process' row stays in flight, untouched by the audit run.
-        process_tm.refresh_from_db()
-        self.assertFalse(process_tm.is_completed)
-        self.assertEqual(process_tm.errors_count, 0)
+        # The 'process' row stays uncompleted, untouched by the audit run.
+        process_row.refresh_from_db()
+        self.assertFalse(process_row.is_completed)
+        self.assertEqual(process_row.errors_count, 0)
         self.assertEqual(widget.status, 'fulfilling')
 
 
-class R5SameProcessDuplicateTests(TransactionTestCase):
-    """R5 (b): the constraint still rejects a SECOND background
-    transition on the SAME process, via AlreadyInProgress, and phase 1
-    releases the cache lock on the way out."""
+class SameProcessDuplicateTests(TransactionTestCase):
+    """The constraint still rejects a second background transition on the same
+    process, and enqueue releases the cache lock on the way out."""
 
     def test_same_process_duplicate_raises_already_in_progress(self):
         widget = Widget.objects.create()
-        _make_inflight_process_tm(widget)
+        _make_uncompleted_fulfil_row(widget)
 
-        # Put the instance back on a declared source so the source gate
-        # passes and the failure we observe is unambiguously the
-        # constraint, not source validation.
+        # Put the instance back on a declared source, so the failure we see is
+        # the constraint and not the source gate.
         widget.status = 'draft'
         widget.save(update_fields=['status'])
 
@@ -93,10 +87,10 @@ class R5SameProcessDuplicateTests(TransactionTestCase):
             with self.assertRaises(AlreadyInProgress) as ctx:
                 widget.process.fulfil()
 
-        # The message names the conflicting process.
+        # The exception names the conflicting process.
         self.assertIn("process 'process'", str(ctx.exception))
 
-        # No second row was created for this instance+process.
+        # No second row was created for this instance and process.
         self.assertEqual(
             TransitionMessage.objects.filter(
                 app_label='bg_tests',
@@ -107,19 +101,19 @@ class R5SameProcessDuplicateTests(TransactionTestCase):
             1,
         )
 
-        # The in_progress_state write of the failed attempt rolled back
-        # with phase 1's atomic block — the instance is where we left it.
+        # The failed attempt's in_progress_state write rolled back with the
+        # enqueue transaction, so the instance is where we left it.
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'draft')
 
-        # The cache lock taken for the phase-1 critical section was
-        # released in the finally — the instance is not stranded locked.
+        # Enqueue releases the cache lock on the way out, so the instance is
+        # not left locked.
         self.assertFalse(State(widget, 'status', 'process').is_locked())
 
 
-class R5ConstraintDbLevelTests(TransactionTestCase):
-    """R5 (c): the partial unique constraint itself, pinned at the DB
-    level with direct inserts (no phase-1 machinery)."""
+class ConstraintAtDatabaseLevelTests(TransactionTestCase):
+    """The partial unique constraint itself, pinned with direct inserts and no
+    engine code in the way."""
 
     _ROW = {
         'app_label': 'bg_tests',
@@ -133,8 +127,8 @@ class R5ConstraintDbLevelTests(TransactionTestCase):
     def test_duplicate_uncompleted_same_process_violates_constraint(self):
         TransitionMessage.objects.create(**self._ROW)
         with self.assertRaises(IntegrityError):
-            # atomic() so the broken transaction state is contained and
-            # the assertions below can keep querying.
+            # atomic() contains the broken transaction, so the assertions
+            # below can still query.
             with transaction.atomic():
                 TransitionMessage.objects.create(**self._ROW)
         self.assertEqual(TransitionMessage.objects.count(), 1)
@@ -154,32 +148,31 @@ class R5ConstraintDbLevelTests(TransactionTestCase):
 
     def test_constraint_is_partial_completed_rows_do_not_block(self):
         TransitionMessage.objects.create(**{**self._ROW, 'is_completed': True})
-        # Same keys again, uncompleted — allowed, the constraint only
-        # covers is_completed=False rows.
+        # The same keys again, uncompleted — allowed, because the constraint
+        # only covers is_completed=False rows.
         TransitionMessage.objects.create(**self._ROW)
         self.assertEqual(TransitionMessage.objects.count(), 2)
 
 
-class R5DefaultQueueFallbackTests(TestCase):
-    """R5 (d): WidgetAuditProcess.audit declares no queue= — phase 1
-    records DJANGO_LOGIC['DEFAULT_QUEUE'] on the TransitionMessage,
-    resolved lazily at dispatch time."""
+class DefaultQueueFallbackTests(TestCase):
+    """WidgetAuditProcess.audit declares no queue, so enqueue records
+    DJANGO_LOGIC['DEFAULT_QUEUE'] on the row."""
 
-    def test_tm_records_builtin_default_queue(self):
+    def test_row_records_builtin_default_queue(self):
         widget = Widget.objects.create()
         with sync_execution():
             widget.audit_process.audit()
-        tm = TransitionMessage.objects.get(process_name='audit_process')
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.queue_name, 'django_logic')
+        audit_row = TransitionMessage.objects.get(process_name='audit_process')
+        self.assertTrue(audit_row.is_completed)
+        self.assertEqual(audit_row.queue_name, 'django_logic')
 
-    def test_tm_records_overridden_default_queue(self):
+    def test_row_records_overridden_default_queue(self):
         widget = Widget.objects.create()
         with override_settings(
             DJANGO_LOGIC=dl_settings(DEFAULT_QUEUE='custom.q')
         ):
             with sync_execution():
                 widget.audit_process.audit()
-        tm = TransitionMessage.objects.get(process_name='audit_process')
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.queue_name, 'custom.q')
+        audit_row = TransitionMessage.objects.get(process_name='audit_process')
+        self.assertTrue(audit_row.is_completed)
+        self.assertEqual(audit_row.queue_name, 'custom.q')

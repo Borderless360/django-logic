@@ -88,7 +88,7 @@ class TestStuckTransitionDetection(StabilityTestCase):
     """
 
     def test_stuck_rows_are_identified_by_the_message_not_the_state(self):
-        """Stuck detection is TM-scoped (0.12.0): a row at MAX_ERRORS and
+        """Stuck detection works from the row: a row at MAX_ERRORS and
         uncompleted is the signal; the instance's state field carries no
         in-progress marker for sync work anymore."""
         order = Order.objects.create(status='approved')

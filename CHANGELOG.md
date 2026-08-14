@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-14
+
 ### Removed (breaking) — the second diet
 
 Every removal below had zero consumers in gv, the reference consumer, and
@@ -33,9 +35,16 @@ growth defended the engine's own machinery).
   rejected `failed_state` write.
 - **`to_json`** from `django_logic.testing` (zero consumers; `snapshot()`
   returns a dict that `json.dumps` handles).
-- **The separate removed-settings check (`W003`)** — folded into `W004`:
-  one check now owns "the engine does not read this key", answering with
-  per-key migration advice for removed keys and the typo hint otherwise.
+- **The separate removed-settings check function** — merged into
+  `check_no_unknown_settings`, so one function now owns "the engine does
+  not read this key". The two reports keep their own ids:
+  `django_logic.W003` still carries the per-key migration advice for a
+  removed key, and `django_logic.W004` still reports a typo. They stay
+  separate because the W004 hint tells you to silence W004 when you keep
+  extra keys in `DJANGO_LOGIC` on purpose — a shared id would have hidden
+  the migration advice from everyone who followed it, and would have
+  turned `check --fail-level WARNING` red for anyone who had silenced
+  W003. No settings change is needed on upgrade.
 
 ### Added
 
@@ -75,6 +84,29 @@ growth defended the engine's own machinery).
   replace `LIVENESS_*`. `_enqueue_atomic` replaces `_phase_one_atomic`.
   Stranded-row exceptions no longer mention `W002`, `retry horizon`,
   or `re-drive`.
+
+- **The plain-English pass now covers the whole project**, not just the
+  engine: the 44 test modules that still carried the dialect, and
+  `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`, which used to exempt
+  itself from the vocabulary. `CLAUDE.md` states the rule as simplified
+  English (ASD-STE100) with a table of retired words, and
+  `tests/test_voice.py` enforces that table over the library and the
+  current documentation. This changelog is deliberately out of scope: it
+  is a historical record, so it keeps naming the words and the APIs that
+  shipped at the time.
+
+  Three facts in the design document were wrong and are corrected: the
+  step count in the execution walkthrough, the check id for a removed
+  settings key, and what `django_logic.W002` reports (it reports
+  safety-net tasks missing from the beat schedule; it cannot tell you
+  whether a queue has a worker).
+
+### Changed (operators — check your log queries)
+
+- **The worker's first log line reads `Execute Start`, not `Phase2
+  Start`.** Everything after it is unchanged (`SideEffect`, `Set State`,
+  `Complete`). Update any alert, saved search, or dashboard that matches
+  on the old text. Nothing else in the log format changed.
 
 ## [0.13.1] — 2026-08-10
 

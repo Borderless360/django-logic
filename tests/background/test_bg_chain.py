@@ -1,30 +1,18 @@
-"""Issue #98 follow-up: background -> background ``next_transition`` chaining.
+"""One background transition chained to another with ``next_transition``.
 
-The ``owning_process_class`` overwrite in ``Process._get_transition_method``
-(process.py) exists specifically for the chained-``next_transition`` case:
-a follow-up transition forwards the predecessor's kwargs, and the owner
-must be re-resolved to the follow-up's own declaring process — not
-inherited. Until now this path had **no test**: the only ``next_transition``
-fixture was sync -> sync (``WidgetChainProcess``).
+A follow-up forwards the kwargs of the transition before it, so
+``Process._get_transition_method`` must resolve the owner again from the
+follow-up's own declaring process. An inherited owner would make the worker
+restore the wrong transition from the row.
 
-These scenarios drive the real object through the whole chain via the
-``Process`` entrypoint (no mocks, no ``change_state`` patching) and assert
-on the observable transformation — the full state trace, the side-effects
-that ran, and the per-transition ``owning_process_class`` recorded on each
-``TransitionMessage``.
+Both scenarios drive the real object through the whole chain from the process
+entrypoint, with no mocks. They assert on what is observable: the full state
+trace, the side-effects that ran, and the ``owning_process_class`` recorded on
+each ``TransitionMessage``.
 
-Two cases:
-
-1. A flat ``WidgetBgChainProcess``: ``bg_fulfil`` -> ``bg_export``. The
-   follow-up TM must record ``WidgetBgChainProcess`` (not the
-   predecessor's), and the object must pass through every intermediate
-   state.
-
-2. A nested condition-disambiguated ``ChainConversationProcess``: a
-   per-integration nested bg ``send`` chains into a nested bg ``report``.
-   The follow-up ``report`` TM must record the NESTED owning class
-   (``GmailChainProcess`` / ``DummyChainProcess``), not the bound parent
-   and not the predecessor — the riskiest owner-overwrite case.
+The flat case chains ``bg_fulfil`` into ``bg_export``. The nested case picks a
+``send`` per integration by condition and chains it into a nested ``report``, so
+the follow-up row must record the nested class and not the bound parent.
 """
 from django.test import TestCase, override_settings
 
@@ -62,24 +50,23 @@ class BgToBgChainScenario(ProcessScenario):
 
         self.background_transition(widget, 'bg_fulfil')
 
-        # The object passed through EVERY intermediate state — the in_progress
-        # and target of each leg of the chain. This is the observable journey,
-        # not just the final state.
+        # The object passed through every intermediate state: the in-progress
+        # state and the target of each step.
         self.assert_state_trace(
             ['chain_fulfilling', 'fulfilled', 'chain_exporting', 'exported']
         )
         self.assert_state(widget, 'exported')
 
-        # Both legs' side-effects ran, in order, inside the one drive.
+        # Both steps' side-effects ran, in order, in the one call.
         self.assert_side_effects_ran(['se_bg_fulfil_se', 'se_bg_export_se'])
         self.assert_callbacks_ran(['cb_bg_export_cb'])
 
-        # Two separate durable rows were created, one per background
-        # transition — and each records its OWN owner, not the predecessor's.
+        # One row per background transition, and each records its own owner.
         self.assert_related_count(TransitionMessage.objects.all(), 2)
-        tms = list(TransitionMessage.objects.order_by('id'))
-        self.assertEqual([t.transition_name for t in tms], ['bg_fulfil', 'bg_export'])
-        self.assertTrue(all(t.is_completed for t in tms))
+        messages = list(TransitionMessage.objects.order_by('id'))
+        self.assertEqual([t.transition_name for t in messages],
+                         ['bg_fulfil', 'bg_export'])
+        self.assertTrue(all(t.is_completed for t in messages))
         self.assert_transition_owner(
             widget, _BG_CHAIN, transition_name='bg_fulfil'
         )
@@ -88,9 +75,8 @@ class BgToBgChainScenario(ProcessScenario):
         )
 
     def test_journey_pins_the_whole_transformation(self):
-        # The journey assertion locks the end-to-end observable behaviour
-        # in one statement: one drive, draft -> exported, both side-effects,
-        # the export callback, no failure.
+        # One statement pins the whole transformation: draft to exported, both
+        # side-effects, the export callback, and no failure.
         widget = self.create_instance(status='draft')
         self.background_transition(widget, 'bg_fulfil')
         self.assert_journey([
@@ -104,34 +90,33 @@ class BgToBgChainScenario(ProcessScenario):
             ),
         ])
 
-    def test_failure_of_first_leg_does_not_chain(self):
-        # A failure of the first leg stops the chain: the follow-up never
-        # runs and no follow-up TransitionMessage is created. The instance
-        # stays in the first leg's in_progress state, pending retry.
+    def test_failure_of_first_step_does_not_chain(self):
+        # A failed first step stops the chain. The follow-up never runs and no
+        # second row is saved. The instance waits in the first in-progress
+        # state for the retry.
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'bg_fulfil', fail_side_effect='se_bg_fulfil_se',
             fail_with=ValueError('fulfil broke'),
         )
         self.assert_state(widget, 'chain_fulfilling')
-        # Only the first leg's side-effect was attempted (and injected to
-        # fail); the export side-effect never ran.
+        # Only the first step's side-effect ran, and it was injected to fail.
         self.assert_side_effects_not_ran(['se_bg_export_se'])
-        # Only one TM exists — the failed first leg, uncompleted for retry.
+        # One row only: the failed first step, uncompleted so it is retried.
         self.assertEqual(TransitionMessage.objects.count(), 1)
         self.assertFalse(TransitionMessage.objects.get().is_completed)
         self.assert_transition_owner(widget, _BG_CHAIN, transition_name='bg_fulfil')
 
-    def test_terminal_failure_of_first_leg_does_not_chain(self):
-        # When the first leg exhausts MAX_ERRORS it terminalizes into its
-        # failed_state; the follow-up still never runs.
+    def test_terminal_failure_of_first_step_does_not_chain(self):
+        # When the first step uses up MAX_ERRORS it moves to its failed_state.
+        # The follow-up still never runs.
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'bg_fulfil', fail_side_effect='se_bg_fulfil_se',
             fail_with=ValueError('persistent'),
         )
-        # Drive retries until terminal (MAX_ERRORS total attempts).
-        for _ in range(2):  # MAX_ERRORS=3 -> initial + 2 retries
+        # Retry until the row is terminal.
+        for _ in range(2):  # MAX_ERRORS is 3: the first attempt plus 2 retries
             self.retry_transition(
                 widget, fail_side_effect='se_bg_fulfil_se',
                 fail_with=ValueError('persistent'),
@@ -165,7 +150,7 @@ class NestedDisambiguatedBgChainScenario(ProcessScenario):
         self.assert_side_effects_ran(['chain_gmail_send', 'chain_gmail_report'])
         self.assertNotIn('dummy_', conv.se_log)
 
-        # Each leg's TM records the NESTED Gmail class as owner — not the
+        # Each leg's row records the NESTED Gmail class as owner — not the
         # bound parent ChainConversationProcess, and the follow-up does NOT
         # inherit the predecessor's owner.
         self.assert_transition_owner(conv, _GMAIL_CHAIN, transition_name='send')
@@ -215,7 +200,7 @@ def _record_chain_kwargs(instance, **kwargs):
 class SyncToBackgroundRequestChainTests(TestCase):
     """#129: a sync transition's next_transition into a BACKGROUND follow-up
     must not forward ``request`` — under STRICT_KWARGS_SERIALIZATION the
-    follow-up's phase-1 failure is swallowed by NextTransition, silently
+    follow-up's failure at enqueue is swallowed by NextTransition, silently
     killing the chain. Sync follow-ups keep receiving request."""
 
     @classmethod

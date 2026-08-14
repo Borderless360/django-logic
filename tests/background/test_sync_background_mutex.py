@@ -1,25 +1,19 @@
-"""D2 — sync/background mutual exclusion.
+"""A synchronous transition and a background transition never interleave.
 
-A synchronous ``Transition`` and a background transition on the same
-instance + process must never interleave:
+The mutex is scoped to one instance plus one process:
 
-* While an uncompleted ``TransitionMessage`` exists (the durable
-  in-flight marker for background work), ``Transition.change_state``
-  raises ``TransitionNotAllowed`` from its under-the-lock
-  ``_ensure_no_background_in_flight`` revalidation — and releases the
-  cache lock on the way out.
-* While the cache lock is held (a sync transition mid-flight),
-  ``BackgroundTransition.change_state`` fails phase 1 with
-  ``TransitionNotAllowed("State is locked")`` and creates no
-  ``TransitionMessage`` row.
-* ``BackgroundTransition.change_state`` holds the cache lock only for
-  its critical section and ALWAYS unlocks in a finally — on rejection
-  (``AlreadyInProgress``) and on success alike.
-* Plain ``Action`` is documented as NOT gated on its success path: it does
-  not change state, takes no lock, and ignores in-flight background work.
-  Its FAILURE path's ``failed_state`` write is the exception — while an
-  uncompleted row exists, phase 2 owns the state field, so the write is
-  skipped (#185 review).
+* While an uncompleted ``TransitionMessage`` exists, ``Transition.change_state``
+  raises ``TransitionNotAllowed`` under the lock and releases the lock on the
+  way out.
+* While a synchronous transition holds the cache lock,
+  ``BackgroundTransition.change_state`` refuses to enqueue with
+  ``TransitionNotAllowed("State is locked")`` and creates no row.
+* ``BackgroundTransition.change_state`` releases the lock in a finally, on
+  rejection and on success alike.
+* A plain ``Action`` is not gated on its success path: it changes no state,
+  takes no lock, and ignores background work in progress. Its failure path is
+  the exception — while an uncompleted row exists the worker owns the state
+  field, so the ``failed_state`` write is skipped.
 """
 from datetime import timedelta
 
@@ -49,9 +43,9 @@ from tests import dl_settings
 _SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 
-def _make_tm(widget, process_name='process', is_completed=False):
-    """An in-flight (or completed) TransitionMessage row, created directly —
-    exactly what phase 1 leaves behind while phase 2 is pending."""
+def _make_row(widget, process_name='process', is_completed=False):
+    """Create a TransitionMessage row directly — the same row enqueue leaves
+    behind while the worker still has to execute it."""
     return TransitionMessage.objects.create(
         app_label='bg_tests',
         model_name='widget',
@@ -65,18 +59,17 @@ def _make_tm(widget, process_name='process', is_completed=False):
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class SyncTransitionGatedByTransitionMessageTests(TestCase):
-    """D2: the uncompleted TransitionMessage row gates sync transitions."""
+    """The uncompleted TransitionMessage row gates synchronous transitions."""
 
     def setUp(self):
         cache.clear()
         self.addCleanup(cache.clear)
         self.widget = Widget.objects.create()  # status='draft'
 
-    def test_uncompleted_tm_blocks_sync_transition_and_releases_lock(self):
-        # D2 (a): with background work in flight on this instance+process,
-        # the sync 'cancel' is rejected under the lock by
-        # _ensure_no_background_in_flight — and the lock is released.
-        _make_tm(self.widget)
+    def test_uncompleted_row_blocks_sync_transition_and_releases_lock(self):
+        # A background transition is in progress on this instance and process,
+        # so the synchronous 'cancel' is refused under the lock.
+        _make_row(self.widget)
 
         with self.assertRaises(TransitionNotAllowed) as ctx:
             self.widget.process.cancel()
@@ -84,38 +77,37 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.assertIn(
             'background transition is in progress', str(ctx.exception)
         )
-        # The except branch in Transition.change_state must unlock before
-        # re-raising — otherwise the instance would be stranded locked.
+        # Transition.change_state must unlock before it re-raises, or the
+        # instance stays locked with nothing left to unlock it.
         state = State(self.widget, 'status', 'process')
         self.assertFalse(state.is_locked())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')
 
-    def test_uncompleted_tm_for_other_process_does_not_block(self):
-        # D2 (b): the gate is scoped per process — an independent state
-        # machine's in-flight row must not block this process.
-        _make_tm(self.widget, process_name='other_process')
+    def test_uncompleted_row_for_other_process_does_not_block(self):
+        # The gate is scoped per process: an independent state machine's row
+        # must not block this process.
+        _make_row(self.widget, process_name='other_process')
 
         self.widget.process.cancel()
 
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'cancelled')
 
-    def test_completed_tm_does_not_block(self):
-        # D2 (c): only UNCOMPLETED rows are in-flight markers; finished
-        # background work must not gate anything.
-        _make_tm(self.widget, is_completed=True)
+    def test_completed_row_does_not_block(self):
+        # Only uncompleted rows gate anything — finished background work does
+        # not.
+        _make_row(self.widget, is_completed=True)
 
         self.widget.process.cancel()
 
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'cancelled')
 
-    def test_sync_action_is_not_gated_by_uncompleted_tm(self):
-        # D2 (g): a plain Action does not change state, takes no lock and
-        # is documented as NOT TM-gated — it runs fine while background
-        # work is in flight on the same instance + process.
-        _make_tm(self.widget)
+    def test_sync_action_is_not_gated_by_uncompleted_row(self):
+        # A plain Action changes no state and takes no lock, so it runs even
+        # while background work is in progress on the same instance + process.
+        _make_row(self.widget)
         ran = []
 
         def poke_side_effect(instance, **kwargs):
@@ -129,22 +121,20 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.assertEqual(self.widget.status, 'draft')  # Actions never move state
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
-    def test_tm_gate_raises_the_transient_type(self):
-        # The gated condition clears when the flight completes, so it is
-        # the motivating case for TransitionTemporarilyUnavailable (#191):
-        # a generic handler must be able to answer 409/retry, not 400.
-        _make_tm(self.widget)
+    def test_gate_raises_the_transient_type(self):
+        # The refusal clears once the background work finishes, so a generic
+        # handler must be able to answer 409 "retry shortly", not 400.
+        _make_row(self.widget)
 
         with self.assertRaises(TransitionTemporarilyUnavailable):
             self.widget.process.cancel()
 
-    def test_stale_uncompleted_tm_is_not_transient(self):
-        # A row untouched past the retry horizon is stranded, not busy
-        # (#195): "retry shortly" would be wrong forever, and the WARNING
-        # demotion would stop a stuck instance from paging. The plain base
-        # keeps generic handlers refusing and hook logging at ERROR.
-        tm = _make_tm(self.widget)
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+    def test_stale_uncompleted_row_is_not_transient(self):
+        # A row untouched past the retry window is stranded, not busy. "Retry
+        # shortly" would be wrong forever, and demoting the log to WARNING
+        # would stop a stuck instance from paging anyone.
+        row = _make_row(self.widget)
+        TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(hours=2))
 
         with self.assertRaises(TransitionNotAllowed) as ctx:
@@ -156,13 +146,12 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         # The refusal path must still release the lock.
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
-    def test_running_attempt_inside_its_declared_budget_is_live(self):
-        # The watchdog's own liveness definition: an attempt inside
-        # started_at + timeout_seconds is live, however old `modified` is.
-        # Without this signal a healthy 40-minute attempt read as
-        # "stranded" at minute 16 (review of #195).
-        tm = _make_tm(self.widget)
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+    def test_running_attempt_inside_its_timeout_is_still_running(self):
+        # An attempt inside started_at + timeout_seconds is still running,
+        # however old `modified` is. Without that signal a healthy 40-minute
+        # attempt read as stranded at minute 16.
+        row = _make_row(self.widget)
+        TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(minutes=16),
             started_at=timezone.now() - timedelta(minutes=16),
             timeout_seconds=3600,
@@ -171,11 +160,11 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         with self.assertRaises(TransitionTemporarilyUnavailable):
             self.widget.process.cancel()
 
-    def test_attempt_past_its_budget_and_horizon_is_stranded(self):
-        # Budget exhausted AND nothing recorded since: the watchdog would
-        # have abandoned it — the horizon clock applies again.
-        tm = _make_tm(self.widget)
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+    def test_attempt_past_its_timeout_and_retry_window_is_stranded(self):
+        # The timeout has passed and nothing was recorded since, so the
+        # watchdog would have abandoned the attempt: the retry window decides.
+        row = _make_row(self.widget)
+        TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(hours=2),
             started_at=timezone.now() - timedelta(hours=2),
             timeout_seconds=60,
@@ -186,12 +175,12 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.assertNotIsInstance(
             ctx.exception, TransitionTemporarilyUnavailable)
 
-    def test_horizon_floor_keeps_short_retry_configs_transient(self):
-        # Suite settings give RETRY_MINUTES=2, MAX_ERRORS=3 → formula 8,
-        # floor 15. A 10-minute-old row sits between the two: only the
-        # floor keeps it transient.
-        tm = _make_tm(self.widget)
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+    def test_retry_window_floor_keeps_short_retry_settings_transient(self):
+        # These settings give RETRY_MINUTES=2 and MAX_ERRORS=3, so the computed
+        # window is 8 minutes and the floor is 15. A 10-minute-old row sits
+        # between the two, so only the floor keeps it transient.
+        row = _make_row(self.widget)
+        TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(minutes=10))
 
         with self.assertRaises(TransitionTemporarilyUnavailable):
@@ -201,24 +190,24 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         TRANSITION_MESSAGE_MAX_ERRORS=2,
         TRANSITION_MESSAGE_RETRY_MINUTES=20,
     ))
-    def test_horizon_scales_with_the_retry_pipeline(self):
-        # RETRY_MINUTES=20, MAX_ERRORS=2 → horizon 60. A 30-minute-old row
-        # is still inside the pipeline's span: transient, not stranded.
-        # Kills a hardcoded-15 horizon.
-        tm = _make_tm(self.widget)
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+    def test_retry_window_scales_with_the_retry_settings(self):
+        # RETRY_MINUTES=20 and MAX_ERRORS=2 give a 60-minute window, so a
+        # 30-minute-old row is still transient. A hardcoded 15 minutes fails
+        # here.
+        row = _make_row(self.widget)
+        TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(minutes=30))
 
         with self.assertRaises(TransitionTemporarilyUnavailable):
             self.widget.process.cancel()
 
     def test_stranded_row_reclassifies_the_background_rejection_too(self):
-        # Phase 1's constraint rejection shares the classification (#195
-        # review): re-driving the SAME background transition was the most
-        # likely consumer retry, and it kept answering AlreadyInProgress
-        # ("retry shortly", WARNING) forever on a stranded row.
-        tm = _make_tm(self.widget, process_name='process')
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+        # Sending the same background transition to the queue again is the most
+        # likely consumer retry, so enqueue shares the classification. It used
+        # to answer AlreadyInProgress ("retry shortly") forever on a stranded
+        # row.
+        row = _make_row(self.widget, process_name='process')
+        TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(hours=2))
 
         with self.assertRaises(TransitionNotAllowed) as ctx:
@@ -232,10 +221,10 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.assertEqual(TransitionMessage.objects.count(), 1)
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
-    def test_live_row_still_rejects_background_redrive_as_transient(self):
-        # Control for the reclassification: a live row keeps
-        # AlreadyInProgress.
-        _make_tm(self.widget, process_name='process')
+    def test_running_row_rejects_a_second_enqueue_as_transient(self):
+        # Control for the test above: a row that is still being retried keeps
+        # answering AlreadyInProgress.
+        _make_row(self.widget, process_name='process')
 
         with self.assertRaises(AlreadyInProgress):
             with sync_execution():
@@ -243,10 +232,10 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
     @modify_settings(INSTALLED_APPS={'remove': 'django_logic.background'})
     def test_probe_and_gate_answer_not_installed_with_no_query(self):
-        # The documented sync-only contract (#197): with the background app
-        # absent, in_flight() answers False — even though the row exists in
-        # the table — and the sync gate lets the transition through.
-        _make_tm(self.widget)
+        # With the background app uninstalled, in_flight() answers False
+        # without querying, and the synchronous gate lets the transition
+        # through — even though the row is still in the table.
+        _make_row(self.widget)
 
         with self.assertNumQueries(0):
             self.assertFalse(in_flight(self.widget, 'process'))
@@ -254,42 +243,42 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'cancelled')
 
-    def test_public_in_flight_probe_reads_the_marker(self):
-        # #197: the documented probe for consumer API seams. One shared
-        # queryset (TransitionMessage.in_flight_for) backs this, the sync
-        # gate, and the Action failure path.
+    def test_public_in_flight_probe_reads_the_row(self):
+        # in_flight() is the documented probe for consumer API seams. One
+        # shared queryset backs it, the synchronous gate, and the Action
+        # failure path.
         self.assertFalse(in_flight(self.widget, 'process'))
 
-        tm = _make_tm(self.widget)
+        row = _make_row(self.widget)
         self.assertTrue(in_flight(self.widget, 'process'))
         # Default process_name is 'process'.
         self.assertTrue(in_flight(self.widget))
         # Scoped per process, and completed rows do not count.
         self.assertFalse(in_flight(self.widget, 'other_process'))
-        TransitionMessage.objects.filter(pk=tm.pk).update(is_completed=True)
+        TransitionMessage.objects.filter(pk=row.pk).update(is_completed=True)
         self.assertFalse(in_flight(self.widget, 'process'))
 
     def test_public_probe_answers_false_for_a_stranded_row(self):
-        # The probe shapes 409 "retry shortly" answers, so it shares the
-        # gate's liveness classification: a stranded row is not busy, and
-        # answering "busy" from it would be the forever-retry #195 removed.
-        tm = _make_tm(self.widget)
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+        # The probe shapes 409 "retry shortly" answers, so it uses the same
+        # rule as the gate: a stranded row is not busy, and calling it busy
+        # would make the consumer retry forever.
+        row = _make_row(self.widget)
+        TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(hours=2))
 
         self.assertFalse(in_flight(self.widget, 'process'))
 
     def test_probe_failure_keeps_the_original_exception_and_runs_hooks(self):
-        # #194: the side-effect that brought us to fail_transition may have
-        # rollback-poisoned the connection, so the in-flight probe itself
-        # raises TransactionManagementError. That error must not replace
-        # the original one, and both failure hook bundles must still run.
+        # The side-effect that failed may have left the connection needing a
+        # rollback, so the probe itself raises TransactionManagementError. That
+        # error must not replace the original one, and both failure hook
+        # bundles must still run.
         widget = Widget.objects.create()
         hooks = []
 
-        def poison_then_fail(instance, **kwargs):
-            # IntegrityError propagates AND marks needs_rollback — the
-            # receiver-free version of the poisoned-connection shape.
+        def insert_duplicate_then_fail(instance, **kwargs):
+            # IntegrityError propagates and marks the transaction as needing a
+            # rollback, without any signal receiver being involved.
             Widget.objects.create(pk=instance.pk)
 
         def record_fcb(instance, exception, **kwargs):
@@ -297,29 +286,28 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
         action = Action(
             'poke_fail', sources=['draft'], failed_state='poke_failed',
-            side_effects=[poison_then_fail],
+            side_effects=[insert_duplicate_then_fail],
             failure_callbacks=[record_fcb],
         )
         state = State(widget, 'status', 'process')
 
         with self.assertLogs('django-logic.transition', level='ERROR') as logs:
             with self.assertRaises(IntegrityError):
-                # SideEffects.execute routes the failure into
-                # fail_transition itself before re-raising.
+                # SideEffects.execute routes the failure into fail_transition
+                # itself before it re-raises.
                 action.change_state(state)
 
         self.assertEqual(hooks, ['failure_callbacks'])
         self.assertFalse(state.is_locked())
         self.assertIn('could not probe', '\n'.join(logs.output))
 
-    def test_failing_action_skips_failed_state_write_while_tm_in_flight(self):
-        # D2 (h): the cache lock is free for the whole queued/phase-2 span,
-        # so the Action's atomic acquire succeeds — but the uncompleted row
-        # is the durable owner of the state field, and writing failed_state
-        # over the in_progress_state would supersede the flight (or be
-        # destroyed by its target write). The write is skipped; the failure
-        # stays fully visible.
-        _make_tm(self.widget)
+    def test_failing_action_skips_failed_state_write_while_row_uncompleted(self):
+        # The cache lock is free while the row waits for the worker, so the
+        # Action acquires it. The uncompleted row still owns the state field:
+        # writing failed_state over the in_progress_state would supersede the
+        # background work, or be overwritten by its target write. The write is
+        # skipped and the failure stays visible.
+        _make_row(self.widget)
 
         def boom(instance, **kwargs):
             raise ValueError('boom')
@@ -330,8 +318,8 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
         with self.assertLogs('django-logic.transition', level='ERROR') as logs:
             with self.assertRaises(ValueError):
-                # SideEffects.execute routes the failure into
-                # fail_transition itself before re-raising.
+                # SideEffects.execute routes the failure into fail_transition
+                # itself before it re-raises.
                 action.change_state(state)
 
         self.widget.refresh_from_db()
@@ -344,11 +332,11 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class BackgroundPhaseOneMutexTests(TransactionTestCase):
-    """D2: phase 1 of a background transition vs the sync lock / TM guard.
+class BackgroundEnqueueMutexTests(TransactionTestCase):
+    """Enqueue versus the synchronous lock and the uncompleted row.
 
-    TransactionTestCase because (e) depends on the partial unique
-    constraint firing a real IntegrityError inside phase 1's atomic block.
+    TransactionTestCase, because one test needs the partial unique constraint
+    to raise a real IntegrityError inside the enqueue transaction.
     """
 
     def setUp(self):
@@ -356,10 +344,9 @@ class BackgroundPhaseOneMutexTests(TransactionTestCase):
         self.addCleanup(cache.clear)
         self.widget = Widget.objects.create()  # status='draft'
 
-    def test_locked_state_rejects_background_transition_and_creates_no_tm(self):
-        # D2 (d): reverse direction — a sync transition mid-flight (cache
-        # lock held) makes phase 1 fail fast, before any TransitionMessage
-        # or in_progress_state write.
+    def test_locked_state_rejects_background_transition_and_creates_no_row(self):
+        # The reverse direction: a synchronous transition holds the cache lock,
+        # so enqueue fails before it writes a row or the in_progress_state.
         state = State(self.widget, 'status', 'process')
         self.assertTrue(state.lock())
         self.addCleanup(state.unlock)
@@ -376,11 +363,10 @@ class BackgroundPhaseOneMutexTests(TransactionTestCase):
         state.unlock()
         self.assertFalse(state.is_locked())
 
-    def test_phase_one_releases_lock_when_rejected_as_already_in_progress(self):
-        # D2 (e): the partial unique constraint rejects a second in-flight
-        # row as AlreadyInProgress; the finally in
-        # BackgroundTransition.change_state must still release the lock.
-        _make_tm(self.widget)
+    def test_enqueue_releases_lock_when_rejected_as_already_in_progress(self):
+        # The partial unique constraint rejects a second uncompleted row as
+        # AlreadyInProgress, and the finally must still release the lock.
+        _make_row(self.widget)
 
         with sync_execution():
             with self.assertRaises(AlreadyInProgress) as ctx:
@@ -391,14 +377,14 @@ class BackgroundPhaseOneMutexTests(TransactionTestCase):
         self.assertFalse(state.is_locked())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')  # no in_progress write
-        # Only the pre-existing row survives — the rejected attempt's
-        # atomic block rolled back.
+        # Only the pre-existing row survives — the rejected attempt rolled
+        # back.
         self.assertEqual(TransitionMessage.objects.count(), 1)
 
     def test_rejection_is_catchable_as_temporarily_unavailable(self):
-        # A consumer holding only the core import can answer "busy, retry
-        # shortly" without importing the background subpackage (#191).
-        _make_tm(self.widget)
+        # A consumer that imports only the core package can answer "busy,
+        # retry shortly" without importing the background subpackage.
+        _make_row(self.widget)
 
         with sync_execution():
             with self.assertRaises(TransitionTemporarilyUnavailable) as ctx:
@@ -406,30 +392,29 @@ class BackgroundPhaseOneMutexTests(TransactionTestCase):
 
         self.assertIsInstance(ctx.exception, AlreadyInProgress)
 
-    def test_phase_one_releases_lock_on_success(self):
-        # D2 (f): on the happy path the lock is released by the same
-        # finally before dispatch — phase 2 then runs unlocked and the
-        # instance ends up unlocked too.
+    def test_enqueue_releases_lock_on_success(self):
+        # On the happy path the same finally releases the lock before dispatch,
+        # so the worker runs unlocked and the instance ends up unlocked.
         with sync_execution():
             self.widget.process.fulfil()
 
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilled')
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
-        tm = TransitionMessage.objects.get()
-        self.assertTrue(tm.is_completed)
+        row = TransitionMessage.objects.get()
+        self.assertTrue(row.is_completed)
 
 
-class PhaseOnePostInsertRecheckTests(TransactionTestCase):
-    """Phase 1 re-verifies the persisted state after the TM insert.
+class EnqueuePostInsertRecheckTests(TransactionTestCase):
+    """Enqueue re-reads the persisted state after it inserts the row.
 
-    On PostgreSQL the insert can block in a speculative-insert wait while a
-    concurrent flight's phase 2 finishes (its row leaves the partial unique
-    index when is_completed flips). Phase 1 is then admitted seconds after
-    its under-the-lock revalidation, against an instance the finished
-    flight already moved to its target state — without the recheck it
-    silently re-ran the transition (observed live on the Heroku harness:
-    two concurrent phase 1s, both HTTP 200, the work executed twice).
+    On PostgreSQL the insert waits for a concurrent insert on the same unique
+    index to finish — the other row leaves the partial unique index when
+    is_completed flips. The waiting insert is then admitted seconds after its
+    under-the-lock check, against an instance the finished attempt has already
+    moved to its target state. Without the recheck the transition ran twice:
+    the Heroku harness showed two callers both getting HTTP 200 and the work
+    executed twice.
     """
 
     def setUp(self):
@@ -441,12 +426,11 @@ class PhaseOnePostInsertRecheckTests(TransactionTestCase):
         real_create = TransitionMessage.objects.create
 
         def create_then_state_moves(**kwargs):
-            # Simulate the speculative-insert wait: by the time the insert
-            # returns, the concurrent flight has completed and moved the
-            # instance to its target state.
-            tm = real_create(**kwargs)
+            # Stand in for the waiting insert: by the time it returns, the
+            # other attempt has finished and moved the instance to its target.
+            row = real_create(**kwargs)
             Widget.objects.filter(pk=self.widget.pk).update(status='fulfilled')
-            return tm
+            return row
 
         with patch.object(TransitionMessage.objects, 'create',
                           side_effect=create_then_state_moves):
@@ -455,27 +439,27 @@ class PhaseOnePostInsertRecheckTests(TransactionTestCase):
                     self.widget.process.fulfil()
 
         self.assertIn('persisted state moved', str(ctx.exception))
-        # The admitted-then-rejected attempt rolled back its row and never
-        # wrote in_progress_state; the lock is released. (The simulated
-        # external write happened inside phase 1's atomic block, so the
-        # rollback reverts it to 'draft' here — in the real cross-connection
-        # race the other flight's 'fulfilled' write survives untouched.)
+        # The rejected attempt rolled its row back, never wrote the
+        # in_progress_state, and released the lock. The simulated write here
+        # happens inside the enqueue transaction, so the rollback reverts it to
+        # 'draft'; across two real connections the other 'fulfilled' write
+        # survives.
         self.assertEqual(TransitionMessage.objects.count(), 0)
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
     def test_recheck_rejection_is_catchable_as_temporarily_unavailable(self):
-        # Same core-import contract as the AlreadyInProgress guard (#191):
-        # the recheck's refusal means "busy, retry shortly", not "forbidden".
+        # Same core-import contract as the AlreadyInProgress guard: the
+        # recheck's refusal means "busy, retry shortly", not "forbidden".
         from unittest.mock import patch
 
         real_create = TransitionMessage.objects.create
 
         def create_then_state_moves(**kwargs):
-            tm = real_create(**kwargs)
+            row = real_create(**kwargs)
             Widget.objects.filter(pk=self.widget.pk).update(status='fulfilled')
-            return tm
+            return row
 
         with patch.object(TransitionMessage.objects, 'create',
                           side_effect=create_then_state_moves):
@@ -486,10 +470,9 @@ class PhaseOnePostInsertRecheckTests(TransactionTestCase):
         self.assertIsInstance(ctx.exception, SourceStateChanged)
 
     def test_retry_from_in_progress_still_admitted(self):
-        # The legitimate recovery path must keep working: instance stranded
-        # in in_progress_state with NO uncompleted row (e.g. after an
-        # unrestorable-row finalization) — re-triggering the transition from
-        # in_progress_state is allowed and completes.
+        # The recovery path must keep working: an instance stranded in the
+        # in_progress_state with no uncompleted row can be driven again from
+        # that state, and it completes.
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
 

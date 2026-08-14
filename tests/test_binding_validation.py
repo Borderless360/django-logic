@@ -8,7 +8,7 @@ only failed deep inside a transition.
 The ambiguous-recovery guardrails (#143 / django_logic.E001) that used to
 live here were retired in 0.12.0 with ``recover_stranded_states``:
 ``in_progress_state`` is background-only now, written atomically with the
-``TransitionMessage`` row, so recovery is TM-scoped and marker sharing is
+``TransitionMessage`` row, so recovery works from that row and marker sharing is
 harmless — pinned below.
 """
 from django.core.exceptions import ImproperlyConfigured

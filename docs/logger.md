@@ -99,8 +99,9 @@ critical section: `Lock`, optionally `Set State in_progress_state`, the
 `TransitionMessage#<pk> created` line, and `Unlock` (since 0.4 enqueue
 holds the state lock only for this section — the uncompleted row is the
 gate afterwards). Execute (the worker, or inline in Sync mode) logs
-`Phase2 Start`, the `SideEffect` lines, `Set State target`, and
-`Complete`. (`Phase2 Start` is the existing log event name.)
+`Execute Start`, the `SideEffect` lines, `Set State target`, and
+`Complete`. Before 0.14.0 that first line read `Phase2 Start`; update any
+log query or alert that matches on the old text.
 
 All side-effects **and** the target-state write run inside a single Celery task
 (`acks_late=True`) — there is no per-callback Celery fan-out. There are no
@@ -113,7 +114,7 @@ tr_id Set State fulfilling
 tr_id TransitionMessage#42 created (queue=django_logic.critical)
 tr_id Unlock instance_key
 ... worker picks up the task ...
-tr_id Phase2 Start fulfil instance_key queue=django_logic.critical
+tr_id Execute Start fulfil instance_key queue=django_logic.critical
 tr_id SideEffect reserve_stock
 tr_id Set State fulfilled
 tr_id Complete

@@ -57,11 +57,11 @@ jobs:
           pip install -e ".[dev]"
           pip install psycopg2-binary
 
-      # tests/background/test_concurrency_pg.py needs real PostgreSQL and was
-      # run by NO job and no make target. It pins the phase-2 row-lock
-      # contract (select_for_update(nowait) => a second worker skips a locked
-      # row), and a 0.12.0 change broke that contract while the SQLite suite
-      # and the stability suite both stayed green. Run it here.
+      # tests/background/test_concurrency_pg.py needs real PostgreSQL, so no
+      # other job and no make target runs it. It pins the row lock the worker
+      # takes to execute a row: select_for_update(nowait) makes a second worker
+      # skip a locked row. A past release broke that rule while the SQLite
+      # suite and the stability suite both stayed green.
       - name: Run PostgreSQL concurrency tests
         env:
           DJANGO_SETTINGS_MODULE: tests.settings_stability

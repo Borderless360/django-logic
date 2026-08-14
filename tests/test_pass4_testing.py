@@ -1,17 +1,16 @@
-"""Pass-4 review pins for ``django_logic.testing``.
+"""Assertions in ``django_logic.testing`` that used to pass while checking
+nothing.
 
-Every test here fails if the fix it names is reverted — the findings were all
-of the "the guard/report says PASS while checking nothing" kind, so each needs
-a test that only the fixed code can satisfy:
+Each test here fails if its guard is removed:
 
-* a bare string where a list of names belongs is a vacuous assertion.
-* ``from_snapshot`` must reject a foreign snapshot and must own the restored
-  instance's ``TransitionMessage`` row.
-* the wrong entrypoint (``transition()`` on a background action) and an
-  injection that never fired must fail immediately, not later for another
-  reason.
-* ``process_name`` derives from ``process_class`` — pinned by a scenario that
-  does not declare one.
+* a bare string where a list of names belongs must raise, not iterate the
+  string one character at a time.
+* ``from_snapshot`` must reject a snapshot of another model, and must own the
+  restored instance's ``TransitionMessage`` row.
+* the wrong entrypoint, and an injection that never fired, must fail at once
+  rather than later for some other reason.
+* ``process_name`` derives from ``process_class`` when a scenario declares no
+  name of its own.
 """
 import datetime
 
@@ -34,7 +33,7 @@ from tests.background.models import (
 from tests.models import Invoice
 
 
-# --- B2: a bare string where a list of names belongs ------------------------
+# --- A bare string where a list of names belongs ----------------------------
 
 
 class BareStringNameArgumentTests(ProcessScenario):
@@ -44,8 +43,8 @@ class BareStringNameArgumentTests(ProcessScenario):
     process_name = 'sync_proc'
 
     def test_assert_not_available_rejects_a_bare_string(self):
-        # 'approve' IS available, yet iterating it per character found no
-        # match — the assertion passed while asserting nothing.
+        # 'approve' is available, but iterating the string one character at a
+        # time matched nothing, so the assertion used to pass.
         widget = self.create_instance(status='draft')
         with self.assertRaises(TypeError) as ctx:
             self.assert_not_available(widget, 'approve')
@@ -53,7 +52,7 @@ class BareStringNameArgumentTests(ProcessScenario):
         self.assertIn("['approve']", str(ctx.exception))
 
     def test_assert_side_effects_not_ran_rejects_a_bare_string(self):
-        # 'se_a' DID run; per-character iteration made the assertion pass.
+        # 'se_a' did run, but per-character iteration made the assertion pass.
         widget = self.create_instance(status='draft')
         self.transition(widget, 'approve')
         with self.assertRaises(TypeError) as ctx:
@@ -85,7 +84,7 @@ class BareStringNameArgumentTests(ProcessScenario):
                     call()
 
 
-# --- B3 + B4 + B-K2: from_snapshot -----------------------------------------
+# --- from_snapshot ----------------------------------------------------------
 
 
 class SnapshotRestoreGuardTests(ProcessScenario):
@@ -102,25 +101,25 @@ class SnapshotRestoreGuardTests(ProcessScenario):
         message = str(ctx.exception)
         self.assertIn('bg_tests.Widget', message)
         self.assertIn(Invoice._meta.label, message)
-        # Nothing was written: the corrupted half-restore never happened.
+        # It wrote nothing, so there is no half-restored instance.
         self.assertFalse(Invoice.objects.exists())
 
-    def test_scenario_from_snapshot_rejects_a_foreign_snapshot(self):
+    def test_scenario_from_snapshot_rejects_a_snapshot_of_another_model(self):
         widget = self.create_instance(status='draft')
         data = self.snapshot(widget)
-        data['model'] = Invoice._meta.label      # the wrong snapshot file
+        data['model'] = Invoice._meta.label
         with self.assertRaises(ValueError):
             self.from_snapshot(data)
 
-    def test_restore_purges_the_existing_transition_message(self):
+    def test_restore_deletes_the_existing_transition_message(self):
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'fulfil', fail_side_effect='bg_ok',
             fail_with=ValueError('snap'))
         data = self.snapshot(widget)
 
-        # The repro DB still holds a row for this instance+process (a stale
-        # orphan, or a row driven since the snapshot was taken).
+        # The database still holds a row for this instance and process, left
+        # over from an earlier run or driven since the snapshot was taken.
         stale = TransitionMessage.objects.get(instance_id=str(widget.pk),
                                               process_name='process')
         stale.errors_count = 99
@@ -141,18 +140,19 @@ class SnapshotRestoreGuardTests(ProcessScenario):
             widget, 'fulfil', fail_side_effect='bg_ok',
             fail_with=ValueError('hung'))
 
-        # A production row that started an attempt, timed out, and had its
-        # cleanup hook blow up as well — the shape a watchdog test replays.
+        # A row from production that started an attempt, timed out, and whose
+        # cleanup hook also raised. A watchdog test replays this shape.
         now = timezone.now().replace(microsecond=123456)
-        tm = TransitionMessage.objects.get(instance_id=str(widget.pk),
-                                          process_name='process')
-        tm.started_at = now - datetime.timedelta(minutes=30)
-        tm.completed_at = now - datetime.timedelta(minutes=20)
-        tm.duration_ms = 601_000
-        tm.failure_side_effect_error = 'cleanup exploded'
-        tm.last_error_dt = now - datetime.timedelta(minutes=25)
-        tm.save(update_fields=['started_at', 'completed_at', 'duration_ms',
-                               'failure_side_effect_error', 'last_error_dt'])
+        transition_message = TransitionMessage.objects.get(
+            instance_id=str(widget.pk), process_name='process')
+        transition_message.started_at = now - datetime.timedelta(minutes=30)
+        transition_message.completed_at = now - datetime.timedelta(minutes=20)
+        transition_message.duration_ms = 601_000
+        transition_message.failure_side_effect_error = 'cleanup exploded'
+        transition_message.last_error_dt = now - datetime.timedelta(minutes=25)
+        transition_message.save(
+            update_fields=['started_at', 'completed_at', 'duration_ms',
+                           'failure_side_effect_error', 'last_error_dt'])
 
         data = self.snapshot(widget)
         for key in ('started_at', 'completed_at', 'duration_ms',
@@ -165,14 +165,15 @@ class SnapshotRestoreGuardTests(ProcessScenario):
         restored = self.from_snapshot(data)
         replayed = TransitionMessage.objects.get(
             instance_id=str(restored.pk), process_name='process')
-        self.assertEqual(replayed.started_at, tm.started_at)
-        self.assertEqual(replayed.completed_at, tm.completed_at)
-        self.assertEqual(replayed.last_error_dt, tm.last_error_dt)
+        self.assertEqual(replayed.started_at, transition_message.started_at)
+        self.assertEqual(replayed.completed_at, transition_message.completed_at)
+        self.assertEqual(replayed.last_error_dt,
+                         transition_message.last_error_dt)
         self.assertEqual(replayed.duration_ms, 601_000)
         self.assertEqual(replayed.failure_side_effect_error, 'cleanup exploded')
 
 
-# --- B5: the wrong entrypoint for a background transition ------------------
+# --- The wrong entrypoint for a background transition ------------------------
 
 
 class BackgroundEntrypointGuardTests(ProcessScenario):
@@ -183,9 +184,9 @@ class BackgroundEntrypointGuardTests(ProcessScenario):
 
     @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='celery'))
     def test_transition_refuses_a_background_action_under_celery_mode(self):
-        # A consumer test env on the global default: pre-fix this enqueued a
-        # task no worker runs and the test failed later, elsewhere, for the
-        # wrong reason — with an uncompleted TransitionMessage left behind.
+        # A test environment left on the global default. This used to enqueue a
+        # task no worker runs, so the test failed later and somewhere else, with
+        # an uncompleted row left behind.
         widget = self.create_instance(status='draft')
         with self.assertRaises(AssertionError) as ctx:
             self.transition(widget, 'fulfil')
@@ -210,8 +211,8 @@ class BackgroundEntrypointGuardTests(ProcessScenario):
 
 
 class MixedNamesakeEntrypointTests(ProcessScenario):
-    """A sync + background namesake pair: ``transition()`` legitimately drives
-    the SYNC declaration, so the guard must not refuse it."""
+    """One action_name declared both synchronously and in the background.
+    ``transition()`` drives the synchronous one, so the guard must allow it."""
 
     process_class = MixedSyncBgProcess
     model = Conversation
@@ -225,7 +226,7 @@ class MixedNamesakeEntrypointTests(ProcessScenario):
         self.assert_state(conversation, 'archived_sync')
 
 
-# --- B6: an injection that never fired must not borrow another hook's alibi -
+# --- An injection that never fired must not pass on another hook's error ----
 
 
 class InjectionNeverFiredTests(ProcessScenario):

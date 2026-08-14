@@ -1,16 +1,13 @@
-"""D1 + D3 regression tests (0.4 stability hardening).
+"""Two rules that stop a transition from overwriting a concurrent state change.
 
-D1 — under-the-lock revalidation: ``Transition.change_state`` and
-``BackgroundTransition.change_state`` must re-read the *persisted* state
-after acquiring the lock and refuse to run when a concurrent transition
-has already moved the row (validate-then-lock TOCTOU). On rejection the
-lock must be released, no side-effects may run, and (for background)
-no ``TransitionMessage`` row may be created.
+``Transition.change_state`` and ``BackgroundTransition.change_state`` re-read
+the persisted state after they take the lock, and refuse when another
+transition has already moved the row. On refusal the lock is released, no
+side-effect runs, and no ``TransitionMessage`` row is left behind.
 
-D3 — ``Action.fail_transition`` must NOT write ``failed_state`` while the
-state is locked by another in-flight transition (an Action holds no lock,
-so writing would clobber the lock holder's state); when unlocked, the
-``failed_state`` write proceeds as before.
+``Action.fail_transition`` skips its ``failed_state`` write while another
+transition holds the lock. An Action takes no lock, so the write would
+overwrite the state the lock holder is about to set.
 """
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -35,7 +32,7 @@ def raise_boom(instance, **kwargs):
 
 
 class TransitionLockRevalidationTests(TestCase):
-    """D1 — persisted-state revalidation under the lock."""
+    """change_state re-reads the persisted state after it takes the lock."""
 
     def setUp(self):
         SIDE_EFFECT_CALLS.clear()
@@ -47,9 +44,8 @@ class TransitionLockRevalidationTests(TestCase):
         cache.clear()
 
     def test_sync_transition_rejects_stale_in_memory_state(self):
-        # D1: flip the DB row out from under the in-memory instance — the
-        # instance attribute still says 'draft' but the persisted state is
-        # 'void', so the under-the-lock revalidation must reject.
+        # Another writer moves the row to 'void'. The in-memory instance still
+        # says 'draft', so the re-read under the lock must refuse.
         Invoice.objects.filter(pk=self.invoice.pk).update(status='void')
         self.assertEqual(self.invoice.status, 'draft')  # in-memory is stale
 
@@ -61,18 +57,15 @@ class TransitionLockRevalidationTests(TestCase):
             transition.change_state(self.state)
 
         self.assertIn('persisted state', str(cm.exception))
-        # The lock acquired by change_state must be released on rejection.
         self.assertFalse(self.state.is_locked())
-        # No side-effects may have run.
         self.assertEqual(SIDE_EFFECT_CALLS, [])
-        # The DB row is untouched — still what the concurrent writer set.
+        # The row still holds what the concurrent writer set.
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'void')
 
     def test_background_transition_rejects_stale_state_no_message_row(self):
-        # D1 (background): same revalidation under BackgroundTransition's
-        # critical-section lock — and crucially BEFORE the durable
-        # TransitionMessage row is created. queue= omitted (optional in 0.4).
+        # BackgroundTransition re-reads inside its own lock, and it does so
+        # before it saves the TransitionMessage row.
         Invoice.objects.filter(pk=self.invoice.pk).update(status='void')
 
         transition = BackgroundTransition(
@@ -84,17 +77,15 @@ class TransitionLockRevalidationTests(TestCase):
                 transition.change_state(self.state)
 
         self.assertIn('persisted state', str(cm.exception))
-        # No durable in-flight marker may exist after the rejection.
+        # No uncompleted row may survive the refusal.
         self.assertEqual(TransitionMessage.objects.count(), 0)
-        # The lock is released by the finally in change_state.
         self.assertFalse(self.state.is_locked())
         self.assertEqual(SIDE_EFFECT_CALLS, [])
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'void')
 
     def test_happy_path_proceeds_when_db_state_matches(self):
-        # D1 control: when the persisted state matches the in-memory state,
-        # the revalidation is a no-op and the transition completes normally.
+        # Control: the persisted state matches, so the transition runs.
         transition = Transition(
             'approve', sources=['draft'], target='approved',
             side_effects=[record_side_effect],
@@ -108,7 +99,7 @@ class TransitionLockRevalidationTests(TestCase):
 
 
 class ActionFailedStateLockGuardTests(TestCase):
-    """D3 — Action skips its failed_state write under a foreign lock."""
+    """An Action skips its failed_state write while another holder has the lock."""
 
     def setUp(self):
         cache.clear()
@@ -123,9 +114,8 @@ class ActionFailedStateLockGuardTests(TestCase):
         cache.clear()
 
     def test_failed_state_write_skipped_while_foreign_lock_held(self):
-        # D3: another transition holds the lock for this instance/field
-        # (the lock key derives from instance + field only, so a second
-        # State object for the same row maps to the same key).
+        # The lock key derives from the instance and the field only, so a
+        # second State object for the same row takes the same lock.
         foreign_state = State(
             Invoice.objects.get(pk=self.invoice.pk), 'status', 'process'
         )
@@ -135,20 +125,19 @@ class ActionFailedStateLockGuardTests(TestCase):
             with self.assertRaises(ValueError):
                 self.action.change_state(self.state)
 
-        # The skip is logged at ERROR on the transition logger.
         self.assertTrue(
             any('skipping failed_state' in message for message in logs.output),
             f"expected 'skipping failed_state' error log, got: {logs.output}",
         )
-        # failed_state was NOT written — the lock holder's state survives.
+        # The lock holder's state survives.
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'draft')
-        # And the foreign lock is still held (Action must not unlock it).
+        # The Action must not release a lock it does not hold.
         self.assertTrue(foreign_state.is_locked())
 
     def test_failed_state_written_when_unlocked(self):
-        # D3 control: with no foreign lock the failed_state write proceeds,
-        # and the side-effect exception still propagates.
+        # Control: with no lock held the failed_state write proceeds, and the
+        # side-effect exception still reaches the caller.
         with self.assertRaises(ValueError):
             self.action.change_state(self.state)
 

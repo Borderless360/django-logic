@@ -49,11 +49,6 @@ def callback_two(instance, **kwargs):
     instance.save(update_fields=['callback_log'])
 
 
-def failure_side_effect(instance, **kwargs):
-    instance.failure_log = (instance.failure_log or '') + 'fse,'
-    instance.save(update_fields=['failure_log'])
-
-
 def failure_callback(instance, **kwargs):
     instance.failure_log = (instance.failure_log or '') + 'fcb,'
     instance.save(update_fields=['failure_log'])
