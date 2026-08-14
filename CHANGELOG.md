@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-08-14
+
+Documentation only. No engine change, so upgrading from 0.14.0 changes no
+behaviour.
+
+### Changed
+
+- **Docs: declarations are specifications** (#205). The README states the
+  design principle — write every process and usage out in full; duplication
+  in declarations is acceptable and usually preferable — with a
+  before/after example, the data-dependent-outcome ("verdict") callback
+  pattern next to the one-in-flight gate, a note in the nested-processes
+  recipe, and the rule in CLAUDE.md for AI tools.
+
 ## [0.14.0] — 2026-08-14
 
 ### Removed (breaking) — the second diet
@@ -67,12 +81,6 @@ growth defended the engine's own machinery).
 
 ### Changed
 
-- **Docs: declarations are specifications** (#205). The README states the
-  design principle — write every process and usage out in full; duplication
-  in declarations is acceptable and usually preferable — with a
-  before/after example, the data-dependent-outcome ("verdict") callback
-  pattern next to the one-in-flight gate, a note in the nested-processes
-  recipe, and the rule in CLAUDE.md for AI tools.
 - The testing-guide scenario catalog is five canonical scenarios; the
   other shapes stay pinned in `tests/` and the guide points there.
 - Kept, deviating from the diet plan: `retry_pending` and
