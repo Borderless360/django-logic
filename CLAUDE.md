@@ -84,8 +84,8 @@ out in full — explicit `sources`, `target`, `conditions`, `side_effects`,
 Duplication in declarations is acceptable and usually preferable: it tells
 how the process behaves; a builder that assembles transitions tells how the
 code works and hides the line a reviewer came to check. The same rule holds
-at usage sites: drive `instance.process.action(...)` literally, never through
-name-string dispatch.
+where the process is used: write `instance.process.action(...)` literally,
+never `getattr(process, action_name)` with the name held in a variable.
 
 ## Non-negotiable rules
 

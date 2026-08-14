@@ -327,10 +327,10 @@ behave?" — not "how is this code structured?". Write it for that reader:
   declarations tell how the *process* works; a builder that assembles
   transitions tells how the *code* works, and hides the one line the
   reader came to check.
-- **The same rule applies where the process is used.** Code that drives a
-  process reads `instance.process.approve(...)` literally — no
-  `getattr(process, action_name_variable)` dispatch, no wrapper hiding
-  which transition runs.
+- **The same rule applies where the process is used.** Code that runs a
+  process reads `instance.process.approve(...)` literally — not
+  `getattr(process, action_name)` with the name held in a variable, and
+  not a wrapper that hides which transition runs.
 
 ```python
 # Hard to review: what are refund's sources? Which hooks run on cancel?
@@ -1093,7 +1093,7 @@ Two mechanisms serialize work on a state field, each with its own scope:
 
 The constraint is scoped **per process**. Two independent state machines bound to different fields of the same model — say `status` and `payment_status` — can both have background work in progress.
 
-**Data-dependent outcomes ("verdicts").** A background side effect cannot drive a synchronous transition on its own instance — the row it runs under is still uncompleted, so the gate above refuses it. When the leg's outcome decides the next state (a validation that ends valid or invalid), state the decided call explicitly and run it from the transition's `callbacks`, which execute after the row completes:
+**Data-dependent outcomes ("verdicts").** A background side effect cannot run a synchronous transition on its own instance: its own row is still uncompleted, so the gate above refuses it. When the side effect's result decides the next state (a validation that ends valid or invalid), write the decided call explicitly and run it from the transition's `callbacks`, which execute after the row completes:
 
 ```python
 from functools import partial
@@ -1115,7 +1115,7 @@ BackgroundAction(action_name='run_validation', sources=['validating'],
                  side_effects=[fetch_sheet], callbacks=[apply_verdict])
 ```
 
-Each decision point names the exact transition it runs — no name-string dispatch. Callbacks are best-effort: a worker that dies between completing the row and the callback loses the verdict and leaves the instance where it was — re-drivable, not corrupted.
+Each decision point names the exact transition it runs. Callbacks are best-effort: a worker that dies between completing the row and the callback loses the verdict. The instance stays in its current state, and the operator can run the action again — nothing is corrupted.
 
 To answer "busy, try again shortly" in your own API, read the row through `in_flight()` instead of writing the filter yourself:
 
