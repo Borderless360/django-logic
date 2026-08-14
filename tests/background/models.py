@@ -1,10 +1,9 @@
-"""Models + processes for background-transition tests.
+"""Models and processes for background-transition tests.
 
-Process↔model binding for this app happens in one place only —
-``tests/background/apps.py`` (``BackgroundTestsConfig.ready()``). Binding at
-module import time here would re-create the model→process→actions→model
-circular import (issue #100); ``ready()`` runs after every app's models are
-loaded, so it is the single supported binding site.
+This app binds every process in one place: ``BackgroundTestsConfig.ready()``
+in ``tests/background/apps.py``. Binding here at import time would recreate
+the model to process to actions to model import cycle. ``ready()`` runs after
+every app's models are loaded, so it is the only supported binding site.
 """
 from django.db import models
 
@@ -21,9 +20,8 @@ def bg_boom(instance, **kwargs):
     raise ValueError('boom')
 
 
-# Captures the exact kwargs (values + types) a phase-2 side-effect received,
-# so round-trip tests can assert on what crossed the phase-1/phase-2 boundary
-# (user restoration, datetime->str, context presence) without a DB column.
+# Holds the exact kwargs, values and types, that the last side-effect received
+# on the worker. Round-trip tests read it instead of a database column.
 LAST_KWARGS: dict = {}
 
 
@@ -46,9 +44,9 @@ def bg_failure_callback(instance, **kwargs):
 
 class Widget(models.Model):
     status = models.CharField(max_length=32, default='draft')
-    # R5: a SECOND state field driven by an independent process
-    # (WidgetAuditProcess below). Two state machines on the same row must
-    # be able to have background work in flight at the same time.
+    # A second state field, driven by WidgetAuditProcess below. Two state
+    # machines on one row must be able to run background work at the same
+    # time.
     audit_status = models.CharField(max_length=32, default='clean')
     se_log = models.TextField(default='', blank=True)
     cb_log = models.TextField(default='', blank=True)
@@ -99,7 +97,7 @@ class WidgetProcess(Process):
             failed_state='tb_failed',
             queue='django_logic.slow',
             side_effects=[bg_ok],
-            timeout=60,  # watchdog kicks in after 60s
+            timeout=60,
         ),
         BackgroundAction(
             action_name='sync_inventory',
@@ -125,17 +123,15 @@ class WidgetProcess(Process):
 
 
 def bg_audit_ok(instance, **kwargs):
-    """Harmless side-effect for the audit process (R5 fixtures)."""
+    """Harmless side-effect for the audit process."""
     instance.se_log = (instance.se_log or '') + 'audit_ok,'
     instance.save(update_fields=['se_log'])
 
 
-# R5: an INDEPENDENT process bound to a different state field
-# (Widget.audit_status). The per-process partial unique constraint on
-# TransitionMessage means in-flight work here must not conflict with
-# in-flight work on WidgetProcess ('process') for the same instance.
-# Deliberately declares NO queue= so it exercises the
-# DJANGO_LOGIC['DEFAULT_QUEUE'] fallback ('django_logic').
+# An independent process bound to Widget.audit_status. The unique constraint on
+# TransitionMessage is per process, so an uncompleted row here must not block
+# an uncompleted row on WidgetProcess for the same instance. It declares no
+# queue, so it also covers the DJANGO_LOGIC['DEFAULT_QUEUE'] fallback.
 class WidgetAuditProcess(Process):
     process_name = 'audit_process'
     transitions = [
@@ -150,11 +146,11 @@ class WidgetAuditProcess(Process):
     ]
 
 
-# --- Filtered-default-manager fixtures (issue #90) -------------------------
-# A model whose default manager hides archived rows. The background runner
-# must reload instances via _base_manager, or archiving an instance between
-# phase 1 and phase 2 makes the restore raise DoesNotExist and the message
-# is marked completed with the instance stranded in in_progress_state.
+# --- Filtered default manager ----------------------------------------------
+# A model whose default manager hides archived rows. The worker must reload
+# instances through _base_manager. Otherwise archiving an instance before the
+# worker runs makes the reload raise DoesNotExist, the row completes, and the
+# instance is stranded in its in_progress_state.
 
 
 class ActiveOnlyManager(models.Manager):
@@ -166,8 +162,8 @@ class ArchivableWidget(models.Model):
     status = models.CharField(max_length=32, default='draft')
     archived = models.BooleanField(default=False)
 
-    # Filtered manager first = _default_manager. Django's _base_manager
-    # stays a plain unfiltered Manager (no base_manager_name declared).
+    # The filtered manager comes first, so it becomes _default_manager. With
+    # no base_manager_name declared, _base_manager stays unfiltered.
     objects = ActiveOnlyManager()
     all_objects = models.Manager()
 
@@ -194,17 +190,16 @@ class ArchivableProcess(Process):
     ]
 
 
-# --- Nested-process background transitions ---------------------------------
-# Regression fixtures for the phase-2 restore of a BackgroundTransition that
-# lives on a *nested* process. Phase 1 reaches it through the parent's
-# get_available_transitions recursion; phase 2 must descend into
-# nested_processes (runner._find_transition) to restore it. These processes
-# operate on the same Widget.status field as WidgetProcess but are reached via
-# a separate bound property (`parent_process`), so no migration is needed.
+# --- Background transitions on nested processes -----------------------------
+# Enqueue reaches a nested transition through the parent's
+# get_available_transitions recursion, so the worker must also descend into
+# nested_processes to restore it. These processes drive the same Widget.status
+# field as WidgetProcess through a separate accessor (`parent_process`), so no
+# migration is needed.
 
 
 class NestedBgGrandchildProcess(Process):
-    """Two levels deep — proves _find_transition recurses, not just one hop."""
+    """Two levels deep, so the search must recurse and not stop at one hop."""
 
     process_name = 'nested_grandchild'
     transitions = [
@@ -229,8 +224,8 @@ class NestedBgMidProcess(Process):
 
 
 class NestedBgChildProcess(Process):
-    """A nested sub-process that owns durable background transitions. Reached
-    only through its parent's ``nested_processes`` — never bound directly."""
+    """A nested process that owns background transitions. Callers reach it only
+    through its parent's ``nested_processes``; it is never bound directly."""
 
     process_name = 'nested_child'
     transitions = [
@@ -266,26 +261,24 @@ class NestedBgChildProcess(Process):
 
 
 class WidgetParentProcess(Process):
-    """Parent bound to Widget.status. Declares no background transitions of
-    its own — they live on the nested processes it delegates to."""
+    """Parent bound to Widget.status. It declares no background transitions of
+    its own; they live on the nested processes it delegates to."""
 
     process_name = 'parent_process'
     nested_processes = [NestedBgChildProcess, NestedBgMidProcess]
 
 
-# --- Condition-disambiguated nested background transitions (issue #98) ------
-# A ConversationProcess routes per messaging integration via two nested
-# processes (Gmail/Dummy), each declaring background transitions that SHARE an
-# action_name, selected by a condition on the instance (source_integration).
-# This is exactly the polymorphism the synchronous path always supported;
-# issue #98 makes it work for durable background transitions too: phase 1
-# records the owning nested process class on the TransitionMessage, and phase 2
-# restores that exact transition without re-evaluating the condition.
+# --- Nested background transitions chosen by a condition --------------------
+# ConversationProcess routes per messaging integration through two nested
+# processes, Gmail and Dummy. Both declare background transitions that share an
+# action_name, and a condition on the instance picks one. Enqueue records the
+# owning nested process class on the row, and the worker restores that exact
+# transition without evaluating the condition again.
 
 
 class Conversation(models.Model):
     status = models.CharField(max_length=32, default='open')
-    # The discriminator the nested processes' conditions key on.
+    # The field the nested processes' conditions read.
     source_integration = models.CharField(max_length=32, default='gmail')
     se_log = models.TextField(default='', blank=True)
     cb_log = models.TextField(default='', blank=True)
@@ -313,8 +306,8 @@ def conv_send_dummy(instance, **kwargs):
 
 
 class GmailConversationProcess(Process):
-    """Per-integration nested process; its transitions are selected when the
-    instance's ``source_integration == 'gmail'``."""
+    """Nested process for one integration. Its transitions are chosen when the
+    instance's ``source_integration`` is ``'gmail'``."""
 
     process_name = 'gmail_conversation'
     transitions = [
@@ -370,21 +363,19 @@ class DummyConversationProcess(Process):
 
 
 class ConversationProcess(Process):
-    """Bound parent. Declares no transitions of its own — generic callers just
-    invoke ``conversation.process.send_message_via_integration(...)`` and the
-    nested processes' conditions route to the right integration."""
+    """Bound parent with no transitions of its own. A caller invokes
+    ``conversation.process.send_message_via_integration(...)`` and the nested
+    processes' conditions route the call to the right integration."""
 
     process_name = 'process'
     nested_processes = [GmailConversationProcess, DummyConversationProcess]
 
 
-# Overlapping-condition sibling background transitions (issue #98). The relaxed
-# validator allows a shared background action_name across distinct nested
-# classes regardless of whether the conditions are mutually exclusive — so a
-# misconfiguration with overlapping conditions is caught at RUNTIME (phase 1),
-# not at class creation, exactly like duplicate synchronous action_names. These
-# fixtures let a test pin that the phase-1 ambiguity raises cleanly, before any
-# in_progress_state write or TransitionMessage row.
+# Two nested background transitions that share an action_name and whose
+# conditions both pass. The validator allows a shared background action_name
+# across nested classes, so this misconfiguration is caught at enqueue time,
+# just like duplicate synchronous action_names. These fixtures let a test pin
+# that enqueue raises before it writes an in_progress_state or a row.
 
 
 def conv_always(instance, **kwargs):
@@ -426,11 +417,11 @@ class AmbiguousConversationProcess(Process):
     nested_processes = [AmbiguousAProcess, AmbiguousBProcess]
 
 
-# Two nested BackgroundActions that SHARE an action_name with IDENTICAL sources
-# and no in_progress_state — the worst-case for an owner-less restore (issue #98
-# review finding): the phase-2 state guard checks only ``current in sources`` and
-# so cannot tell the siblings apart. A row that lost its owner must NOT be
-# resolved by first-match here, or the wrong integration's side-effects fire.
+# Two nested BackgroundActions that share an action_name, have identical
+# sources, and declare no in_progress_state. The worker's state guard only
+# checks that the current state is in sources, so it cannot tell them apart. A
+# row with no recorded owner must not resolve to the first match here, or the
+# wrong integration's side-effects run.
 
 
 def conv_act_a(instance, **kwargs):
@@ -474,10 +465,10 @@ class SharedActionConversationProcess(Process):
     nested_processes = [SharedActionAProcess, SharedActionBProcess]
 
 
-# A synchronous transition and a background transition SHARING an action_name in
-# one process, routed by a condition on the instance (issue #98: this is allowed
-# now that phase 2 filters to is_background — the sync namesake is invisible to
-# restore). 'archive' runs inline for gmail and durably for dummy.
+# A synchronous transition and a background transition that share an
+# action_name in one process, routed by a condition on the instance. The worker
+# only looks at background transitions, so the synchronous namesake is
+# invisible to it. 'archive' runs inline for gmail and durably for dummy.
 
 
 def conv_sync_archive(instance, **kwargs):
@@ -512,14 +503,12 @@ class MixedSyncBgProcess(Process):
     ]
 
 
-# --- Test-local processes attached to Widget -------------------------------
-# These were previously defined and bound inside their test modules. They live
-# here so that every bind_model_process call for this app is centralised in
-# apps.py (the single binding site); the tests import these symbols.
+# --- Processes attached to Widget for individual test modules ---------------
+# They live here so every bind_model_process call for this app stays in
+# apps.py. The test modules import these symbols.
 
 
-# Used by tests/test_scenario.py::GuardedApprovalScenario — a minimal process
-# with a condition + permission, bound under the `guard` process name.
+# A minimal process with one condition and one permission, bound as `guard`.
 
 def _stock_ok(instance):
     return getattr(instance, '_stock_available', True)
@@ -542,10 +531,9 @@ class ScenarioGuardProcess(Process):
     ]
 
 
-# Used by tests/test_issue_fixes_testing.py (#96) — `approve` chains into
-# `notify` via next_transition; the follow-up's side-effect must be tracked
-# even though only `approve` was driven. ``RAN`` records call order for the
-# test's assertions.
+# `approve` chains into `notify` through next_transition. The follow-up's
+# side-effect must be tracked even though the test only drives `approve`.
+# ``RAN`` records the call order.
 
 RAN: list = []
 
@@ -577,18 +565,16 @@ class WidgetChainProcess(Process):
     ]
 
 
-# --- Scenario behavior fixtures (behavior-focused process tests) ----------
-# Processes that exercise the sync Transition/Action matrix and the
-# background->background next_transition chain, driven through the real
-# Process entrypoint by ProcessScenario tests. Observables are se_log/cb_log
-# (appended markers) so tests assert on how the OBJECT changes, not on
-# framework return values. Bound in tests/background/apps.py (the single
-# binding site) under distinct process_names on Widget/Conversation.
+# --- Fixtures for ProcessScenario behaviour tests ---------------------------
+# These processes cover the synchronous Transition and Action matrix and the
+# background-to-background next_transition chain. Every side-effect appends a
+# marker to se_log or cb_log, so a test asserts on how the object changed
+# rather than on a return value.
 
 
 def _se(marker):
-    """Side-effect factory: append ``marker`` to se_log. __name__ is stable
-    so track()/assert_side_effects_ran can name it."""
+    """Return a side-effect that appends ``marker`` to se_log. Its __name__ is
+    stable so track() and assert_side_effects_ran can refer to it."""
     def fn(instance, **kwargs):
         instance.se_log = (instance.se_log or '') + marker + ','
         instance.save(update_fields=['se_log'])
@@ -597,7 +583,7 @@ def _se(marker):
 
 
 def _cb(marker):
-    """Callback factory: append ``marker`` to cb_log."""
+    """Return a callback that appends ``marker`` to cb_log."""
     def fn(instance, **kwargs):
         instance.cb_log = (instance.cb_log or '') + marker + ','
         instance.save(update_fields=['cb_log'])
@@ -605,15 +591,15 @@ def _cb(marker):
     return fn
 
 
-# Module-global observables for behaviors that se_log/cb_log can't express:
-# failure-hook ordering across the fse/fcb boundary, and kwargs capture.
+# Two things se_log and cb_log cannot record: the order of the failure hooks,
+# and the kwargs a side-effect received.
 SYNC_ORDER: list = []
 SYNC_LAST_KWARGS: dict = {}
 
 
 def _fcb(marker):
-    """Failure-callback: append ``fcb_<marker>`` to cb_log AND record the
-    cross-hook ordering in SYNC_ORDER."""
+    """Return a failure callback that appends ``fcb_<marker>`` to cb_log and
+    records its position in SYNC_ORDER."""
     def fn(instance, **kwargs):
         instance.cb_log = (instance.cb_log or '') + 'fcb_' + marker + ','
         instance.save(update_fields=['cb_log'])
@@ -623,20 +609,20 @@ def _fcb(marker):
 
 
 def sync_boom(instance, **kwargs):
-    """Side-effect that always raises — the injection target for failure
-    tests (fail_side_effect='sync_boom')."""
+    """Side-effect that always raises. Failure tests target it with
+    fail_side_effect='sync_boom'."""
     raise ValueError('sync boom')
 
 
 def sync_cb_boom(instance, **kwargs):
-    """Callback that always raises — proves a callback exception is
-    swallowed (best-effort) and the target state is kept."""
+    """Callback that always raises, so a test can check that the engine
+    swallows the exception and keeps the target state."""
     raise ValueError('callback boom')
 
 
 def sync_capture(instance, **kwargs):
-    """Side-effect that records the kwargs it received into SYNC_LAST_KWARGS
-    so a test can assert on kwargs forwarding / transition-context chaining."""
+    """Side-effect that records its kwargs in SYNC_LAST_KWARGS, so a test can
+    check kwargs forwarding and transition-context chaining."""
     instance.se_log = (instance.se_log or '') + 'captured,'
     instance.save(update_fields=['se_log'])
     SYNC_LAST_KWARGS.clear()
@@ -644,16 +630,16 @@ def sync_capture(instance, **kwargs):
 
 
 def sync_capture_fail(instance, exception, **kwargs):
-    """Failure-callback that records kwargs + the exception, so a test can
-    assert failure hooks receive the ``exception`` kwarg and forwarded args."""
+    """Failure callback that records its kwargs and the exception, so a test
+    can check that failure hooks receive both."""
     SYNC_LAST_KWARGS.clear()
     SYNC_LAST_KWARGS.update(kwargs)
     SYNC_LAST_KWARGS['exception'] = exception
 
 
-# Callback that records the persisted state visible AT CALLBACK TIME, proving
-# the target is written before callbacks run. Reads a fresh row from the DB so
-# it observes the persisted write, not an in-memory attribute.
+# The state stored in the database at the moment each callback ran. The
+# callback below reads a fresh row, so it sees the stored write and not an
+# in-memory attribute.
 CALLBACK_SEEN_STATE: list = []
 
 
@@ -681,14 +667,13 @@ def _is_staff_user(instance, user=None, **kwargs):
 
 
 class WidgetSyncProcess(Process):
-    """Sync Transition/Action matrix on Widget.status, bound as ``sync_proc``.
+    """The synchronous Transition and Action matrix on Widget.status, bound as
+    ``sync_proc``.
 
-    Covers: ordered side-effects + next_transition chaining, the failure
-    path (failed_state + failure_callbacks), a sync
-    Action (no state change on success; failed_state only when unlocked),
-    a swallowed callback exception, same-action-name disambiguation by
-    condition, a permission gate, and kwargs forwarding / failure-hook
-    exception contract.
+    It covers ordered side-effects, next_transition chaining, the failure path,
+    a synchronous Action, a swallowed callback exception, two transitions with
+    one action_name split by a condition, a permission gate, and kwargs
+    forwarding into the failure hooks.
     """
 
     process_name = 'sync_proc'
@@ -703,8 +688,8 @@ class WidgetSyncProcess(Process):
                    failed_state='rejection_failed',
                    side_effects=[_se('reject_attempt')],
                    failure_callbacks=[_fcb('on_fail')]),
-        # Target is written before callbacks run, so a raising callback is
-        # swallowed and the target state survives.
+        # The target is written before callbacks run, so a raising callback
+        # cannot undo it.
         Transition('boom_callback', sources=['draft'], target='boom_done',
                    callbacks=[sync_cb_boom]),
         Action('poke', sources=['draft'],
@@ -722,14 +707,14 @@ class WidgetSyncProcess(Process):
         Transition('staff_only', sources=['draft'], target='staffed',
                    permissions=[_is_staff_user],
                    side_effects=[_se('staff')]),
-        # kwargs forwarding + failure-hook exception contract.
+        # kwargs forwarding, and what the failure hooks receive.
         Transition('capture', sources=['draft'], target='captured',
                    side_effects=[sync_capture]),
         Transition('capture_fail', sources=['draft'], target='captured',
                    failed_state='capture_failed',
                    side_effects=[sync_boom],
                    failure_callbacks=[sync_capture_fail]),
-        # Callback ordering: the target is persisted BEFORE callbacks run.
+        # The target is stored before callbacks run.
         Transition('finalize', sources=['draft'], target='finalized',
                    side_effects=[_se('finalize')],
                    callbacks=[cb_record_seen_state]),
@@ -737,10 +722,10 @@ class WidgetSyncProcess(Process):
 
 
 class WidgetContextProcess(Process):
-    """Two-step sync chain on Widget.status, bound as ``ctx_proc``, for
-    asserting next_transition mints a fresh tr_id and chains root_id /
-    parent_id across the follow-up. The follow-up captures its kwargs into
-    SYNC_LAST_KWARGS via sync_capture."""
+    """A two-step synchronous chain on Widget.status, bound as ``ctx_proc``. It
+    lets a test check that next_transition gives the follow-up a new tr_id and
+    carries root_id and parent_id across. The follow-up records its kwargs in
+    SYNC_LAST_KWARGS."""
 
     process_name = 'ctx_proc'
     transitions = [
@@ -752,9 +737,8 @@ class WidgetContextProcess(Process):
 
 
 class InnerSyncProcess(Process):
-    """Nested sub-process owning a sync transition, reached only via its
-    parent's ``nested_processes`` — proves the parent entrypoint drives a
-    nested transition behaviorally."""
+    """Nested process that owns a synchronous transition, reached only through
+    its parent's ``nested_processes``."""
 
     process_name = 'inner_sync'
     transitions = [
@@ -771,11 +755,9 @@ class WidgetNestedSyncProcess(Process):
 
 
 class WidgetAmbiguousNextProcess(Process):
-    """``start`` chains into ``follow``, but TWO ``follow`` transitions are
-    available from ``started`` with no disambiguating condition. The
-    follow-up must be REFUSED (neither runs) rather than picking one
-    arbitrarily — the behavior the old mock-based next_transition test
-    pinned, now expressed through the entrypoint on a real object."""
+    """``start`` chains into ``follow``, but two ``follow`` transitions are
+    available from ``started`` and no condition separates them. The engine must
+    refuse the follow-up and run neither, instead of picking one."""
 
     process_name = 'ambig_next'
     transitions = [
@@ -789,14 +771,13 @@ class WidgetAmbiguousNextProcess(Process):
 
 
 class WidgetBgChainProcess(Process):
-    """Background -> background next_transition chain on Widget.status,
+    """A background-to-background next_transition chain on Widget.status,
     bound as ``bg_chain``.
 
-    ``bg_fulfil`` completes into ``bg_export`` via next_transition. This is
-    the regression fixture for the untested owner-overwrite path: the
-    follow-up TransitionMessage must record its OWN owner, not the
-    predecessor's, and the object must pass through every intermediate
-    state (chain_fulfilling -> fulfilled -> chain_exporting -> exported).
+    ``bg_fulfil`` chains into ``bg_export``. The follow-up row must record its
+    own owner and not the first transition's, and the widget must pass through
+    every state on the way: chain_fulfilling, fulfilled, chain_exporting,
+    exported.
     """
 
     process_name = 'bg_chain'
@@ -816,11 +797,10 @@ class WidgetBgChainProcess(Process):
     ]
 
 
-# Nested condition-disambiguated background chain on Conversation. Each
-# integration owns a bg ``send`` (open -> open) that chains into a bg
-# ``report`` (open -> reported) via next_transition. The follow-up must
-# record the NESTED owning class (Gmail/Dummy), not the bound parent and
-# not the predecessor — the riskiest owner-overwrite case for issue #98.
+# A nested background chain on Conversation, split by condition. Each
+# integration owns a background ``send`` (open -> open) that chains into a
+# background ``report`` (open -> reported). The follow-up row must record the
+# nested class that owns it, not the bound parent and not the first transition.
 
 
 def chain_is_gmail(instance, **kwargs):
@@ -890,19 +870,17 @@ class DummyChainProcess(Process):
 
 
 class ChainConversationProcess(Process):
-    """Bound parent (``chain_conv``) delegating to per-integration nested
-    bg chain processes. Generic callers invoke ``conversation.chain_conv.send()``
-    and conditions route to the right integration's chain."""
+    """Bound parent (``chain_conv``) that delegates to one nested chain process
+    per integration. A caller invokes ``conversation.chain_conv.send()`` and the
+    conditions route it to the right chain."""
 
     process_name = 'chain_conv'
     nested_processes = [GmailChainProcess, DummyChainProcess]
 
 
-# --- Ambiguous same-action-name transitions with OVERLAPPING conditions -----
-# Two synchronous 'clash' transitions whose conditions BOTH pass. The resolve
-# step must refuse (raise TransitionNotAllowed) rather than pick one — with no
-# state write and no side-effect. Pins the resolve-time ambiguity contract that
-# the previous test only claimed to (it never actually created ambiguity).
+# --- Two transitions with one action_name and conditions that both pass ------
+# The engine must refuse and raise TransitionNotAllowed rather than pick one,
+# with no state write and no side-effect.
 
 
 class WidgetAmbiguousConditionProcess(Process):
@@ -915,31 +893,28 @@ class WidgetAmbiguousConditionProcess(Process):
     ]
 
 
-# --- Process-level conditions & permissions (Process.is_valid) ---------------
-# A process-level condition/permission gates the WHOLE process — its own
-# transitions AND every nested process's transitions — because
-# _iter_available_with_owner short-circuits the entire subtree when
-# is_valid(user) is False. These fixtures restore the class-level guard
-# coverage (and the nested-inheritance case) that the migration dropped.
+# --- Conditions and permissions declared on the process ----------------------
+# A condition or permission on the process class gates the whole process: its
+# own transitions and every nested process's transitions. The engine skips the
+# whole subtree when the process is not valid for the caller.
 
 
 def process_gate_open(instance, **kwargs):
-    """Process-level condition: the process is inert unless the instance is
-    flagged 'gate_open'. Gates the class's own transitions and its nested
-    process's transitions alike."""
+    """Condition on the process class. Nothing in the process is available
+    unless the instance carries the 'gate_open' flag."""
     return 'gate_open' in (instance.kwargs_seen or [])
 
 
 def process_requires_staff(instance, user=None, **kwargs):
-    """Process-level permission: no transition is available/allowed without a
-    staff user. (Per the engine contract, a permission is only enforced when a
-    user is supplied; user=None means 'no user context'.)"""
+    """Permission on the process class. No transition is available without a
+    staff user. The engine only enforces a permission when the caller supplies
+    a user, so user=None means there is no user context."""
     return bool(user and getattr(user, 'is_staff', False))
 
 
 class GuardedInnerProcess(Process):
-    """Nested process with NO guards of its own — reached only through the
-    guarded parent, so the parent's process-level guard is what gates it."""
+    """Nested process with no guards of its own. Callers reach it only through
+    the guarded parent, so the parent's guards are what gate it."""
 
     process_name = 'guarded_inner'
     transitions = [
@@ -949,8 +924,8 @@ class GuardedInnerProcess(Process):
 
 
 class WidgetProcGuardProcess(Process):
-    """Bound as ``proc_guard``. Class-level ``conditions`` + ``permissions``
-    gate BOTH ``go`` and the nested ``inner_go``."""
+    """Bound as ``proc_guard``. Its ``conditions`` and ``permissions`` gate both
+    ``go`` and the nested ``inner_go``."""
 
     process_name = 'proc_guard'
     conditions = [process_gate_open]
@@ -962,16 +937,14 @@ class WidgetProcGuardProcess(Process):
     nested_processes = [GuardedInnerProcess]
 
 
-# --- Cross-machine failure cascade (fundamental problem.md §3) ---------------
-# THE ANTI-PATTERN, pinned so an engine change can't silently alter it: an
-# outer transition's side-effect drives a transition on a DIFFERENT instance
-# (a second state machine) and lets that inner failure propagate. The cascade
-# then is: inner lands in its failed_state with inner failure hooks run -> the
-# exception propagates -> outer's fail_transition runs (outer -> its
-# failed_state, outer failure hooks run) -> outer's side-effects declared AFTER
-# the nested call are SKIPPED -> outer's success callbacks are SKIPPED -> the
-# exception reaches the caller of the outer transition. This is exactly the
-# 0.1.6->0.2.0 cascade; one journey test locks every leg of it.
+# --- Failure that cascades across two state machines -------------------------
+# These fixtures pin the anti-pattern so no engine change can alter it quietly.
+# An outer transition's side-effect drives a transition on a different instance
+# and lets the inner failure propagate. The result: the inner instance lands in
+# its failed_state and runs its failure hooks, the exception propagates, the
+# outer transition lands in its own failed_state and runs its failure hooks, the
+# outer side-effects declared after the nested call are skipped, the outer
+# success callbacks are skipped, and the exception reaches the outer caller.
 
 CASCADE_ORDER: list = []
 
@@ -1005,21 +978,20 @@ def cascade_outer_before(instance, **kwargs):
 
 def cascade_call_inner(instance, inner_pk=None, **kwargs):
     """The anti-pattern: a side-effect drives another machine's transition and
-    lets its exception propagate (never re-raise a child error into a parent —
-    see CLAUDE.md rule 3). The inner pk is forwarded as a caller kwarg."""
+    lets its exception propagate. Never re-raise a child error into a parent."""
     CASCADE_ORDER.append('outer:call_inner')
     Widget.objects.get(pk=inner_pk).cascade_inner.inner_fulfil()
 
 
 def cascade_outer_after(instance, **kwargs):
-    # Declared AFTER the nested call; must be SKIPPED once it raises.
+    # Declared after the nested call, so it must be skipped once that raises.
     CASCADE_ORDER.append('outer:after')
     instance.se_log = (instance.se_log or '') + 'outer_after,'
     instance.save(update_fields=['se_log'])
 
 
 def cascade_outer_cb(instance, **kwargs):
-    # Success callback; must NOT run when the transition fails.
+    # A success callback must not run when the transition fails.
     CASCADE_ORDER.append('outer:success_callback')
     instance.cb_log = (instance.cb_log or '') + 'outer_cb,'
     instance.save(update_fields=['cb_log'])

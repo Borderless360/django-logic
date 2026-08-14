@@ -1,22 +1,20 @@
-"""Regressions for GitHub issues #94, #95, #96 (django_logic.testing).
+"""Regressions in ``django_logic.testing``.
 
-#94 — a requested ``fail_side_effect`` that never fires must fail the test
-loudly instead of silently running the happy path.
-
-#95 — ``snapshot``/``from_snapshot`` must round-trip JSONField values as
-real dicts/lists (not Python reprs) and return an instance whose in-memory
-attributes are DB-coerced field types.
-
-#96 — tracking instruments the whole process tree, so hooks executed via
-``next_transition`` follow-ups are visible to the side-effect assertions.
+* A requested ``fail_side_effect`` that never fires must fail the test loudly
+  instead of quietly running the happy path.
+* ``snapshot`` and ``from_snapshot`` must round-trip JSONField values as real
+  dicts and lists, and return an instance whose attributes carry the database
+  field types.
+* Tracking instruments the whole process tree, so hooks that run through a
+  ``next_transition`` follow-up are visible to the side-effect assertions.
 """
 from django.test import override_settings
 
 from django_logic.testing import ProcessScenario
 from django_logic.testing.snapshot import _jsonable, from_snapshot, snapshot
-# WidgetChainProcess (approve chains into notify via next_transition) and its
-# RAN call-order log live in tests.background.models and are bound in
-# tests/background/apps.py — the single binding site for the app.
+# WidgetChainProcess chains approve into notify, and its RAN call log lives in
+# tests.background.models. tests/background/apps.py is the one place that binds
+# it.
 from tests.background.models import (
     RAN, Widget, WidgetChainProcess, WidgetProcess,
 )
@@ -24,7 +22,7 @@ from tests import dl_settings
 
 
 class InjectionMustFireTests(ProcessScenario):
-    """#94 — silent injection no-ops are now loud failures."""
+    """An injection that never fires is a loud failure, not a silent no-op."""
 
     process_class = WidgetProcess
     model = Widget
@@ -41,9 +39,9 @@ class InjectionMustFireTests(ProcessScenario):
         self.assertIn('does not match any side-effect', str(ctx.exception))
 
     def test_existing_hook_that_never_fires_fails_the_drive(self):
-        # 'bg_ok' exists (on fulfil and others) but 'cancel' is a sync
-        # transition with no side-effects — the injection can never fire.
-        # Pre-fix this recorded OK and the test became a happy-path run.
+        # 'bg_ok' exists on other transitions, but 'cancel' is synchronous and
+        # has no side-effects, so the injection can never fire. It used to
+        # record a pass and quietly run the happy path.
         widget = self.create_instance()
         with self.assertRaises(AssertionError) as ctx:
             self.transition(widget, 'cancel',
@@ -61,7 +59,7 @@ class InjectionMustFireTests(ProcessScenario):
 
 
 class TrackingCoversNextTransitionTests(ProcessScenario):
-    """#96 — hooks run via next_transition are tracked."""
+    """Hooks that run through next_transition are tracked."""
 
     process_class = WidgetChainProcess
     model = Widget
@@ -77,14 +75,14 @@ class TrackingCoversNextTransitionTests(ProcessScenario):
         self.transition(widget, 'approve')
         self.assert_state(widget, 'notified')          # the chain ran
         self.assertEqual(RAN, ['chain_first', 'chain_followup'])
-        # Pre-fix, only 'approve' was instrumented: chain_followup ran but
-        # was invisible — assert_side_effects_ran could not see it and
-        # assert_side_effects_not_ran(['chain_followup']) passed vacuously.
+        # Only 'approve' used to be instrumented, so chain_followup ran unseen
+        # and assert_side_effects_not_ran(['chain_followup']) passed for the
+        # wrong reason.
         self.assert_side_effects_ran(['chain_first', 'chain_followup'])
 
 
 class SnapshotFidelityTests(ProcessScenario):
-    """#95 — JSONField round-trip + DB-coerced attribute types."""
+    """snapshot round-trips JSONField values and database field types."""
 
     process_class = WidgetProcess
     model = Widget
@@ -117,8 +115,8 @@ class SnapshotFidelityTests(ProcessScenario):
         data = snapshot(widget, state_field='status')
         widget.delete()
         restored = from_snapshot(data, model=Widget)
-        # refresh_from_db() ran: JSONField attrs are real lists, pk is the
-        # model's real pk type, not whatever the JSON file carried.
+        # refresh_from_db() ran, so JSONField attributes are real lists and pk
+        # has the model's field type, not the type the JSON file carried.
         self.assertIsInstance(restored.kwargs_seen, list)
         self.assertEqual(restored.pk, data['pk'])
 
@@ -128,9 +126,9 @@ class SnapshotFidelityTests(ProcessScenario):
         self.assertIn('unsupported field value type', str(ctx.exception))
 
     def test_snapshot_round_trips_transition_message_field_name(self):
-        # A restored row must take the same phase-2 path as the production
-        # row — field_name='' would route it down the legacy inference
-        # fallback instead of the recorded-field path.
+        # A restored row must take the same worker path as a production row.
+        # With field_name='' the worker infers the state field instead of
+        # reading the recorded one.
         from django_logic.background import sync_execution
         from django_logic.background.models import TransitionMessage
 
@@ -143,12 +141,12 @@ class SnapshotFidelityTests(ProcessScenario):
         TransitionMessage.objects.all().delete()
         widget.delete()
         restored = from_snapshot(data, model=Widget)
-        tm = TransitionMessage.objects.get(instance_id=str(restored.pk))
-        self.assertEqual(tm.field_name, 'status')
+        row = TransitionMessage.objects.get(instance_id=str(restored.pk))
+        self.assertEqual(row.field_name, 'status')
 
 
 class FailureHookAssertionsTests(ProcessScenario):
-    """The failure-hook tracker sinks are assertable (review follow-up)."""
+    """The failure hooks the tracker records are assertable."""
 
     process_class = WidgetProcess
     model = Widget
@@ -157,8 +155,8 @@ class FailureHookAssertionsTests(ProcessScenario):
 
     @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=1))
     def test_failure_hooks_are_assertable(self):
-        # 'crash' declares failure_callbacks=[bg_failure_callback];
-        # terminal at MAX_ERRORS=1, so the failure callback completes.
+        # 'crash' declares failure_callbacks=[bg_failure_callback], and
+        # MAX_ERRORS=1 makes the first attempt terminal, so the callback runs.
         widget = self.create_instance()
         self.background_transition(widget, 'crash',
                                    fail_side_effect='bg_boom',

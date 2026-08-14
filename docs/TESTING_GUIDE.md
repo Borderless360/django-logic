@@ -388,8 +388,8 @@ class FulfilmentTests(TestCase):     # DJANGO_LOGIC['BACKGROUND_EXECUTION']='syn
         with patch('myapp.services.courier_client.book', side_effect=CourierError):
             with self.assertRaises(CourierError):
                 order.process.fulfil()
-        tm = TransitionMessage.objects.get(instance_id=str(order.pk))
-        self.assertEqual(tm.errors_count, 1)
+        transition_message = TransitionMessage.objects.get(instance_id=str(order.pk))
+        self.assertEqual(transition_message.errors_count, 1)
 ```
 
 Two lower-level helpers mirror production behaviour exactly:
@@ -399,7 +399,7 @@ from django_logic.background.dispatch import retry_pending
 retry_pending()   # one tick of the periodic starter, inline (sync mode)
 
 from django_logic.background.runner import run_background_transition
-run_background_transition(tm.pk)   # one worker attempt for a specific row
+run_background_transition(transition_message.pk)   # one worker attempt for a specific row
 ```
 
 Use `TransactionTestCase` (or `ProcessScenario`, which extends it) when your
@@ -417,7 +417,7 @@ pyramid backing it:
    ~340 tests): every reproduced defect from the 0.3 stability review has a
    permanent regression test — savepoint isolation of side-effects
    (`tests/background/test_savepoint_isolation.py`), the worker's state guard
-   (`test_phase2_state_guard.py`), the per-process in-flight constraint
+   (`test_worker_state_guard.py`), the per-process in-flight constraint
    (`test_constraint_per_process.py`), restore verification
    (`test_restore_verification.py`), sync/background mutual exclusion
    (`test_sync_background_mutex.py`), and lock revalidation

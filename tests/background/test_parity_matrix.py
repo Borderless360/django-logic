@@ -1,32 +1,29 @@
-"""Sync/background parity contract matrix (#111).
+"""One set of assertions, run against all four transition classes.
 
-The recurring consumer-bug class is divergence: the same hook behaving
-differently when its transition flips between Transition / Action /
-BackgroundTransition / BackgroundAction. This module runs ONE set of
-behavioral assertions against all four transition classes on the same
-model, and declares the intended differences explicitly — so any NEW
-asymmetry fails a test by construction.
+The recurring consumer bug is divergence: the same hook behaves differently when
+its transition changes between Transition, Action, BackgroundTransition and
+BackgroundAction. This module drives all four on the same model and states the
+intended differences, so a new difference fails a test here.
 
-Contracts pinned per class:
-* hook kwargs — identical values AND Python types (the #108 typed
-  round-trip) plus a live ``user``;
-* ``request`` — reaches sync hooks, never background hooks (dropped at
-  phase-1 serialization: the one deliberate asymmetry);
-* serialization is IN THE LOOP for every background drive — an
-  unserializable kwarg fails at phase 1, which is also the realism pin
-  for the testing framework's inline background execution;
-* failure routing — sync raises to the caller and routes failed_state
-  immediately; background absorbs at the caller and routes after
-  retries are exhausted;
+Pinned for every class:
+
+* hook kwargs — the same values and the same Python types, plus a live ``user``;
+* ``request`` reaches synchronous hooks and never background hooks. Enqueue
+  drops it when it serializes the kwargs, and that is the one deliberate
+  difference;
+* every background drive serializes kwargs, so an unserializable kwarg fails at
+  enqueue — inline sync-mode execution included;
+* failure routing — a synchronous transition raises to the caller and writes
+  failed_state at once; a background one absorbs at the caller and writes
+  failed_state once the retries run out;
 * callbacks observe the target state in all four classes;
-* hook ordering — side-effects run while the persisted state is still
-  the source, callbacks only after the target write is observable; on
-  terminal failure, failed_state is written first, then
-  failure_callbacks — the same sequence sync and background;
-* ``next_transition`` — the same background follow-up runs with the
-  same typed kwargs and a live ``user`` whether the parent is sync or
-  background, and never sees ``request``; the declared difference: a
-  sync ``Action`` never chains, a ``BackgroundAction`` does.
+* hook order — side-effects run while the persisted state is still the source,
+  and callbacks run only after the target write is readable. On terminal
+  failure, failed_state is written first and the failure callbacks second;
+* ``next_transition`` — the same background follow-up runs with the same typed
+  kwargs and a live ``user`` whether the parent is synchronous or background,
+  and never sees ``request``. The declared difference: a synchronous ``Action``
+  never chains, a ``BackgroundAction`` does.
 """
 from datetime import datetime, timezone as tz
 from decimal import Decimal
@@ -113,10 +110,10 @@ class ParityProcess(Process):
         BackgroundAction('bg_action', sources=['draft'],
                          side_effects=[record_kwargs, record_order_side_effect],
                          callbacks=[record_callback_state, record_order_callback]),
-        # next_transition parity: one parent per class, every one chaining
-        # into the same background follow-up. The hop accepts both 'draft'
-        # (Action parents change no state) and 'chained_src' (Transition
-        # parents' target).
+        # One chaining parent per class, all into the same background
+        # follow-up. The follow-up accepts 'draft' because Action parents
+        # change no state, and 'chained_src' because Transition parents
+        # write it.
         Transition('sync_transition_chain', sources=['draft'],
                    target='chained_src', next_transition='chain_hop'),
         Action('sync_action_chain', sources=['draft'],
@@ -181,8 +178,8 @@ class ParityMatrixTests(TestCase):
                 self.assertIs(type(results[action][key]), type(value), f'{action}.{key}')
 
     def test_request_reaches_sync_hooks_and_never_background_hooks(self):
-        # The one deliberate asymmetry: a live request cannot cross the
-        # durable phase boundary.
+        # A live request cannot be serialized into the row, so a background
+        # hook never receives one.
         sentinel = object()
         for action in SYNC_ACTIONS:
             _drive(self._fresh(), action, request=sentinel)
@@ -191,12 +188,10 @@ class ParityMatrixTests(TestCase):
             _drive(self._fresh(), action, request=sentinel)
             self.assertNotIn('request', SEEN, action)
 
-    def test_unserializable_kwarg_fails_at_phase1_for_background_only(self):
-        # Serialization is in the loop for every background drive — including
-        # inline/sync-mode execution, which is what makes downstream scenario
-        # tests able to catch serialization bugs at all (the realism pin).
-        # (Sync transitions json-encode kwargs only for logging, so the
-        # functional contract is asserted for the background classes.)
+    def test_unserializable_kwarg_fails_at_enqueue_for_background_only(self):
+        # Every background drive serializes kwargs, inline sync-mode execution
+        # included. That is what lets a scenario test catch a serialization bug
+        # at all. Synchronous transitions encode kwargs only for logging.
         from django.core.exceptions import ImproperlyConfigured
 
         class Blob:
@@ -206,11 +201,10 @@ class ParityMatrixTests(TestCase):
             with self.assertRaises(ImproperlyConfigured, msg=action):
                 _drive(self._fresh(), action, blob=Blob())
 
-    def test_non_finite_float_kwarg_fails_at_phase1_for_background_only(self):
-        # NaN/Infinity pass Python's json.dumps (non-standard tokens) but
-        # are not valid JSON — without the phase-1 guard the failure
-        # surfaces backend-dependently at the row write (issue #118). Same
-        # dispatcher contract as an unserializable kwarg above.
+    def test_non_finite_float_kwarg_fails_at_enqueue_for_background_only(self):
+        # Python's json.dumps writes NaN and Infinity, but neither is valid
+        # JSON. Without the guard at enqueue the failure appears later at the
+        # row write, and differs per database.
         from django.core.exceptions import ImproperlyConfigured
         from django_logic.background.models import TransitionMessage
 
@@ -219,7 +213,7 @@ class ParityMatrixTests(TestCase):
                 with self.assertRaises(
                         ImproperlyConfigured, msg=f'{action} {bad!r}'):
                     _drive(self._fresh(), action, rate=bad)
-        # Phase 1 failed before persisting anything.
+        # Enqueue failed before it wrote anything.
         self.assertFalse(TransitionMessage.objects.exists())
 
     def test_callbacks_observe_the_target_state_in_all_four_classes(self):
@@ -231,14 +225,11 @@ class ParityMatrixTests(TestCase):
             self.assertEqual(CALLBACK_STATE.get('status'), expected[action], action)
 
     def test_side_effects_precede_the_target_write_and_callbacks_follow_it(self):
-        # The callback-state test above pins WHICH state callbacks observe;
-        # this pins the ORDER around the state write: the side-effect runs
-        # while the persisted state is still the SOURCE (this process
-        # declares no in_progress_state; when one is declared, the sync
-        # path and background phase 1 both write it before side-effects
-        # run, so the pre-target contract stays symmetric), and the
-        # callback runs only after the target write is observable. Actions
-        # differ only in the state the callback sees — they never write one.
+        # The test above pins which state callbacks observe; this one pins the
+        # order around the state write. The side-effect runs while the
+        # persisted state is still the source, and the callback runs only after
+        # the target write is readable. Actions differ only in the state the
+        # callback sees, because they never write one.
         expected = {'sync_transition': 'done', 'sync_action': 'draft',
                     'bg_transition': 'done', 'bg_action': 'draft'}
         for action in ALL_ACTIONS:
@@ -251,11 +242,9 @@ class ParityMatrixTests(TestCase):
             )
 
     def test_terminal_failure_order_is_identical_for_both_failure_capable_classes(self):
-        # failed_state is written FIRST, so the failure callbacks observe
-        # the contained state. Every implementation site agrees — the sync
-        # path (Transition.fail_transition), the background terminal attempt
-        # (runner._handle_failure), and the watchdog finalizer that mirrors
-        # it — and that cross-class symmetry is the contract pinned here.
+        # failed_state is written first, so the failure callbacks observe the
+        # contained state. The synchronous path, the worker's terminal attempt
+        # and the watchdog finalizer must all agree on that order.
         from django_logic.background.models import TransitionMessage
         from django_logic.background.runner import run_background_transition
 
@@ -267,14 +256,13 @@ class ParityMatrixTests(TestCase):
             with self.assertRaises(ValueError):
                 _drive(widget, action)
             if action == 'bg_transition':
-                # sync runs the terminal sequence on its only attempt; the
-                # background one runs at MAX_ERRORS — the retry-timing
-                # difference already pinned by the failure-routing tests.
-                tm = TransitionMessage.objects.get(instance_id=str(widget.pk),
-                                                   transition_name=action)
+                # The synchronous path runs the terminal sequence on its only
+                # attempt; the background one runs it at MAX_ERRORS.
+                row = TransitionMessage.objects.get(instance_id=str(widget.pk),
+                                                    transition_name=action)
                 for _ in range(2):
                     with self.assertRaises(ValueError):
-                        run_background_transition(tm.pk)
+                        run_background_transition(row.pk)
             widget.refresh_from_db()
             self.assertEqual(widget.status, 'failed', action)
             results[action] = list(ORDER)
@@ -284,13 +272,10 @@ class ParityMatrixTests(TestCase):
         FAIL['on'] = False
 
     def test_next_transition_chains_equivalently_across_all_four_classes(self):
-        # The parent's class must not change WHAT the follow-up receives:
-        # the same background follow-up runs with the same typed kwargs and
-        # a live user, and request never reaches it — stripped by
-        # NextTransition for a sync parent (#129), dropped at the parent's
-        # own phase 1 for a background parent. The one declared difference:
-        # a sync Action never runs next_transition (see the divergence note
-        # on Action), while a BackgroundAction's phase 2 does.
+        # The parent's class must not change what the follow-up receives: the
+        # same typed kwargs, a live user, and never a request. The one declared
+        # difference is that a synchronous Action never runs next_transition,
+        # while a BackgroundAction does.
         chains = {'sync_transition_chain': True, 'sync_action_chain': False,
                   'bg_transition_chain': True, 'bg_action_chain': True}
         for parent in CHAIN_PARENTS:
@@ -322,11 +307,10 @@ class ParityMatrixTests(TestCase):
         self.assertEqual(widget.status, 'failed')
 
     def test_background_failure_rolls_back_and_routes_after_retries(self):
-        # In sync execution mode phase 2 runs inline and PROPAGATES the
-        # exception (celery mode absorbs it at the caller) — but the durable
-        # contract is identical: each attempt's writes roll back, the
-        # TransitionMessage counts the error, and exhaustion routes
-        # failed_state.
+        # In sync mode the worker step runs inline and propagates the
+        # exception; celery mode absorbs it at the caller. The durable contract
+        # is the same either way: each attempt's writes roll back, the row
+        # counts the error, and running out of retries writes failed_state.
         from django_logic.background.models import TransitionMessage
         from django_logic.background.runner import run_background_transition
 
@@ -336,15 +320,15 @@ class ParityMatrixTests(TestCase):
             _drive(widget, 'bg_transition')
         widget.refresh_from_db()
         self.assertNotEqual(widget.status, 'done')
-        tm = TransitionMessage.objects.get(instance_id=str(widget.pk),
-                                           transition_name='bg_transition')
-        self.assertEqual(tm.errors_count, 1)
+        row = TransitionMessage.objects.get(instance_id=str(widget.pk),
+                                            transition_name='bg_transition')
+        self.assertEqual(row.errors_count, 1)
 
-        # drive the remaining attempts as the worker would (the periodic
-        # starter only picks rows up once RETRY_MINUTES have elapsed)
+        # Run the remaining attempts as the worker would. The periodic starter
+        # only picks a row up once RETRY_MINUTES have passed.
         for _ in range(2):
             try:
-                run_background_transition(tm.pk)
+                run_background_transition(row.pk)
             except ValueError:
                 pass
         widget.refresh_from_db()

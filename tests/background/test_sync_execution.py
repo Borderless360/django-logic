@@ -1,8 +1,8 @@
-"""End-to-end: BackgroundTransition + BackgroundAction under Sync mode.
+"""End to end: BackgroundTransition and BackgroundAction in sync mode.
 
-Sync mode is what the test suite runs by default (see tests/settings.py),
-so calling ``instance.process.fulfil()`` executes phase 1 **and** phase 2
-inline and we can assert on the resulting state directly.
+The test suite runs in sync mode by default (see tests/settings.py), so
+``instance.process.fulfil()`` enqueues and executes inline. The tests can then
+assert on the final state directly.
 """
 from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase, override_settings
@@ -33,21 +33,23 @@ class HappyPathTests(TestCase):
 
     def test_transition_message_is_marked_completed(self):
         self.widget.process.fulfil()
-        tm = TransitionMessage.objects.get(
+        transition_message = TransitionMessage.objects.get(
             app_label='bg_tests',
             model_name='widget',
             instance_id=self.widget.pk,
         )
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.errors_count, 0)
-        self.assertEqual(tm.queue_name, 'django_logic.critical')
+        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(transition_message.errors_count, 0)
+        self.assertEqual(transition_message.queue_name,
+                         'django_logic.critical')
 
     def test_queue_name_persisted(self):
         self.widget.status = 'fulfilled'
         self.widget.save()
         self.widget.process.generate_export()
-        tm = TransitionMessage.objects.get(transition_name='generate_export')
-        self.assertEqual(tm.queue_name, 'django_logic.slow')
+        transition_message = TransitionMessage.objects.get(
+            transition_name='generate_export')
+        self.assertEqual(transition_message.queue_name, 'django_logic.slow')
 
     def test_chained_transitions(self):
         self.widget.process.fulfil()
@@ -67,15 +69,15 @@ class BackgroundActionTests(TestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilled')  # unchanged
         self.assertIn('ok,', self.widget.se_log)
-        # Phase-3 success callbacks run for a BackgroundAction too (the
-        # action branch of _run_success_hooks, which only differs from a
-        # BackgroundTransition in skipping the state write).
+        # Success callbacks run for a BackgroundAction too. The only
+        # difference from a BackgroundTransition is the skipped state write.
         self.assertIn('cb,', self.widget.cb_log)
 
     def test_action_records_transition_message(self):
         self.widget.process.sync_inventory()
-        tm = TransitionMessage.objects.get(transition_name='sync_inventory')
-        self.assertTrue(tm.is_completed)
+        transition_message = TransitionMessage.objects.get(
+            transition_name='sync_inventory')
+        self.assertTrue(transition_message.is_completed)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
@@ -91,24 +93,26 @@ class FailurePathTests(TestCase):
     def test_errors_count_incremented_below_max(self):
         with self.assertRaises(ValueError):
             self.widget.process.crash()
-        tm = TransitionMessage.objects.get(transition_name='crash')
-        self.assertFalse(tm.is_completed)
-        self.assertEqual(tm.errors_count, 1)
-        self.assertEqual(tm.last_error_message, 'boom')
-        # State stays in in_progress_state because retry is still pending.
+        transition_message = TransitionMessage.objects.get(
+            transition_name='crash')
+        self.assertFalse(transition_message.is_completed)
+        self.assertEqual(transition_message.errors_count, 1)
+        self.assertEqual(transition_message.last_error_message, 'boom')
+        # The state stays in in_progress_state because a retry is still due.
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'crashing')
 
     def test_reaches_max_errors_and_writes_failed_state(self):
-        # Raise the budget of errors to 1 so we hit terminal on first shot.
+        # Allow one error only, so the first failure is terminal.
         with override_settings(
             DJANGO_LOGIC=dict(_SYNC_SETTINGS, TRANSITION_MESSAGE_MAX_ERRORS=1)
         ):
             with self.assertRaises(ValueError):
                 self.widget.process.crash()
-        tm = TransitionMessage.objects.get(transition_name='crash')
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.errors_count, 1)
+        transition_message = TransitionMessage.objects.get(
+            transition_name='crash')
+        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(transition_message.errors_count, 1)
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'crash_failed')
         self.assertIn('fcb,', self.widget.cb_log)
@@ -129,8 +133,8 @@ class FailurePathTests(TestCase):
 class ConcurrencyTests(TestCase):
     def test_second_concurrent_request_rejected(self):
         widget = Widget.objects.create()
-        # Simulate: the first phase 1 committed (TM exists, state=fulfilling)
-        # but phase 2 hasn't completed.
+        # The first enqueue committed — the row exists and the state is
+        # 'fulfilling' — but the worker has not completed it.
         TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
@@ -146,18 +150,18 @@ class ConcurrencyTests(TestCase):
         fresh = Widget.objects.get(pk=widget.pk)
         fresh.status = 'draft'  # pretend the caller still sees draft
         with self.assertRaises(AlreadyInProgress):
-            # Bypass the "not in sources" check by forcing the source.
+            # Put the instance back on a declared source so the source gate
+            # passes and the row is what rejects the second call.
             fresh.status = 'draft'
             fresh.save()
             fresh.process.fulfil()
 
     def test_non_guard_integrity_error_surfaces_raw(self):
-        # An IntegrityError from the user's own model write (here the
-        # in_progress_state set_state) must NOT be mislabelled as
-        # AlreadyInProgress — only the partial-unique constraint maps to
-        # that. The TransitionMessage is created first specifically so its
-        # own IntegrityError is the only one that means "already in
-        # progress".
+        # An IntegrityError from the user's own model write — here the
+        # in_progress_state write — must not be relabelled as
+        # AlreadyInProgress. Only the partial unique constraint on
+        # TransitionMessage means "already in progress", and the row is
+        # inserted first so that constraint is the only one that can fire.
         from unittest.mock import patch
         from django.db import IntegrityError
 
@@ -177,7 +181,8 @@ class ConcurrencyTests(TestCase):
 
 
 class SyncExecutionContextManagerTests(TestCase):
-    """sync_execution() should force Sync mode even if the global is 'celery'."""
+    """sync_execution() forces sync mode even when the global setting is
+    'celery'."""
 
     def test_context_manager_overrides_setting(self):
         celery_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
@@ -193,8 +198,8 @@ class ValidateOnReadyTests(TestCase):
     """Boot-time validation of the celery-mode deployment contract."""
 
     def test_execution_mode_defaults_to_celery(self):
-        # Celery is a core dependency; background transitions are Celery
-        # tasks unless the project explicitly opts into sync (tests/CI).
+        # Celery is a core dependency, so background transitions are Celery
+        # tasks unless the project opts into sync mode for tests or CI.
         from django_logic.background import settings as bg_settings
 
         cfg = {k: v for k, v in _SYNC_SETTINGS.items()
@@ -229,8 +234,8 @@ class ValidateOnReadyTests(TestCase):
             self.assertIn('PostgreSQL', str(ctx.exception))
 
     def test_validate_on_ready_rejects_locmem_cache_in_celery_mode(self):
-        # D5: with a per-process cache the state lock does not lock anything
-        # across web processes and workers. Fail fast in production.
+        # A per-process cache locks nothing across web processes and workers,
+        # so boot must fail instead of running unprotected in production.
         from django_logic.background.settings import validate_on_ready
 
         celery_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')

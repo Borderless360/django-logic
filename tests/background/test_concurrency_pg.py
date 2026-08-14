@@ -1,16 +1,11 @@
-"""Real-concurrency coverage for the durable runner — PostgreSQL only.
+"""Concurrency coverage for the durable runner. PostgreSQL only.
 
-The default sqlite suite cannot exercise these guarantees: sqlite ignores
-``select_for_update(nowait=True)`` and serialises all writers, so the
-phase-2 row lock and the partial-unique two-phase-1 race only mean
-something on Postgres. These run in the Postgres CI job (settings_stability)
-and skip otherwise.
+SQLite ignores ``select_for_update(nowait=True)`` and serialises every writer,
+so the row lock and the race between two enqueues only mean something on
+PostgreSQL. These tests run in the PostgreSQL CI job and skip elsewhere.
 
-Covers the two flagship reliability claims that previously had zero
-real-concurrency coverage:
-  * "No two workers run the same transition at once" (phase-2 row lock)
-  * "Only one uncompleted message per instance per process" (partial
-    unique constraint)
+They pin two claims: no two workers run the same transition at once, and only
+one uncompleted TransitionMessage exists per instance per process.
 """
 import threading
 
@@ -30,16 +25,15 @@ _SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 @requires_postgres
-class PhaseTwoRowLockTests(TransactionTestCase):
-    """A second phase-2 attempt on a row another worker holds must skip
-    silently (OperationalError -> _NothingToDo): no duplicate side-effects,
-    row left for the holder."""
+class ExecuteRowLockTests(TransactionTestCase):
+    """A second worker that reaches a row another worker holds must skip it.
+    No side-effect runs twice, and the row stays for the worker holding it."""
 
     databases = '__all__'
 
     def test_second_worker_skips_locked_row(self):
         widget = Widget.objects.create(status='fulfilling')
-        tm = TransitionMessage.objects.create(
+        transition_message = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
             instance_id=str(widget.pk),
@@ -56,7 +50,7 @@ class PhaseTwoRowLockTests(TransactionTestCase):
             try:
                 with transaction.atomic():
                     # Worker A grabs and holds the row lock.
-                    TransitionMessage.objects.select_for_update().get(pk=tm.pk)
+                    TransitionMessage.objects.select_for_update().get(pk=transition_message.pk)
                     lock_held.set()
                     release.wait(timeout=10)
             finally:
@@ -66,14 +60,14 @@ class PhaseTwoRowLockTests(TransactionTestCase):
         holder.start()
         try:
             self.assertTrue(lock_held.wait(timeout=10))
-            # Worker B tries phase 2 while A holds the lock — must no-op.
-            run_background_transition(tm.pk)
+            # Worker B tries execute while A holds the lock — must no-op.
+            run_background_transition(transition_message.pk)
         finally:
             release.set()
             holder.join(timeout=10)
 
-        tm.refresh_from_db()
-        self.assertFalse(tm.is_completed)        # B did not complete it
+        transition_message.refresh_from_db()
+        self.assertFalse(transition_message.is_completed)        # B did not complete it
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'fulfilling')
         self.assertEqual(widget.se_log, '')       # bg_ok never ran in B
@@ -82,10 +76,10 @@ class PhaseTwoRowLockTests(TransactionTestCase):
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 @requires_postgres
 class ConcurrentPhaseOneTests(TransactionTestCase):
-    """Two phase-1 calls racing on the same instance: exactly one wins.
+    """Two enqueue calls racing on the same instance: exactly one wins.
 
     Since 0.4 the loser is rejected by whichever guard it reaches first:
-    the phase-1 cache lock (``TransitionNotAllowed: State is locked``) or
+    the cache lock enqueue takes (``TransitionNotAllowed: State is locked``) or
     the partial unique constraint (``AlreadyInProgress``, a
     ``TransitionNotAllowed`` subclass). Both are correct rejections; the
     invariants are exactly one winner and exactly one TransitionMessage.
@@ -93,7 +87,7 @@ class ConcurrentPhaseOneTests(TransactionTestCase):
 
     databases = '__all__'
 
-    def test_two_concurrent_phase_one_only_one_wins(self):
+    def test_two_concurrent_enqueues_only_one_wins(self):
         widget = Widget.objects.create(status='draft')
 
         def fulfil():

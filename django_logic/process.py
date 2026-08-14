@@ -24,11 +24,6 @@ _transition_context: ContextVar[dict | None] = ContextVar(
     '_transition_context', default=None
 )
 
-#: Kwarg names the engine sets on every drive, and forwards through
-#: ``__getattr__`` itself when chaining a ``next_transition`` follow-up. A
-#: caller that passes one gets it silently overwritten, so they are documented
-#: as reserved rather than refused — the engine cannot distinguish its own
-#: forwarding from a caller's at that layer.
 class _ProcessAccessor(property):
     """The model property ``bind_model_process`` installs.
 
@@ -44,6 +39,10 @@ class _ProcessAccessor(property):
 #: cannot see them.
 _PROCESS_INSTANCE_ATTRS = frozenset({'state', 'instance', 'field_name'})
 
+#: Kwarg names the engine sets on every call, and forwards through
+#: ``__getattr__`` when it chains a ``next_transition``. A caller who passes one
+#: has it overwritten. The engine cannot tell its own forwarding from a caller's
+#: here, so the README documents them as reserved instead of refusing them.
 _RESERVED_KWARGS = frozenset({
     'tr_id', 'root_id', 'parent_id', 'process_class', 'owning_process_class',
 })
@@ -100,21 +99,20 @@ class Process:
             )
 
     def __getattr__(self, item):
-        # Underscore/dunder names are never action names — refusing them
-        # keeps introspection sane (copy/pickle/mock/IPython probe dunders
-        # via getattr and must see a normal AttributeError, and
-        # hasattr(process, '_x') must not be True for everything). Any
-        # other missing attribute is assumed to be an action name and
-        # resolved lazily at call time.
+        # Names that start with an underscore are never action names. copy,
+        # pickle, mock and IPython probe dunder names with getattr and must get
+        # a normal AttributeError, and hasattr(process, '_x') must not be True
+        # for every name. Any other missing attribute is treated as an action
+        # name and resolved when it is called.
         if item.startswith('_'):
             raise AttributeError(item)
 
         def transition_method(*args, **kwargs):
             if args:
-                # Positional arguments used to be silently discarded — so
-                # ``instance.process.verify(user)`` ran with user=None,
-                # which BYPASSES all permission checks (and loses audit
-                # attribution) without any error. Fail loudly instead.
+                # Positional arguments used to be dropped, so
+                # ``instance.process.verify(user)`` ran with user=None. That
+                # skips every permission check and loses the audit trail with
+                # no error at all, so fail loudly instead.
                 raise TypeError(
                     f"{item}() accepts keyword arguments only (got "
                     f"{len(args)} positional). Pass user and other values "
@@ -122,15 +120,12 @@ class Process:
                     f"positional user would be dropped and permission "
                     f"checks skipped."
                 )
-            # Defensive: drop a caller-supplied 'action_name' key, which
-            # would otherwise collide with _get_transition_method's first
-            # parameter ("multiple values for argument 'action_name'").
-            # No engine path forwards it; only hand-built kwargs dicts do.
-            # The other reserved names (_RESERVED_KWARGS) are NOT refused
-            # here: next_transition chaining forwards tr_id / root_id /
-            # parent_id / process_class through this very path to propagate
-            # lineage, so the engine cannot tell its own forwarding from a
-            # caller's. They are documented as reserved in the README instead.
+            # Drop an 'action_name' key the caller passed: it would clash with
+            # _get_transition_method's first parameter and raise "multiple
+            # values for argument 'action_name'". No engine path forwards it;
+            # only a hand-built kwargs dict does. The other names in
+            # _RESERVED_KWARGS stay, because next_transition forwards tr_id,
+            # root_id, parent_id and process_class through this same path.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 
@@ -539,7 +534,7 @@ def collect_hook_signature_offenders(process_cls) -> list:
 # collect_ambiguous_in_progress_states, _state_storage_label — feeding
 # django_logic.E001 and recover_stranded_states) was retired in 0.12.0:
 # in_progress_state is background-only now, written atomically with the
-# TransitionMessage row, so recovery is TM-scoped and no record-less
+# TransitionMessage row, so recovery works from that row and no record-less
 # stranded instance can exist for an owner to be picked for.
 
 

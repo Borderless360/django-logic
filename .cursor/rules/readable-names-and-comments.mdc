@@ -1,23 +1,53 @@
 ---
-description: Plain English for names, comments, and exceptions. Do not copy the repo's old private dialect.
+description: Simplified English for names, comments, and exceptions. Do not copy the repo's old private dialect.
 alwaysApply: true
 ---
 
-# Plain English
+# Simplified English
 
-Write as you would to a colleague. Short sentences. One meaning per word. No metaphors.
+Write as you would to a colleague, in ASD-STE100 style.
 
-Existing comments in this repo are often a private dialect (`phase 1`, `liveness`, `#195`). Do not copy them. Rewrite what you touch.
+- One idea per sentence. Aim for 20 words or fewer. Never write more than 25.
+- Active voice, present tense: "the worker writes the row", not "the row is written".
+- One word for one meaning. Do not use two words for the same thing in one file.
+- Use a verb, not a noun built from a verb: "when it fails", not "on failure of".
+- No metaphors and no jokes.
+- Prefer deleting to rewriting. A comment that only narrates the next line goes.
+
+Many existing comments use a private dialect. Do not copy them. Rewrite the dialect in the lines you touch.
 
 ## Allowed words
 
-transition, background transition, `TransitionMessage`, source state, retry window, stranded (nothing is retrying it), enqueue (save the row and send it), execute (the worker runs the side-effects), uncompleted, in progress.
+transition, background transition, `TransitionMessage`, source state, retry window, stranded (nothing is retrying it), enqueue (the web process saves the `TransitionMessage` row and sends it to the queue), execute (the worker runs the side-effects and writes the final state), uncompleted, in progress.
 
-## Banned
+## Banned words, and what to write instead
 
-`tm`, `msg`, `inst`, `bg`, `phase 1`, `phase 2`, `liveness`, `retry horizon`, `re-drive`, `in-flight marker`, `speculative-insert`, `owning process`, `finishing flight`, `#123`, `issue #N`, `W002` in exceptions.
+| Do not write | Write |
+| --- | --- |
+| `phase 1`, `phase one`, `phase-1` | enqueue |
+| `phase 2`, `Phase2`, `phase-2` | execute |
+| `liveness` | "whether the row is still being retried", "retry status", or "still running" |
+| `retry horizon` | retry window |
+| `re-drive`, `redrive` | re-dispatch, or "send it to the queue again" |
+| `in-flight marker` | the uncompleted row |
+| `speculative-insert (wait)` | "the insert waits for a concurrent insert on the same unique index to finish" |
+| `owning process` | "the process that declares the transition" |
+| `finishing flight` | "an attempt that is still running" |
+| `TM`, `TM-scoped` | `TransitionMessage`, "the row", "scoped to the row" |
+| `tm`, `msg`, `inst`, `bg` | `transition_message`, `message`, `instance`, `background` |
 
-Ticket numbers belong in `CHANGELOG.md` only.
+Also banned: a ticket, PR or check id in a comment or an exception (`#195`, `W002`, "the 0.13.1 review"). Delete the citation and keep the fact. `CHANGELOG.md` owns that history.
+
+Never refer to a design-document section (`§2.7`, "D2 (c)", "contract 7", "pass 4"). State the rule itself in one clause.
+
+## Keep these names as they are
+
+They look like dialect, but code depends on them:
+
+- the settings key literal `'PHASE2_STATE_GUARD'`, and every name in `_REMOVED_SETTINGS` and `_KNOWN_SETTINGS`;
+- Django API attributes: `.msg`, `.hint`, `.id` on `CheckMessage`;
+- state names, model names, field names, queue names, migration files, and any string an assertion compares against;
+- public API names: `BackgroundTransition`, `TransitionMessage`, `in_progress_state`, `in_flight()`, `retry_pending`, `failure_callbacks`.
 
 ## Names
 
@@ -33,6 +63,8 @@ Use full words. Type names (`State`, `TransitionMessage`) and Python conventions
 
 ## Comments and exceptions
 
+A comment says the non-obvious *why* in one or two sentences.
+
 ```python
 # BAD
 # Same liveness classification as the sync gate (#195).
@@ -40,5 +72,7 @@ Use full words. Type names (`State`, `TransitionMessage`) and Python conventions
 # GOOD
 # Nothing is retrying this row, so "try again shortly" would be wrong forever.
 ```
+
+Exception text and log text are for the operator on call at 3am. Say what happened and what to do. No internal jargon.
 
 If you would not say it out loud, rewrite it.

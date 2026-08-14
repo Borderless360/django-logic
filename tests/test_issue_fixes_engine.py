@@ -1,22 +1,20 @@
-"""Regressions for GitHub issues #85, #87, #90, #91 (engine level).
+"""Four engine rules, each one written after a consumer hit the defect.
 
-#85 — the cache lock must be released on EVERY failure path after
-acquisition: a failed ``in_progress_state`` write, a failed target write in
-``complete_transition``, and a failed ``failed_state`` write in
-``fail_transition``. Pre-fix, any of those froze the instance's FSM for the
-full ``LOCK_TIMEOUT`` (every transition raised "State is locked").
+The cache lock is released on every failure path after it is taken: a failed
+``in_progress_state`` write, a failed target write, and a failed
+``failed_state`` write. Before the fix any of those froze the instance for the
+whole ``LOCK_TIMEOUT``, and every later transition raised "State is locked".
 
-#87 — positional arguments to a process transition method used to be
-silently dropped; ``instance.process.verify(user)`` ran with ``user=None``
-and therefore bypassed all permission checks. Now a ``TypeError``.
+A positional argument to a process transition method raises ``TypeError``. It
+used to be dropped, so ``instance.process.verify(user)`` ran with
+``user=None`` and skipped every permission check.
 
-#90 — the background runner reloads instances with ``_base_manager``, so a
-filtered default manager (archived rows hidden) cannot strand an in-flight
-transition.
+The background runner reloads the instance through ``_base_manager``, so a
+default manager that hides archived rows cannot strand a running transition.
 
-#91 — every django-logic Celery task pairs ``acks_late=True`` with
-``reject_on_worker_lost=True`` at the task level, so crash re-delivery does
-not depend on the consumer's global Celery configuration.
+Every django-logic Celery task sets both ``acks_late=True`` and
+``reject_on_worker_lost=True``, so crash re-delivery does not depend on the
+consumer's global Celery configuration.
 """
 from unittest.mock import patch
 
@@ -34,7 +32,7 @@ def _boom_set_state(self, value):
 
 
 class LockReleasedOnWriteFailureTests(TestCase):
-    """#85 — no state-write failure may leak the lock."""
+    """No state-write failure may leave the lock held."""
 
     def setUp(self):
         self.invoice = Invoice.objects.create(status='draft')
@@ -46,7 +44,7 @@ class LockReleasedOnWriteFailureTests(TestCase):
             with self.assertRaises(RuntimeError):
                 transition.change_state(self.state)
         self.assertFalse(self.state.is_locked(),
-                         'target write failure leaked the lock')
+                         'the failed target write left the lock held')
 
     def test_failed_failed_state_write_releases_the_lock(self):
         def explode(instance, **kwargs):
@@ -60,22 +58,21 @@ class LockReleasedOnWriteFailureTests(TestCase):
             with self.assertRaises(Exception):
                 transition.change_state(self.state)
         self.assertFalse(self.state.is_locked(),
-                         'failed_state write failure leaked the lock')
+                         'the failed failed_state write left the lock held')
 
     def test_instance_is_usable_again_after_a_failed_write(self):
-        # The point of #85: the NEXT transition must not be rejected with
-        # "State is locked".
+        # The next transition must not be rejected with "State is locked".
         transition = Transition('go', sources=['draft'], target='done')
         with patch.object(State, 'set_state', _boom_set_state):
             with self.assertRaises(RuntimeError):
                 transition.change_state(self.state)
-        transition.change_state(self.state)  # unpatched: succeeds
+        transition.change_state(self.state)  # no patch, so this one succeeds
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'done')
 
 
 class PositionalArgumentsRejectedTests(TestCase):
-    """#87 — positional args raise instead of silently dropping user."""
+    """A positional argument raises instead of dropping the user."""
 
     def test_positional_argument_raises_type_error(self):
         widget = Widget.objects.create()
@@ -91,17 +88,17 @@ class PositionalArgumentsRejectedTests(TestCase):
 
 
 class BaseManagerRestoreTests(TestCase):
-    """#90 — a filtered default manager cannot strand in-flight work."""
+    """A filtered default manager cannot strand a running transition."""
 
     def test_archived_instance_is_still_restored_and_completed(self):
         from django_logic.background.models import TransitionMessage
         from django_logic.background.runner import run_background_transition
 
         widget = ArchivableWidget.objects.create()
-        # Phase 1 happened: in_progress + TM row.
+        # Enqueue already ran: the in-progress state and the row both exist.
         widget.status = 'finishing'
         widget.save(update_fields=['status'])
-        tm = TransitionMessage.objects.create(
+        transition_message = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='archivablewidget',
             instance_id=str(widget.pk),
@@ -110,17 +107,17 @@ class BaseManagerRestoreTests(TestCase):
             transition_name='finish',
             queue_name='django_logic.critical',
         )
-        # The instance is archived between phase 1 and phase 2 — it vanishes
-        # from the default manager but still exists.
+        # The instance is archived between enqueue and execute. It disappears
+        # from the default manager, but the row is still there.
         ArchivableWidget.all_objects.filter(pk=widget.pk).update(archived=True)
         self.assertFalse(ArchivableWidget.objects.filter(pk=widget.pk).exists())
 
-        # Pre-fix: DoesNotExist -> _RestoreError -> row completed with the
-        # instance stranded in 'finishing' forever.
-        run_background_transition(tm.pk)
+        # Before the fix the reload failed, the row completed with no work
+        # done, and the instance stayed stranded in 'finishing'.
+        run_background_transition(transition_message.pk)
 
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)
+        transition_message.refresh_from_db()
+        self.assertTrue(transition_message.is_completed)
         fresh = ArchivableWidget.all_objects.get(pk=widget.pk)
         self.assertEqual(fresh.status, 'done')
 
@@ -131,12 +128,12 @@ class BaseManagerRestoreTests(TestCase):
 
 
 class TaskCrashRedeliveryConfigTests(TestCase):
-    """#91 — acks_late is paired with reject_on_worker_lost per task."""
+    """Every task pairs acks_late with reject_on_worker_lost."""
 
     def test_all_tasks_pair_acks_late_with_reject_on_worker_lost(self):
-        # Derived from the module, never hardcoded: a hardcoded list once
-        # silently stopped covering a newly added task, so both kwargs could
-        # be stripped from it with the suite still green.
+        # The task list is read from the module, never written by hand. A
+        # hardcoded list once stopped covering a new task, so both keywords
+        # could be removed from it and the suite still passed.
         from django_logic.background import tasks
 
         found = [
@@ -146,8 +143,8 @@ class TaskCrashRedeliveryConfigTests(TestCase):
         ]
         self.assertEqual(
             len(found), 5,
-            'expected every @shared_task in django_logic.background.tasks to '
-            'be discovered; got %s' % sorted(t.name for t in found))
+            'expected to find every shared task in '
+            'django_logic.background.tasks; found %s' % sorted(t.name for t in found))
         for task in found:
             self.assertTrue(task.acks_late, task.name)
             self.assertTrue(task.reject_on_worker_lost, task.name)

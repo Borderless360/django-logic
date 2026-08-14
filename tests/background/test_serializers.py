@@ -37,7 +37,7 @@ class SerializeKwargsTests(SimpleTestCase):
         self.assertEqual(serialize_kwargs({'x': 1}), {'x': 1})
 
     def test_user_replaced_with_user_id(self):
-        # serialize reads .pk (matching the phase-2 get(pk=...) restore and
+        # serialize reads .pk (matching the get(pk=...) restore on the worker and
         # custom-PK user models), not .id.
         user = Mock()
         user.pk = 42
@@ -87,7 +87,7 @@ class SerializeKwargsTests(SimpleTestCase):
 
     def test_malformed_scalar_payload_passes_through_with_a_warning(self):
         # A KNOWN tag whose payload no longer decodes (hand-edited row,
-        # cross-version writer bug) must not crash phase 2 — same
+        # cross-version writer bug) must not crash execute — same
         # passthrough contract as an unknown tag.
         row = {'when': {'__dl_type__': 'datetime', 'value': 'not-a-datetime'}}
         with self.assertLogs('django-logic.transition', level='WARNING') as logs:
@@ -126,7 +126,7 @@ class SerializeKwargsTests(SimpleTestCase):
         self.assertEqual(out['root_id'], str(tr_id))
         self.assertEqual(out['parent_id'], str(tr_id))
 
-    def test_unserializable_raises_at_phase1(self):
+    def test_unserializable_raises_at_enqueue(self):
         class Unserializable:
             pass
 
@@ -167,7 +167,7 @@ class SerializeKwargsTests(SimpleTestCase):
         self.assertEqual(json.loads(json.dumps(out)), out)
 
     def test_strict_raise_is_a_distinct_typeerror_subclass(self):
-        # The phase-1 dispatcher wraps generic TypeError in
+        # The enqueue dispatcher wraps generic TypeError in
         # ImproperlyConfigured ("not JSON-serializable") — the strict-mode
         # rejection must stay distinguishable so it propagates verbatim.
         with override_settings(DJANGO_LOGIC={'STRICT_KWARGS_SERIALIZATION': True}):
@@ -176,7 +176,7 @@ class SerializeKwargsTests(SimpleTestCase):
 
     def test_non_string_dict_keys_warn(self):
         # JSON stringifies int keys silently ({1: 'a'} -> {"1": "a"}), which
-        # breaks the type-faithful contract — phase 1 must say so.
+        # breaks the type-faithful contract — enqueue must say so.
         with self.assertLogs('django-logic.transition', level='WARNING') as logs:
             out = serialize_kwargs({'m': {1: 'a'}})
         self.assertIn('non-string dict keys', logs.output[0])

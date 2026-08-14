@@ -1,13 +1,13 @@
 # Releasing django-logic
 
 This project publishes to **PyPI** (https://pypi.org/project/django-logic/) and
-cuts a matching **GitHub release** on the `Borderless360/django-logic` repo.
+creates a matching **GitHub release** on the `Borderless360/django-logic` repo.
 
 ## Credentials
 
-The PyPI upload token lives in **`.pypirc`** at the repo root. This file is
-**git-ignored** (see `.gitignore`) and must **never** be committed. It holds a
-project-scoped API token for `django-logic`:
+The PyPI upload token lives in **`.pypirc`** at the repo root. Git ignores this
+file (see `.gitignore`). Never commit it. It holds a project-scoped API token
+for `django-logic`:
 
 ```ini
 [pypi]
@@ -15,35 +15,35 @@ username = __token__
 password = pypi-…            # rotate at https://pypi.org/manage/account/token/
 ```
 
-If the token is ever exposed, revoke it on PyPI and drop a fresh one into
-`.pypirc` — nothing else needs to change.
+If the token leaks, revoke it on PyPI and write a new one into `.pypirc`.
+Nothing else changes.
 
 ## One-time tooling
 
-Everything runs through [`uv`](https://github.com/astral-sh/uv) (build) and
-`twine` via `uvx` (check + upload) — no global installs required.
+[`uv`](https://github.com/astral-sh/uv) builds the package. `uvx` runs `twine`
+to check and upload it. You need no global installs.
 
 ## Release checklist
 
-1. **Land all release commits on `master`** (via PR) and pull `master` locally.
+1. **Merge every release commit into `master`** through a pull request, then
+   pull `master` locally.
 2. **Set the version** in `pyproject.toml` (`[project].version`).
 3. **Update `CHANGELOG.md`**: move `[Unreleased]` into a dated `[X.Y.Z]`
    section; leave a fresh empty `[Unreleased]`.
 4. **Run the tests**: `python tests/manage.py test` (or `make test`).
 5. **Run the metadata drift check**: `python tests/manage.py test tests.test_metadata`
-   — verifies that the Django trove classifiers, the CI test matrix, the
-   `[project]` dependency floors, and the README support statement all agree
-   (issues #144/#147). Do not publish while it is red: it means the package
-   would advertise or resolve a Django/Python combination we don't test.
-6. **Run the downstream consumer checks**: consumer-side validation lives
-   with the consumers, not in this repo — a library should not know who
-   consumes it. Before publishing, run each known downstream's suite against
-   the release candidate from *its own* checkout/CI (install this repo at
-   the candidate ref, e.g. `uv pip install --no-deps /path/to/django-logic`)
-   and do not publish while any of them is red. The public validation rig
-   (`django-logic-test`) exercises the release candidate on real
-   broker/worker infrastructure and is the minimum bar.
-7. **Build + validate the artifacts**:
+   — it checks that the Django trove classifiers, the CI test matrix, the
+   `[project]` dependency floors, and the README support statement agree.
+   Do not publish while it is red. A red run means the package advertises or
+   resolves a Django or Python version that the tests never run.
+6. **Run the downstream consumer checks**: each consumer keeps its own
+   validation, because a library should not know who consumes it. Install this
+   repo at the candidate ref from the consumer's own checkout or CI
+   (`uv pip install --no-deps /path/to/django-logic`), then run that
+   consumer's suite. Do not publish while any of them is red. Always run the
+   public validation rig (`django-logic-test`): it exercises the release
+   candidate on a real broker with real workers.
+7. **Build and check the artifacts**:
    ```bash
    make dist          # rm -rf dist/ build/ *.egg-info && uv build && twine check dist/*
    ```
@@ -63,7 +63,8 @@ Everything runs through [`uv`](https://github.com/astral-sh/uv) (build) and
       --notes-file <notes.md> --latest \
       dist/django_logic-X.Y.Z-py3-none-any.whl dist/django_logic-X.Y.Z.tar.gz
     ```
-11. **Verify**: `pip install django-logic==X.Y.Z` in a clean venv imports cleanly.
+11. **Check the published package**: `pip install django-logic==X.Y.Z` in a
+    clean virtualenv, then import it.
 
-> PyPI uploads are **irreversible** — a version number can never be re-uploaded.
-> Always `make dist` + install-check before `make publish`.
+> A PyPI upload is final. You can never upload the same version number twice.
+> Always run `make dist` and the install check before `make publish`.

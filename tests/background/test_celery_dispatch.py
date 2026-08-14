@@ -30,36 +30,36 @@ _APPLY_ASYNC = (
 
 @override_settings(DJANGO_LOGIC=_CELERY_SETTINGS)
 class CeleryDispatchTests(TestCase):
-    def test_phase_one_enqueues_on_commit_with_queue_routing(self):
+    def test_enqueue_dispatches_on_commit_with_queue_routing(self):
         widget = Widget.objects.create()
         with patch(_APPLY_ASYNC) as mock_async:
             with self.captureOnCommitCallbacks(execute=True):
                 tr_id = widget.process.fulfil()
             self.assertIsNotNone(tr_id)
 
-        # Celery mode does NOT run phase 2 inline: the row stays uncompleted
+        # Celery mode does NOT run execute inline: the row stays uncompleted
         # and the state remains in_progress until a worker drains the queue.
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'fulfilling')
-        tm = TransitionMessage.objects.get(transition_name='fulfil')
-        self.assertFalse(tm.is_completed)
+        transition_message = TransitionMessage.objects.get(transition_name='fulfil')
+        self.assertFalse(transition_message.is_completed)
 
         # The task is enqueued exactly once, routed to the transition's own
         # declared queue — the "no default queue" guarantee. `shadow` gives the
         # dispatch a per-transition name in Celery events / Flower (issue #78).
         mock_async.assert_called_once_with(
-            args=[tm.pk], queue='django_logic.critical',
+            args=[transition_message.pk], queue='django_logic.critical',
             shadow='django_logic.bg_tests.fulfil',
         )
 
-    def test_no_dispatch_when_phase_one_transaction_rolls_back(self):
+    def test_no_dispatch_when_the_enqueue_transaction_rolls_back(self):
         widget = Widget.objects.create()
         with patch(_APPLY_ASYNC) as mock_async:
             with self.assertRaises(RuntimeError):
                 with self.captureOnCommitCallbacks(execute=True):
                     with transaction.atomic():
                         widget.process.fulfil()
-                        raise RuntimeError('roll back phase 1')
+                        raise RuntimeError('roll back the enqueue transaction')
             # The on_commit enqueue is discarded with the rolled-back txn.
             mock_async.assert_not_called()
 
@@ -70,7 +70,7 @@ class CeleryRetryRoutingTests(TestCase):
     (a slow export never lands on the critical queue)."""
 
     def _make_stale(self, widget, queue, transition_name):
-        tm = TransitionMessage.objects.create(
+        transition_message = TransitionMessage.objects.create(
             app_label='bg_tests',
             model_name='widget',
             instance_id=str(widget.pk),
@@ -79,10 +79,10 @@ class CeleryRetryRoutingTests(TestCase):
             queue_name=queue,
             kwargs={},
         )
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+        TransitionMessage.objects.filter(pk=transition_message.pk).update(
             created=timezone.now() - timedelta(minutes=5),
         )
-        return tm
+        return transition_message
 
     def test_retry_redispatches_each_row_to_its_own_queue(self):
         w1 = Widget.objects.create(status='fulfilling')

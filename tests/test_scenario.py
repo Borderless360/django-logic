@@ -1,21 +1,16 @@
-"""Exercises the scenario-based testing framework (`django_logic.testing`).
+"""Covers the scenario testing framework (`django_logic.testing`).
 
-Demonstrates the full surface — synchronous transitions, background happy/
-failure/retry/terminal paths, BackgroundAction (no state change), availability
-with conditions + permissions, side-effect/callback tracking, snapshot capture
-+ replay, and AI-readable failure output — all without Celery.
-
-Driven against the existing Widget/WidgetProcess fixtures plus a tiny guarded
-process bound under `guard` (no new migrations).
+Every surface runs here with no broker: synchronous transitions, the background
+success, failure, retry and terminal paths, BackgroundAction, availability under
+conditions and permissions, hook tracking, snapshot and replay, and the failure
+timeline. ScenarioGuardProcess is bound under the name `guard` in
+tests/background/apps.py, so this module adds no migration.
 """
 from django.conf import settings
 from django.contrib.auth import get_user_model
 
 from django_logic.background.models import TransitionMessage
 from django_logic.testing import ProcessScenario
-# ScenarioGuardProcess (a minimal process with a condition + permission, bound
-# under the `guard` process name) lives in tests.background.models and is bound
-# in tests/background/apps.py — the single binding site for the app.
 from tests.background.models import ScenarioGuardProcess, Widget, WidgetProcess
 
 
@@ -36,7 +31,8 @@ class WidgetFulfilmentScenario(ProcessScenario):
         self.assert_callbacks_ran(['bg_callback'])
 
     def test_failure_records_error_and_stays_in_progress(self):
-        """A side-effect fails -> error recorded, instance left in_progress."""
+        """A side-effect fails: the error is recorded and the instance stays in
+        the in-progress state."""
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'fulfil',
@@ -54,7 +50,7 @@ class WidgetFulfilmentScenario(ProcessScenario):
             widget, 'fulfil', fail_side_effect='bg_ok', fail_with=ValueError('blip'))
         self.assert_state(widget, 'fulfilling')
 
-        self.retry_transition(widget)  # no injection this time -> succeeds
+        self.retry_transition(widget)  # no injected failure this time
         self.assert_state(widget, 'fulfilled')
         self.assert_error_count(widget, 1)
 
@@ -79,7 +75,7 @@ class WidgetFulfilmentScenario(ProcessScenario):
     def test_background_action_does_not_change_state(self):
         widget = self.create_instance(status='fulfilled')
         self.background_transition(widget, 'sync_inventory')
-        self.assert_state(widget, 'fulfilled')  # action: no target write
+        self.assert_state(widget, 'fulfilled')  # an action writes no target
         self.assert_side_effects_ran(['bg_ok'])
         self.assert_callbacks_ran(['bg_callback'])
 
@@ -88,7 +84,7 @@ class WidgetFulfilmentScenario(ProcessScenario):
         self.assert_not_available(widget, ['generate_export'])  # needs 'fulfilled'
 
     def test_snapshot_capture_and_replay(self):
-        """Capture a stuck instance, rebuild it from the snapshot, fix it."""
+        """Capture a stuck instance, rebuild it from the snapshot, retry it."""
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'fulfil', fail_side_effect='bg_ok', fail_with=ValueError('snap'))
@@ -105,11 +101,11 @@ class WidgetFulfilmentScenario(ProcessScenario):
         self.assert_state(restored, 'fulfilling')
         self.assert_error_count(restored, 1)
 
-        self.retry_transition(restored)  # the "fix" works
+        self.retry_transition(restored)
         self.assert_state(restored, 'fulfilled')
 
-    def test_ai_readable_failure_output(self):
-        """A failed assertion produces the structured timeline output."""
+    def test_failed_assertion_reports_the_timeline(self):
+        """A failed assertion attaches the step-by-step timeline to the error."""
         widget = self.create_instance(status='draft')
         self.transition(widget, 'cancel')
         with self.assertRaises(AssertionError) as ctx:

@@ -8,30 +8,55 @@ below are distilled from a full
 production-style validation on Heroku (RabbitMQ + PostgreSQL + multiple
 workers + induced worker crashes, deploys, broker loss, and pgbouncer).
 
-## Voice — write like a person
+## Voice — simplified English, everywhere
 
-This library was largely written by AI tools. Much of the existing prose is a
-private dialect (numbered “phases”, “liveness”, “retry horizon”, ticket ids in
-comments). **Do not copy that voice.** Write as you would to a colleague.
+This library was largely written by AI tools, and much of the prose became a
+private dialect: numbered "phases", "liveness", "retry horizon", ticket ids in
+comments. 0.14.0 removed it. **Do not bring it back.**
 
-- Short sentences. One meaning per word. No metaphors.
+Write simplified technical English, the way ASD-STE100 defines it:
+
+- One idea per sentence. Aim for 20 words. Never pass 25.
+- Active voice, present tense. "The worker writes the row", not "the row is
+  written by the worker".
+- One word for one meaning. Do not use two words for the same thing.
+- Use a verb, not a noun built from a verb. "when it fails", not "on failure of".
+- No metaphors and no jokes. Say the mechanism.
 - Names are full words: `transition_message`, not `tm`.
-- Comments explain a non-obvious *why* in one or two sentences. Do not narrate
-  the next line, and do not cite GitHub issues, PRs, or check ids (`#195`,
-  `W002`). `CHANGELOG.md` owns that provenance.
-- Exception text is for operators. Say what happened and what to do.
+- A comment gives a non-obvious *why* in one or two sentences. It never narrates
+  the next line, and it never cites a GitHub issue, a PR, or a check id (`#195`,
+  `W002`). `CHANGELOG.md` owns that history.
+- Do not point at a design-document section number (`§2.7`, `D2 (c)`,
+  `contract 7`). State the rule itself in one clause.
+- Exception and log text is for the operator on call at 3am. Say what happened
+  and what to do.
 - If you would not say it out loud, rewrite it.
-- When you touch a file, rewrite dialect in the lines you touch. Do not add
-  more of it.
+- When you touch a file, rewrite dialect in the lines you touch.
 
 **Allowed words:** transition, background transition, `TransitionMessage`,
 source state, retry window, stranded (nothing is retrying it), enqueue (save
 the row and send it to the queue), execute (the worker runs the side-effects),
 uncompleted, in progress.
 
-**Do not use:** `phase 1` / `phase 2`, `liveness`, `retry horizon`, `re-drive`,
-`in-flight marker`, `speculative-insert`, `owning process`, `finishing flight`,
-clipped locals (`tm`, `msg`, `inst`).
+**Retired words, and what to write instead:**
+
+| Do not write | Write |
+|---|---|
+| `phase 1`, `phase one`, `phase-1` | enqueue |
+| `phase 2`, `Phase2`, `phase-2` | execute |
+| `liveness` | whether the row is still being retried |
+| `retry horizon` | retry window |
+| `re-drive`, `redrive` | re-dispatch |
+| `in-flight marker` | the uncompleted row |
+| `speculative-insert` | describe the insert wait plainly |
+| `owning process` | the process that declares the transition |
+| `finishing flight` | an attempt that is still running |
+| `TM`, `TM-scoped` | `TransitionMessage`, scoped to the row |
+| `tm`, `msg`, `inst` | `transition_message`, `message`, `instance` |
+
+`tests/test_voice.py` enforces this table over the library and the current
+docs. It skips `CHANGELOG.md` on purpose: the changelog is a historical
+record, so it must keep naming the words and APIs that shipped at the time.
 
 ## What to generate
 

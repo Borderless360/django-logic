@@ -21,16 +21,15 @@ ROOT_URLCONF = 'tests.urls'
 MIDDLEWARE: list = []
 
 # Database selection:
-#   * Default: SQLite. The full sync-mode test suite passes here because
-#     sync mode executes phase 2 inline and never exercises
+#   * Default: SQLite. The sync-mode suite passes here because sync mode
+#     executes the transition inline and never runs
 #     ``select_for_update(nowait=True)`` against real concurrency.
 #   * Set ``POSTGRES_HOST`` (plus optional ``POSTGRES_{DB,USER,PASSWORD,PORT}``)
-#     to run against PostgreSQL. Recommended for the stability suite, which
-#     spawns real concurrent transactions and needs proper row locking.
+#     to run against PostgreSQL. Use it for the stability suite, which starts
+#     real concurrent transactions and needs row locking.
 #
-# Celery mode additionally rejects SQLite at ``validate_on_ready`` time
-# (see ``django_logic.background.settings._reject_sqlite_in_celery_mode``)
-# so production misconfigurations surface immediately.
+# Celery mode rejects SQLite when it validates settings on startup, so a
+# production misconfiguration fails immediately.
 if os.environ.get('POSTGRES_HOST'):
     DATABASES = {
         'default': {
@@ -55,19 +54,18 @@ else:
         }
     }
 
-# Second alias so the instance-alias routing shipped in 0.12.0 is pinned
-# (#187, mutation M26): get_persisted_state and the engine's savepoints must
-# follow instance._state.db, not 'default'. No global router — the routed
-# topology is installed per-test in tests/test_multidb_alias.py, so startup
-# system checks (and tests/test_router_check.py) see the default setup.
+# A second alias pins the instance-alias routing: get_persisted_state and the
+# engine's savepoints must follow instance._state.db, not 'default'. There is
+# no global router here — tests/test_multidb_alias.py installs the routed
+# topology per test, so the startup system checks see the default setup.
 DATABASES['other'] = {
     'ENGINE': 'django.db.backends.sqlite3',
     'NAME': ':memory:',
 }
 
-# LocMemCache by default. Tests that need atomic nx semantics use the
-# @requires_real_redis skip decorator and run under settings_redis.py
-# / settings_stability.py in dedicated CI jobs.
+# LocMemCache by default. Tests that need an atomic add() use the
+# @requires_real_redis skip decorator and run under settings_redis.py or
+# settings_stability.py in dedicated CI jobs.
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',

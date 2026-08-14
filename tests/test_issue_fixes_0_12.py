@@ -1,7 +1,7 @@
-"""Regression tests for the defects found reviewing 0.11.0 (#178-#182).
+"""Regression tests for the defects found reviewing 0.11.0.
 
-Each test states the wrong behaviour it pins shut, so a future refactor that
-reintroduces it fails here rather than in a consumer's production data.
+Each test states the wrong behaviour it pins shut, so a refactor that brings it
+back fails here instead of in a consumer's production data.
 """
 from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
@@ -46,12 +46,12 @@ class _BindCleanup:
         super().tearDown()
 
 
-# --- #178: a failing state write must be accounted ----------------------
+# --- A failing state write must count as an error ------------------------
 
 def _write_a_sibling_row(instance, **kwargs):
-    """A side-effect with an observable database write, so the attempt
-    savepoint's rollback can actually be asserted (a ``_noop`` side-effect
-    leaves nothing to roll back, which made this pin vacuous)."""
+    """A side-effect that writes a row, so the rollback of the attempt
+    savepoint can be asserted. A ``_noop`` side-effect leaves nothing to roll
+    back, which made this pin prove nothing."""
     Invoice.objects.create(status='sibling')
 
 
@@ -67,9 +67,9 @@ class RejectedTargetWriteProcess(Process):
 
 
 class RejectedStateWriteTests(_BindCleanup, TestCase):
-    """#178 — a state write the database refuses used to escape the outer
-    atomic, rolling back record_error with it: errors_count stayed 0, the
-    starter re-dispatched forever, and the side-effects re-ran forever."""
+    """A state write the database refuses used to escape the outer atomic block
+    and roll back record_error with it. errors_count stayed 0, so the starter
+    sent the row to the queue again and the side-effects re-ran forever."""
 
     _bound = (RejectedTargetWriteProcess,)
 
@@ -92,15 +92,15 @@ class RejectedStateWriteTests(_BindCleanup, TestCase):
         'TRANSITION_MESSAGE_MAX_ERRORS': 3,
         'TRANSITION_MESSAGE_RETRY_MINUTES': 0,
     })
-    def test_rejected_target_write_is_charged_and_terminates(self):
+    def test_rejected_target_write_counts_an_error_and_terminates(self):
         inv = Invoice.objects.create(status='draft')
         with self.assertRaises(ValueError):
             inv.rejected_target_proc.go()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        # The attempt was charged — this is the whole fix. It used to be 0.
-        self.assertEqual(tm.errors_count, 1)
-        self.assertFalse(tm.is_completed)
+        row = TransitionMessage.objects.get(instance_id=str(inv.pk))
+        # The attempt counted as an error. It used to stay at 0.
+        self.assertEqual(row.errors_count, 1)
+        self.assertFalse(row.is_completed)
 
         # And the retry loop terminates instead of running forever.
         for _ in range(5):
@@ -108,9 +108,9 @@ class RejectedStateWriteTests(_BindCleanup, TestCase):
                 retry_stale_transitions()
             except ValueError:
                 pass
-        tm.refresh_from_db()
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.errors_count, 3)
+        row.refresh_from_db()
+        self.assertTrue(row.is_completed)
+        self.assertEqual(row.errors_count, 3)
 
     @override_settings(DJANGO_LOGIC={
         'BACKGROUND_EXECUTION': 'sync',
@@ -118,29 +118,28 @@ class RejectedStateWriteTests(_BindCleanup, TestCase):
         'TRANSITION_MESSAGE_RETRY_MINUTES': 0,
     })
     def test_target_write_rolls_back_its_own_attempt(self):
-        """The write lives inside the attempt savepoint, so a rejected write
-        leaves no partial state behind.
+        """The target write lives inside the attempt savepoint, so a rejected
+        write leaves nothing behind.
 
-        The side-effect's own row is the witness: asserting only on the
-        instance's state proved nothing, because the veto blocks the target
-        write whether or not a savepoint contains it (caught by a mutation
-        that moved the write back out of the savepoint and still passed).
+        The side-effect's own row is what proves it. Asserting on the instance's
+        state proved nothing, because the veto blocks the target write whether
+        or not a savepoint contains it.
         """
         inv = Invoice.objects.create(status='draft')
         with self.assertRaises(ValueError):
             inv.rejected_target_proc.go()
         inv.refresh_from_db()
-        # Never the target; still the in-progress state phase 1 wrote.
+        # Never the target; still the in_progress_state that enqueue wrote.
         self.assertEqual(inv.status, 'rt_running')
         # The attempt was all-or-nothing: the side-effect's write is gone.
         self.assertFalse(
             Invoice.objects.filter(status='sibling').exists(),
-            'the failed attempt left a side-effect write behind — the target '
+            'the failed attempt left a side-effect write behind, so the target '
             'write is not inside the attempt savepoint',
         )
 
 
-# --- #179: the timeout watchdog --------------------------------------------
+# --- The timeout watchdog --------------------------------------------------
 
 def _raise_slow(instance, **kwargs):
     raise ValueError('slow boom')
@@ -183,61 +182,60 @@ class WatchdogAccountingTests(_BindCleanup, TestCase):
         super().setUp()
         cache.clear()
 
-    def _age_attempt(self, tm):
+    def _age_attempt(self, row):
         """Push started_at past the timeout without sleeping."""
         from datetime import timedelta
         from django.utils import timezone
-        TransitionMessage.objects.filter(pk=tm.pk).update(
+        TransitionMessage.objects.filter(pk=row.pk).update(
             started_at=timezone.now() - timedelta(seconds=30))
-        tm.refresh_from_db()
+        row.refresh_from_db()
 
-    def test_attempt_that_recorded_its_own_error_is_not_charged_again(self):
-        """#179 — three ticks with no new attempts used to take errors_count
-        from 1 to 4, silently spending the consumer's retries and burying the
-        real error message under a synthetic timeout."""
+    def test_attempt_that_recorded_its_own_error_is_not_counted_again(self):
+        """Three watchdog runs with no new attempts used to take errors_count
+        from 1 to 4. That spent the consumer's retries and replaced the real
+        error message with a timeout message."""
         ProcessManager.bind_model_process(
             Invoice, WatchdogChargeProcess, state_field='status')
         inv = Invoice.objects.create(status='draft')
         with self.assertRaises(ValueError):
             inv.wd_charge_proc.go()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        self.assertEqual(tm.errors_count, 1)
-        self._age_attempt(tm)
+        row = TransitionMessage.objects.get(instance_id=str(inv.pk))
+        self.assertEqual(row.errors_count, 1)
+        self._age_attempt(row)
 
         for _ in range(3):
             self.assertEqual(watchdog_stale_attempts(), 0)
-        tm.refresh_from_db()
-        self.assertEqual(tm.errors_count, 1)
+        row.refresh_from_db()
+        self.assertEqual(row.errors_count, 1)
         # The real cause survives.
-        self.assertEqual(tm.last_error_message, 'slow boom')
+        self.assertEqual(row.last_error_message, 'slow boom')
 
-    def test_abandoned_attempt_is_visible_and_charged_exactly_once(self):
-        """#179 — started_at is committed before the attempt and survives it
-        rolling back, so a worker that dies mid-flight is observable. Before
-        the fix the marker vanished with the transaction and timeout= could
-        never fire at all."""
+    def test_abandoned_attempt_is_visible_and_counted_exactly_once(self):
+        """started_at is committed before the attempt and survives the attempt
+        rolling back, so a worker that dies part way through is visible. It used
+        to vanish with the transaction, so ``timeout=`` could never fire."""
         ProcessManager.bind_model_process(
             Invoice, WatchdogCrashProcess, state_field='status')
         inv = Invoice.objects.create(status='draft')
         with self.assertRaises(SystemExit):
             inv.wd_crash_proc.go()
 
-        tm = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        self.assertIsNotNone(tm.started_at)   # survived the rollback
-        self.assertEqual(tm.errors_count, 0)  # the attempt recorded nothing
-        self._age_attempt(tm)
+        row = TransitionMessage.objects.get(instance_id=str(inv.pk))
+        self.assertIsNotNone(row.started_at)   # survived the rollback
+        self.assertEqual(row.errors_count, 0)  # the attempt recorded nothing
+        self._age_attempt(row)
 
         self.assertEqual(watchdog_stale_attempts(), 1)
-        tm.refresh_from_db()
-        self.assertEqual(tm.errors_count, 1)
-        # Charged once, not once per tick.
+        row.refresh_from_db()
+        self.assertEqual(row.errors_count, 1)
+        # Counted once, not once per watchdog run.
         self.assertEqual(watchdog_stale_attempts(), 0)
-        tm.refresh_from_db()
-        self.assertEqual(tm.errors_count, 1)
+        row.refresh_from_db()
+        self.assertEqual(row.errors_count, 1)
 
 
-# --- #180: nested-process tree walk ---------------------------------------
+# --- Nested-process tree walk ---------------------------------------------
 
 class SharedLeafProcess(Process):
     process_name = 'shared_leaf'
@@ -278,8 +276,8 @@ class NestedTreeWalkTests(_BindCleanup, TestCase):
         cache.clear()
 
     def test_diamond_yields_each_transition_once_and_is_callable(self):
-        """#180 — a leaf reachable by two paths yielded its transitions twice,
-        so resolution rejected the single declaration as 'several transitions
+        """A leaf reachable by two paths yielded its transitions twice, so
+        resolution refused the single declaration as 'several transitions
         available' while get_available_actions still advertised it."""
         ProcessManager.bind_model_process(
             Invoice, DiamondRootProcess, state_field='status')
@@ -295,7 +293,7 @@ class NestedTreeWalkTests(_BindCleanup, TestCase):
         self.assertEqual(inv.status, 'approved')
 
     def test_duplicate_nested_entry_is_harmless(self):
-        """The copy-paste case: the same class listed twice."""
+        """The copy-paste mistake: the same class listed twice."""
         ProcessManager.bind_model_process(
             Invoice, DuplicateNestedProcess, state_field='status')
         inv = Invoice.objects.create(status='draft')
@@ -304,7 +302,7 @@ class NestedTreeWalkTests(_BindCleanup, TestCase):
         self.assertEqual(inv.status, 'approved')
 
     def test_nested_cycle_does_not_recurse_forever(self):
-        """#180 — A -> B -> A used to die with RecursionError."""
+        """A nesting cycle A -> B -> A used to die with RecursionError."""
         class CycleB(Process):
             process_name = 'cycle_b'
             transitions = [
@@ -331,7 +329,7 @@ class NestedTreeWalkTests(_BindCleanup, TestCase):
         self.assertEqual(inv.status, 'approved')
 
 
-# --- #181: templates must not drive the state machine ---------------------
+# --- Templates must not drive the state machine ---------------------------
 
 class TemplateSafeProcess(Process):
     process_name = 'tpl_safe_proc'
@@ -344,9 +342,9 @@ class TemplateRenderTests(_BindCleanup, TestCase):
     _bound = (TemplateSafeProcess,)
 
     def test_rendering_a_transition_does_not_execute_it(self):
-        """#181 — Django calls any callable a template resolves, so
-        ``{{ obj.process.approve }}`` transitioned the object while rendering
-        a page (and printed the tr_id into the output)."""
+        """Django calls any callable a template resolves, so
+        ``{{ obj.process.approve }}`` used to run the transition while rendering
+        a page, and print the transition id into the output."""
         ProcessManager.bind_model_process(
             Invoice, TemplateSafeProcess, state_field='status')
         cache.clear()
@@ -361,12 +359,12 @@ class TemplateRenderTests(_BindCleanup, TestCase):
         self.assertEqual(inv.status, 'draft')
 
 
-# --- #182: definitions the engine must refuse ----------------------------
+# --- Definitions the engine must refuse -----------------------------------
 
 class ShadowedDefinitionTests(TestCase):
     def test_action_name_shadowed_by_process_attribute_is_rejected(self):
-        """#182 — such a transition was advertised and silently did nothing,
-        because __getattr__ only runs when attribute lookup fails."""
+        """Such a transition was advertised and did nothing, because
+        __getattr__ runs only when the normal attribute lookup fails."""
         with self.assertRaises(ImproperlyConfigured) as ctx:
             class Shadowed(Process):
                 process_name = 'shadowed_proc'
@@ -378,8 +376,8 @@ class ShadowedDefinitionTests(TestCase):
         self.assertIn('shadowed', str(ctx.exception).lower())
 
     def test_process_name_colliding_with_model_field_is_rejected(self):
-        """#182 — binding replaced the field's descriptor with a read-only
-        property, after which the model could not be instantiated at all."""
+        """Binding replaced the field's descriptor with a read-only property,
+        after which the model could not be created at all."""
         class FieldClash(Process):
             process_name = 'status'          # Invoice.status is a real field
             transitions = [
@@ -398,8 +396,8 @@ class BooleanSettingTests(TestCase):
         'STRICT_KWARGS_SERIALIZATION': 'false',
     })
     def test_string_false_does_not_enable_strict_mode(self):
-        """#182 — it was bool()-coerced, so the string 'false' (an env var
-        read straight through) switched strict mode ON."""
+        """The value went through bool(), so the string 'false' — an environment
+        variable read straight through — switched strict mode on."""
         self.assertFalse(strict_kwargs_serialization())
         with self.assertRaises(ImproperlyConfigured):
             _validate_bool('STRICT_KWARGS_SERIALIZATION')
@@ -419,8 +417,8 @@ class UnknownSettingsCheckTests(TestCase):
         'TRANSITION_MESSAGE_MAX_ERROR': 3,      # typo: missing S
     })
     def test_typo_is_reported_as_w004(self):
-        """#182 — a misspelled key was silently ignored and the default
-        silently applied."""
+        """A misspelled key used to be ignored, and the default applied without
+        a word."""
         findings = check_no_unknown_settings(None)
         self.assertEqual([f.id for f in findings], ['django_logic.W004'])
         self.assertIn('TRANSITION_MESSAGE_MAX_ERROR', findings[0].msg)
@@ -440,13 +438,13 @@ class UnknownSettingsCheckTests(TestCase):
         self.assertNotIn('typo', findings[0].msg)
 
 
-# --- the low-severity sweep -----------------------------------------------
+# --- Smaller fixes --------------------------------------------------------
 
 class BareStringSourcesTests(TestCase):
     def test_sources_as_a_bare_string_is_rejected(self):
-        """`list('draft')` is ['d','r','a','f','t'], which matches no state:
-        the transition became invisible to get_available_actions() and calling
-        it reported a missing action rather than a bad declaration."""
+        """`list('draft')` is ['d','r','a','f','t'], which matches no state.
+        get_available_actions() stopped listing the transition, and calling it
+        reported a missing action instead of a bad declaration."""
         with self.assertRaises(ImproperlyConfigured) as ctx:
             Transition('go', sources='draft', target='approved')
         self.assertIn('iterated per character', str(ctx.exception))
@@ -458,8 +456,8 @@ class BareStringSourcesTests(TestCase):
 
 class DeferredUnlockRegistryTests(TransactionTestCase):
     """The registry registered its on_commit clear only while it was empty. A
-    rollback discards the hook but keeps the entries, so it was never empty
-    again and never cleared — growing for the life of the connection."""
+    rollback discards the hook but keeps the entries, so the registry was never
+    empty again, never cleared, and grew for the life of the connection."""
 
     def test_registry_clears_after_a_rollback_then_commits(self):
         from django.db import transaction
@@ -476,7 +474,7 @@ class DeferredUnlockRegistryTests(TransactionTestCase):
                 note_deferred_unlock('default', State(inv, 'status'))
                 raise RuntimeError('rollback')
 
-        # Every subsequent committing transaction must leave it empty.
+        # Every later committing transaction must leave it empty.
         for _ in range(3):
             with transaction.atomic():
                 note_deferred_unlock('default', State(inv, 'status'))
@@ -485,9 +483,9 @@ class DeferredUnlockRegistryTests(TransactionTestCase):
 
 class ReservedUserIdKwargTests(TestCase):
     def test_caller_supplied_user_id_is_dropped_loudly(self):
-        """restore_user popped it in phase 2 and replaced it with a live user,
-        so the hook never saw the caller's value — and the same call behaved
-        correctly in sync mode, a parity break only visible in production."""
+        """The worker popped ``user_id`` and replaced it with a live user, so the
+        hook never saw the caller's value. Sync mode kept the value, so the
+        difference only showed up in production."""
         from django_logic.background.serializers import serialize_kwargs
 
         with self.assertLogs('django-logic', level='WARNING') as logs:
@@ -604,20 +602,20 @@ class FailureErrorAccumulationTests(TestCase):
     """
 
     def test_two_recorded_problems_both_survive(self):
-        tm = TransitionMessage.objects.create(
+        transition_message = TransitionMessage.objects.create(
             app_label='tests', model_name='invoice', instance_id='1',
             process_name='acc_proc', transition_name='go', queue_name='q')
 
-        tm.record_failure_side_effect_error(
+        transition_message.record_failure_side_effect_error(
             ValueError('write refused'), label='failed_state write')
-        tm.record_failure_side_effect_error(
+        transition_message.record_failure_side_effect_error(
             RuntimeError('cleanup broke'), label='failed_state write')
 
-        tm.refresh_from_db()
+        transition_message.refresh_from_db()
         self.assertIn('failed_state write: ValueError: write refused',
-                      tm.failure_side_effect_error)
+                      transition_message.failure_side_effect_error)
         self.assertIn('failed_state write: RuntimeError: cleanup broke',
-                      tm.failure_side_effect_error)
+                      transition_message.failure_side_effect_error)
 
 
 # (StrandedRecoveryHonestyTests retired in 0.12.0 with recover_stranded_states

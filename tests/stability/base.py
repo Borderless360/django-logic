@@ -1,11 +1,10 @@
-"""
-Base test case and utilities for stability tests.
+"""Base test case and helpers for the stability suite.
 
-Provides:
-  - StabilityTestCase: TransactionTestCase with Redis cleanup and leak detection
-  - CrashSimulator: Injects crashes at specific points during side effect execution
-  - WorkerCrashSimulated: Exception type used to simulate worker crashes
-  - requires_real_redis: Skip decorator for tests that need real Redis (nx=True)
+  - StabilityTestCase: TransactionTestCase that clears the cache and fails a
+    test which leaks a lock
+  - CrashSimulator: raises at a chosen point inside a side effect
+  - WorkerCrashSimulated: the exception it raises
+  - requires_real_redis: skips a test that needs a real Redis (nx=True)
 """
 import threading
 import unittest
@@ -38,20 +37,21 @@ requires_postgres = unittest.skipUnless(
 
 
 class WorkerCrashSimulated(Exception):
-    """Raised to simulate a Celery worker crash (OOM, SIGKILL, deploy)."""
+    """Stands in for a Celery worker that dies: out of memory, SIGKILL, or a
+    deploy."""
     pass
 
 
 class CrashSimulator:
     """
-    Wraps side effects to simulate worker crashes at specific points.
+    Wraps side effects so a worker crash can happen at a chosen point.
 
     Usage:
         sim = CrashSimulator(crash_during='call_courier')
         wrapped = [sim.wrap(fn) for fn in side_effects]
-        # When call_courier is reached, WorkerCrashSimulated is raised.
+        # Reaching call_courier raises WorkerCrashSimulated.
 
-    After a crash, `sim.calls` records which side effects actually ran.
+    After the crash, `sim.calls` lists the side effects that ran.
     """
 
     def __init__(self, crash_during=None, crash_after_nth_call=None):
@@ -92,7 +92,7 @@ class CrashSimulator:
 
 class IdempotencyTracker:
     """
-    Tracks side effect execution counts to verify idempotency.
+    Counts how many times each side effect runs.
 
     Usage:
         tracker = IdempotencyTracker()
@@ -124,14 +124,13 @@ class IdempotencyTracker:
 
 def run_concurrent(fn, n_threads=2, args_per_thread=None):
     """
-    Run `fn` concurrently in `n_threads` threads and collect results.
+    Run `fn` in `n_threads` threads and collect the results.
 
-    Each thread gets its own database connection via Django's per-thread
-    connection management. Returns a list of (result_or_None, exception_or_None)
-    tuples.
+    Django gives each thread its own database connection. Returns one
+    (result, exception) tuple per thread, where the unused half is None.
 
-    If args_per_thread is provided, it should be a list of (args, kwargs) tuples,
-    one per thread. Otherwise fn is called with no arguments.
+    `args_per_thread`, when given, holds one (args, kwargs) tuple per thread.
+    Otherwise `fn` takes no arguments.
     """
     results = [None] * n_threads
     errors = [None] * n_threads
@@ -164,11 +163,11 @@ def run_concurrent(fn, n_threads=2, args_per_thread=None):
 @tag('stability')
 class StabilityTestCase(TransactionTestCase):
     """
-    Base test case for stability tests.
+    Base test case for the stability suite.
 
-    - Uses TransactionTestCase for real transaction isolation
-    - Clears Redis cache between tests to prevent lock leaks
-    - Verifies no orphaned locks remain after each test (leak detection)
+    - Subclasses TransactionTestCase, so transactions behave as in production
+    - Clears the cache between tests, so no lock leaks into the next one
+    - Fails a test that leaves a tracked lock behind
     """
     databases = '__all__'
 
@@ -183,18 +182,17 @@ class StabilityTestCase(TransactionTestCase):
         super().tearDown()
 
     def _assert_no_leaked_locks(self):
-        """Verify that no Redis lock keys were leaked by the test."""
+        """Fail the test if it left a tracked lock key in the cache."""
         for key in list(self._tracked_cache_keys):
             value = cache.get(key)
             if value is not None:
                 self.fail(
-                    f"Leaked lock detected: cache key '{key}' still has "
-                    f"value '{value}' after test completed. This indicates "
-                    f"a lock was never released."
+                    f"Leaked lock: cache key '{key}' still holds '{value}' "
+                    f"after the test finished. A lock was never released."
                 )
 
     def track_lock(self, state):
-        """Register a state's cache key for leak detection in tearDown."""
+        """Register a state's cache key, so tearDown checks it for a leak."""
         self._tracked_cache_keys.add(state._get_hash())
 
     def get_cache_value(self, state):

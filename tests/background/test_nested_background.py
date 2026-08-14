@@ -1,14 +1,9 @@
-"""Regression: background transitions declared on a *nested* process.
+"""Background transitions declared on a nested process.
 
-Phase 1 can start a background transition that lives on a nested process —
-transition resolution descends into ``nested_processes``. The
-``TransitionMessage`` records only the bound (parent) ``process_name``, so
-phase 2 restores the parent process and must descend into ``nested_processes``
-itself to find the transition (``runner._find_transition``).
-
-Before that descent existed, phase 2 could not locate the nested transition:
-the message was marked completed, the side-effects never ran, and the instance
-was stranded in ``in_progress_state``. Every test here fails on that old code.
+The row records only the bound parent ``process_name``, so the worker restores
+the parent process and has to descend into ``nested_processes`` to find the
+transition. Without that descent the worker marked the row completed, ran no
+side-effects, and left the instance in its ``in_progress_state``.
 """
 from django.test import TestCase, override_settings
 
@@ -26,13 +21,12 @@ class NestedBackgroundTransitionTests(TestCase):
         self.widget = Widget.objects.create(status='draft')
 
     def test_reaches_target_and_runs_side_effects(self):
-        # Invoked through the PARENT property; the transition lives on the
+        # Called through the parent property, while the transition lives on the
         # nested child process.
         tr_id = self.widget.parent_process.nested_fulfil()
         self.assertIsNotNone(tr_id)
 
         self.widget.refresh_from_db()
-        # Old behaviour: stuck in 'nested_fulfilling', se_log empty.
         self.assertEqual(self.widget.status, 'nested_fulfilled')
         self.assertIn('ok,', self.widget.se_log)
         self.assertIn('cb,', self.widget.cb_log)
@@ -40,16 +34,17 @@ class NestedBackgroundTransitionTests(TestCase):
 
     def test_transition_message_completed(self):
         self.widget.parent_process.nested_fulfil()
-        tm = TransitionMessage.objects.get(transition_name='nested_fulfil')
-        self.assertTrue(tm.is_completed)
-        self.assertEqual(tm.errors_count, 0)
-        self.assertEqual(tm.queue_name, 'django_logic.critical')
-        # The message records the bound parent process, not the nested one —
-        # which is exactly why phase 2 has to descend.
-        self.assertEqual(tm.process_name, 'parent_process')
+        row = TransitionMessage.objects.get(transition_name='nested_fulfil')
+        self.assertTrue(row.is_completed)
+        self.assertEqual(row.errors_count, 0)
+        self.assertEqual(row.queue_name, 'django_logic.critical')
+        # The row records the bound parent process, not the nested one, which
+        # is why the worker has to descend.
+        self.assertEqual(row.process_name, 'parent_process')
 
     def test_two_levels_deep(self):
-        # nested_processes -> NestedBgMidProcess -> NestedBgGrandchildProcess
+        # The descent goes through NestedBgMidProcess to
+        # NestedBgGrandchildProcess.
         self.widget.parent_process.deeply_nested_fulfil()
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'deeply_nested_fulfilled')
@@ -76,14 +71,14 @@ class NestedBackgroundTransitionTests(TestCase):
         )
 
     def test_nested_failure_actually_runs_side_effect(self):
-        # The clincher: pre-fix the nested transition was never found, so the
-        # raising side-effect never ran and nothing was raised. Post-fix the
-        # side-effect runs and (sync mode) the exception propagates.
+        # Without the descent the raising side-effect never ran, so nothing was
+        # raised and the test would have looked like a pass. In sync mode the
+        # side-effect runs and the exception propagates.
         with self.assertRaises(ValueError):
             self.widget.parent_process.nested_crash()
 
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'nested_crashing')
-        tm = TransitionMessage.objects.get(transition_name='nested_crash')
-        self.assertFalse(tm.is_completed)
-        self.assertEqual(tm.errors_count, 1)
+        row = TransitionMessage.objects.get(transition_name='nested_crash')
+        self.assertFalse(row.is_completed)
+        self.assertEqual(row.errors_count, 1)
