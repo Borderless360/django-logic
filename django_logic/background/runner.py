@@ -172,6 +172,7 @@ def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -
     try:
         TransitionMessage.objects.filter(pk=transition_message_id, is_completed=False).update(
             is_completed=True,
+            ended_in_failure=True,
             completed_at=now,
             last_error_message=note,
             last_error_dt=now,
@@ -369,7 +370,8 @@ def _finalize_terminal_from_watchdog(
     except _RestoreError:
         # No attempt ran here, so started_at (if any) belongs to an
         # abandoned attempt — don't record a misleading duration.
-        transition_message.mark_as_completed(measure_duration=False)
+        transition_message.mark_as_completed(
+            measure_duration=False, ended_in_failure=True)
         return None
     except Exception as exc:
         # Anything _restore did not treat as permanent: a consumer
@@ -386,7 +388,8 @@ def _finalize_terminal_from_watchdog(
             f'run the transition again from there to move it on.',
             exc_info=True,
         )
-        transition_message.mark_as_completed(measure_duration=False)
+        transition_message.mark_as_completed(
+            measure_duration=False, ended_in_failure=True)
         return None
 
     try:
@@ -468,7 +471,8 @@ def _finalize_terminal_from_watchdog(
 
     # A safety-net finalization is not a worker attempt. started_at belongs to
     # the abandoned attempt, so measuring from it would inflate duration_ms.
-    transition_message.mark_as_completed(measure_duration=False)
+    transition_message.mark_as_completed(
+        measure_duration=False, ended_in_failure=True)
     return (transition, state, kwargs, exception)
 
 
@@ -761,7 +765,8 @@ def _handle_restore_failure(
         f'written, so the instance stays in its in_progress_state; run the '
         f'transition again from there to move it on.'
     )
-    transition_message.mark_as_completed(measure_duration=False)
+    transition_message.mark_as_completed(
+        measure_duration=False, ended_in_failure=True)
     return _Outcome(terminal=True, succeeded=False, exception=error)
 
 
@@ -865,7 +870,7 @@ def _handle_failure(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                 f'{transition.failed_state}'
             )
-    transition_message.mark_as_completed()
+    transition_message.mark_as_completed(ended_in_failure=True)
     return _Outcome(
         terminal=True,
         succeeded=False,

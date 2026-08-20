@@ -55,7 +55,10 @@ call that worked on 0.14.x works unchanged.
   before it publishes — a compare-and-set, so a row costs at most one
   broker message per retry window instead of one per tick, and the primary
   dispatch counts as the first (migration 0008 adds the marker and a
-  `dispatch_count`; both instant on PostgreSQL). A row published 60 times
+  `dispatch_count`; instant on PostgreSQL). A publish that raises gives its
+  count back — the window stays spent, so a broken broker is asked once per
+  window, but the ceiling counts only messages the broker really took
+  (found in review, by Cursor Bugbot). A row published 60 times
   that never once started stops being re-dispatched, and
   `detect_stuck_transitions` reports it by name and queue — "does that
   queue have a consumer?" — instead of the silence that let five stalled
@@ -69,7 +72,10 @@ call that worked on 0.14.x works unchanged.
   per instance and process instead of deleting it on the same
   `CLEANUP_DAYS` clock as successes. That row is the only explanation for
   an instance parked in its `failed_state`. One row per parked instance:
-  bounded, and no new setting.
+  bounded, and no new setting. A new `ended_in_failure` flag on the row
+  (migration 0008) is what marks a failure — an `errors_count` comparison
+  cannot, because a permanent failure completes at one error and a retried
+  success can carry several (found in review, by Cursor Bugbot).
 
 ### Documented
 

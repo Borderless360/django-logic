@@ -87,6 +87,17 @@ class DispatchClaimTests(TestCase):
             TransitionMessage.STRANDED,
         )
 
+    def test_a_failed_publish_gives_the_count_back(self):
+        widget = Widget.objects.create(status='fulfilling')
+        row = _never_started_row(widget)
+        with patch(_APPLY_ASYNC, side_effect=RuntimeError('broker down')):
+            self.assertEqual(_retry_pending_inline(), 0)
+        row.refresh_from_db()
+        # The window is spent (one ask per window against a broken broker),
+        # but the ceiling counts only messages the broker really took.
+        self.assertEqual(row.dispatch_count, 0)
+        self.assertIsNotNone(row.last_dispatched_at)
+
     def test_the_primary_dispatch_counts_as_the_first(self):
         widget = Widget.objects.create(status='draft')
         with patch(_APPLY_ASYNC) as mock_async:

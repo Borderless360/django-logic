@@ -150,16 +150,22 @@ def _retry_pending_inline() -> int:
                 if TransitionMessage.worker_holds_row(pk):
                     continue
                 # Claim before publishing: at most one broker message per
-                # row per retry window, whoever many starter ticks fire in
+                # row per retry window, however many starter ticks fire in
                 # it. A failed publish after a claim costs one window; the
-                # reverse order reintroduces the duplicates.
+                # reverse order reintroduces the duplicates. The count goes
+                # back on a failed publish, so a broker outage cannot spend
+                # the dispatch ceiling on messages the broker never took.
                 if not TransitionMessage.claim_dispatch(pk):
                     continue
-                # Same per-transition shadow as the primary dispatch path.
-                run_background_transition_task.apply_async(
-                    args=[pk], queue=queue_name,
-                    shadow=f'django_logic.{app_label}.{transition_name}',
-                )
+                try:
+                    # Same per-transition shadow as the primary dispatch path.
+                    run_background_transition_task.apply_async(
+                        args=[pk], queue=queue_name,
+                        shadow=f'django_logic.{app_label}.{transition_name}',
+                    )
+                except Exception:
+                    TransitionMessage.publish_failed(pk)
+                    raise
             dispatched += 1
         except Exception as e:
             # A dispatch-layer error (broker down, serialization, etc.)
@@ -193,15 +199,13 @@ def cleanup_completed_transitions() -> int:
     """
     from django.db.models import OuterRef, Q, Subquery
 
-    from django_logic.background.runner import UNRESTORABLE_MARKER
-
     cutoff = timezone.now() - timedelta(days=bg_settings.cleanup_days())
-    # Terminal failure: the retries were exhausted, or the row could not be
-    # restored at all. A superseded row is not a failure — the external
-    # state change won and the instance is not parked.
-    failed = Q(errors_count__gte=bg_settings.max_errors()) | Q(
-        last_error_message__startswith=UNRESTORABLE_MARKER
-    )
+    # ended_in_failure, not an errors_count comparison: a permanent failure
+    # completes at one error, and a retried success can carry several, so
+    # the count cannot tell them apart. Every terminal-failure path sets
+    # the flag; a superseded row does not — the external state change won
+    # and the instance is not parked.
+    failed = Q(ended_in_failure=True)
     newest_failed = (
         TransitionMessage.objects
         .filter(
@@ -270,8 +274,8 @@ def detect_stuck_transitions() -> int:
             f'detect_stuck_transitions: TransitionMessage#{pk} was published '
             f'{dispatch_count} times to queue {queue_name!r} and never '
             f'started — does that queue have a consumer? The starter has '
-            f'stopped re-dispatching it. Start a consumer (the queued copies '
-            f'will run it), or dispatch it by hand.'
+            f'stopped re-dispatching it. Start a consumer; if the queue no '
+            f'longer holds the copies, dispatch the row by hand.'
         )
 
     max_errors = bg_settings.max_errors()

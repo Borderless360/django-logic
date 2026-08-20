@@ -2,9 +2,9 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    """Two nullable/defaulted columns — instant on PostgreSQL. No new index:
-    every read of these columns goes through the uncompleted set, which is
-    small by design and already indexed."""
+    """Three nullable/defaulted columns — instant on PostgreSQL. No new
+    index: every read of these columns goes through the uncompleted set
+    (small by design, already indexed) or the cleanup sweep's full scan."""
 
     dependencies = [
         ('django_logic_background', '0007_transitionmessage_owning_process_class'),
@@ -20,5 +20,10 @@ class Migration(migrations.Migration):
             model_name='transitionmessage',
             name='dispatch_count',
             field=models.PositiveIntegerField(default=0),
+        ),
+        migrations.AddField(
+            model_name='transitionmessage',
+            name='ended_in_failure',
+            field=models.BooleanField(default=False),
         ),
     ]

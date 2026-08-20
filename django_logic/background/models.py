@@ -59,6 +59,15 @@ class TransitionMessage(TimeStampedModel):
     # that triggered the failure branch in the first place.
     failure_side_effect_error = models.TextField(blank=True)
 
+    # True when the row completed as a failure — retries exhausted, a
+    # permanent failure, a restore that could not run, an unrestorable row.
+    # False for a success and for a superseded row (the external state
+    # change won; the instance is not parked). The cleanup sweep keeps the
+    # newest failure row per instance and process, and this flag is what
+    # tells it apart: ``errors_count`` cannot, because a permanent failure
+    # completes at one error and a retried success can carry several.
+    ended_in_failure = models.BooleanField(default=False)
+
     # Worker timing. ``started_at`` is (re)written at the top of every
     # attempt, so on retry it reflects the *current* attempt — a
     # watchdog can scan ``is_completed=False AND started_at < cutoff``
@@ -213,6 +222,21 @@ class TransitionMessage(TimeStampedModel):
             )
         )
         return bool(claimed)
+
+    @classmethod
+    def publish_failed(cls, transition_message_id: int) -> None:
+        """Give a claim's count back when its publish raised.
+
+        The window stays spent — ``last_dispatched_at`` keeps the claim, so
+        a broken broker is asked once per retry window, not once per tick —
+        but the dispatch ceiling must count only messages the broker really
+        took. Without this, a broker outage of sixty windows exhausted the
+        ceiling with nothing on the queue, and the never-started report
+        then pointed at a consumer that was never the problem.
+        """
+        cls.objects.filter(
+            pk=transition_message_id, dispatch_count__gt=0,
+        ).update(dispatch_count=models.F('dispatch_count') - 1)
 
     @classmethod
     def mark_dispatched(cls, transition_message_id: int) -> None:
@@ -376,7 +400,9 @@ class TransitionMessage(TimeStampedModel):
             return False
         return True
 
-    def mark_as_completed(self, measure_duration: bool = True) -> None:
+    def mark_as_completed(
+        self, measure_duration: bool = True, *, ended_in_failure: bool = False,
+    ) -> None:
         """Mark the row completed and (optionally) record ``duration_ms``.
 
         ``measure_duration`` must be ``False`` when the row is finalized by
@@ -386,11 +412,17 @@ class TransitionMessage(TimeStampedModel):
         the time-to-finalize, not an execution time — recording it as
         ``duration_ms`` would grossly inflate latency metrics. Leaving
         ``duration_ms`` null signals "no measured execution".
+
+        ``ended_in_failure`` is True on every terminal-failure path, so the
+        cleanup sweep can keep the newest failure row per instance.
         """
         now = timezone.now()
         self.is_completed = True
         self.completed_at = now
         update_fields = ['is_completed', 'completed_at', 'modified']
+        if ended_in_failure:
+            self.ended_in_failure = True
+            update_fields.append('ended_in_failure')
         if measure_duration and self.started_at is not None:
             delta = now - self.started_at
             # Clamp to 0 to absorb clock skew; cap into PositiveIntegerField.

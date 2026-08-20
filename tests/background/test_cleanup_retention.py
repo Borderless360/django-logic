@@ -22,7 +22,8 @@ _SETTINGS = dl_settings(
 
 
 def _old_completed_row(widget, *, errors=0, last_error='', days_ago=30,
-                       process_name='process', transition_name='fulfil'):
+                       process_name='process', transition_name='fulfil',
+                       failed=False):
     row = TransitionMessage.objects.create(
         app_label='bg_tests',
         model_name='widget',
@@ -34,6 +35,7 @@ def _old_completed_row(widget, *, errors=0, last_error='', days_ago=30,
         errors_count=errors,
         last_error_message=last_error,
         is_completed=True,
+        ended_in_failure=failed,
     )
     past = timezone.now() - timedelta(days=days_ago)
     TransitionMessage.objects.filter(pk=row.pk).update(
@@ -52,9 +54,11 @@ class CleanupRetentionTests(TestCase):
 
     def test_the_newest_terminal_failure_row_stays(self):
         widget = Widget.objects.create(status='fulfilment_failed')
-        _old_completed_row(widget, errors=3, last_error='boom', days_ago=40)
+        _old_completed_row(
+            widget, errors=3, last_error='boom', days_ago=40, failed=True,
+        )
         newest = _old_completed_row(
-            widget, errors=3, last_error='boom again', days_ago=20,
+            widget, errors=3, last_error='boom again', days_ago=20, failed=True,
         )
         _old_completed_row(widget, days_ago=30)  # a success in between
         deleted = cleanup_completed_transitions()
@@ -67,18 +71,35 @@ class CleanupRetentionTests(TestCase):
         widget = Widget.objects.create(status='fulfilling')
         row = _old_completed_row(
             widget, errors=0,
-            last_error=f'{UNRESTORABLE_MARKER} model gone',
+            last_error=f'{UNRESTORABLE_MARKER} model gone', failed=True,
         )
         cleanup_completed_transitions()
+        self.assertTrue(TransitionMessage.objects.filter(pk=row.pk).exists())
+
+    def test_a_permanent_failure_row_is_kept(self):
+        widget = Widget.objects.create(status='draft')
+        from django_logic.background import PermanentFailure
+        with self.assertRaises(PermanentFailure):
+            widget.process.refuse()
+        row = TransitionMessage.objects.get(transition_name='refuse')
+        self.assertTrue(row.ended_in_failure)
+        self.assertEqual(row.errors_count, 1)
+        past = timezone.now() - timedelta(days=30)
+        TransitionMessage.objects.filter(pk=row.pk).update(
+            modified=past, completed_at=past,
+        )
+        self.assertEqual(cleanup_completed_transitions(), 0)
         self.assertTrue(TransitionMessage.objects.filter(pk=row.pk).exists())
 
     def test_retention_is_per_instance_and_process(self):
         widget = Widget.objects.create(status='fulfilment_failed')
         other = Widget.objects.create(status='audit_failed')
-        keep_one = _old_completed_row(widget, errors=3, last_error='a')
+        keep_one = _old_completed_row(
+            widget, errors=3, last_error='a', failed=True,
+        )
         keep_two = _old_completed_row(
             other, errors=3, last_error='b', process_name='audit_process',
-            transition_name='audit',
+            transition_name='audit', failed=True,
         )
         cleanup_completed_transitions()
         self.assertEqual(

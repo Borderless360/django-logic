@@ -76,13 +76,19 @@ def dispatch_transition(transition_message) -> None:
     def _enqueue():
         # The primary publish counts as the first dispatch, so the
         # starter's claim window starts from here, not from the first tick.
+        # The count goes back if the publish raises — the ceiling counts
+        # only messages the broker really took.
         from django_logic.background.models import TransitionMessage
         TransitionMessage.mark_dispatched(transition_message.pk)
-        run_background_transition_task.apply_async(
-            args=[transition_message.pk],
-            queue=transition_message.queue_name,
-            shadow=shadow,
-        )
+        try:
+            run_background_transition_task.apply_async(
+                args=[transition_message.pk],
+                queue=transition_message.queue_name,
+                shadow=shadow,
+            )
+        except Exception:
+            TransitionMessage.publish_failed(transition_message.pk)
+            raise
 
     transaction.on_commit(_enqueue)
 
