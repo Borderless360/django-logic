@@ -21,7 +21,9 @@ JSON and rebuild it in a test, turning a production bug into a regression test.
 
 See ``docs/TESTING_GUIDE.md`` for the full guide.
 """
+from django_logic.testing.driven import DrivenTransitions, record_driven_transitions
 from django_logic.testing.idempotency import assert_idempotent
+from django_logic.testing.rows import open_transition_message
 from django_logic.testing.scenario import ProcessScenario, JourneyStep
 from django_logic.testing.snapshot import from_snapshot, snapshot
 
@@ -31,4 +33,7 @@ __all__ = [
     'snapshot',
     'from_snapshot',
     'assert_idempotent',
+    'open_transition_message',
+    'record_driven_transitions',
+    'DrivenTransitions',
 ]
