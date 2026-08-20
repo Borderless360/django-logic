@@ -802,7 +802,10 @@ def _handle_failure(
     )
 
     max_errors = bg_settings.max_errors()
-    if transition_message.errors_count < max_errors:
+    if (
+        transition_message.errors_count < max_errors
+        and not _failure_is_permanent(transition, error)
+    ):
         # Leave uncompleted → periodic starter will retry.
         return _Outcome(
             terminal=False,
@@ -811,6 +814,11 @@ def _handle_failure(
             transition=transition,
             state_obj=state,
             kwargs=kwargs,
+        )
+    if transition_message.errors_count < max_errors:
+        transition_logger.info(
+            f'{kwargs.get("tr_id")} {transition.action_name} failed '
+            f'permanently ({type(error).__name__}); not retried.'
         )
 
     # Terminal failure: write failed_state (if any) and mark completed.
@@ -866,6 +874,21 @@ def _handle_failure(
         state_obj=state,
         kwargs=kwargs,
     )
+
+
+def _failure_is_permanent(transition, error: BaseException) -> bool:
+    """Whether ``error`` says another attempt gets the same answer.
+
+    True for :class:`PermanentFailure` (the raise site declares it) and for
+    the exception types the transition lists in ``no_retry_on`` (the
+    declaration declares it, for types the consumer does not control).
+    """
+    from django_logic.background.exceptions import PermanentFailure
+
+    if isinstance(error, PermanentFailure):
+        return True
+    no_retry_on = getattr(transition, 'no_retry_on', ())
+    return bool(no_retry_on) and isinstance(error, no_retry_on)
 
 
 def _run_success_hooks(outcome: _Outcome) -> None:

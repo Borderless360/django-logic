@@ -48,6 +48,14 @@ class BackgroundTransition(Transition):
           (``'django_logic'``). Name queues per SLA (e.g. ``critical`` /
           ``slow``) and give each its own worker to manage performance
           per queue.
+        - ``no_retry_on`` — exception types whose failures are permanent
+          for this transition. When a side-effect raises one, the worker
+          takes the terminal path on that attempt instead of retrying:
+          it writes ``failed_state`` (when declared), marks the row
+          completed, and runs ``failure_callbacks``. Use it for
+          exception types you do not control; for your own code, raise
+          :class:`django_logic.background.exceptions.PermanentFailure`,
+          which needs no declaration.
 
     Recommended:
         - ``in_progress_state`` — if omitted, the state field does not
@@ -69,6 +77,7 @@ class BackgroundTransition(Transition):
         *,
         queue: str | None = None,
         timeout: int | None = None,
+        no_retry_on: tuple = (),
         **kwargs,
     ):
         if queue is not None and (not queue or not isinstance(queue, str)):
@@ -84,8 +93,19 @@ class BackgroundTransition(Transition):
                     f"be a positive integer number of seconds, got "
                     f"{timeout!r}."
                 )
+        no_retry_on = tuple(
+            no_retry_on if isinstance(no_retry_on, (list, tuple)) else (no_retry_on,)
+        )
+        for exception_type in no_retry_on:
+            if not (isinstance(exception_type, type)
+                    and issubclass(exception_type, BaseException)):
+                raise ImproperlyConfigured(
+                    f"BackgroundTransition '{action_name}': no_retry_on must "
+                    f"contain exception types, got {exception_type!r}."
+                )
         self.queue = queue
         self.timeout = timeout
+        self.no_retry_on = no_retry_on
         super().__init__(
             action_name=action_name, sources=sources, target=target, **kwargs
         )

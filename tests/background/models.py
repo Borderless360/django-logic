@@ -20,6 +20,11 @@ def bg_boom(instance, **kwargs):
     raise ValueError('boom')
 
 
+def bg_refuse(instance, **kwargs):
+    from django_logic.background import PermanentFailure
+    raise PermanentFailure('the rule says no')
+
+
 # Holds the exact kwargs, values and types, that the last side-effect received
 # on the worker. Round-trip tests read it instead of a database column.
 LAST_KWARGS: dict = {}
@@ -98,6 +103,27 @@ class WidgetProcess(Process):
             queue='django_logic.slow',
             side_effects=[bg_ok],
             timeout=60,
+        ),
+        BackgroundTransition(
+            action_name='refuse',
+            sources=['draft'],
+            target='refuse_done',
+            in_progress_state='refusing',
+            failed_state='refused',
+            queue='django_logic.critical',
+            side_effects=[bg_refuse],
+            failure_callbacks=[bg_failure_callback],
+        ),
+        BackgroundTransition(
+            action_name='refuse_declared',
+            sources=['draft'],
+            target='rd_done',
+            in_progress_state='rd_running',
+            failed_state='rd_refused',
+            queue='django_logic.critical',
+            side_effects=[bg_boom],
+            failure_callbacks=[bg_failure_callback],
+            no_retry_on=(ValueError,),
         ),
         BackgroundAction(
             action_name='sync_inventory',
