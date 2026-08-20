@@ -40,6 +40,13 @@ from django_logic.background.runner import (
 from django_logic.logger import logger
 
 
+#: How many publishes a row that never started gets before the starter stops
+#: re-dispatching it and ``detect_stuck_transitions`` reports it instead.
+#: Two hours at the default two-minute claim window — a backlogged queue
+#: clears long before that; a queue with no consumer never does.
+MAX_DISPATCHES_NEVER_STARTED = 60
+
+
 @shared_task(
     acks_late=True,
     reject_on_worker_lost=True,
@@ -105,7 +112,10 @@ def _retry_pending_inline() -> int:
     # (the select_for_update guard prevents double-execution, but duplicate
     # queue messages pile up and the redispatch keeps overwriting
     # started_at, perpetually sliding the watchdog's timeout floor). Rows
-    # that never started (started_at IS NULL) are always eligible.
+    # that never started (started_at IS NULL) are eligible until they pass
+    # the dispatch ceiling: published that many times and never once picked
+    # up means the queue has no consumer, and more copies cannot help —
+    # detect_stuck_transitions reports such rows.
     candidates = list(
         TransitionMessage.objects
         .filter(
@@ -114,6 +124,10 @@ def _retry_pending_inline() -> int:
             created__lt=cutoff,
         )
         .filter(Q(started_at__isnull=True) | Q(started_at__lt=cutoff))
+        .exclude(
+            started_at__isnull=True,
+            dispatch_count__gte=MAX_DISPATCHES_NEVER_STARTED,
+        )
         .order_by('created')
         .values_list('pk', 'queue_name', 'app_label', 'transition_name')
     )
@@ -134,6 +148,12 @@ def _retry_pending_inline() -> int:
                 # whole duration. A crashed attempt holds no lock, so it is
                 # re-dispatched at once.
                 if TransitionMessage.worker_holds_row(pk):
+                    continue
+                # Claim before publishing: at most one broker message per
+                # row per retry window, whoever many starter ticks fire in
+                # it. A failed publish after a claim costs one window; the
+                # reverse order reintroduces the duplicates.
+                if not TransitionMessage.claim_dispatch(pk):
                     continue
                 # Same per-transition shadow as the primary dispatch path.
                 run_background_transition_task.apply_async(
@@ -229,6 +249,31 @@ def detect_stuck_transitions() -> int:
 
     Returns the number of rows finalized.
     """
+    # Rows the starter has given up re-dispatching: published that many
+    # times, never once picked up. Report them — the missing consumer is an
+    # operations problem the library cannot fix, but it can name it. The
+    # copies already on the queue still run the row the moment a consumer
+    # appears; `redispatch --id` (or one manual dispatch) recovers a purged
+    # queue. Alert-only on purpose: finalizing would fail work a deep
+    # backlog would have completed.
+    never_started = (
+        TransitionMessage.objects
+        .filter(
+            is_completed=False,
+            started_at__isnull=True,
+            dispatch_count__gte=MAX_DISPATCHES_NEVER_STARTED,
+        )
+        .values_list('pk', 'queue_name', 'dispatch_count')
+    )
+    for pk, queue_name, dispatch_count in never_started:
+        logger.error(
+            f'detect_stuck_transitions: TransitionMessage#{pk} was published '
+            f'{dispatch_count} times to queue {queue_name!r} and never '
+            f'started — does that queue have a consumer? The starter has '
+            f'stopped re-dispatching it. Start a consumer (the queued copies '
+            f'will run it), or dispatch it by hand.'
+        )
+
     max_errors = bg_settings.max_errors()
     stuck_ids = list(
         TransitionMessage.objects

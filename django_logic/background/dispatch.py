@@ -74,6 +74,10 @@ def dispatch_transition(transition_message) -> None:
     shadow = task_label(transition_message)
 
     def _enqueue():
+        # The primary publish counts as the first dispatch, so the
+        # starter's claim window starts from here, not from the first tick.
+        from django_logic.background.models import TransitionMessage
+        TransitionMessage.mark_dispatched(transition_message.pk)
         run_background_transition_task.apply_async(
             args=[transition_message.pk],
             queue=transition_message.queue_name,

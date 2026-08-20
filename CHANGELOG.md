@@ -4,9 +4,10 @@
 
 ## [0.15.0] — 2026-08-20
 
-Five consumer-reported issues from the gv coupled-core migration, all found
-while reviewing the integration app port (gv#9594). No breaking changes:
-every declaration and call that worked on 0.14.x works unchanged.
+Six consumer-reported issues from the gv coupled-core migration — five found
+reviewing the integration app port (gv#9594), one observed live on the gv
+staging broker right after it. No breaking changes: every declaration and
+call that worked on 0.14.x works unchanged.
 
 ### Added
 
@@ -49,6 +50,20 @@ every declaration and call that worked on 0.14.x works unchanged.
   message and worker pickup per row per tick). A crashed attempt holds no
   lock, so re-dispatch is as fast as before — faster than a timeout-budget
   filter would have been.
+- **Publishing for one row is bounded, and a queue with no consumer is
+  named** (#215). The starter now claims `last_dispatched_at` on the row
+  before it publishes — a compare-and-set, so a row costs at most one
+  broker message per retry window instead of one per tick, and the primary
+  dispatch counts as the first (migration 0008 adds the marker and a
+  `dispatch_count`; both instant on PostgreSQL). A row published 60 times
+  that never once started stops being re-dispatched, and
+  `detect_stuck_transitions` reports it by name and queue — "does that
+  queue have a consumer?" — instead of the silence that let five stalled
+  rows put ~7,000 messages a day on a staging broker. Alert-only on
+  purpose: a deep backlog clears and the queued copies run the row;
+  finalizing would fail work that would have completed. Claims do not
+  touch `modified`, so `retry_status` still answers stranded for exactly
+  these rows.
 - **The cleanup sweep keeps failure forensics** (#213).
   `cleanup_completed_transitions` now keeps the newest terminal-failure row
   per instance and process instead of deleting it on the same

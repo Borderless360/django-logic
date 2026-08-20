@@ -112,6 +112,19 @@ class TransitionMessage(TimeStampedModel):
     # wall-clock limit.
     timeout_seconds = models.PositiveIntegerField(blank=True, null=True)
 
+    # When a broker message was last published for this row, and how many
+    # times one ever was — the primary dispatch and every starter
+    # re-dispatch. The pair is what bounds publishing for a row nothing
+    # consumes: the starter claims ``last_dispatched_at`` before it
+    # publishes (at most one message per retry window), and a row that
+    # passes the dispatch ceiling with ``started_at`` still null stops
+    # being re-dispatched and is reported instead. Deliberately separate
+    # from ``modified``: a dispatch is not activity on the row, and
+    # writing ``modified`` here would stop ``retry_status`` from ever
+    # answering stranded for exactly these rows.
+    last_dispatched_at = models.DateTimeField(blank=True, null=True)
+    dispatch_count = models.PositiveIntegerField(default=0)
+
     kwargs = models.JSONField(blank=True, default=dict)
 
     class Meta:
@@ -167,6 +180,52 @@ class TransitionMessage(TimeStampedModel):
 
     RETRYING = 'retrying'
     STRANDED = 'stranded'
+
+    @classmethod
+    def claim_dispatch(cls, transition_message_id: int) -> bool:
+        """Claim the right to publish one broker message for this row.
+
+        A compare-and-set on ``last_dispatched_at``: the claim succeeds only
+        when the row is uncompleted and was last published more than
+        ``RETRY_MINUTES`` ago. The starter publishes only after a successful
+        claim (mark first, publish second — the reverse order reintroduces
+        the duplicate this exists to remove), so a row nothing consumes
+        costs at most one message per retry window instead of one per tick.
+
+        ``modified`` is deliberately not written: a dispatch is not
+        activity on the row, and refreshing it would stop ``retry_status``
+        from answering stranded for a row on a queue with no consumer.
+        """
+        from django_logic.background import settings as bg_settings
+
+        now = timezone.now()
+        cutoff = now - timedelta(minutes=bg_settings.retry_minutes())
+        claimed = (
+            cls.objects
+            .filter(pk=transition_message_id, is_completed=False)
+            .filter(
+                models.Q(last_dispatched_at__isnull=True)
+                | models.Q(last_dispatched_at__lt=cutoff)
+            )
+            .update(
+                last_dispatched_at=now,
+                dispatch_count=models.F('dispatch_count') + 1,
+            )
+        )
+        return bool(claimed)
+
+    @classmethod
+    def mark_dispatched(cls, transition_message_id: int) -> None:
+        """Record the primary publish for a fresh row, unconditionally.
+
+        Enqueue must always publish, so this is a plain stamp, not a claim —
+        it makes the primary dispatch count as the first one, so the
+        starter's claim window starts from it.
+        """
+        cls.objects.filter(pk=transition_message_id, is_completed=False).update(
+            last_dispatched_at=timezone.now(),
+            dispatch_count=models.F('dispatch_count') + 1,
+        )
 
     @classmethod
     def worker_holds_row(cls, transition_message_id: int) -> bool:
