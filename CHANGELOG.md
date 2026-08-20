@@ -2,6 +2,81 @@
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-20
+
+Five consumer-reported issues from the gv coupled-core migration, all found
+while reviewing the integration app port (gv#9594). No breaking changes:
+every declaration and call that worked on 0.14.x works unchanged.
+
+### Added
+
+- **A failure can say it is permanent** (#209). A background side-effect
+  that raises `django_logic.background.PermanentFailure` — or an exception
+  type the transition lists in `no_retry_on=(...)` — takes the terminal
+  path on that first attempt: `failed_state` is written, the row completes,
+  `failure_callbacks` run. Before, a business refusal ("no record matched",
+  "the rule says no") waited out `MAX_ERRORS × RETRY_MINUTES` before the
+  user saw it, and consumers routed around the retry policy with
+  target-less actions plus per-outcome verdict transitions. Ordinary
+  exceptions keep their retries — that asymmetry is the point.
+- **Two testing helpers the reference consumer kept hand-rolling** (#214).
+  `django_logic.testing.open_transition_message(instance, process_name,
+  transition_name, started_minutes_ago=...)` stands up a coherent
+  uncompleted `TransitionMessage` for tests that pin the one-uncompleted-row
+  gate (gv wrote that eight-field row by hand in three files, each slightly
+  differently). `django_logic.testing.record_driven_transitions()` records
+  which actions a test block drove and diffs against a process's
+  declarations (`record.undriven(MyProcess)`). Unlike the runtime coverage
+  subsystem 0.14.0 removed, this is a test-scope context manager with no
+  engine seam, no setting, and a consumer who asked for it.
+
+### Fixed
+
+- **A live long attempt is no longer called stranded** (#210). Past the
+  retry window, `retry_status` now probes the row lock (savepointed
+  `select_for_update(nowait=True)`, never blocking) before answering
+  `STRANDED`. Before, an attempt that ran quietly for more than
+  `max(RETRY_MINUTES × (MAX_ERRORS + 1), 15)` minutes with no declared
+  `timeout=` made the gates tell the operator "nothing is retrying it —
+  complete the row" while a worker held the row and the starter was
+  re-dispatching it. The queue-backlog ambiguity remains and the stranded
+  message still names it; the dangerous half — a human completing a live
+  row — is gone.
+- **The starter no longer duplicates dispatches for long attempts** (#211).
+  `retry_stale_transitions` skips a row a worker holds. Before, every
+  attempt longer than `RETRY_MINUTES` drew one no-op broker message per
+  tick for its whole duration (harmless via the lock, but one wasted
+  message and worker pickup per row per tick). A crashed attempt holds no
+  lock, so re-dispatch is as fast as before — faster than a timeout-budget
+  filter would have been.
+- **The cleanup sweep keeps failure forensics** (#213).
+  `cleanup_completed_transitions` now keeps the newest terminal-failure row
+  per instance and process instead of deleting it on the same
+  `CLEANUP_DAYS` clock as successes. That row is the only explanation for
+  an instance parked in its `failed_state`. One row per parked instance:
+  bounded, and no new setting.
+
+### Documented
+
+- **The window between the worker's commit and its callbacks** (#212). A
+  worker killed there loses callbacks and `next_transition` forever — this
+  is the design's documented best-effort boundary (see the crash table in
+  `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`), kept rather than fixed:
+  recovery machinery for hooks is the kind of self-guarding growth the
+  release policy exists to stop, and a re-run could not restore an
+  in-memory verdict anyway. The README now says what the consumer owes: a
+  callback that applies a recorded decision needs a periodic re-check
+  behind it, or the follow-up becomes its own `BackgroundTransition`.
+
+### Deferred, deliberately
+
+- #184 (the lock key omits the database alias) and #186 (MTI/proxy models
+  sharing a state column alias the lock key) stay open. Both change the
+  lock key's shape, which is shared-cache state: old and new processes
+  disagree about what is locked for the length of a rolling deploy. That
+  fix wants a release of its own with a drain note, not a seat in a
+  correctness release.
+
 ## [0.14.1] — 2026-08-14
 
 Documentation only. No engine change, so upgrading from 0.14.0 changes no

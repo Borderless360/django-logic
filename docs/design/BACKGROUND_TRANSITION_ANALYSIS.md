@@ -241,7 +241,8 @@ Briefly, for the record:
 │                                                                            │
 │  ✓ The state reaches target or failed_state                                │
 │  ✓ Side-effects re-run from the start until they succeed or                │
-│    reach max errors                                                        │
+│    reach max errors — unless the failure says it is permanent              │
+│    (PermanentFailure / no_retry_on), which is terminal at once             │
 │  ✓ No two workers run the same transition at once                          │
 │  ✓ A retry keeps the queue_name on the row                                 │
 │  ✓ The row records errors_count and last_error_message                     │

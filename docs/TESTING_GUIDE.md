@@ -406,6 +406,42 @@ Use `TransactionTestCase` (or `ProcessScenario`, which extends it) when your
 assertions depend on real transaction boundaries — e.g. proving a failed
 attempt's writes rolled back.
 
+### An uncompleted row as a fixture
+
+Tests that pin behaviour around the one-uncompleted-row gate need a live
+`TransitionMessage`. Do not build the row by hand — one wrong field and the
+gate never sees it. The helper writes every field from the instance itself:
+
+```python
+from django_logic.testing import open_transition_message
+
+row = open_transition_message(order, 'process', 'fulfil')
+with self.assertRaises(TransitionTemporarilyUnavailable):
+    order.process.cancel()          # the gate answers "busy"
+
+# An attempt that started an hour ago, for the retry-window branches:
+row = open_transition_message(order, 'process', 'fulfil', started_minutes_ago=60)
+```
+
+### Which transitions did the suite never drive?
+
+Wrap a block of drives and diff against the declarations:
+
+```python
+from django_logic.testing import record_driven_transitions
+
+with record_driven_transitions() as record:
+    order.process.fulfil()
+    order.process.generate_export()
+
+self.assertEqual(record.undriven(OrderProcess), ['cancel'])
+```
+
+A drive counts when the transition ran, including one whose side-effect
+failed. A refusal (`TransitionNotAllowed`) does not count. Names are
+compared across the whole nested tree, so when nested processes share an
+action name, one drive covers the name.
+
 ---
 
 ## How the library itself is tested

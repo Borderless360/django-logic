@@ -597,7 +597,9 @@ enqueue waited (`SourceStateChanged`). A stranded row — nothing is retrying it
 does not count as busy. The synchronous gate and a later enqueue then raise the
 plain base class again, so "retry shortly" is never a forever answer. An attempt
 that still runs inside its declared `timeout=` budget always counts as being
-retried. Catch the transient type **ahead of** the base class:
+retried, and so does a row a worker holds right now: before the gate answers
+"stranded" it probes the row lock, so a long quiet attempt reads as busy, not
+lost. Catch the transient type **ahead of** the base class:
 
 ```python
 from django_logic.exceptions import (
@@ -765,7 +767,7 @@ For long-running side-effects (payment processing, PDF generation, external API 
 **How the work is split.** A synchronous `Transition` does everything at once, in the caller's call frame. A background transition cannot: its work runs later, on another machine. It therefore follows the standard transactional-outbox pattern, in two steps:
 
 - **Enqueue** (synchronous, inside your request): validate the transition, then write `in_progress_state` and a durable `TransitionMessage` row in **one** database transaction. The row records what you asked for. django-logic sends the Celery task on commit. This takes milliseconds.
-- **Execute** (on a Celery worker): load the row, run the side-effects, write the target state and mark the row completed — all in one atomic block. The durable row is what lets the safety-net tasks retry or finalize the work when the worker crashes or the broker loses the message. Success and failure *callbacks* run after the worker's transaction commits, and they are best-effort by contract.
+- **Execute** (on a Celery worker): load the row, run the side-effects, write the target state and mark the row completed — all in one atomic block. The durable row is what lets the safety-net tasks retry or finalize the work when the worker crashes or the broker loses the message. Success and failure *callbacks* run after the worker's transaction commits, and they are best-effort by contract: a worker killed between that commit and the callbacks loses them, and nothing re-runs them. So a callback that applies a decision the side-effect recorded (disable this account, mark that parcel failed) needs a periodic re-check behind it — or make the follow-up its own `BackgroundTransition`, which gets its own row and its own retries.
 
 They give you:
 
@@ -892,6 +894,42 @@ class ShopConfig(AppConfig):
 # In a view — returns immediately (Celery mode) or after the worker completes (Sync mode).
 tr_id = order.process.fulfil(user=request.user)
 ```
+
+### Say a failure is permanent
+
+The worker retries every side-effect failure until `MAX_ERRORS`, because a
+lost connection or a timeout may pass on the next attempt. A refusal does
+not: no record matched, a rule said no, the payload was rejected. Retrying
+one only delays the answer by `RETRY_MINUTES × MAX_ERRORS`. Say so, and the
+worker takes the terminal path on the first attempt — it writes
+`failed_state`, runs `failure_callbacks`, and completes the row, exactly as
+an exhausted retry does:
+
+```python
+from django_logic.background import PermanentFailure
+
+def match_order(instance, **kwargs):
+    order = find_order(instance.barcode)
+    if order is None:
+        raise PermanentFailure('no order matches this barcode')
+    ...
+```
+
+For an exception type you do not control, declare it on the transition:
+
+```python
+BackgroundTransition(
+    action_name='submit_declaration',
+    sources=['packed'],
+    target='declared',
+    failed_state='declaration_refused',
+    side_effects=[submit_declaration],
+    no_retry_on=(CustomsRefusal,),
+)
+```
+
+The two compose: raise `PermanentFailure` from code you own, list the types
+you do not. Everything else keeps its retries.
 
 ### Polymorphic routing with nested processes
 
@@ -1057,8 +1095,8 @@ The periodic starter sends a stale transition to its own queue again, so a retri
 
 Four periodic tasks keep the durable model working on its own. Run them on `STARTER_QUEUE` through Celery beat:
 
-- `retry_stale_transitions` — sends uncompleted rows older than `RETRY_MINUTES` to the queue again. It skips a row whose current attempt started less than `RETRY_MINUTES` ago, so a running attempt is not re-dispatched on every tick.
-- `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`.
+- `retry_stale_transitions` — sends uncompleted rows older than `RETRY_MINUTES` to the queue again. It skips a row whose current attempt started less than `RETRY_MINUTES` ago, and a row a worker holds right now, so an attempt that runs longer than the retry interval is not sent to the queue again on every tick. A crashed attempt holds no lock, so it is re-dispatched at once.
+- `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`, except the newest terminal-failure row per instance and process. That row is the only explanation for an instance parked in its `failed_state`, so it stays for the investigation, however late it comes.
 - `detect_stuck_transitions` — finalizes a row that sits at `MAX_ERRORS`: it writes `failed_state`, runs `failure_callbacks` and marks the row completed, so the retry loop stops.
 - `watchdog_stale_attempts` — gives up on an attempt that ran past its declared `timeout` (see below).
 
