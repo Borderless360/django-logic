@@ -164,12 +164,42 @@ def _retry_pending_inline() -> int:
     bind=False,
 )
 def cleanup_completed_transitions() -> int:
-    """Periodic: delete completed messages older than ``CLEANUP_DAYS``."""
+    """Periodic: delete completed messages older than ``CLEANUP_DAYS``.
+
+    A row that ended in terminal failure is the only explanation for an
+    instance parked in its ``failed_state``, so the sweep keeps the newest
+    such row per instance and process and deletes the rest. One row per
+    parked instance stays, however late the investigation comes.
+    """
+    from django.db.models import OuterRef, Q, Subquery
+
+    from django_logic.background.runner import UNRESTORABLE_MARKER
+
     cutoff = timezone.now() - timedelta(days=bg_settings.cleanup_days())
+    # Terminal failure: the retries were exhausted, or the row could not be
+    # restored at all. A superseded row is not a failure — the external
+    # state change won and the instance is not parked.
+    failed = Q(errors_count__gte=bg_settings.max_errors()) | Q(
+        last_error_message__startswith=UNRESTORABLE_MARKER
+    )
+    newest_failed = (
+        TransitionMessage.objects
+        .filter(
+            failed,
+            is_completed=True,
+            app_label=OuterRef('app_label'),
+            model_name=OuterRef('model_name'),
+            instance_id=OuterRef('instance_id'),
+            process_name=OuterRef('process_name'),
+        )
+        .order_by('-completed_at', '-pk')
+        .values('pk')[:1]
+    )
     with transaction.atomic():
         deleted, _ = (
             TransitionMessage.objects
             .filter(is_completed=True, modified__lt=cutoff)
+            .exclude(failed & Q(pk=Subquery(newest_failed)))
             .delete()
         )
     if deleted:
