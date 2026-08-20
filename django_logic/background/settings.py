@@ -18,7 +18,8 @@ from django_logic.conf import _conf
 
 EXECUTION_CELERY = 'celery'
 EXECUTION_SYNC = 'sync'
-_VALID_EXECUTION_MODES = frozenset({EXECUTION_CELERY, EXECUTION_SYNC})
+EXECUTION_PULL = 'pull'
+_VALID_EXECUTION_MODES = frozenset({EXECUTION_CELERY, EXECUTION_SYNC, EXECUTION_PULL})
 
 
 def background_execution() -> str:
@@ -206,7 +207,10 @@ def validate_on_ready() -> None:
     # DjangoLogicConfig.ready so sync-only installs validate them too.
     from django_logic.conf import validate_core_settings
     validate_core_settings()
-    if mode == EXECUTION_CELERY:
+    if mode in (EXECUTION_CELERY, EXECUTION_PULL):
+        # Pull mode shares both requirements: the claim needs real row
+        # locks (SKIP LOCKED), and the state lock must span the web
+        # process and the worker processes.
         _reject_sqlite_in_celery_mode()
         _check_lock_cache_in_celery_mode()
         # NB: whether the broker is reachable is NOT checked here — validate_on_ready runs

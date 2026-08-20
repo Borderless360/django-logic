@@ -96,6 +96,11 @@ def _retry_pending_inline() -> int:
     # active sync_execution() block.
     from django_logic.background.dispatch import _current_mode
 
+    if _current_mode() == bg_settings.EXECUTION_PULL:
+        # Pull workers claim rows on their own; there is nothing to
+        # re-dispatch. Kept callable so a leftover beat entry is harmless.
+        return 0
+
     sync_mode = _current_mode() == bg_settings.EXECUTION_SYNC
 
     cutoff = timezone.now() - timedelta(minutes=bg_settings.retry_minutes())

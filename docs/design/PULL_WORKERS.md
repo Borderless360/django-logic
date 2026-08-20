@@ -1,0 +1,168 @@
+# Pull workers — the design cut for the broker mirror
+
+> Design record for issue #217. Status: **proposal with a working spike**
+> (`BACKGROUND_EXECUTION='pull'`, additive, off by default). The push design
+> it would replace is recorded in
+> [BACKGROUND_TRANSITION_ANALYSIS.md](BACKGROUND_TRANSITION_ANALYSIS.md);
+> nothing there is deleted until this design passes the same crash table
+> and the same Heroku matrix.
+
+---
+
+## 1. The problem is the mirror, not the code
+
+The engine's truth is the `TransitionMessage` row. Execution is push: every
+row is mirrored into a broker message, and a worker runs whatever the
+broker delivers. Truth in two places needs reconciling, and the
+reconciling machinery is most of the engine's size and most of its
+incident history:
+
+- the dispatcher (`transaction.on_commit` + `apply_async`),
+- the periodic starter, for rows whose message was lost,
+- the watchdog and its committed `started_at` stamp,
+- the stuck-detector,
+- the beat wiring — with its own defect class: the silently ignored
+  schedule assignment, the interval that reset on every deploy (#203),
+  the missing-entries check,
+- and, in 0.15.0, the dispatch claim, the dispatch counter, the ceiling,
+  and the refund — all bounding the mirror when nothing consumes it
+  (#211, #215).
+
+Five shipped incidents share one root: *the message and the row disagree*.
+The release policy says a third fix on one defect class triggers a design
+cut. This is that cut.
+
+## 2. The design in one sentence
+
+The committed row is the signal: a worker asks the database for one
+claimable row, runs the existing execute path on it, and asks again — with
+`LISTEN/NOTIFY` as the wake-up so the ask is immediate, and a slow poll as
+the floor.
+
+```
+┌─── ENQUEUE (unchanged) ────────────────────────────────────────────┐
+│ atomic { set_state(in_progress_state); create TransitionMessage } │
+│ on commit: NOTIFY django_logic_work (best effort)                 │
+└────────────────────────────────────────────────────────────────────┘
+┌─── WORKER LOOP (new, replaces broker + starter) ───────────────────┐
+│ wait for NOTIFY, or POLL_SECONDS, whichever comes first           │
+│ claim: SELECT pk FROM transitionmessage                           │
+│        WHERE is_completed = false                                 │
+│          AND queue_name IN (my queues)                            │
+│          AND errors_count < MAX_ERRORS                            │
+│          AND (last_error_dt IS NULL                               │
+│               OR last_error_dt < now - RETRY_MINUTES)             │
+│        ORDER BY created                                           │
+│        FOR UPDATE SKIP LOCKED LIMIT 1                             │
+│ run_background_transition(pk)      ← the existing execute path    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+The claim's WHERE clause **is** the retry rule. A fresh row is claimable
+at once. A row whose attempt just failed becomes claimable again after
+`RETRY_MINUTES` — no task has to re-dispatch it; it is simply visible
+again. A row whose attempt is running right now is row-locked by that
+attempt, so `SKIP LOCKED` passes over it. A worker that dies releases its
+lock with its connection, so its row is claimable immediately — faster
+than today's starter, which waits out the retry interval.
+
+## 3. What each mechanism becomes
+
+| Today (push) | Under pull |
+|---|---|
+| dispatcher: `on_commit` + `apply_async` | one best-effort NOTIFY |
+| lost broker message + starter recovery | impossible — nothing is sent |
+| periodic starter | the claim's WHERE clause |
+| duplicate dispatches for a long attempt (#211) | impossible — `SKIP LOCKED` |
+| unbounded publishing to a dead queue (#215) | impossible — nothing is published |
+| dispatch claim, counter, ceiling, refund | deleted |
+| "does that queue have a consumer?" | a query: uncompleted rows older than X in that queue |
+| beat schedule + its checks | deleted — cleanup runs inside the worker loop |
+| watchdog + `started_at` | kept at first; a lease can replace it later (§6) |
+| stuck-detector | a check at claim time, plus the never-started report |
+| queue routing (broker queues) | a column filter: `--queues critical,fast` per worker process |
+| `acks_late` / redelivery semantics | not needed — the row never left the database |
+
+**Unchanged, because it is the product:** the declarations and the whole
+consumer API, enqueue's atomic block and its concurrency guards, the
+runner (savepoints, the state guard, the superseded rule, the failure
+paths, permanent failures), sync mode, the testing package.
+
+## 4. The crash table, revisited
+
+Every recovery in the push design's crash table holds under pull, with
+fewer mechanisms:
+
+| Crash | Push recovery | Pull recovery |
+|---|---|---|
+| between commit and the send | starter re-dispatches within RETRY_MINUTES | nothing was sent; the row is already claimable; NOTIFY was best effort and the poll is the floor |
+| worker dies mid side-effects | broker redelivery + starter | the row lock died with the worker; next claim takes it at once |
+| two workers reach one row | `select_for_update(nowait)` skip | same guard, plus `SKIP LOCKED` prevents most collisions before they happen |
+| attempt hangs but holds its connection | watchdog on `started_at` | same watchdog, unchanged |
+| broker loses everything | starter rebuilds from rows | there is no broker to lose |
+
+## 5. Latency, and the wake-up
+
+Push delivers in milliseconds. A bare poll delivers in `POLL_SECONDS`.
+`LISTEN/NOTIFY` closes the gap: enqueue fires one NOTIFY after commit,
+every worker holds one LISTEN connection, and a payload-free notification
+means "ask the database now". Losing a notification costs one poll
+interval, nothing more — the row waits in the database either way. This is
+PostgreSQL-only; celery mode already refuses SQLite, so the requirement is
+not new.
+
+## 6. Two open choices
+
+**The lease.** The spike keeps the watchdog: `started_at` +
+`timeout_seconds` still name an abandoned-but-unlocked attempt. A later
+step could fold that into the claim — a `claimed_until` column the worker
+extends while it runs — making "is this attempt alive?" one column read
+instead of a stamp plus a probe. Deferred: the watchdog works, and the cut
+should change one thing at a time.
+
+**Build or adopt.** Procrastinate is a maintained PostgreSQL job library
+with exactly this shape (SKIP LOCKED, LISTEN/NOTIFY, locks, periodic
+tasks). Adopting it would outsource the worker loop and its process
+management; the cost is a new core dependency, mapping our per-instance
+gate onto its locks, and a consumer migration story we do not control.
+The spike's loop is ~200 lines because the hard parts (the attempt, the
+guards, the accounting) already exist in the runner — which weakens the
+adopt case, but the comparison belongs in the decision, so it stays here.
+
+## 7. What the worker process looks like
+
+```
+python manage.py dl_worker --queues django_logic.critical,django_logic.fast
+```
+
+One process per SLA group, exactly like today's one Celery worker per
+queue. Concurrency by running more processes (Heroku: more dynos or a
+larger `--concurrency` later). Celery stops being a dependency of the
+*execution* path; it remains a dependency of the *celery mode* until every
+consumer has moved, and celery mode itself is untouched by the spike.
+
+## 8. Migration path
+
+1. `'pull'` ships as a third `BACKGROUND_EXECUTION` mode, off by default.
+   No behaviour change for anyone.
+2. The Heroku harness runs the full matrix twice — push and pull — and the
+   results decide.
+3. A consumer moves by changing one setting and its worker Procfile lines,
+   then draining the old broker queues once.
+4. Only after the reference consumer has run pull in production does a
+   release delete the push machinery. That deletion is the payoff and it
+   is not taken in advance.
+
+## 9. Validation plan
+
+- The SQLite suite must stay green untouched (pull is Postgres-only and
+  additive).
+- New PostgreSQL tests: a fresh row is claimed and completed; a failing
+  row is invisible until `RETRY_MINUTES` and claimable after; a row whose
+  attempt is running is skipped; a crashed claim is re-claimable at once;
+  the queue filter holds; NOTIFY wakes a waiting worker.
+- The Heroku matrix (`django-logic-test`): every row that exercises
+  dispatch, recovery, retries, watchdog, and concurrency, driven under
+  pull, alongside the recorded push results. The rows the mirror made
+  necessary (lost dispatch, dispatch bounds) must become trivially green
+  or provably meaningless.

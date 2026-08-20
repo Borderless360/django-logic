@@ -62,6 +62,13 @@ def dispatch_transition(transition_message) -> None:
         run_background_transition(transition_message.pk)
         return
 
+    if mode == bg_settings.EXECUTION_PULL:
+        # The committed row is the signal. The notification only wakes the
+        # workers early; losing it costs one poll interval.
+        from django_logic.background.pull import notify_workers
+        transaction.on_commit(notify_workers)
+        return
+
     # Celery mode — deferred import avoids loading the task module (and
     # the app registry work it triggers) on the sync fast path.
     from django_logic.background.observability import task_label
