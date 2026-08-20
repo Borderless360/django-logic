@@ -23,9 +23,9 @@ notification after commit, and a waiting worker asks the database at
 once instead of at the next poll. A lost notification costs one poll
 interval — the row waits in the database either way.
 
-Spike status: additive and off by default. The watchdog and the cleanup
-still run, called from inside the worker loop, so pull mode needs no
-beat schedule at all.
+The worker loop also runs the safety nets (the watchdog, the stuck
+finalizer and its no-worker report, the cleanup sweep), so nothing has
+to be scheduled anywhere else.
 """
 from __future__ import annotations
 
@@ -73,27 +73,12 @@ def claim_next(queues: list[str]) -> int | None:
     through the runner's existing skip-if-locked guard — wasteful once
     in a while, never wrong.
     """
-    from django_logic.background.models import TransitionMessage
-    from django.db.models import Q
-    from django.utils import timezone
-    from datetime import timedelta
+    from django_logic.background.safety_nets import _claimable
 
-    retry_cutoff = timezone.now() - timedelta(
-        minutes=bg_settings.retry_minutes())
     with transaction.atomic():
         return (
-            TransitionMessage.objects
+            _claimable(queues)
             .select_for_update(skip_locked=True)
-            .filter(
-                is_completed=False,
-                queue_name__in=queues,
-                errors_count__lt=bg_settings.max_errors(),
-            )
-            .filter(
-                Q(last_error_dt__isnull=True)
-                | Q(last_error_dt__lt=retry_cutoff)
-            )
-            .order_by('created')
             .values_list('pk', flat=True)
             .first()
         )
@@ -114,14 +99,14 @@ def _run_safety_nets() -> None:
     """The periodic work beat used to own: abandoned-attempt watchdog,
     the stuck finalizer and its never-started report, and the cleanup
     sweep. Called from the loop, so pull mode needs no beat process."""
-    from django_logic.background.tasks import (
-        _watchdog_stale_attempts_inline,
+    from django_logic.background.safety_nets import (
         cleanup_completed_transitions,
         detect_stuck_transitions,
+        watchdog_stale_attempts,
     )
 
     for step in (
-        _watchdog_stale_attempts_inline,
+        watchdog_stale_attempts,
         detect_stuck_transitions,
         cleanup_completed_transitions,
     ):

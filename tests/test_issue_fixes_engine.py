@@ -127,24 +127,3 @@ class BaseManagerRestoreTests(TestCase):
         self.assertEqual(state.get_persisted_state(), 'x')
 
 
-class TaskCrashRedeliveryConfigTests(TestCase):
-    """Every task pairs acks_late with reject_on_worker_lost."""
-
-    def test_all_tasks_pair_acks_late_with_reject_on_worker_lost(self):
-        # The task list is read from the module, never written by hand. A
-        # hardcoded list once stopped covering a new task, so both keywords
-        # could be removed from it and the suite still passed.
-        from django_logic.background import tasks
-
-        found = [
-            obj for obj in vars(tasks).values()
-            if hasattr(obj, 'apply_async')
-            and str(getattr(obj, 'name', '')).startswith('django_logic.')
-        ]
-        self.assertEqual(
-            len(found), 5,
-            'expected to find every shared task in '
-            'django_logic.background.tasks; found %s' % sorted(t.name for t in found))
-        for task in found:
-            self.assertTrue(task.acks_late, task.name)
-            self.assertTrue(task.reject_on_worker_lost, task.name)

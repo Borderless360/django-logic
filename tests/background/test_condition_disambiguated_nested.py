@@ -29,7 +29,7 @@ from django_logic.background.runner import (
     _RestoreError,
     run_background_transition,
 )
-from django_logic.background.tasks import detect_stuck_transitions
+from django_logic.background.safety_nets import detect_stuck_transitions
 from django_logic.exceptions import TransitionNotAllowed
 from tests.background.models import (
     Conversation,
@@ -261,34 +261,28 @@ class FindTransitionDisambiguationTests(TestCase):
         self.assertEqual(found.in_progress_state, 'nested_fulfilling')
 
 
-_CELERY_SETTINGS = dl_settings(BACKGROUND_EXECUTION='celery', TRANSITION_MESSAGE_MAX_ERRORS=3)
-
-_APPLY_ASYNC = (
-    'django_logic.background.tasks.run_background_transition_task.apply_async'
-)
-
-
-@override_settings(DJANGO_LOGIC=_CELERY_SETTINGS)
-class CeleryCrossProcessRestoreTests(TestCase):
-    """Issue #98 in the REAL production execution model (web dyno → worker dyno).
+@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
+class PullCrossProcessRestoreTests(TestCase):
+    """Issue #98 in the REAL production execution model (web process → worker process).
 
     The sync-mode tests run enqueue and execute in one process; the durable
     discriminator only matters when they are SEPARATE processes. Here enqueue
-    runs in celery mode (apply_async mocked, on_commit fired) so it records the
-    owning nested process on the row and enqueues — but execute does NOT run
-    inline. We then invoke run_background_transition(tm_pk) exactly as a worker
+    runs in pull mode, so it records the declaring nested process on the row
+    and stops — execute does NOT run inline. We then invoke run_background_transition(tm_pk) exactly as a worker
     draining the queue would: a fresh restore from the committed row alone, with
     none of the Python state enqueue had. This proves the owner survives the process boundary
     purely via the DB column.
     """
 
     def _enqueue_and_capture_row(self, conv):
-        with patch(_APPLY_ASYNC) as mock_async:
-            with self.captureOnCommitCallbacks(execute=True):
+        # Pull mode: enqueue commits the row and stops — execute runs on a
+        # worker process. The captured pk is what a worker would claim.
+        with override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='pull')):
+            with self.captureOnCommitCallbacks(execute=False):
                 tr_id = conv.process.send_message_via_integration()
-            self.assertIsNotNone(tr_id)
-            mock_async.assert_called_once()
-            return mock_async.call_args.kwargs['args'][0]
+        self.assertIsNotNone(tr_id)
+        from django_logic.background.models import TransitionMessage
+        return TransitionMessage.objects.latest('id').pk
 
     def test_gmail_round_trip_across_the_worker_boundary(self):
         conv = Conversation.objects.create(

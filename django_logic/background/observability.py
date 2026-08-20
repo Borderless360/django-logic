@@ -1,17 +1,13 @@
 """Per-transition monitoring identity for background transitions.
 
-All background transitions run under the single Celery task
-``django_logic.run_background_transition``, so monitoring tools group them
-together by default — a failing export transition can't be told apart from a
+Every background transition runs through one shared execute path, so
+monitoring tools group them together by default — a failing export transition can't be told apart from a
 failing client transition. These helpers restore per-transition identity:
 
-* :func:`task_label` — a human-readable label used as the Celery ``shadow`` on
-  dispatch, so Flower / RabbitMQ management / Celery events show a distinct
-  name per transition (vendor-neutral; no dependency).
-* :func:`set_sentry_context` — if ``sentry-sdk`` is installed, name the Sentry
-  transaction and tag it per transition, so each transition is its own Sentry
-  issue. Sentry groups by the Celery task *name* (not ``shadow``), so this
-  explicit naming is what splits the issues.
+* :func:`task_label` — a stable, readable per-transition label.
+* :func:`set_sentry_context` — if ``sentry-sdk`` is installed, name the
+  Sentry transaction and tag it per transition, so each transition is its
+  own Sentry issue.
 
 Both are best-effort and never affect transition execution.
 """

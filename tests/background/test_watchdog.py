@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
-from django_logic.background.tasks import _watchdog_stale_attempts_inline
+from django_logic.background.safety_nets import watchdog_stale_attempts
 from tests.background.models import Widget
 from tests import dl_settings
 
@@ -87,7 +87,7 @@ class WatchdogSkipsTests(TestCase):
             started_at=timezone.now() - timedelta(hours=1),
             timeout_seconds=None,  # opted out
         )
-        self.assertEqual(_watchdog_stale_attempts_inline(), 0)
+        self.assertEqual(watchdog_stale_attempts(), 0)
 
     def test_skips_rows_without_started_at(self):
         widget = Widget.objects.create()
@@ -101,7 +101,7 @@ class WatchdogSkipsTests(TestCase):
             started_at=None,  # no worker has started it yet
             timeout_seconds=60,
         )
-        self.assertEqual(_watchdog_stale_attempts_inline(), 0)
+        self.assertEqual(watchdog_stale_attempts(), 0)
 
     def test_skips_rows_still_within_timeout(self):
         widget = Widget.objects.create()
@@ -115,7 +115,7 @@ class WatchdogSkipsTests(TestCase):
             started_at=timezone.now() - timedelta(seconds=10),  # fresh
             timeout_seconds=60,
         )
-        self.assertEqual(_watchdog_stale_attempts_inline(), 0)
+        self.assertEqual(watchdog_stale_attempts(), 0)
 
     def test_skips_completed_rows(self):
         widget = Widget.objects.create()
@@ -130,7 +130,7 @@ class WatchdogSkipsTests(TestCase):
             timeout_seconds=60,
             is_completed=True,
         )
-        self.assertEqual(_watchdog_stale_attempts_inline(), 0)
+        self.assertEqual(watchdog_stale_attempts(), 0)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
@@ -152,7 +152,7 @@ class WatchdogActsTests(TestCase):
         widget = Widget.objects.create(status='tb_running')
         transition_message = self._make_stale(widget, errors_count=0)
 
-        self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+        self.assertEqual(watchdog_stale_attempts(), 1)
         transition_message.refresh_from_db()
 
         self.assertEqual(transition_message.errors_count, 1)
@@ -167,7 +167,7 @@ class WatchdogActsTests(TestCase):
         # errors_count=1 so the watchdog's increment hits MAX_ERRORS=2.
         transition_message = self._make_stale(widget, errors_count=1)
 
-        self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+        self.assertEqual(watchdog_stale_attempts(), 1)
         transition_message.refresh_from_db()
 
         self.assertEqual(transition_message.errors_count, 2)
@@ -188,7 +188,7 @@ class WatchdogActsTests(TestCase):
             timeout_seconds=60,
             errors_count=1,  # next increment hits MAX_ERRORS=2
         )
-        self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+        self.assertEqual(watchdog_stale_attempts(), 1)
         transition_message.refresh_from_db()
         self.assertTrue(transition_message.is_completed)
 
@@ -232,7 +232,7 @@ class WatchdogFinalizeWriteDiscardedTests(TestCase):
             post_init.disconnect, _break_the_failed_state_write, sender=Widget)
 
         with self.assertLogs('django-logic.transition', level='INFO') as logs:
-            self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+            self.assertEqual(watchdog_stale_attempts(), 1)
 
         transition_message.refresh_from_db()
         widget.refresh_from_db()

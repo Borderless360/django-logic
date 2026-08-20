@@ -16,22 +16,32 @@ from django.core.exceptions import ImproperlyConfigured
 # ready() hook read a setting first, naming nothing.
 from django_logic.conf import _conf
 
-EXECUTION_CELERY = 'celery'
 EXECUTION_SYNC = 'sync'
 EXECUTION_PULL = 'pull'
-_VALID_EXECUTION_MODES = frozenset({EXECUTION_CELERY, EXECUTION_SYNC, EXECUTION_PULL})
+_VALID_EXECUTION_MODES = frozenset({EXECUTION_SYNC, EXECUTION_PULL})
 
 
 def background_execution() -> str:
     """Return the configured execution mode.
 
-    Defaults to ``'celery'`` — background transitions are Celery tasks.
-    ``'sync'`` runs the worker inline in the same process and exists for
-    tests, CI, management commands, and the shell.
+    Defaults to ``'pull'`` — workers claim committed rows from the
+    database (run them with ``manage.py dl_worker``). ``'sync'`` runs the
+    worker inline in the same process and exists for tests, CI,
+    management commands, and the shell.
     """
     configured = _conf().get('BACKGROUND_EXECUTION')
     if configured is None:
-        return EXECUTION_CELERY
+        return EXECUTION_PULL
+    if configured == 'celery':
+        raise ImproperlyConfigured(
+            "DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' was removed: "
+            "workers now claim committed rows from the database, so no "
+            "broker carries them. Set 'pull' and run one "
+            "`manage.py dl_worker --queues <names>` process per queue "
+            "group (the worker loop also runs the safety nets, so no "
+            "beat schedule is needed). Drain the old broker queues once "
+            "before switching. See the README's background section."
+        )
     if configured not in _VALID_EXECUTION_MODES:
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC['BACKGROUND_EXECUTION'] must be one of "
@@ -53,79 +63,6 @@ def default_queue() -> str:
             "DJANGO_LOGIC['DEFAULT_QUEUE'] must be a non-empty string."
         )
     return queue
-
-
-def starter_queue() -> str:
-    """Celery queue for the periodic retry/cleanup safety-net tasks.
-
-    Consumed by :func:`beat_schedule`, which routes the four periodic
-    tasks here. A hand-written ``CELERY_BEAT_SCHEDULE`` must set
-    ``options={'queue': ...}`` itself — the framework does not intercept
-    task routing.
-    """
-    queue = _conf().get('STARTER_QUEUE', 'django_logic.starter')
-    if not queue or not isinstance(queue, str):
-        raise ImproperlyConfigured(
-            "DJANGO_LOGIC['STARTER_QUEUE'] must be a non-empty string "
-            "(the Celery queue where the periodic retry/cleanup tasks run)."
-        )
-    return queue
-
-
-def beat_schedule(
-    *,
-    retry_seconds: float = 60.0,
-    detect_stuck_seconds: float = 300.0,
-    watchdog_seconds: float = 120.0,
-    cleanup_schedule=None,
-) -> dict:
-    """Ready-made Celery beat entries for the four safety-net tasks,
-    routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
-
-    Cleanup runs on a ``crontab`` (03:17 by default), not an interval.
-    Interval entries count from beat start-up, and beat restarts on every
-    deploy — plus platforms like Heroku restart dynos daily and store the
-    scheduler state on an ephemeral disk — so a day-scale interval can
-    starve forever. A crontab fires by wall clock and survives restarts.
-    Pass ``cleanup_schedule=`` to override (any Celery schedule value).
-
-    Use it from your project's ``celery.py`` (after the app is configured)
-    so the safety net cannot be forgotten or routed to the wrong queue::
-
-        from django_logic.background import beat_schedule
-        app.conf['CELERY_BEAT_SCHEDULE'] = {
-            **(app.conf.beat_schedule or {}),
-            **beat_schedule(),
-        }
-
-    Write the ``CELERY_``-namespaced key, not ``app.conf.beat_schedule``:
-    under ``config_from_object(namespace='CELERY')`` Celery resolves
-    ``beat_schedule`` from ``CELERY_BEAT_SCHEDULE`` in Django settings
-    first, so a plain attribute assignment is accepted and then silently
-    ignored. ``django_logic.W002`` catches that.
-
-    The schedules are overridable per task; the defaults match the
-    README's recommended schedule.
-    """
-    from celery.schedules import crontab
-
-    if cleanup_schedule is None:
-        cleanup_schedule = crontab(hour=3, minute=17)
-    queue = starter_queue()
-
-    def entry(task: str, seconds: float) -> dict:
-        return {'task': task, 'schedule': seconds, 'options': {'queue': queue}}
-
-    return {
-        'django-logic-retry-stale': entry(
-            'django_logic.retry_stale_transitions', retry_seconds),
-        'django-logic-detect-stuck': entry(
-            'django_logic.detect_stuck_transitions', detect_stuck_seconds),
-        'django-logic-watchdog': entry(
-            'django_logic.watchdog_stale_attempts', watchdog_seconds),
-        'django-logic-cleanup': entry(
-            'django_logic.cleanup_completed_transitions', cleanup_schedule),
-    }
 
 
 def _validated_number(
@@ -194,7 +131,6 @@ def validate_on_ready() -> None:
     mode = background_execution()
     # Surface value errors now rather than on first use.
     default_queue()
-    starter_queue()
     # Safety settings: every numeric knob the retry/cleanup/lock
     # machinery depends on is validated at boot in EVERY mode — a bad
     # value must not wait for its first use (which may be a 3am retry
@@ -207,20 +143,14 @@ def validate_on_ready() -> None:
     # DjangoLogicConfig.ready so sync-only installs validate them too.
     from django_logic.conf import validate_core_settings
     validate_core_settings()
-    if mode in (EXECUTION_CELERY, EXECUTION_PULL):
-        # Pull mode shares both requirements: the claim needs real row
-        # locks (SKIP LOCKED), and the state lock must span the web
-        # process and the worker processes.
-        _reject_sqlite_in_celery_mode()
-        _check_lock_cache_in_celery_mode()
-        # NB: whether the broker is reachable is NOT checked here — validate_on_ready runs
-        # at Django app-ready, which in the standard celery.py pattern is
-        # *before* the project's Celery app sets broker_url, so it would
-        # false-warn on every boot. The check lives in dispatch (where the
-        # app is configured); see dispatch._warn_once_about_celery_config.
+    if mode == EXECUTION_PULL:
+        # The claim needs real row locks (SKIP LOCKED), and the state lock
+        # must span the web process and the worker processes.
+        _reject_sqlite_in_pull_mode()
+        _check_lock_cache_in_pull_mode()
 
 
-def _reject_sqlite_in_celery_mode() -> None:
+def _reject_sqlite_in_pull_mode() -> None:
     """SQLite doesn't support ``select_for_update(nowait=True)`` nor
     partial unique indexes, so the worker concurrency guard silently
     degrades to "serialize everything" — which masks real bugs in dev
@@ -241,8 +171,8 @@ def _reject_sqlite_in_celery_mode() -> None:
     engine = (databases.get(alias) or {}).get('ENGINE', '')
     if 'sqlite' in engine.lower():
         raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' requires "
-            f"a database that supports select_for_update(nowait=True) "
+            f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' requires "
+            f"a database that supports SELECT FOR UPDATE with SKIP LOCKED "
             f"and partial unique indexes. TransitionMessage is routed to "
             f"alias '{alias}', which uses {engine!r} (SQLite). Switch that "
             f"alias to PostgreSQL or set BACKGROUND_EXECUTION='sync'."
@@ -255,24 +185,24 @@ _LOCAL_CACHE_BACKENDS = (
 )
 
 
-def _check_lock_cache_in_celery_mode() -> None:
-    """The state lock lives in the ``default`` cache. In Celery mode the
+def _check_lock_cache_in_pull_mode() -> None:
+    """The state lock lives in the ``default`` cache. In Pull mode the
     web process and the workers are different OS processes (usually
     different hosts), so a local-memory or dummy cache means the lock
     silently does not lock anything across them.
 
     Production (``DEBUG=False``) fails fast; with ``DEBUG=True`` we only
-    warn so local celery-mode experiments stay possible.
+    warn so local pull-mode experiments stay possible.
     """
     caches = getattr(settings, 'CACHES', {}) or {}
     backend = (caches.get('default') or {}).get('BACKEND', '')
     if not backend.startswith(_LOCAL_CACHE_BACKENDS):
         return
     message = (
-        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' but the 'default' "
+        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' but the 'default' "
         f"cache backend is {backend!r}, which is per-process. The state "
-        f"lock will not be shared between web processes and Celery "
-        f"workers. Use a cross-process cache for the 'default' cache — "
+        f"lock will not be shared between the web processes and the "
+        f"worker processes. Use a cross-process cache for 'default' — "
         f"e.g. 'django.core.cache.backends.redis.RedisCache', or "
         f"django-redis via `pip install django-logic[redis]`."
     )

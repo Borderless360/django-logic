@@ -17,8 +17,8 @@ from django_logic.background.settings import (
     _validate_bool,
     strict_kwargs_serialization,
 )
-from django_logic.background.tasks import (
-    retry_stale_transitions,
+from django_logic.background.safety_nets import (
+    run_pending,
     watchdog_stale_attempts,
 )
 from django_logic.checks import check_no_unknown_settings
@@ -105,7 +105,7 @@ class RejectedStateWriteTests(_BindCleanup, TestCase):
         # And the retry loop terminates instead of running forever.
         for _ in range(5):
             try:
-                retry_stale_transitions()
+                run_pending()
             except ValueError:
                 pass
         row.refresh_from_db()

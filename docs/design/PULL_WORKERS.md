@@ -1,11 +1,10 @@
 # Pull workers — the design cut for the broker mirror
 
-> Design record for issue #217. Status: **proposal with a working spike**
-> (`BACKGROUND_EXECUTION='pull'`, additive, off by default). The push design
-> it would replace is recorded in
-> [BACKGROUND_TRANSITION_ANALYSIS.md](BACKGROUND_TRANSITION_ANALYSIS.md);
-> nothing there is deleted until this design passes the same crash table
-> and the same Heroku matrix.
+> Design record for issue #217. Status: **the shipped design as of 0.16.0**
+> — pull is the default execution mode and the push machinery is removed.
+> The push design it replaced is recorded in
+> [BACKGROUND_TRANSITION_ANALYSIS.md](BACKGROUND_TRANSITION_ANALYSIS.md),
+> which stays as the crash-by-crash analysis this design answers to.
 
 ---
 
@@ -113,7 +112,7 @@ not new.
 
 ## 6. Two open choices
 
-**The lease.** The spike keeps the watchdog: `started_at` +
+**The lease.** This version keeps the watchdog: `started_at` +
 `timeout_seconds` still name an abandoned-but-unlocked attempt. A later
 step could fold that into the claim — a `claimed_until` column the worker
 extends while it runs — making "is this attempt alive?" one column read
@@ -125,9 +124,9 @@ with exactly this shape (SKIP LOCKED, LISTEN/NOTIFY, locks, periodic
 tasks). Adopting it would outsource the worker loop and its process
 management; the cost is a new core dependency, mapping our per-instance
 gate onto its locks, and a consumer migration story we do not control.
-The spike's loop is ~200 lines because the hard parts (the attempt, the
-guards, the accounting) already exist in the runner — which weakens the
-adopt case, but the comparison belongs in the decision, so it stays here.
+The shipped loop is ~200 lines because the hard parts (the attempt, the
+guards, the accounting) already exist in the runner — which is what
+decided build over adopt; the comparison stays here for the record.
 
 ## 7. What the worker process looks like
 
@@ -135,23 +134,22 @@ adopt case, but the comparison belongs in the decision, so it stays here.
 python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 ```
 
-One process per SLA group, exactly like today's one Celery worker per
-queue. Concurrency by running more processes (Heroku: more dynos or a
-larger `--concurrency` later). Celery stops being a dependency of the
-*execution* path; it remains a dependency of the *celery mode* until every
-consumer has moved, and celery mode itself is untouched by the spike.
+One process per SLA group, exactly like one broker worker per queue
+before. Concurrency by running more processes (Heroku: more dynos; a
+`--concurrency` flag can come later). Celery is no longer a dependency:
+nothing imports it, and `'celery'` as a mode reports its removal with the
+migration steps at boot.
 
 ## 8. Migration path
 
-1. `'pull'` ships as a third `BACKGROUND_EXECUTION` mode, off by default.
-   No behaviour change for anyone.
-2. The Heroku harness runs the full matrix twice — push and pull — and the
-   results decide.
-3. A consumer moves by changing one setting and its worker Procfile lines,
-   then draining the old broker queues once.
-4. Only after the reference consumer has run pull in production does a
-   release delete the push machinery. That deletion is the payoff and it
-   is not taken in advance.
+1. 0.15.0 is the last push release; 0.16.0 ships pull as the default and
+   removes the push machinery. `'celery'` reports its removal, with the
+   migration steps, at boot.
+2. The Heroku harness runs the full matrix under pull next to the
+   recorded push results before 0.16.0 publishes.
+3. A consumer moves by setting `'pull'`, replacing its Celery worker and
+   beat lines with `dl_worker` processes, and draining the old broker
+   queues once.
 
 ## 9. Validation plan
 

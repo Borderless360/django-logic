@@ -12,8 +12,8 @@ Public API:
   seams.
 * :class:`PermanentFailure` — raise from a side-effect to say the failure
   is permanent: the worker takes the terminal path instead of retrying.
-* :func:`beat_schedule` — ready-made Celery beat entries for the four
-  safety-net tasks, routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
+* :func:`run_worker` — the pull worker loop (also exposed as the
+  ``dl_worker`` management command).
 
 All symbols are importable after Django's app registry is ready
 (i.e. inside views, management commands, tests, signal handlers).
@@ -31,7 +31,7 @@ _PUBLIC = {
     'retry_pending': ('django_logic.background.dispatch', 'retry_pending'),
     'in_flight': ('django_logic.background.dispatch', 'in_flight'),
     'PermanentFailure': ('django_logic.background.exceptions', 'PermanentFailure'),
-    'beat_schedule': ('django_logic.background.settings', 'beat_schedule'),
+    'run_worker': ('django_logic.background.pull', 'run_worker'),
 }
 
 __all__ = list(_PUBLIC.keys())

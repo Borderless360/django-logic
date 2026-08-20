@@ -40,15 +40,6 @@ class PullEnqueueTests(TestCase):
         row = TransitionMessage.objects.get()
         self.assertFalse(row.is_completed)
 
-    def test_the_starter_has_nothing_to_do(self):
-        from django_logic.background.tasks import _retry_pending_inline
-
-        widget = Widget.objects.create(status='fulfilling')
-        open_transition_message(
-            widget, 'process', 'fulfil', started_minutes_ago=60,
-        )
-        self.assertEqual(_retry_pending_inline(), 0)
-
 
 def _hold_row_lock(row_pk, locked, release):
     try:
