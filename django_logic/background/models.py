@@ -168,6 +168,28 @@ class TransitionMessage(TimeStampedModel):
     RETRYING = 'retrying'
     STRANDED = 'stranded'
 
+    @classmethod
+    def worker_holds_row(cls, transition_message_id: int) -> bool:
+        """Whether a worker attempt holds this row's lock right now.
+
+        Asks with ``select_for_update(nowait=True)`` inside its own
+        savepoint and gives up at once, so the probe never blocks and never
+        keeps a lock. On SQLite the clause is dropped, so the answer is
+        always False there — celery mode rejects SQLite at boot, and in
+        sync mode the attempt runs in the caller's own thread.
+        """
+        try:
+            with transaction.atomic():
+                list(
+                    cls.objects
+                    .select_for_update(nowait=True)
+                    .filter(pk=transition_message_id, is_completed=False)
+                    .values_list('pk', flat=True)
+                )
+        except OperationalError:
+            return True
+        return False
+
     #: Grace between an attempt exhausting its declared budget and the
     #: watchdog abandoning it (which writes ``modified`` via record_error,
     #: putting the row back on the retry-window clock).
@@ -191,17 +213,24 @@ class TransitionMessage(TimeStampedModel):
         * otherwise a row whose newest activity (``modified``, refreshed
           at attempt start / on every recorded error, or ``started_at``)
           is within the retry window is still being retried;
-        * past the window it is stranded: nothing has retried it for
-          longer than the whole retry pipeline's span. This cannot
-          distinguish a truly lost row from a queue backlogged for that
-          long — the stranded message names both causes.
+        * past the window, a row a worker still holds is still being
+          retried: an attempt that runs quietly for longer than the
+          window is slow, not lost. The probe is a savepointed
+          ``select_for_update(nowait=True)`` that locks nothing; when it
+          cannot answer (a poisoned connection, the database down), the
+          time-based answer below stands;
+        * past the window with no worker on the row it is stranded:
+          nothing has retried it for longer than the whole retry
+          pipeline's span. This cannot distinguish a truly lost row from
+          a queue backlogged for that long — the stranded message names
+          both causes.
         """
         from django_logic.background import settings as bg_settings
 
         row = (
             cls.in_flight_for(instance, process_name)
             .order_by('-modified')
-            .values('modified', 'started_at', 'timeout_seconds')
+            .values('pk', 'modified', 'started_at', 'timeout_seconds')
             .first()
         )
         if row is None:
@@ -220,6 +249,13 @@ class TransitionMessage(TimeStampedModel):
             bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
         )
         if now - newest > timedelta(minutes=retry_window):
+            try:
+                if cls.worker_holds_row(row['pk']):
+                    return cls.RETRYING
+            except Exception:
+                # The probe must never break the gate that asked. Unknown
+                # means the time-based classification stands.
+                pass
             return cls.STRANDED
         return cls.RETRYING
 

@@ -127,6 +127,14 @@ def _retry_pending_inline() -> int:
                 # dispatch failure for this row and keep scanning.
                 run_background_transition(pk)
             else:
+                # A worker that holds the row is running its attempt right
+                # now. The recency guard above only covers attempts younger
+                # than RETRY_MINUTES, so without this probe every attempt
+                # that runs longer sent one no-op message per tick for its
+                # whole duration. A crashed attempt holds no lock, so it is
+                # re-dispatched at once.
+                if TransitionMessage.worker_holds_row(pk):
+                    continue
                 # Same per-transition shadow as the primary dispatch path.
                 run_background_transition_task.apply_async(
                     args=[pk], queue=queue_name,
