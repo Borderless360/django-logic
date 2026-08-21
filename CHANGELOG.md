@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-08-20
+
+The design cut (#217): workers pull committed rows from the database, so
+the broker mirror — and every mechanism that reconciled it — is gone.
+One incident class (the message and the row disagree) produced five
+shipped defects across four releases; this removes the class instead of
+guarding it again.
+
+### Changed (breaking) — the pull engine
+
+- **Workers claim rows from the database.** `BACKGROUND_EXECUTION`
+  defaults to `'pull'`: enqueue commits the row and fires one
+  payload-free `NOTIFY`; a worker claims with
+  `SELECT FOR UPDATE SKIP LOCKED` and runs the unchanged execute path.
+  The claim's filter is the retry rule — a failed row reappears after
+  `RETRY_MINUTES` on its own, and a crashed worker's row is claimable
+  the moment its connection dies (faster than the starter it replaces).
+  Run one `manage.py dl_worker --queues <names>` process per queue
+  group. The loop runs the safety nets once a minute, so nothing is
+  scheduled anywhere.
+- **`'celery'` mode is removed** and reports its removal with the
+  migration steps at boot. Celery is no longer a dependency; the
+  `[celery]` extra stays as an empty alias so old pins resolve.
+  Consumers switch by setting `'pull'`, replacing their Celery worker
+  and beat lines with `dl_worker` processes, and draining the old broker
+  queues once.
+- **Removed with the mirror:** the dispatcher's broker half, the
+  periodic starter task, the beat schedule and `STARTER_QUEUE` (a
+  leftover key is reported by `django_logic.W004`), the
+  `django_logic.W002` check, and 0.15.0's dispatch claim, counter,
+  ceiling and refund (`last_dispatched_at` and `dispatch_count` drop in
+  migration 0009) — a row that nothing consumes now simply waits,
+  visibly, and `detect_stuck_transitions` names it and its queue once it
+  is older than the retry window.
+- **Every attempt runs in a forked child of the worker.** A crash in
+  consumer code — a hard exit, a segmentation fault, the platform's
+  memory killer — kills the attempt process, not the worker, and the
+  parent records it as an error on the row. A crashing attempt therefore
+  gets the same paced, bounded retries as a failing one, ending in
+  ``failed_state`` at ``MAX_ERRORS``; before, a crash left no error
+  anywhere and recovery depended on the platform restarting the whole
+  worker (with its repeated-crash backoff parking the queue group).
+- The safety nets live in ``django_logic.background.safety_nets`` as
+  plain functions; ``retry_pending()`` still runs one inline retry pass
+  for tests. The declarations, the runner, sync mode and the testing
+  package are unchanged — no consumer process definition changes.
+
 ## [0.15.0] — 2026-08-20
 
 Six consumer-reported issues from the gv coupled-core migration — five found

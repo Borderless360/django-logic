@@ -2,9 +2,11 @@
 
 Two modes:
 
-* **Celery mode** (``DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'celery'``):
-  schedule a Celery task on the transition's queue via
-  ``transaction.on_commit``. The worker picks it up and executes.
+* **Pull mode** (``DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'pull'``, the
+  default): the committed row is the signal. Enqueue fires one
+  payload-free notification after commit so a waiting worker asks the
+  database at once; a lost notification costs one poll interval. The
+  worker loop lives in :mod:`django_logic.background.pull`.
 
 * **Sync mode** (``'sync'``): execute inline, immediately after the
   enqueue atomic block exits. Bypasses ``transaction.on_commit`` so it
@@ -32,7 +34,7 @@ def sync_execution():
     """Force Sync mode for the duration of the ``with`` block.
 
     Useful inside a test / management command when the global setting
-    is ``'celery'`` but you want the worker path to run inline for this
+    is ``'pull'`` but you want the worker path to run inline for this
     block.
     """
     token = _force_sync.set(True)
@@ -51,98 +53,29 @@ def _current_mode() -> str:
 def dispatch_transition(transition_message) -> None:
     """Hand a fresh TransitionMessage off to the worker.
 
-    In Celery mode, schedules the Celery task via ``transaction.on_commit``
-    so the DB row is visible to the worker.
+    In Pull mode, notify the workers after commit — the committed row is
+    what they run, so there is nothing to lose or duplicate.
 
-    In Sync mode, executes inline. Exceptions propagate to the caller.
+    In Sync mode, execute inline. Exceptions propagate to the caller.
     """
-    mode = _current_mode()
-    if mode == bg_settings.EXECUTION_SYNC:
+    if _current_mode() == bg_settings.EXECUTION_SYNC:
         from django_logic.background.runner import run_background_transition
         run_background_transition(transition_message.pk)
         return
 
-    # Celery mode — deferred import avoids loading the task module (and
-    # the app registry work it triggers) on the sync fast path.
-    from django_logic.background.observability import task_label
-    from django_logic.background.tasks import run_background_transition_task
-
-    _warn_once_about_celery_config(run_background_transition_task)
-
-    # `shadow` gives this dispatch a per-transition name in Celery events /
-    # Flower / RabbitMQ management, even though it's the one shared task.
-    shadow = task_label(transition_message)
-
-    def _enqueue():
-        # The primary publish counts as the first dispatch, so the
-        # starter's claim window starts from here, not from the first tick.
-        # The count goes back if the publish raises — the ceiling counts
-        # only messages the broker really took.
-        from django_logic.background.models import TransitionMessage
-        TransitionMessage.mark_dispatched(transition_message.pk)
-        try:
-            run_background_transition_task.apply_async(
-                args=[transition_message.pk],
-                queue=transition_message.queue_name,
-                shadow=shadow,
-            )
-        except Exception:
-            TransitionMessage.publish_failed(transition_message.pk)
-            raise
-
-    transaction.on_commit(_enqueue)
-
-
-_celery_config_warned = False
-
-
-def _warn_once_about_celery_config(task) -> None:
-    """Warn once, at the first celery-mode dispatch, about Celery config that
-    silently breaks the durability contract.
-
-    Checked here rather than at Django app-ready because app-ready runs before
-    the project's ``celery.py`` configures the app; by the first dispatch the
-    app is configured, making the check reliable.
-
-    **No real broker.** With ``broker_url`` unset Celery falls back to an
-    in-memory transport no worker drains: ``apply_async`` succeeds but the
-    task never runs, leaving the instance stuck in ``in_progress_state``.
-
-    Every django-logic task sets ``reject_on_worker_lost=True`` alongside
-    ``acks_late=True``, so a worker crash redelivers the message.
-    """
-    global _celery_config_warned
-    if _celery_config_warned:
-        return
-    _celery_config_warned = True
-    from django_logic.logger import logger
-
-    try:
-        conf = task.app.conf
-    except Exception:
-        return
-    broker = getattr(conf, 'broker_url', None)
-    if not broker or str(broker).startswith('memory://'):
-        logger.warning(
-            "DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' but the Celery "
-            "app has no real broker (broker_url=%r). apply_async publishes "
-            "to an in-memory transport no worker consumes, so background "
-            "transitions will never run. Configure a durable broker "
-            "(Redis/RabbitMQ) or set BACKGROUND_EXECUTION='sync'.",
-            broker,
-        )
+    from django_logic.background.pull import notify_workers
+    transaction.on_commit(notify_workers)
 
 
 def retry_pending() -> int:
-    """Run one iteration of the periodic starter inline.
+    """Run every claimable row inline, once.
 
-    Intended for tests and for management commands that want to simulate
-    "time passed, the starter re-dispatched the stale messages".
-
-    Returns the number of messages that were (re-)dispatched.
+    For tests and management commands that want to simulate "time
+    passed, the retry wait is over". Returns the number of rows that ran
+    cleanly.
     """
-    from django_logic.background.tasks import _retry_pending_inline
-    return _retry_pending_inline()
+    from django_logic.background.safety_nets import run_pending
+    return run_pending()
 
 
 def in_flight(instance, process_name: str = 'process') -> bool:

@@ -187,11 +187,11 @@ class BackgroundTransition(Transition):
                         f"BackgroundTransition '{self.action_name}' is not "
                         f"allowed: an uncompleted TransitionMessage for "
                         f"{state.instance_key} is stranded — nothing is "
-                        f"retrying it. Likely causes: the safety-net beat "
-                        f"tasks are not scheduled, a queue backlog or "
-                        f"worker outage longer than the retry window, or a "
-                        f"lost broker message. Complete the row, or start "
-                        f"the beat tasks so it is retried."
+                        f"retrying it. Likely causes: no worker serves its "
+                        f"queue, or a worker outage longer than the retry "
+                        f"window. Start a worker for that queue "
+                        f"(dl_worker --queues ...) — it takes the row at "
+                        f"once — or complete the row."
                     )
                 raise
         finally:

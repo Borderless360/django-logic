@@ -26,7 +26,7 @@ from django.utils import timezone
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
-from django_logic.background.tasks import _watchdog_stale_attempts_inline
+from django_logic.background.safety_nets import watchdog_stale_attempts
 from django_logic.state import State
 from tests.models import Invoice
 
@@ -194,7 +194,7 @@ class WatchdogFinalizeAliasTests(TestCase):
         invoice = Invoice.objects.using('other').create(status='running')
         self._stale_transition_message(invoice)
 
-        self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+        self.assertEqual(watchdog_stale_attempts(), 1)
 
         self.assertEqual(
             Invoice.objects.using('other').get(pk=invoice.pk).status, 'failed')
@@ -224,7 +224,7 @@ class WatchdogFinalizeAliasTests(TestCase):
         post_save.connect(veto_failed, sender=Invoice)
         self.addCleanup(post_save.disconnect, veto_failed, sender=Invoice)
 
-        self.assertEqual(_watchdog_stale_attempts_inline(), 1)
+        self.assertEqual(watchdog_stale_attempts(), 1)
 
         transition_message.refresh_from_db()
         # The row completes despite the veto.

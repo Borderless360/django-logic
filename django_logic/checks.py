@@ -176,79 +176,6 @@ def check_background_database_routing(app_configs, **kwargs):
     return findings
 
 
-@checks.register('django_logic')
-def check_safety_net_is_scheduled(app_configs, **kwargs):
-    """In celery mode, the periodic safety-net tasks must actually be in the
-    running app's beat schedule (``django_logic.W002``).
-
-    They carry the durability half of ``BACKGROUND_EXECUTION='celery'``.
-    Without them a lost worker message is never sent to the queue again, an
-    attempt that dies without raising never reaches a terminal state, and
-    completed rows are never deleted. Nothing else reports it: one consumer ran
-    seven weeks with none of them scheduled and collected 36 stranded rows.
-    ``app.conf.beat_schedule = {...}`` is ignored when the project also defines
-    the ``CELERY_``-namespaced setting, because Celery reads the namespaced key
-    first. Assign ``app.conf['CELERY_BEAT_SCHEDULE']`` instead.
-
-    Matched by task name, not by entry key, so renamed entries still pass.
-    """
-    from django.apps import apps
-
-    # BACKGROUND_EXECUTION defaults to 'celery' and the core app registers
-    # checks too. Without this line an install that never added the background
-    # app would get a false warning on every `manage.py check`, and would fail
-    # any CI that runs `check --fail-level WARNING`. An install that does bind
-    # background transitions without the app is reported as an error above.
-    if not apps.is_installed('django_logic.background'):
-        return []
-
-    from django_logic.background import settings as bg_settings
-
-    if bg_settings.background_execution() != bg_settings.EXECUTION_CELERY:
-        return []
-    try:
-        from celery import current_app
-    except ImportError:  # pragma: no cover - celery is a hard dependency
-        return []
-    try:
-        scheduled = current_app.conf.beat_schedule or {}
-    except Exception:
-        # No usable Celery configuration in this process (a management
-        # command in a project that configures Celery lazily). Not our
-        # place to fail the check run over it.
-        return []
-
-    shipped = {entry['task'] for entry in bg_settings.beat_schedule().values()}
-    present = {
-        entry.get('task') for entry in scheduled.values()
-        if isinstance(entry, dict)
-    }
-    missing = sorted(shipped - present)
-    if not missing:
-        return []
-    return [checks.Warning(
-        "BACKGROUND_EXECUTION='celery' but these periodic safety-net tasks "
-        "are not in the Celery beat schedule: %s. Lost worker messages are "
-        "never sent to the queue again and completed rows are never deleted."
-        % ', '.join(missing),
-        hint="Install them with "
-             "app.conf['CELERY_BEAT_SCHEDULE'] = "
-             "{**(app.conf.beat_schedule or {}), **beat_schedule()} — note the "
-             "CELERY_-namespaced key: a plain app.conf.beat_schedule "
-             "assignment is silently ignored when the project defines "
-             "CELERY_BEAT_SCHEDULE in Django settings. If you schedule them "
-             "elsewhere (django-celery-beat's database scheduler, an external "
-             "cron), silence this with "
-             "SILENCED_SYSTEM_CHECKS = ['django_logic.W002'].",
-        id='django_logic.W002',
-    )]
-
-
-#: Settings a past release removed, mapped to what to do instead. The
-#: unknown-key check below reports them under their own id. ``DJANGO_LOGIC``
-#: rejects nothing, so a leftover key is simply ignored. The worst case is a
-#: deployment that set ``LOG_KWARGS_REDACTOR`` to keep personal data out of its
-#: logs, upgrades, and starts logging raw kwargs with no warning.
 _REMOVED_SETTINGS = {
     'LOG_KWARGS':
         'kwargs are always attached to log records now; scrub them with a '
@@ -264,6 +191,9 @@ _REMOVED_SETTINGS = {
         'let pending rows complete before renaming a Process class',
     'TRANSITION_COVERAGE_LOG':
         'transition-coverage recording was removed in 0.14.0',
+    'STARTER_QUEUE':
+        'the safety nets run inside the pull worker loop; nothing is '
+        'scheduled on a queue anymore',
 }
 
 
@@ -272,7 +202,6 @@ _REMOVED_SETTINGS = {
 _KNOWN_SETTINGS = frozenset({
     'BACKGROUND_EXECUTION',
     'DEFAULT_QUEUE',
-    'STARTER_QUEUE',
     'LEGACY_EXCEPTION_BASE',
     'LOCK_TIMEOUT',
     'DEFER_UNLOCK_UNTIL_COMMIT',

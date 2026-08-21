@@ -7,7 +7,7 @@
 >    job — guaranteed by its own regression suite, a PostgreSQL + Redis
 >    stability suite, and a production-style Heroku validation matrix (see
 >    [How the library itself is tested](#how-the-library-itself-is-tested)).
->    Your tests run the *business process* **entirely without Celery**.
+>    Your tests run the *business process* **entirely without services**.
 > 2. **You test the object's journey, not the wiring.** Assert what the object
 >    *became* as it moved through the process — its state trajectory, the
 >    fields the side-effects changed, and what happens to the caller on failure
@@ -92,8 +92,8 @@ or a direct DB read).
 
 ## Setup
 
-Background transitions execute through Celery by default
-(`BACKGROUND_EXECUTION` defaults to `'celery'`). Tests opt into **sync
+Background transitions execute on pull workers by default
+(`BACKGROUND_EXECUTION` defaults to `'pull'`). Tests opt into **sync
 execution mode**, where enqueue (validate + persist the `TransitionMessage` +
 write `in_progress_state`) and execute (side-effects + target state) run
 inline in the test process — the *real* code paths, not a re-implementation:
@@ -105,12 +105,12 @@ DJANGO_LOGIC = {
 }
 ```
 
-SQLite is fine for process tests (the library refuses SQLite only in celery
-mode, where the concurrency guard needs real row locking). No broker, no
-worker, no beat.
+SQLite is fine for process tests (the library refuses SQLite only in pull
+mode, where the claim needs real row locking). No services, no worker
+processes.
 
 If a specific test file needs sync mode while the global setting is
-`'celery'`, use the context manager instead:
+`'pull'`, use the context manager instead:
 
 ```python
 from django_logic.background import sync_execution
@@ -122,10 +122,10 @@ with sync_execution():
 **What you should test** — your states, transitions, conditions, permissions,
 side-effect behaviour, failure handling, and retry outcomes.
 
-**What you should NOT test** — that Celery delivers tasks, that the broker
-survives restarts, that beat schedules the safety nets, that `acks_late`
-re-delivers after a worker crash. Those are library guarantees; sync mode
-deliberately removes them from your test surface.
+**What you should NOT test** — that the worker loop claims rows, that the database
+survives restarts, that the safety nets run on their cadence, that a
+crashed worker's row is claimed again. Those are library guarantees; sync
+mode deliberately removes them from your test surface.
 
 ---
 ## The scenario catalog

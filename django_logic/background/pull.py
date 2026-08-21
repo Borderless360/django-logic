@@ -1,0 +1,223 @@
+"""Pull execution: workers claim rows from the database.
+
+The committed ``TransitionMessage`` row is the signal. A worker asks the
+database for one claimable row, runs the shared execute path on it, and
+asks again. Nothing is sent to a broker, so nothing can be lost,
+duplicated, or published to a queue nobody consumes — the defect class
+recorded in the design record (``docs/design/PULL_WORKERS.md``, issue
+#217).
+
+The claim's WHERE clause is the retry rule:
+
+* a fresh row is claimable at once;
+* a row whose attempt just failed becomes claimable again after
+  ``RETRY_MINUTES`` — nothing has to re-dispatch it, it is simply
+  visible again;
+* a row whose attempt runs right now is row-locked by that attempt, so
+  ``SKIP LOCKED`` passes over it;
+* a worker that dies releases its lock with its connection, so its row
+  is claimable at once.
+
+``LISTEN/NOTIFY`` is the wake-up: enqueue fires one payload-free
+notification after commit, and a waiting worker asks the database at
+once instead of at the next poll. A lost notification costs one poll
+interval — the row waits in the database either way.
+
+The worker loop also runs the safety nets (the watchdog, the stuck
+finalizer and its no-worker report, the cleanup sweep), so nothing has
+to be scheduled anywhere else.
+"""
+from __future__ import annotations
+
+import os
+import select
+import time
+
+from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
+
+from django_logic.background import settings as bg_settings
+from django_logic.logger import logger
+
+#: One channel for every queue. The notification carries no payload and
+#: means only "ask the database now"; the claim's queue filter does the
+#: routing, so per-queue channels would buy nothing.
+NOTIFY_CHANNEL = 'django_logic_work'
+
+#: The floor under LISTEN/NOTIFY: a worker asks the database at least
+#: this often even when no notification arrives.
+POLL_SECONDS = 5.0
+
+#: How often the loop runs the safety nets (watchdog, stuck report,
+#: cleanup) that beat used to schedule.
+SAFETY_NET_SECONDS = 60.0
+
+
+def notify_workers() -> None:
+    """Tell every listening worker to ask the database now. Best effort:
+    a lost notification is covered by the poll floor."""
+    from django_logic.background.models import TransitionMessage
+
+    alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+    try:
+        with connections[alias].cursor() as cursor:
+            cursor.execute(f'NOTIFY {NOTIFY_CHANNEL}')
+    except Exception as exc:
+        logger.warning('pull: NOTIFY failed (the poll floor covers it): %s', exc)
+
+
+def claim_next(queues: list[str]) -> int | None:
+    """Return the pk of one claimable row for ``queues``, or ``None``.
+
+    The lock taken by ``SKIP LOCKED`` is released when this short
+    transaction ends; the runner then takes its own row lock for the
+    attempt. Two workers can race through that gap, and the loser exits
+    through the runner's existing skip-if-locked guard — wasteful once
+    in a while, never wrong.
+    """
+    from django_logic.background.safety_nets import _claimable
+
+    with transaction.atomic():
+        return (
+            _claimable(queues)
+            .select_for_update(skip_locked=True)
+            .values_list('pk', flat=True)
+            .first()
+        )
+
+
+def run_once(queues: list[str], *, isolate: bool = False) -> bool:
+    """Claim and execute at most one row. Returns whether one ran.
+
+    With ``isolate=True`` (what the worker loop uses) the attempt runs in
+    a forked child process, so a crash — ``os._exit`` in consumer code, a
+    segmentation fault, the platform's memory killer — kills the attempt,
+    not the worker. The parent records the death as an error on the row,
+    which gives a crashing attempt the same paced, bounded retries as a
+    failing one; before this, every crash killed the whole worker process
+    and the platform's restart backoff parked the queue group with it.
+    """
+    from django_logic.background.runner import run_background_transition
+
+    pk = claim_next(queues)
+    if pk is None:
+        return False
+    if isolate and hasattr(os, 'fork'):
+        _run_attempt_in_child(pk)
+    else:
+        run_background_transition(pk)
+    return True
+
+
+def _run_attempt_in_child(pk: int) -> None:
+    """Run one attempt in a forked child and account for its death.
+
+    Both sides must not share a database connection — a connection closed
+    (or crashed) on one side poisons the other's session. The parent
+    closes every connection before the fork; each side then opens its
+    own lazily.
+
+    A child that dies without completing the row left no error on it, so
+    the parent records one: the claim's retry wait then paces the next
+    attempt, and ``MAX_ERRORS`` bounds a crash loop — a side-effect that
+    crashes every time ends in ``failed_state`` like one that fails every
+    time, instead of crash-looping forever.
+    """
+    from django.db import connections
+
+    from django_logic.background.models import TransitionMessage
+    from django_logic.background.runner import run_background_transition
+
+    connections.close_all()
+    child = os.fork()
+    if child == 0:
+        status = 1
+        try:
+            run_background_transition(pk)
+            status = 0
+        finally:
+            # _exit, so a crashing attempt cannot run the parent's cleanup
+            # handlers or flush its buffers twice.
+            os._exit(status)
+    _, raw_status = os.waitpid(child, 0)
+    exit_code = os.waitstatus_to_exitcode(raw_status)
+    if exit_code == 0:
+        return
+    logger.error(
+        f'pull: the attempt process for TransitionMessage#{pk} died '
+        f'(exit {exit_code}). Its row lock died with it; the error recorded '
+        f'here paces the next claim.'
+    )
+    row = TransitionMessage.objects.filter(pk=pk, is_completed=False).first()
+    if row is not None:
+        row.record_error(RuntimeError(
+            f'[crashed] the attempt process died (exit {exit_code}) before '
+            f'the attempt finished'
+        ))
+
+
+def _run_safety_nets() -> None:
+    """The periodic work beat used to own: abandoned-attempt watchdog,
+    the stuck finalizer and its never-started report, and the cleanup
+    sweep. Called from the loop, so pull mode needs no beat process."""
+    from django_logic.background.safety_nets import (
+        cleanup_completed_transitions,
+        detect_stuck_transitions,
+        watchdog_stale_attempts,
+    )
+
+    for step in (
+        watchdog_stale_attempts,
+        detect_stuck_transitions,
+        cleanup_completed_transitions,
+    ):
+        try:
+            step()
+        except Exception as exc:
+            logger.error('pull: safety net %s failed: %s',
+                         getattr(step, '__name__', step), exc)
+
+
+def _wait_for_work(timeout: float) -> None:
+    """Sleep until a notification arrives or ``timeout`` passes.
+
+    Holds one LISTEN connection per worker process. When the connection
+    cannot listen (a pooler that rejects LISTEN, a broken socket), the
+    wait degrades to a plain sleep and the poll floor carries the loop.
+    """
+    from django_logic.background.models import TransitionMessage
+
+    alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+    try:
+        connection = connections[alias]
+        connection.ensure_connection()
+        raw = connection.connection
+        with raw.cursor() as cursor:
+            cursor.execute(f'LISTEN {NOTIFY_CHANNEL}')
+        select.select([raw], [], [], timeout)
+        raw.poll()
+        raw.notifies.clear()
+    except Exception:
+        time.sleep(timeout)
+
+
+def run_worker(queues: list[str], *, forever: bool = True) -> None:
+    """The worker loop: drain claimable rows, run the safety nets on
+    schedule, wait for a notification, repeat.
+
+    ``forever=False`` runs exactly one drain-and-safety-net pass — for
+    tests and for a one-off catch-up command.
+    """
+    logger.info('pull worker starting: queues=%s', ','.join(queues))
+    last_safety_net = 0.0
+    while True:
+        ran_any = False
+        while run_once(queues, isolate=True):
+            ran_any = True
+        now = time.monotonic()
+        if now - last_safety_net >= SAFETY_NET_SECONDS:
+            _run_safety_nets()
+            last_safety_net = now
+        if not forever:
+            return
+        if not ran_any:
+            _wait_for_work(POLL_SECONDS)

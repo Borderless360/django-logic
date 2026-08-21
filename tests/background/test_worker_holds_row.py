@@ -105,23 +105,19 @@ class HeldRowTests(TransactionTestCase):
         )
         release.set()
 
-    def test_starter_skips_a_row_a_worker_holds(self):
-        from django_logic.background.dispatch import sync_execution
-        from django_logic.background.tasks import _retry_pending_inline
+    def test_the_retry_pass_leaves_a_held_row_alone(self):
+        from django_logic.background.safety_nets import run_pending
 
         widget = Widget.objects.create(status='fulfilling')
         row = open_transition_message(
             widget, 'process', 'fulfil', started_minutes_ago=60,
         )
         release = self._hold(row.pk)
-        # Celery mode would apply_async; the probe must skip the held row
-        # before any dispatch. Settings stay on celery mode here — the row
-        # is skipped, so nothing is ever sent.
-        with override_settings(
-            DJANGO_LOGIC=dl_settings(
-                BACKGROUND_EXECUTION='celery',
-                TRANSITION_MESSAGE_RETRY_MINUTES=2,
-            ),
-        ):
-            self.assertEqual(_retry_pending_inline(), 0)
+        # The attempt's row lock is the guard: the pass visits the row,
+        # the runner gives it up, and nothing about it changes.
+        run_pending()
+        row.refresh_from_db()
+        widget.refresh_from_db()
+        self.assertFalse(row.is_completed)
+        self.assertEqual(widget.status, 'fulfilling')
         release.set()

@@ -480,11 +480,11 @@ class Transition:
                 f"Transition '{self.action_name}' is not allowed: a "
                 f"background transition for {state.instance_key} has an "
                 f"uncompleted TransitionMessage that is stranded — "
-                f"nothing is retrying it. Likely causes: the safety-net "
-                f"beat tasks are not scheduled, a queue backlog or "
-                f"worker outage longer than the retry window, or a lost "
-                f"broker message. Complete the row, or start the beat "
-                f"tasks so it is retried."
+                f"nothing is retrying it. Likely causes: no worker serves "
+                f"its queue, or a worker outage longer than the retry "
+                f"window. Start a worker for that queue "
+                f"(dl_worker --queues ...) — it takes the row at once — "
+                f"or complete the row."
             )
         raise TransitionTemporarilyUnavailable(
             f"Transition '{self.action_name}' is not allowed right now: "

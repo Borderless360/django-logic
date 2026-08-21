@@ -26,25 +26,25 @@ Django Logic is a lightweight workflow framework for Django. It models business 
 - 🔄 **Side Effects** - Execute functions during state transitions
 - 🏗️ **Nested Processes** - Build complex workflows with sub-processes
 - ⚡ **Built-in Locking** - Cache/Redis-based locking to prevent race conditions
-- ⏳ **Durable Background Transitions** - Background transitions run as Celery tasks by default — built in, not an optional extra. They are queue-routed, retried, and recovered after a crash (see [Background Transitions](#background-transitions))
-- 🧪 **Scenario-Based Testing** - Test a whole workflow as ordinary unit tests, background jobs, failures and retries included. Sync execution mode and `django_logic.testing` need no Celery broker (see [Testing Your Processes](#testing-your-processes))
+- ⏳ **Durable Background Transitions** - Workers claim committed rows straight from the database — no broker, nothing to lose or duplicate. Queue-routed, retried, and recovered after a crash (see [Background Transitions](#background-transitions))
+- 🧪 **Scenario-Based Testing** - Test a whole workflow as ordinary unit tests, background jobs, failures and retries included. Sync execution mode and `django_logic.testing` need no services at all (see [Testing Your Processes](#testing-your-processes))
 - 🔍 **Structured Logging** - State changes go to the standard `django-logic` / `django-logic.transition` Python loggers. Configure them in Django `LOGGING` (see [docs/logger.md](docs/logger.md))
 
 ## Requirements
 - Python 3.11+
 - Django 4.2+ (4.2, 5.1, 5.2 and 6.0 are tested in CI; 5.0 is not supported)
 - django-model-utils >= 4.5.1
-- celery >= 5.0 — **installed automatically**; background transitions are Celery tasks
-- A **cross-process `default` cache** for the state lock — *not* a package dependency. The engine locks through Django's cache API, so any cross-process backend works. That includes `django.core.cache.backends.redis.RedisCache`, built into Django since 4.0. Celery mode refuses to boot on a locmem/dummy cache when `DEBUG=False`.
+- PostgreSQL for background transitions — the worker's claim needs `SELECT FOR UPDATE SKIP LOCKED`; sync mode runs anywhere
+- A **cross-process `default` cache** for the state lock — *not* a package dependency. The engine locks through Django's cache API, so any cross-process backend works. That includes `django.core.cache.backends.redis.RedisCache`, built into Django since 4.0. Pull mode refuses to boot on a locmem/dummy cache when `DEBUG=False`.
 
 Extras:
 - `pip install django-logic[redis]` — installs `django-redis`, for deployments whose settings name `django_redis.cache.RedisCache`. It stopped being a core dependency in 0.11.0, because the engine has never imported it.
-- `[celery]` remains an **empty alias**, so existing `pip install django-logic[celery,redis]` pins keep resolving — celery is a core dependency since 0.4
+- `[celery]` remains an **empty alias**, so existing `pip install django-logic[celery,redis]` pins keep resolving — 0.16.0 removed the broker, so nothing imports celery
 
 ## Installation
 
 ```bash
-# Installs the current release from PyPI. Celery is installed automatically.
+# Installs the current release from PyPI.
 # Add [redis] if your settings name django_redis.cache.RedisCache.
 pip install django-logic
 ```
@@ -362,7 +362,7 @@ Use context to pass data between side-effects and callbacks.
 
 > ⚠️ **django-logic checks permissions only when you pass `user=`.** A call
 > without it (`invoice.my_process.approve()`) is a *system call*, and it
-> **skips every permission check** by design. That is what you want in a Celery
+> **skips every permission check** by design. That is what you want in a worker
 > task or a management command. It is dangerous when you forget it in an API
 > view. In a request handler, always pass `user=request.user`.
 
@@ -762,19 +762,19 @@ Transition(
 
 ## Background Transitions
 
-For long-running side-effects (payment processing, PDF generation, external API calls), use `BackgroundTransition` / `BackgroundAction` from `django_logic.background`. **Background transitions are Celery tasks** — Celery ships as a core dependency and `'celery'` is the default execution mode.
+For long-running side-effects (payment processing, PDF generation, external API calls), use `BackgroundTransition` / `BackgroundAction` from `django_logic.background`. **Workers claim committed rows straight from the database** — `'pull'` is the default execution mode, and no broker is involved.
 
 **How the work is split.** A synchronous `Transition` does everything at once, in the caller's call frame. A background transition cannot: its work runs later, on another machine. It therefore follows the standard transactional-outbox pattern, in two steps:
 
-- **Enqueue** (synchronous, inside your request): validate the transition, then write `in_progress_state` and a durable `TransitionMessage` row in **one** database transaction. The row records what you asked for. django-logic sends the Celery task on commit. This takes milliseconds.
-- **Execute** (on a Celery worker): load the row, run the side-effects, write the target state and mark the row completed — all in one atomic block. The durable row is what lets the safety-net tasks retry or finalize the work when the worker crashes or the broker loses the message. Success and failure *callbacks* run after the worker's transaction commits, and they are best-effort by contract: a worker killed between that commit and the callbacks loses them, and nothing re-runs them. So a callback that applies a decision the side-effect recorded (disable this account, mark that parcel failed) needs a periodic re-check behind it — or make the follow-up its own `BackgroundTransition`, which gets its own row and its own retries.
+- **Enqueue** (synchronous, inside your request): validate the transition, then write `in_progress_state` and a durable `TransitionMessage` row in **one** database transaction. The row records what you asked for and is the only signal there is — a payload-free notification wakes the workers on commit. This takes milliseconds.
+- **Execute** (on a worker process): a worker claims the row (`SELECT FOR UPDATE SKIP LOCKED`), runs the side-effects, writes the target state and marks the row completed — all in one atomic block. A failed attempt becomes claimable again after the retry wait; a crashed worker's row is claimable the moment its connection dies. Success and failure *callbacks* run after the worker's transaction commits, and they are best-effort by contract: a worker killed between that commit and the callbacks loses them, and nothing re-runs them. So a callback that applies a decision the side-effect recorded (disable this account, mark that parcel failed) needs a periodic re-check behind it — or make the follow-up its own `BackgroundTransition`, which gets its own row and its own retries.
 
 They give you:
 
-- **Durable execution.** django-logic saves every background transition as a `TransitionMessage` row, in the same atomic block that writes `in_progress_state`. A periodic safety-net task recovers the work after a worker crash, a broker loss, or a dropped `transaction.on_commit` hook.
+- **Durable execution.** django-logic saves every background transition as a `TransitionMessage` row, in the same atomic block that writes `in_progress_state`. The row is what workers run, so there is no message to lose: a crash, a missed notification, or a worker outage only delays the claim.
 - **Queue routing per transition.** `queue=` is optional — a transition without it runs on `DJANGO_LOGIC['DEFAULT_QUEUE']` (`'django_logic'`). Name your queues per SLA (`critical` / `slow` / `fast`) and give each one its own worker.
-- **Sync mode for tests.** `'sync'` runs the worker path inline, in the same process — for unit tests, CI, management commands and the Django shell. You need no Celery broker to test a business process; see [Testing Your Processes](#testing-your-processes).
-- **One task per attempt, all or nothing.** Every side-effect and the target-state write happen inside **one** Celery task with `acks_late=True`, inside **one** atomic block, with the side-effects in a savepoint. A failed attempt **rolls back every database write it made**. A worker crash re-delivers the whole task, so the state never stops between two side-effects. The idempotency you owe is for *external* calls only, because a retried attempt runs the side-effects again from the start.
+- **Sync mode for tests.** `'sync'` runs the worker path inline, in the same process — for unit tests, CI, management commands and the Django shell. You need no services to test a business process; see [Testing Your Processes](#testing-your-processes).
+- **One attempt, all or nothing.** Every side-effect and the target-state write happen inside **one** atomic block, with the side-effects in a savepoint. A failed attempt **rolls back every database write it made**, and the whole attempt re-runs on the next claim, so the state never stops between two side-effects. The idempotency you owe is for *external* calls only, because a retried attempt runs the side-effects again from the start.
 
 ### Install
 
@@ -783,7 +783,7 @@ Add `'django_logic.background'` to `INSTALLED_APPS` and configure:
 ```python
 DJANGO_LOGIC = {
     'LOCK_TIMEOUT': 7200,   # the state lock's TTL, seconds
-    'BACKGROUND_EXECUTION': 'celery',   # the default; set 'sync' in test settings
+    'BACKGROUND_EXECUTION': 'pull',     # the default; set 'sync' in test settings
     'DEFAULT_QUEUE': 'django_logic',    # queue for transitions without queue=
     'STARTER_QUEUE': 'django_logic.starter',
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
@@ -819,7 +819,7 @@ out. Every way it can go wrong — a path that does not import, a class that is
 not an exception, an MRO conflict — raises `ImproperlyConfigured` at boot.
 Remove the setting when the migration is done.
 
-At boot, celery mode refuses two settings that would break the guarantees without saying so. The first is a SQLite database for `TransitionMessage`, which has no `select_for_update(nowait)`. The second is a per-process `default` cache (locmem or dummy) when `DEBUG=False`, because the web processes and the workers must share the state lock:
+At boot, pull mode refuses two settings that would break the guarantees without saying so. The first is a SQLite database for `TransitionMessage`, which has no row locks for the claim. The second is a per-process `default` cache (locmem or dummy) when `DEBUG=False`, because the web processes and the workers must share the state lock:
 
 ```python
 CACHES = {
@@ -891,7 +891,7 @@ class ShopConfig(AppConfig):
 ### Call it
 
 ```python
-# In a view — returns immediately (Celery mode) or after the worker completes (Sync mode).
+# In a view — returns immediately (Pull mode) or after the worker completes (Sync mode).
 tr_id = order.process.fulfil(user=request.user)
 ```
 
@@ -1050,7 +1050,7 @@ background slow path can therefore share one `action_name`.
 
 ### Testing background transitions
 
-Set `BACKGROUND_EXECUTION='sync'` in your test settings. The global default is `'celery'`, so you must opt in. Every `instance.process.fulfil(...)` call then enqueues **and** executes inline, with no broker:
+Set `BACKGROUND_EXECUTION='sync'` in your test settings. The global default is `'pull'`, so you must opt in. Every `instance.process.fulfil(...)` call then enqueues **and** executes inline:
 
 ```python
 class FulfilmentTests(TestCase):
@@ -1071,7 +1071,7 @@ class FulfilmentTests(TestCase):
                 order.process.fulfil()
 ```
 
-If the global setting is `'celery'` but you need Sync mode for a specific block, use the context manager:
+If the global setting is `'pull'` but you need Sync mode for a specific block, use the context manager:
 
 ```python
 from django_logic.background import sync_execution
@@ -1086,19 +1086,17 @@ with sync_execution():
 django_logic.fast       — < 1s work (notifications, cache invalidations)
 django_logic.critical   — user-facing with SLA (fulfilment, payments)
 django_logic.slow       — > 30s work (exports, reports)
-django_logic.starter    — the framework's periodic safety-net tasks
 ```
 
-The periodic starter sends a stale transition to its own queue again, so a retried slow job never moves to the critical queue.
+A queue is a column on the row, and each worker process names the queues it serves — so a retried slow job never moves to the critical worker.
 
-### Safety-net tasks
+### Retries, and the safety nets
 
-Four periodic tasks keep the durable model working on its own. Run them on `STARTER_QUEUE` through Celery beat:
+Retries need no scheduler: a row whose attempt failed becomes claimable again after `RETRY_MINUTES` — the claim's own filter is the retry rule. Three safety nets run inside every worker loop, once a minute, so nothing else has to be configured:
 
-- `retry_stale_transitions` — sends uncompleted rows older than `RETRY_MINUTES` to the queue again. It skips a row whose current attempt started less than `RETRY_MINUTES` ago, and a row a worker holds right now, so an attempt that runs longer than the retry interval is not sent to the queue again on every tick. A crashed attempt holds no lock, so it is re-dispatched at once. Every publish is claimed on the row first (`last_dispatched_at`), so a row on a queue nothing consumes costs at most one broker message per retry window — and after 60 publishes with no attempt ever starting, the starter stops and `detect_stuck_transitions` reports the row and its queue instead.
-- `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`, except the newest terminal-failure row per instance and process. That row is the only explanation for an instance parked in its `failed_state`, so it stays for the investigation, however late it comes.
-- `detect_stuck_transitions` — finalizes a row that sits at `MAX_ERRORS`: it writes `failed_state`, runs `failure_callbacks` and marks the row completed, so the retry loop stops.
 - `watchdog_stale_attempts` — gives up on an attempt that ran past its declared `timeout` (see below).
+- `detect_stuck_transitions` — finalizes a row that sits at `MAX_ERRORS`: it writes `failed_state`, runs `failure_callbacks` and marks the row completed, so the retry loop stops. It also names every row that has waited past the retry window with no attempt ever started — the sign that no worker serves that row's queue.
+- `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`, except the newest terminal-failure row per instance and process. That row is the only explanation for an instance parked in its `failed_state`, so it stays for the investigation, however late it comes.
 
 ### Per-attempt timeouts
 
@@ -1203,50 +1201,18 @@ The same check guards the `failed_state` writes that the safety-net tasks make, 
 
 ### Production deployment
 
-Celery mode needs three things. Without them the durability guarantees do not hold, and nothing tells you:
+Pull mode needs two things. Both are checked at boot:
 
-**1. A real broker.** `BACKGROUND_EXECUTION='celery'` needs a durable broker (Redis or RabbitMQ). With no broker in the settings, Celery falls back to an in-memory transport that no worker reads. `apply_async` then succeeds and the task never runs. django-logic logs a warning once, on the first dispatch.
+**1. PostgreSQL for `TransitionMessage`.** The worker's claim is `SELECT FOR UPDATE SKIP LOCKED`; SQLite has no row locks, so boot refuses it (use `'sync'` there).
 
-**2. The four periodic safety-net tasks, scheduled through Celery beat.** Celery registers them for you (`@shared_task`, names `django_logic.*`) once your Celery app imports or auto-discovers `django_logic.background.tasks`. **If you do not schedule them, you get no retries, no stuck-row finalization, no timeout watchdog and no cleanup.** One lost broker message then leaves an instance waiting forever.
-
-Use the ready-made schedule. It routes all four tasks to `DJANGO_LOGIC['STARTER_QUEUE']`, and you can override each one by keyword. Retry runs every 60s, detect-stuck every 300s, and the watchdog every 120s. Cleanup runs at 03:17 on a crontab, not on an interval: an interval counts from the moment beat starts, so a platform that deploys or cycles dynos every day resets the clock before a day-scale interval ever elapses.
-
-```python
-# celery.py — after the app is configured
-from django_logic.background import beat_schedule
-
-# Write the CELERY_-namespaced key, not app.conf.beat_schedule. With
-# config_from_object(namespace='CELERY'), Celery reads beat_schedule from
-# CELERY_BEAT_SCHEDULE in Django settings first. It accepts a plain
-# `app.conf.beat_schedule = ...` assignment and then ignores it.
-app.conf['CELERY_BEAT_SCHEDULE'] = {
-    **(app.conf.beat_schedule or {}),
-    **beat_schedule(),
-}
-```
-
-If the schedule does not reach beat, `manage.py check` reports the tasks as unscheduled (`django_logic.W002`).
-
-A hand-written `CELERY_BEAT_SCHEDULE` works the same way. The task names are `django_logic.retry_stale_transitions`, `django_logic.detect_stuck_transitions`, `django_logic.watchdog_stale_attempts` and `django_logic.cleanup_completed_transitions`. Set `options={'queue': ...}` on each entry yourself.
-
-Run a worker that consumes your transition queues **and** the starter queue, plus beat:
+**2. One worker process per queue group.** Each worker names the queues it serves and loops: claim a row, run it, ask again. A payload-free `LISTEN/NOTIFY` wakes it the moment enqueue commits; a five-second poll is the floor, so a lost notification costs five seconds, never the work. The loop also runs the safety nets once a minute — there is nothing else to schedule, anywhere:
 
 ```bash
-celery -A myproject worker -Q django_logic.critical,django_logic.slow,django_logic.fast,django_logic.starter
-celery -A myproject beat        # (or `worker -B` in dev; run a single beat in production)
+python manage.py dl_worker --queues django_logic.critical,django_logic.fast
+python manage.py dl_worker --queues django_logic.slow
 ```
 
-**3. Crash re-delivery is built in.** Every django-logic task sets
-`acks_late=True` **and** `reject_on_worker_lost=True` on the task itself. The
-broker therefore delivers the transition again when its worker dies while the
-task runs — SIGKILL, OOM, a deploy, or a `--max-memory-per-child` kill — whatever
-your global Celery configuration says. You wire up nothing. Setting the global
-pair is still a good idea for your *own* tasks:
-
-```python
-CELERY_TASK_ACKS_LATE = True
-CELERY_TASK_REJECT_ON_WORKER_LOST = True
-```
+Crash recovery is the database's own: a worker that dies releases its row lock with its connection, and the next claim takes the row at once. An attempt that hangs while keeping its connection is the watchdog's job — declare `timeout=` on transitions that need it.
 
 **Running behind pgbouncer (transaction pooling).** The concurrency guard —
 `select_for_update(nowait)` plus the partial unique constraint — works under
@@ -1264,7 +1230,7 @@ hop is local and plaintext, and pgbouncer terminates TLS upstream. Without
 prepared-statement errors. This setup is validated end to end on Heroku behind an
 in-dyno pgbouncer.
 
-**Monitoring.** In Celery mode django-logic logs a failed attempt (`django-logic.transition` at ERROR) and records it on the row. It does **not** re-raise it as a Celery task exception, because that would flood your alerts and could re-deliver a row that is already resolved under `acks_late`. So watch the `TransitionMessage` table, not Celery task failures:
+**Monitoring.** In Pull mode django-logic logs a failed attempt (`django-logic.transition` at ERROR) and records it on the row; the worker loop keeps going. So watch the `TransitionMessage` table:
 
 ```sql
 -- rows at the error limit (detect_stuck_transitions should be finalizing these)
@@ -1281,7 +1247,7 @@ SELECT count(*) FROM django_logic_background_transitionmessage
  WHERE last_error_message LIKE '[superseded]%';
 ```
 
-Also alert when beat stops, because the safety net stops with it.
+Also alert when the worker processes stop, because the safety nets run inside their loop and stop with them.
 
 **Migrating an existing deployment.** Migration `0005` widens `instance_id` from integer to `varchar(255)` with `ALTER COLUMN ... TYPE`. Django emits the `USING ...::varchar` cast, so existing integer rows convert in place. On a very large `TransitionMessage` table this rewrites the column under a lock — run it in a maintenance window, or with your usual online-migration tooling. Migration `0006` (0.4.0) adds the `field_name` column. It also swaps the partial unique constraint from per-instance (`dl_bg_only_one_uncompleted_per_instance`) to per-process (`dl_bg_one_uncompleted_per_process`). That is a quick metadata and index change, safe to run in place.
 
@@ -1290,7 +1256,7 @@ Also alert when beat stops, because the safety net stops with it.
 FSM workflows are hard to test well, because states, conditions, permissions,
 side-effects, background jobs, failures, retries and locking all interact.
 `django_logic.testing` gives you a **scenario-based** test base class. A test
-reads like the business process, and everything runs **inline, with no Celery
+reads like the business process, and everything runs **inline, with no services
 broker** — background transitions included.
 
 Two principles keep these tests worth writing: **test your process, not the
@@ -1313,7 +1279,7 @@ class TestOrderFulfilment(ProcessScenario):
         order = self.create_instance(status='approved')
         self.assert_available(order, ['fulfil', 'cancel'])
 
-        self.background_transition(order, 'fulfil')      # enqueue + execute, no Celery
+        self.background_transition(order, 'fulfil')      # enqueue + execute, inline
         self.assert_state(order, 'fulfilled')
         self.assert_side_effects_ran(['reserve_stock', 'call_courier'])
         self.assert_callbacks_ran(['send_confirmation_email'])

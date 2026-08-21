@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "0.15.0"
+version = "0.16.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -39,16 +39,12 @@ dependencies = [
     # bound: the django-main CI job warns about an unreleased Django instead.
     "django>=4.2,!=5.0.*",
     "django-model-utils>=4.5.1",
-    # Celery is a core dependency, not an extra. In production every
-    # background transition executes through Celery, and background/tasks.py
-    # imports shared_task at module level. 'sync' execution exists only for
-    # tests and CI.
-    "celery>=5.0",
 ]
 
 [project.optional-dependencies]
-# Celery is a core dependency, so [celery] is an empty alias. It stays here so
-# an existing `pip install django-logic[celery,redis]` pin still resolves.
+# 0.16.0 removed the broker: workers claim committed rows from the database,
+# so nothing imports celery. The empty alias stays so an existing
+# `pip install django-logic[celery,redis]` pin still resolves.
 celery = []
 # The engine never imports django_redis: the state lock goes through Django's
 # cache API (`State.lock` calls `cache.add`), so any cross-process backend

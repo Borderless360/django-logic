@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import UNRESTORABLE_MARKER
-from django_logic.background.tasks import cleanup_completed_transitions
+from django_logic.background.safety_nets import cleanup_completed_transitions
 from tests.background.models import Widget
 from tests import dl_settings
 

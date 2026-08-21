@@ -25,6 +25,14 @@ def bg_refuse(instance, **kwargs):
     raise PermanentFailure('the rule says no')
 
 
+def bg_die_once(instance, marker_path='', **kwargs):
+    """Hard-kill the attempt process on the first run; succeed after."""
+    import os
+    if marker_path and not os.path.exists(marker_path):
+        open(marker_path, 'w').close()
+        os._exit(1)
+
+
 # Holds the exact kwargs, values and types, that the last side-effect received
 # on the worker. Round-trip tests read it instead of a database column.
 LAST_KWARGS: dict = {}
@@ -103,6 +111,15 @@ class WidgetProcess(Process):
             queue='django_logic.slow',
             side_effects=[bg_ok],
             timeout=60,
+        ),
+        BackgroundTransition(
+            action_name='die_once',
+            sources=['draft'],
+            target='survived',
+            in_progress_state='dying',
+            failed_state='died',
+            queue='django_logic.critical',
+            side_effects=[bg_die_once],
         ),
         BackgroundTransition(
             action_name='refuse',

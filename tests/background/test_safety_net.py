@@ -6,10 +6,10 @@ from django.utils import timezone
 
 from django_logic.background import retry_pending
 from django_logic.background.models import TransitionMessage
-from django_logic.background.tasks import (
+from django_logic.background.safety_nets import (
     cleanup_completed_transitions,
     detect_stuck_transitions,
-    _retry_pending_inline,
+    run_pending,
 )
 from tests.background.models import Widget
 from tests import dl_settings
@@ -44,7 +44,7 @@ class RetryStaleTests(TestCase):
     def test_picks_up_uncompleted_message(self):
         widget = Widget.objects.create(status='fulfilling')
         _make_stale_message(widget)
-        dispatched = _retry_pending_inline()
+        dispatched = run_pending()
         self.assertEqual(dispatched, 1)
         widget.refresh_from_db()
         # Execute ran inline, so the widget reached its target state.
@@ -53,42 +53,18 @@ class RetryStaleTests(TestCase):
     def test_skips_completed(self):
         widget = Widget.objects.create(status='fulfilled')
         _make_stale_message(widget, completed=True)
-        self.assertEqual(_retry_pending_inline(), 0)
+        self.assertEqual(run_pending(), 0)
 
     def test_stops_at_max_errors(self):
         widget = Widget.objects.create(status='fulfilling')
         _make_stale_message(widget, errors=99)  # above MAX_ERRORS, which is 3
-        self.assertEqual(_retry_pending_inline(), 0)
+        self.assertEqual(run_pending(), 0)
 
     def test_retry_pending_helper_is_public(self):
         widget = Widget.objects.create(status='fulfilling')
         _make_stale_message(widget)
         self.assertEqual(retry_pending(), 1)
 
-    def test_skips_rows_with_a_recent_attempt(self):
-        # A row whose attempt started inside the retry window is skipped, so
-        # an attempt that is still running is not sent to the queue again on
-        # every tick.
-        with override_settings(
-            DJANGO_LOGIC=dict(_SYNC_SETTINGS, TRANSITION_MESSAGE_RETRY_MINUTES=5)
-        ):
-            widget = Widget.objects.create(status='fulfilling')
-            transition_message = _make_stale_message(widget)
-            TransitionMessage.objects.filter(pk=transition_message.pk).update(
-                created=timezone.now() - timedelta(minutes=30),
-                started_at=timezone.now(),  # the attempt started just now
-            )
-            self.assertEqual(_retry_pending_inline(), 0)
-
-            # Once the attempt is older than the retry window, it is eligible.
-            TransitionMessage.objects.filter(pk=transition_message.pk).update(
-                started_at=timezone.now() - timedelta(minutes=30),
-            )
-            self.assertEqual(_retry_pending_inline(), 1)
-
-
-@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class CleanupTests(TestCase):
     def test_deletes_old_completed_messages(self):
         widget = Widget.objects.create()
         transition_message = TransitionMessage.objects.create(

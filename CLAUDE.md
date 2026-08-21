@@ -89,7 +89,7 @@ import the model at the top level. Then drive it via
 `instance.process.<action>(...)` from request/task/method bodies (never at
 module top or in another app's `ready()`).
 
-Use `BackgroundTransition` (durable, runs side-effects on a Celery worker,
+Use `BackgroundTransition` (durable, runs side-effects on a worker process,
 writes target/`failed_state`) or `BackgroundAction` (same durability, no state
 change on success) for anything slow, external, or retriable.
 
@@ -136,7 +136,7 @@ never `getattr(process, action_name)` with the name held in a variable.
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
    `sync_execution()` context manager) runs the worker path inline with no
    broker and propagates exceptions; `retry_pending()` simulates the periodic
-   starter. The global default is `'celery'`, so test settings must opt into
+   starter. The global default is `'pull'`, so test settings must opt into
    sync. See `docs/TESTING_GUIDE.md` for the full scenario catalog.
 6. **One uncompleted background transition per instance per process.** While an
    uncompleted `TransitionMessage` exists, a second background transition
@@ -170,10 +170,10 @@ Its corollaries, each pinned by a shipped mistake:
   (fatal under pgbouncer) and turns instant refusal into blocking.
 - **The row names its transition.** Recovery re-runs work from
   `TransitionMessage` rows, never from broker messages, so the row records
-  `transition_name` and `owning_process_class`. Never switch to one Celery
-  task per transition: a task name inside a broker message turns a rename
-  deploy into silent message loss; the one shared task fails loudly
-  (`[unrestorable]`).
+  `transition_name` and `owning_process_class`. The row is also the queue:
+  workers claim it directly (`SELECT FOR UPDATE SKIP LOCKED`), so nothing
+  mirrors it into a broker message that could be lost, duplicated, or
+  published to a queue nobody consumes.
 
 ## Release policy (anti-spiral)
 
@@ -195,32 +195,17 @@ same release's own fixes. Therefore:
 
 ## Deployment the durability contract depends on
 
-- A real broker (Redis/RabbitMQ). Celery is a core dependency of
-  django-logic (installed automatically); `BACKGROUND_EXECUTION` defaults
-  to `'celery'`.
-- A cross-process `default` cache for the state lock — celery mode refuses
+- PostgreSQL for `TransitionMessage` — the worker's claim is
+  `SELECT FOR UPDATE SKIP LOCKED`; boot refuses SQLite in pull mode.
+- A cross-process `default` cache for the state lock — pull mode refuses
   to boot with a locmem/dummy cache when `DEBUG=False`. The engine locks
   through Django's cache API and imports no backend, so Django's built-in
   `django.core.cache.backends.redis.RedisCache` is enough; django-redis is
   the `[redis]` extra, not a core dependency (0.11.0).
-- Crash re-delivery is built in (every django-logic task sets
-  `acks_late=True` + `reject_on_worker_lost=True`); set the global Celery
-  pair only for your *own* tasks. You still need a **single beat**
-  scheduling the four `django_logic.*` periodic tasks — and a worker for
-  every queue you use. Install them by writing the `CELERY_`-namespaced key,
-  because a plain `app.conf.beat_schedule = …` assignment is silently ignored
-  when the project also defines `CELERY_BEAT_SCHEDULE` in Django settings:
-
-  ```python
-  from django_logic.background import beat_schedule
-  app.conf['CELERY_BEAT_SCHEDULE'] = {
-      **(app.conf.beat_schedule or {}), **beat_schedule(),
-  }
-  ```
-
-  `manage.py check` reports missing entries as `django_logic.W002` — a
-  *warning*, so it does not fail the command unless you run
-  `check --fail-level WARNING`.
+- One `manage.py dl_worker --queues <names>` process per queue group.
+  The loop runs the safety nets once a minute, so nothing is scheduled
+  anywhere else. Crash recovery is the database's own: a dead worker's
+  row lock dies with its connection and the next claim takes the row.
 - Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
   None}`, `DISABLE_SERVER_SIDE_CURSORS=True`, and no SSL on the app→pgbouncer
   hop. The concurrency guard (`select_for_update(nowait)` + partial-unique)
@@ -233,8 +218,9 @@ same release's own fixes. Therefore:
   `tests/background`. There is no pytest configuration — do not add one
   without wiring `DJANGO_SETTINGS_MODULE`.
 - `django_logic/background/` is the durable engine: `transitions.py`
-  (enqueue), `dispatch.py`, `runner.py` (execute on the worker), `tasks.py`
-  (Celery + periodic), `models.py` (`TransitionMessage`), `settings.py`.
+  (enqueue), `dispatch.py`, `pull.py` (the worker loop), `runner.py`
+  (execute on the worker), `safety_nets.py`, `models.py`
+  (`TransitionMessage`), `settings.py`.
 - Read `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md` and
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
