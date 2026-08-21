@@ -279,7 +279,7 @@ class NextTransition:
     A dedicated slot because the follow-up must run in the same call
     frame, after the state unlock: side-effects run before unlock (the
     follow-up would deadlock on its own lock acquisition), and callbacks
-    execute on a Celery worker for background transitions — only for
+    execute on a worker process for background transitions — only for
     synchronous transitions do they run inline.
     """
 

@@ -226,8 +226,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                 f'transition({action!r}) drives a BackgroundTransition — use '
                 f'background_transition({action!r}), which runs enqueue and '
                 f'the worker inline. Under the global default '
-                f"BACKGROUND_EXECUTION='celery' this call only ENQUEUES a "
-                f'Celery task (no worker runs it here), so the drive returns '
+                f"BACKGROUND_EXECUTION='pull' this call only ENQUEUES the "
+                f'row (no worker runs it here), so the drive returns '
                 f'with the instance in its in_progress_state, an uncompleted '
                 f'TransitionMessage left behind, and the real failure surfaces '
                 f'later as a wrong-state or already-in-flight error.',

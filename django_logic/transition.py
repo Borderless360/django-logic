@@ -11,7 +11,7 @@ still runs side-effects and can set a ``failed_state`` on failure.
 For background-executed transitions, see
 ``django_logic.background.BackgroundTransition``. That path has two
 halves: enqueue (write ``in_progress_state`` + a ``TransitionMessage``
-row in one transaction, then send the Celery task) and execute (the
+row in one transaction, then notify the workers) and execute (the
 worker runs the side-effects and writes the final state). Definitions
 live in ``django_logic.background.transitions`` (enqueue) and
 ``django_logic.background.runner`` (execute).
