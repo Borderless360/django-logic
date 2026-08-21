@@ -10,6 +10,8 @@ Public API:
 * :func:`in_flight` — racy read of whether an uncompleted row is still
   being retried, for shaping "busy, try again shortly" answers at API
   seams.
+* :class:`PermanentFailure` — raise from a side-effect to say the failure
+  is permanent: the worker takes the terminal path instead of retrying.
 * :func:`beat_schedule` — ready-made Celery beat entries for the four
   safety-net tasks, routed to ``DJANGO_LOGIC['STARTER_QUEUE']``.
 
@@ -28,6 +30,7 @@ _PUBLIC = {
     'sync_execution': ('django_logic.background.dispatch', 'sync_execution'),
     'retry_pending': ('django_logic.background.dispatch', 'retry_pending'),
     'in_flight': ('django_logic.background.dispatch', 'in_flight'),
+    'PermanentFailure': ('django_logic.background.exceptions', 'PermanentFailure'),
     'beat_schedule': ('django_logic.background.settings', 'beat_schedule'),
 }
 

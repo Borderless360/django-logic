@@ -2,6 +2,106 @@
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-20
+
+Six consumer-reported issues from the gv coupled-core migration — five found
+reviewing the integration app port (gv#9594), one observed live on the gv
+staging broker right after it. No breaking changes: every declaration and
+call that worked on 0.14.x works unchanged.
+
+### Added
+
+- **A failure can say it is permanent** (#209). A background side-effect
+  that raises `django_logic.background.PermanentFailure` — or an exception
+  type the transition lists in `no_retry_on=(...)` — takes the terminal
+  path on that first attempt: `failed_state` is written, the row completes,
+  `failure_callbacks` run. Before, a business refusal ("no record matched",
+  "the rule says no") waited out `MAX_ERRORS × RETRY_MINUTES` before the
+  user saw it, and consumers routed around the retry policy with
+  target-less actions plus per-outcome verdict transitions. Ordinary
+  exceptions keep their retries — that asymmetry is the point.
+- **Two testing helpers the reference consumer kept hand-rolling** (#214).
+  `django_logic.testing.open_transition_message(instance, process_name,
+  transition_name, started_minutes_ago=...)` stands up a coherent
+  uncompleted `TransitionMessage` for tests that pin the one-uncompleted-row
+  gate (gv wrote that eight-field row by hand in three files, each slightly
+  differently). `django_logic.testing.record_driven_transitions()` records
+  which actions a test block drove and diffs against a process's
+  declarations (`record.undriven(MyProcess)`). Unlike the runtime coverage
+  subsystem 0.14.0 removed, this is a test-scope context manager with no
+  engine seam, no setting, and a consumer who asked for it.
+
+### Fixed
+
+- **A live long attempt is no longer called stranded** (#210). Past the
+  retry window, `retry_status` now probes the row lock (savepointed
+  `select_for_update(nowait=True)`, never blocking) before answering
+  `STRANDED`. Before, an attempt that ran quietly for more than
+  `max(RETRY_MINUTES × (MAX_ERRORS + 1), 15)` minutes with no declared
+  `timeout=` made the gates tell the operator "nothing is retrying it —
+  complete the row" while a worker held the row and the starter was
+  re-dispatching it. The queue-backlog ambiguity remains and the stranded
+  message still names it; the dangerous half — a human completing a live
+  row — is gone.
+- **The starter no longer duplicates dispatches for long attempts** (#211).
+  `retry_stale_transitions` skips a row a worker holds. Before, every
+  attempt longer than `RETRY_MINUTES` drew one no-op broker message per
+  tick for its whole duration (harmless via the lock, but one wasted
+  message and worker pickup per row per tick). A crashed attempt holds no
+  lock, so re-dispatch is as fast as before — faster than a timeout-budget
+  filter would have been.
+- **Publishing for one row is bounded, and a queue with no consumer is
+  named** (#215). The starter now claims `last_dispatched_at` on the row
+  before it publishes — a compare-and-set, so a row costs at most one
+  broker message per retry window instead of one per tick, and the primary
+  dispatch counts as the first (migration 0008 adds the marker and a
+  `dispatch_count`; instant on PostgreSQL). A publish that raises gives its
+  count back — the window stays spent, so a broken broker is asked once per
+  window, but the ceiling counts only messages the broker really took
+  (found in review, by Cursor Bugbot). A row published 60 times
+  that never once started stops being re-dispatched, and
+  `detect_stuck_transitions` reports it by name and queue — "does that
+  queue have a consumer?" — instead of the silence that let five stalled
+  rows put ~7,000 messages a day on a staging broker. Alert-only on
+  purpose: a deep backlog clears and the queued copies run the row;
+  finalizing would fail work that would have completed. Claims do not
+  touch `modified`, so `retry_status` still answers stranded for exactly
+  these rows.
+- **The cleanup sweep keeps failure forensics** (#213).
+  `cleanup_completed_transitions` now keeps the newest terminal-failure row
+  per instance and process instead of deleting it on the same
+  `CLEANUP_DAYS` clock as successes. That row is the only explanation for
+  an instance parked in its `failed_state`. One row per parked instance:
+  bounded, and no new setting. A new `ended_in_failure` flag on the row
+  (migration 0008) is what marks a failure — an `errors_count` comparison
+  cannot, because a permanent failure completes at one error and a retried
+  success can carry several (found in review, by Cursor Bugbot).
+
+### Documented
+
+- **The window between the worker's commit and its callbacks** (#212). A
+  worker killed there loses callbacks and `next_transition` forever — this
+  is the design's documented best-effort boundary (see the crash table in
+  `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md`), kept rather than fixed:
+  recovery machinery for hooks is the kind of self-guarding growth the
+  release policy exists to stop, and a re-run could not restore an
+  in-memory verdict anyway. The README now says what the consumer owes: a
+  callback that applies a recorded decision needs a periodic re-check
+  behind it, or the follow-up becomes its own `BackgroundTransition`.
+- **The Voice rule covers writing to people** (#208, folded in). A summary,
+  a pull-request description, a review reply, or a chat message must stand
+  on its own: say the thing, not a self-coined label for the thing, and
+  define any unavoidable name in the same message. Added to `CLAUDE.md`
+  and the Cursor rule.
+
+### Deferred, deliberately
+
+- #184 (the lock key omits the database alias) and #186 (MTI/proxy models
+  sharing a state column alias the lock key) stay open. Both change the
+  lock key's shape, which is shared-cache state: old and new processes
+  disagree about what is locked for the length of a rolling deploy. That
+  fix wants a release of its own with a drain note, not a seat in a
+  correctness release.
 ## [0.14.1] — 2026-08-14
 
 Documentation only. No engine change, so upgrading from 0.14.0 changes no

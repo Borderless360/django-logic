@@ -59,6 +59,15 @@ class TransitionMessage(TimeStampedModel):
     # that triggered the failure branch in the first place.
     failure_side_effect_error = models.TextField(blank=True)
 
+    # True when the row completed as a failure — retries exhausted, a
+    # permanent failure, a restore that could not run, an unrestorable row.
+    # False for a success and for a superseded row (the external state
+    # change won; the instance is not parked). The cleanup sweep keeps the
+    # newest failure row per instance and process, and this flag is what
+    # tells it apart: ``errors_count`` cannot, because a permanent failure
+    # completes at one error and a retried success can carry several.
+    ended_in_failure = models.BooleanField(default=False)
+
     # Worker timing. ``started_at`` is (re)written at the top of every
     # attempt, so on retry it reflects the *current* attempt — a
     # watchdog can scan ``is_completed=False AND started_at < cutoff``
@@ -111,6 +120,19 @@ class TransitionMessage(TimeStampedModel):
     # to find attempts whose current run has exceeded their declared
     # wall-clock limit.
     timeout_seconds = models.PositiveIntegerField(blank=True, null=True)
+
+    # When a broker message was last published for this row, and how many
+    # times one ever was — the primary dispatch and every starter
+    # re-dispatch. The pair is what bounds publishing for a row nothing
+    # consumes: the starter claims ``last_dispatched_at`` before it
+    # publishes (at most one message per retry window), and a row that
+    # passes the dispatch ceiling with ``started_at`` still null stops
+    # being re-dispatched and is reported instead. Deliberately separate
+    # from ``modified``: a dispatch is not activity on the row, and
+    # writing ``modified`` here would stop ``retry_status`` from ever
+    # answering stranded for exactly these rows.
+    last_dispatched_at = models.DateTimeField(blank=True, null=True)
+    dispatch_count = models.PositiveIntegerField(default=0)
 
     kwargs = models.JSONField(blank=True, default=dict)
 
@@ -168,6 +190,89 @@ class TransitionMessage(TimeStampedModel):
     RETRYING = 'retrying'
     STRANDED = 'stranded'
 
+    @classmethod
+    def claim_dispatch(cls, transition_message_id: int) -> bool:
+        """Claim the right to publish one broker message for this row.
+
+        A compare-and-set on ``last_dispatched_at``: the claim succeeds only
+        when the row is uncompleted and was last published more than
+        ``RETRY_MINUTES`` ago. The starter publishes only after a successful
+        claim (mark first, publish second — the reverse order reintroduces
+        the duplicate this exists to remove), so a row nothing consumes
+        costs at most one message per retry window instead of one per tick.
+
+        ``modified`` is deliberately not written: a dispatch is not
+        activity on the row, and refreshing it would stop ``retry_status``
+        from answering stranded for a row on a queue with no consumer.
+        """
+        from django_logic.background import settings as bg_settings
+
+        now = timezone.now()
+        cutoff = now - timedelta(minutes=bg_settings.retry_minutes())
+        claimed = (
+            cls.objects
+            .filter(pk=transition_message_id, is_completed=False)
+            .filter(
+                models.Q(last_dispatched_at__isnull=True)
+                | models.Q(last_dispatched_at__lt=cutoff)
+            )
+            .update(
+                last_dispatched_at=now,
+                dispatch_count=models.F('dispatch_count') + 1,
+            )
+        )
+        return bool(claimed)
+
+    @classmethod
+    def publish_failed(cls, transition_message_id: int) -> None:
+        """Give a claim's count back when its publish raised.
+
+        The window stays spent — ``last_dispatched_at`` keeps the claim, so
+        a broken broker is asked once per retry window, not once per tick —
+        but the dispatch ceiling must count only messages the broker really
+        took. Without this, a broker outage of sixty windows exhausted the
+        ceiling with nothing on the queue, and the never-started report
+        then pointed at a consumer that was never the problem.
+        """
+        cls.objects.filter(
+            pk=transition_message_id, dispatch_count__gt=0,
+        ).update(dispatch_count=models.F('dispatch_count') - 1)
+
+    @classmethod
+    def mark_dispatched(cls, transition_message_id: int) -> None:
+        """Record the primary publish for a fresh row, unconditionally.
+
+        Enqueue must always publish, so this is a plain stamp, not a claim —
+        it makes the primary dispatch count as the first one, so the
+        starter's claim window starts from it.
+        """
+        cls.objects.filter(pk=transition_message_id, is_completed=False).update(
+            last_dispatched_at=timezone.now(),
+            dispatch_count=models.F('dispatch_count') + 1,
+        )
+
+    @classmethod
+    def worker_holds_row(cls, transition_message_id: int) -> bool:
+        """Whether a worker attempt holds this row's lock right now.
+
+        Asks with ``select_for_update(nowait=True)`` inside its own
+        savepoint and gives up at once, so the probe never blocks and never
+        keeps a lock. On SQLite the clause is dropped, so the answer is
+        always False there — celery mode rejects SQLite at boot, and in
+        sync mode the attempt runs in the caller's own thread.
+        """
+        try:
+            with transaction.atomic():
+                list(
+                    cls.objects
+                    .select_for_update(nowait=True)
+                    .filter(pk=transition_message_id, is_completed=False)
+                    .values_list('pk', flat=True)
+                )
+        except OperationalError:
+            return True
+        return False
+
     #: Grace between an attempt exhausting its declared budget and the
     #: watchdog abandoning it (which writes ``modified`` via record_error,
     #: putting the row back on the retry-window clock).
@@ -191,17 +296,24 @@ class TransitionMessage(TimeStampedModel):
         * otherwise a row whose newest activity (``modified``, refreshed
           at attempt start / on every recorded error, or ``started_at``)
           is within the retry window is still being retried;
-        * past the window it is stranded: nothing has retried it for
-          longer than the whole retry pipeline's span. This cannot
-          distinguish a truly lost row from a queue backlogged for that
-          long — the stranded message names both causes.
+        * past the window, a row a worker still holds is still being
+          retried: an attempt that runs quietly for longer than the
+          window is slow, not lost. The probe is a savepointed
+          ``select_for_update(nowait=True)`` that locks nothing; when it
+          cannot answer (a poisoned connection, the database down), the
+          time-based answer below stands;
+        * past the window with no worker on the row it is stranded:
+          nothing has retried it for longer than the whole retry
+          pipeline's span. This cannot distinguish a truly lost row from
+          a queue backlogged for that long — the stranded message names
+          both causes.
         """
         from django_logic.background import settings as bg_settings
 
         row = (
             cls.in_flight_for(instance, process_name)
             .order_by('-modified')
-            .values('modified', 'started_at', 'timeout_seconds')
+            .values('pk', 'modified', 'started_at', 'timeout_seconds')
             .first()
         )
         if row is None:
@@ -220,6 +332,13 @@ class TransitionMessage(TimeStampedModel):
             bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
         )
         if now - newest > timedelta(minutes=retry_window):
+            try:
+                if cls.worker_holds_row(row['pk']):
+                    return cls.RETRYING
+            except Exception:
+                # The probe must never break the gate that asked. Unknown
+                # means the time-based classification stands.
+                pass
             return cls.STRANDED
         return cls.RETRYING
 
@@ -281,7 +400,9 @@ class TransitionMessage(TimeStampedModel):
             return False
         return True
 
-    def mark_as_completed(self, measure_duration: bool = True) -> None:
+    def mark_as_completed(
+        self, measure_duration: bool = True, *, ended_in_failure: bool = False,
+    ) -> None:
         """Mark the row completed and (optionally) record ``duration_ms``.
 
         ``measure_duration`` must be ``False`` when the row is finalized by
@@ -291,11 +412,17 @@ class TransitionMessage(TimeStampedModel):
         the time-to-finalize, not an execution time — recording it as
         ``duration_ms`` would grossly inflate latency metrics. Leaving
         ``duration_ms`` null signals "no measured execution".
+
+        ``ended_in_failure`` is True on every terminal-failure path, so the
+        cleanup sweep can keep the newest failure row per instance.
         """
         now = timezone.now()
         self.is_completed = True
         self.completed_at = now
         update_fields = ['is_completed', 'completed_at', 'modified']
+        if ended_in_failure:
+            self.ended_in_failure = True
+            update_fields.append('ended_in_failure')
         if measure_duration and self.started_at is not None:
             delta = now - self.started_at
             # Clamp to 0 to absorb clock skew; cap into PositiveIntegerField.

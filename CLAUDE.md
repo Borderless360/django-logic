@@ -58,6 +58,21 @@ uncompleted, in progress.
 docs. It skips `CHANGELOG.md` on purpose: the changelog is a historical
 record, so it must keep naming the words and APIs that shipped at the time.
 
+### Writing to people — no riddles
+
+A summary, a pull-request description, a review reply, or a chat message must
+stand on its own. The reader did not watch the work happen.
+
+- Say the thing, not a name for the thing. Write "the two engine cleanups we
+  postponed", never a label from an earlier report.
+- Do not coin labels for plans, findings, or work items. No letters, no code
+  names, no wave or phase numbers. If a name is unavoidable, define it in the
+  same message, every time it appears.
+- Short is good only when the meaning survives. Cut what the reader does not
+  need. Do not replace an explanation with a token the reader must decode.
+- Before you send, ask: does every word work for someone who did not watch
+  the work? If not, rewrite.
+
 ## What to generate
 
 Model a workflow as a `Process` subclass: a list of `transitions` (edges).
