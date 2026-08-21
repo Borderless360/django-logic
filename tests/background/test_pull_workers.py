@@ -136,6 +136,37 @@ class PullClaimTests(TransactionTestCase):
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'survived')
 
+    def test_a_death_is_not_recorded_on_a_row_another_worker_completed(self):
+        from django_logic.background.pull import _record_child_death
+
+        widget = Widget.objects.create(status='fulfilled')
+        row = open_transition_message(widget, 'process', 'fulfil')
+        TransitionMessage.objects.filter(pk=row.pk).update(is_completed=True)
+        _record_child_death(row.pk, 1)
+        row.refresh_from_db()
+        self.assertEqual(row.errors_count, 0)
+        self.assertEqual(row.last_error_message, '')
+
+    def test_the_safety_nets_run_during_a_sustained_backlog(self):
+        from unittest.mock import patch
+
+        first = Widget.objects.create(status='draft')
+        second = Widget.objects.create(status='draft')
+        first.process.fulfil()
+        second.process.fulfil()
+        ran = []
+        with patch('django_logic.background.pull.SAFETY_NET_SECONDS', 0), \
+                patch('django_logic.background.pull._run_safety_nets',
+                      side_effect=lambda: ran.append(1)):
+            run_worker(_CRITICAL, forever=False)
+        # Nets due after every claim: they ran at least once per drained row,
+        # not only after the backlog emptied.
+        self.assertGreaterEqual(len(ran), 2)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.status, 'fulfilled')
+        self.assertEqual(second.status, 'fulfilled')
+
     def test_one_loop_pass_drains_and_runs_the_safety_nets(self):
         first = Widget.objects.create(status='draft')
         second = Widget.objects.create(status='draft')

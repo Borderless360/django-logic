@@ -1,6 +1,6 @@
-"""BackgroundTransition / BackgroundAction — durable, queue-routed Celery tasks.
+"""BackgroundTransition / BackgroundAction — durable, queue-routed background work.
 
-``change_state`` enqueues the work (same steps in Celery and Sync mode):
+``change_state`` enqueues the work (same steps in Pull and Sync mode):
 
 * validate conditions + permissions,
 * acquire the state lock for the critical section and revalidate the
@@ -9,8 +9,8 @@
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
   row is what gates concurrent transitions,
-* hand the row id to the dispatcher, which either ``apply_async`` the
-  Celery task (Celery mode) or executes the worker path inline (Sync mode).
+* hand off to the dispatcher, which notifies the pull workers after
+  commit (Pull mode) or executes the worker path inline (Sync mode).
 
 The worker path lives in :mod:`django_logic.background.runner` and is
 shared between both modes.
@@ -40,14 +40,14 @@ from django_logic.transition import Transition, _refuse_engine_param_kwargs
 
 
 class BackgroundTransition(Transition):
-    """State-changing transition that runs its side-effects on a Celery worker.
+    """State-changing transition that runs its side-effects on a worker process.
 
     Optional:
-        - ``queue`` — the Celery queue this transition's task is routed
-          to. Defaults to ``DJANGO_LOGIC['DEFAULT_QUEUE']``
+        - ``queue`` — the queue name this transition's row carries.
+          Defaults to ``DJANGO_LOGIC['DEFAULT_QUEUE']``
           (``'django_logic'``). Name queues per SLA (e.g. ``critical`` /
-          ``slow``) and give each its own worker to manage performance
-          per queue.
+          ``slow``) and give each its own ``dl_worker`` process to manage
+          performance per queue.
         - ``no_retry_on`` — exception types whose failures are permanent
           for this transition. When a side-effect raises one, the worker
           takes the terminal path on that attempt instead of retrying:
@@ -111,7 +111,7 @@ class BackgroundTransition(Transition):
         )
 
     def get_queue_name(self) -> str:
-        """The Celery queue this transition's task is routed to.
+        """The queue name this transition's row carries.
 
         Resolved lazily (not at class-definition time) so the declared
         ``queue=`` and the ``DEFAULT_QUEUE`` setting are read when the

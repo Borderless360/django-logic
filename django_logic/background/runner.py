@@ -3,7 +3,7 @@
 ``run_background_transition(transition_message_id)`` owns a single attempt at executing
 a durable background transition. It runs the same way in:
 
-* the Celery task wrapper (:mod:`django_logic.background.tasks`), and
+* the pull worker loop (:mod:`django_logic.background.pull`), and
 * sync mode, directly after enqueue in the same process.
 
 Structure:
@@ -34,11 +34,10 @@ Structure:
 
 Side-effect exceptions re-raise out of ``run_background_transition``
 only in **sync mode**, so inline callers and tests can ``assertRaises``
-directly. In **Celery mode** the runner swallows them once it has
+directly. In **Pull mode** the runner swallows them once it has
 recorded the outcome on the row (``errors_count`` + ``last_error``, or
-``failed_state`` + completion). The periodic starter owns retries, and
-re-raising out of an ``acks_late`` task would raise task-failure alerts
-and let the broker redeliver the message on top of the periodic retry.
+``failed_state`` + completion). The claim's retry wait owns retries;
+re-raising out of the worker loop would only add noise.
 """
 from __future__ import annotations
 
@@ -76,7 +75,7 @@ class _Outcome:
 def run_background_transition(transition_message_id: int) -> None:
     """Run a single attempt at the transition identified by ``transition_message_id``.
 
-    Designed to be call-compatible from both a Celery task and an
+    Designed to be call-compatible from both the pull worker loop and an
     inline sync dispatcher.
     """
     # Committed BEFORE the attempt's atomic block, and deliberately not rolled
@@ -114,9 +113,9 @@ def run_background_transition(transition_message_id: int) -> None:
 
     if outcome.exception is not None:
         # Sync mode propagates so the inline caller and tests can react.
-        # Celery mode must NOT re-raise. The outcome is already recorded on the
-        # row and the periodic starter owns retries, so re-raising out of an
-        # acks_late task would only add alerts and a broker redelivery.
+        # Pull mode must NOT re-raise. The outcome is already recorded on
+        # the row and the claim's retry wait owns retries; re-raising out
+        # of the worker loop would only add noise.
         from django_logic.background.dispatch import _current_mode
         if _current_mode() == bg_settings.EXECUTION_SYNC:
             raise outcome.exception
@@ -152,7 +151,7 @@ def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -
     already exited and rolled back. What survives depends on the execution
     mode:
 
-    * Celery mode — the worker is the top-level unit of work with no
+    * Pull mode — the worker is the top-level unit of work with no
       surrounding transaction, so this UPDATE commits on its own. This is
       the path the original infinite-retry bug lived on.
     * Sync mode — enqueue (which created the row) and execute share the

@@ -185,7 +185,7 @@ class TransitionMessage(TimeStampedModel):
         Asks with ``select_for_update(nowait=True)`` inside its own
         savepoint and gives up at once, so the probe never blocks and never
         keeps a lock. On SQLite the clause is dropped, so the answer is
-        always False there — celery mode rejects SQLite at boot, and in
+        always False there — pull mode rejects SQLite at boot, and in
         sync mode the attempt runs in the caller's own thread.
         """
         try:
@@ -284,7 +284,7 @@ class TransitionMessage(TimeStampedModel):
         Durability is mode-dependent, as for
         ``runner._mark_unrestorable_completed``:
 
-        * **Celery mode** — the worker is the top-level unit of work with
+        * **Pull mode** — the worker is the top-level unit of work with
           no surrounding transaction, so this UPDATE autocommits and is
           visible to the watchdog immediately.
         * **Sync mode inside a caller's ``atomic()``** — part of the

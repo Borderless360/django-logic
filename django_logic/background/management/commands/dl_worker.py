@@ -2,7 +2,7 @@
 
     python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 
-One process per SLA group, like one Celery worker per queue today. The
+One process per SLA group. The
 loop also runs the safety nets (watchdog, stuck report, cleanup), so
 pull mode needs no beat schedule. See docs/design/PULL_WORKERS.md.
 """

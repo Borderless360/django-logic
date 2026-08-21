@@ -147,12 +147,39 @@ def _run_attempt_in_child(pk: int) -> None:
         f'(exit {exit_code}). Its row lock died with it; the error recorded '
         f'here paces the next claim.'
     )
-    row = TransitionMessage.objects.filter(pk=pk, is_completed=False).first()
-    if row is not None:
-        row.record_error(RuntimeError(
-            f'[crashed] the attempt process died (exit {exit_code}) before '
-            f'the attempt finished'
-        ))
+    _record_child_death(pk, exit_code)
+
+
+def _record_child_death(pk: int, exit_code: int) -> None:
+    """Record a died attempt on the row — unless the row completed first.
+
+    Another worker on the same queue can claim the row the moment the
+    child's lock dies and finish it before this write. One conditional
+    UPDATE keeps the guard and the write in the same statement, so a
+    completed row can never take the death as an error.
+    """
+    from django.db.models import F
+    from django.utils import timezone
+
+    from django_logic.background.models import TransitionMessage, db_safe_text
+
+    now = timezone.now()
+    updated = TransitionMessage.objects.filter(
+        pk=pk, is_completed=False,
+    ).update(
+        errors_count=F('errors_count') + 1,
+        last_error_message=db_safe_text(
+            f'[crashed] the attempt process died (exit {exit_code}) '
+            f'before the attempt finished'
+        ),
+        last_error_dt=now,
+        modified=now,
+    )
+    if not updated:
+        logger.info(
+            f'pull: TransitionMessage#{pk} completed on another worker '
+            f'before the death could be recorded; nothing to record.'
+        )
 
 
 def _run_safety_nets() -> None:
@@ -213,11 +240,15 @@ def run_worker(queues: list[str], *, forever: bool = True) -> None:
         ran_any = False
         while run_once(queues, isolate=True):
             ran_any = True
-        now = time.monotonic()
-        if now - last_safety_net >= SAFETY_NET_SECONDS:
+            # A sustained backlog must not starve the safety nets: break
+            # out of the drain when they are due and come back after.
+            if time.monotonic() - last_safety_net >= SAFETY_NET_SECONDS:
+                break
+        if time.monotonic() - last_safety_net >= SAFETY_NET_SECONDS:
             _run_safety_nets()
-            last_safety_net = now
+            last_safety_net = time.monotonic()
+        if ran_any:
+            continue
         if not forever:
             return
-        if not ran_any:
-            _wait_for_work(POLL_SECONDS)
+        _wait_for_work(POLL_SECONDS)
