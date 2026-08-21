@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.16.0] — 2026-08-20
+## [0.16.0] — 2026-08-21
 
 The design cut (#217): workers pull committed rows from the database, so
 the broker mirror — and every mechanism that reconciled it — is gone.
@@ -48,6 +48,17 @@ guarding it again.
   plain functions; ``retry_pending()`` still runs one inline retry pass
   for tests. The declarations, the runner, sync mode and the testing
   package are unchanged — no consumer process definition changes.
+
+### Fixed (found validating the release)
+
+- The Heroku matrix under pull found that a crashing attempt killed the
+  whole worker and the platform's restart backoff parked its queue group
+  — hence the forked child above (#218).
+- The consumer re-vendor review found two more (#220): a died attempt's
+  error could dirty a row another worker had already completed (the
+  record is now one conditional statement), and a sustained backlog
+  starved the safety nets (the drain loop now breaks out when they are
+  due).
 
 ## [0.15.0] — 2026-08-20
 
