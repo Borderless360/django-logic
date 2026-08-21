@@ -95,7 +95,7 @@ fewer mechanisms:
 | Crash | Push recovery | Pull recovery |
 |---|---|---|
 | between commit and the send | starter re-dispatches within RETRY_MINUTES | nothing was sent; the row is already claimable; NOTIFY was best effort and the poll is the floor |
-| worker dies mid side-effects | broker redelivery + starter | the row lock died with the worker; next claim takes it at once |
+| worker dies mid side-effects | broker redelivery + starter | the attempt runs in a forked child: the crash kills the child, the parent records it as an error on the row, the retry wait paces the next claim, and MAX_ERRORS bounds a crash loop |
 | two workers reach one row | `select_for_update(nowait)` skip | same guard, plus `SKIP LOCKED` prevents most collisions before they happen |
 | attempt hangs but holds its connection | watchdog on `started_at` | same watchdog, unchanged |
 | broker loses everything | starter rebuilds from rows | there is no broker to lose |
@@ -118,6 +118,16 @@ step could fold that into the claim — a `claimed_until` column the worker
 extends while it runs — making "is this attempt alive?" one column read
 instead of a stamp plus a probe. Deferred: the watchdog works, and the cut
 should change one thing at a time.
+
+**Crash containment (decided during validation).** The first Heroku run
+showed why the worker cannot run attempts in its own process: an injected
+crash killed the whole worker, and the platform's repeated-crash backoff
+parked the queue group for ten minutes — the process pool the old broker
+worker provided had absorbed exactly this. The loop therefore runs every
+attempt in a forked child. A crash kills the child; the parent records it
+on the row, so crashing attempts get the same paced, bounded retries as
+failing ones — which the push design never had (a crash left no error and
+relied on the platform's restart policy).
 
 **Build or adopt.** Procrastinate is a maintained PostgreSQL job library
 with exactly this shape (SKIP LOCKED, LISTEN/NOTIFY, locks, periodic

@@ -29,6 +29,7 @@ to be scheduled anywhere else.
 """
 from __future__ import annotations
 
+import os
 import select
 import time
 
@@ -84,15 +85,74 @@ def claim_next(queues: list[str]) -> int | None:
         )
 
 
-def run_once(queues: list[str]) -> bool:
-    """Claim and execute at most one row. Returns whether one ran."""
+def run_once(queues: list[str], *, isolate: bool = False) -> bool:
+    """Claim and execute at most one row. Returns whether one ran.
+
+    With ``isolate=True`` (what the worker loop uses) the attempt runs in
+    a forked child process, so a crash — ``os._exit`` in consumer code, a
+    segmentation fault, the platform's memory killer — kills the attempt,
+    not the worker. The parent records the death as an error on the row,
+    which gives a crashing attempt the same paced, bounded retries as a
+    failing one; before this, every crash killed the whole worker process
+    and the platform's restart backoff parked the queue group with it.
+    """
     from django_logic.background.runner import run_background_transition
 
     pk = claim_next(queues)
     if pk is None:
         return False
-    run_background_transition(pk)
+    if isolate and hasattr(os, 'fork'):
+        _run_attempt_in_child(pk)
+    else:
+        run_background_transition(pk)
     return True
+
+
+def _run_attempt_in_child(pk: int) -> None:
+    """Run one attempt in a forked child and account for its death.
+
+    Both sides must not share a database connection — a connection closed
+    (or crashed) on one side poisons the other's session. The parent
+    closes every connection before the fork; each side then opens its
+    own lazily.
+
+    A child that dies without completing the row left no error on it, so
+    the parent records one: the claim's retry wait then paces the next
+    attempt, and ``MAX_ERRORS`` bounds a crash loop — a side-effect that
+    crashes every time ends in ``failed_state`` like one that fails every
+    time, instead of crash-looping forever.
+    """
+    from django.db import connections
+
+    from django_logic.background.models import TransitionMessage
+    from django_logic.background.runner import run_background_transition
+
+    connections.close_all()
+    child = os.fork()
+    if child == 0:
+        status = 1
+        try:
+            run_background_transition(pk)
+            status = 0
+        finally:
+            # _exit, so a crashing attempt cannot run the parent's cleanup
+            # handlers or flush its buffers twice.
+            os._exit(status)
+    _, raw_status = os.waitpid(child, 0)
+    exit_code = os.waitstatus_to_exitcode(raw_status)
+    if exit_code == 0:
+        return
+    logger.error(
+        f'pull: the attempt process for TransitionMessage#{pk} died '
+        f'(exit {exit_code}). Its row lock died with it; the error recorded '
+        f'here paces the next claim.'
+    )
+    row = TransitionMessage.objects.filter(pk=pk, is_completed=False).first()
+    if row is not None:
+        row.record_error(RuntimeError(
+            f'[crashed] the attempt process died (exit {exit_code}) before '
+            f'the attempt finished'
+        ))
 
 
 def _run_safety_nets() -> None:
@@ -151,7 +211,7 @@ def run_worker(queues: list[str], *, forever: bool = True) -> None:
     last_safety_net = 0.0
     while True:
         ran_any = False
-        while run_once(queues):
+        while run_once(queues, isolate=True):
             ran_any = True
         now = time.monotonic()
         if now - last_safety_net >= SAFETY_NET_SECONDS:

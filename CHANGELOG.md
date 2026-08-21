@@ -36,6 +36,14 @@ guarding it again.
   migration 0009) — a row that nothing consumes now simply waits,
   visibly, and `detect_stuck_transitions` names it and its queue once it
   is older than the retry window.
+- **Every attempt runs in a forked child of the worker.** A crash in
+  consumer code — a hard exit, a segmentation fault, the platform's
+  memory killer — kills the attempt process, not the worker, and the
+  parent records it as an error on the row. A crashing attempt therefore
+  gets the same paced, bounded retries as a failing one, ending in
+  ``failed_state`` at ``MAX_ERRORS``; before, a crash left no error
+  anywhere and recovery depended on the platform restarting the whole
+  worker (with its repeated-crash backoff parking the queue group).
 - The safety nets live in ``django_logic.background.safety_nets`` as
   plain functions; ``retry_pending()`` still runs one inline retry pass
   for tests. The declarations, the runner, sync mode and the testing

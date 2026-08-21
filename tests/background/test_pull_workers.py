@@ -115,6 +115,27 @@ class PullClaimTests(TransactionTestCase):
         TransitionMessage.objects.filter(pk=row.pk).update(errors_count=3)
         self.assertIsNone(claim_next(_CRITICAL))
 
+    def test_a_crashing_attempt_is_contained_and_counted(self):
+        import tempfile
+        widget = Widget.objects.create(status='draft')
+        marker = tempfile.mktemp(prefix='dl_die_once_')
+        widget.process.die_once(marker_path=marker)
+        # First attempt: the child process hard-kills itself. The worker
+        # survives, and the death is an error on the row.
+        self.assertTrue(run_once(_CRITICAL, isolate=True))
+        row = TransitionMessage.objects.get()
+        self.assertFalse(row.is_completed)
+        self.assertEqual(row.errors_count, 1)
+        self.assertIn('[crashed]', row.last_error_message)
+        # The recorded error paces the retry: not claimable inside the wait.
+        self.assertIsNone(claim_next(_CRITICAL))
+        with override_settings(DJANGO_LOGIC=dl_settings(
+            BACKGROUND_EXECUTION='pull', TRANSITION_MESSAGE_RETRY_MINUTES=0,
+        )):
+            self.assertTrue(run_once(_CRITICAL, isolate=True))
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'survived')
+
     def test_one_loop_pass_drains_and_runs_the_safety_nets(self):
         first = Widget.objects.create(status='draft')
         second = Widget.objects.create(status='draft')
