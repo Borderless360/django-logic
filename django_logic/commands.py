@@ -11,7 +11,6 @@ from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.exceptions import TransitionTemporarilyUnavailable
 from django_logic.logger import (
-    redact_log_kwargs,
     transition_logger,
     TransitionEventType,
 )
@@ -308,7 +307,7 @@ class Callbacks(BaseCommand):
                     f'{command_name}: {error}',
                     error,
                     exc_info=True,
-                    extra={'kwargs': redact_log_kwargs(kwargs)},
+                    extra={'kwargs': dict(kwargs)},
                 )
 
 

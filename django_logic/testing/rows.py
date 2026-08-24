@@ -34,10 +34,7 @@ def open_transition_message(
     from django_logic.background.models import TransitionMessage
 
     row = TransitionMessage.objects.create(
-        app_label=instance._meta.app_label,
-        model_name=instance._meta.model_name,
-        instance_id=str(instance.pk),
-        process_name=process_name,
+        **TransitionMessage.instance_key(instance, process_name),
         field_name=field_name,
         transition_name=transition_name,
         queue_name=queue_name or conf.default_queue(),

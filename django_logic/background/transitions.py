@@ -31,7 +31,6 @@ from django_logic.background.serializers import (
 )
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import (
-    redact_log_kwargs,
     transition_logger,
     TransitionEventType,
 )
@@ -131,7 +130,7 @@ class BackgroundTransition(Transition):
             f'{process_class_name} {self.action_name} {state.instance_key} '
             f'{kwargs.get("root_id")} {kwargs.get("parent_id")} '
             f'[background queue={queue_name}]',
-            extra={'kwargs': redact_log_kwargs(kwargs), 'state_hash': state._get_hash()},
+            extra={'kwargs': dict(kwargs), 'state_hash': state._get_hash()},
         )
 
         # The resolver already ran the conditions and permissions; the
@@ -348,10 +347,3 @@ class BackgroundAction(BackgroundTransition):
     def __str__(self) -> str:
         return f"BackgroundAction: {self.action_name}"
 
-    def complete_transition(self, state: State, **kwargs):
-        # Defensive no-op for direct/manual invocation only — the engine
-        # never calls this: enqueue stops at the TransitionMessage row and
-        # the worker writes state / runs hooks itself (_handle_success /
-        # _run_success_hooks). The inherited implementation would write an
-        # empty target state; an action must not change state on success.
-        pass

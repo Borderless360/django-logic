@@ -167,6 +167,12 @@ def cleanup_days():
         'TRANSITION_MESSAGE_CLEANUP_DAYS', 7, minimum=0)
 
 
+def retry_window_minutes() -> int:
+    """The whole retry pipeline's span plus slack, floored so a short test
+    retry config does not classify a fresh row as stale."""
+    return max(retry_minutes() * (max_errors() + 1), 15)
+
+
 def validate_bool(key: str) -> None:
     """Reject a non-bool on a setting that gates behaviour.
 

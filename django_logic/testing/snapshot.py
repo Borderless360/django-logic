@@ -1,7 +1,7 @@
 """State capture & restore — close the loop between production bugs and tests.
 
 ``snapshot(instance)`` serialises an instance (its concrete fields, current
-state, the related ``TransitionMessage`` if any, and process status) to a plain
+state, and the related ``TransitionMessage`` if any) to a plain
 JSON-able dict. ``from_snapshot(data)`` rebuilds that instance — and restores
 the ``TransitionMessage`` — so a production bug can be reproduced in a test and
 kept as a regression guard.
@@ -93,17 +93,6 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
     except Exception:
         pass
 
-    # Best-effort process status.
-    try:
-        process = getattr(instance, process_name)
-        data['process'] = {
-            'class': f'{type(process).__module__}.{type(process).__name__}',
-            'available_actions': process.get_available_actions(),
-            'is_locked': process.state.is_locked(),
-        }
-    except Exception:
-        pass
-
     return data
 
 
@@ -176,17 +165,9 @@ def from_snapshot(data_or_path, *, model=None):
         # every lookup ordered by id... or loses, unpredictably) or trips the
         # uncompleted-per-(instance, process) unique constraint with a cryptic
         # IntegrityError instead of restoring.
-        TransitionMessage.objects.filter(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-            process_name=tm_process_name,
-        ).delete()
+        TransitionMessage.for_instance(instance, tm_process_name).delete()
         TransitionMessage.objects.create(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-            process_name=tm_process_name,
+            **TransitionMessage.instance_key(instance, tm_process_name),
             # Restore the recorded field so the worker takes the same
             # recorded-field path the production row would have used
             # ('' = legacy pre-0.4 row, inference fallback).

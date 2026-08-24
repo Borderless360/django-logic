@@ -35,7 +35,6 @@ from django_logic.exceptions import (
     TransitionTemporarilyUnavailable,
 )
 from django_logic.logger import (
-    redact_log_kwargs,
     transition_logger,
     TransitionEventType,
 )
@@ -207,7 +206,9 @@ class Transition:
             f'{kwargs.get("tr_id")} {TransitionEventType.START.value} '
             f'{process_class_name} {self.action_name} {state.instance_key} '
             f'{kwargs.get("root_id")} {kwargs.get("parent_id")}',
-            extra={'kwargs': redact_log_kwargs(kwargs), 'state_hash': state._get_hash()},
+            # A copy, not the live dict: the caller mutates kwargs after
+            # the log call, and records are formatted lazily.
+            extra={'kwargs': dict(kwargs), 'state_hash': state._get_hash()},
         )
 
         # lock() is atomic (cache.add / Redis SET NX) and returns False if

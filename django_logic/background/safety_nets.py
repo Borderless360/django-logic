@@ -85,9 +85,7 @@ def detect_stuck_transitions() -> int:
     Returns the number of rows finalized.
     """
     now = timezone.now()
-    report_after = max(
-        conf.retry_minutes() * (conf.max_errors() + 1), 15,
-    )
+    report_after = conf.retry_window_minutes()
     never_started = (
         TransitionMessage.objects
         .filter(

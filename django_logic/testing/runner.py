@@ -46,13 +46,11 @@ def _messages(instance, process_name, **filters):
     fields of the same model are independent state machines and their rows
     must not be confused."""
     from django_logic.background.models import TransitionMessage
-    return TransitionMessage.objects.filter(
-        app_label=instance._meta.app_label,
-        model_name=instance._meta.model_name,
-        instance_id=str(instance.pk),
-        process_name=process_name,
-        **filters,
-    ).order_by('-id')
+    return (
+        TransitionMessage.for_instance(instance, process_name)
+        .filter(**filters)
+        .order_by('-id')
+    )
 
 
 def uncompleted_message(instance, process_name):

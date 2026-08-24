@@ -149,20 +149,27 @@ class TransitionMessage(TimeStampedModel):
         )
 
     @classmethod
-    def in_flight_for(cls, instance, process_name: str):
-        """The uncompleted rows for ``instance`` + ``process_name``.
+    def instance_key(cls, instance, process_name: str) -> dict:
+        """The instance + process keying, written in one place so a future
+        change to it changes once."""
+        return {
+            'app_label': instance._meta.app_label,
+            'model_name': instance._meta.model_name,
+            'instance_id': str(instance.pk),
+            'process_name': process_name,
+        }
 
-        The one place this filter is written. The sync gate, the Action
-        failure path, and the public ``in_flight()`` probe all read
-        through it, so a future change to the keying changes it once.
-        """
-        return cls.objects.filter(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-            process_name=process_name,
-            is_completed=False,
-        )
+    @classmethod
+    def for_instance(cls, instance, process_name: str):
+        """Every row for ``instance`` + ``process_name``."""
+        return cls.objects.filter(**cls.instance_key(instance, process_name))
+
+    @classmethod
+    def in_flight_for(cls, instance, process_name: str):
+        """The uncompleted rows for ``instance`` + ``process_name``. The
+        sync gate, the Action failure path, and the public ``in_flight()``
+        probe all read through it."""
+        return cls.for_instance(instance, process_name).filter(is_completed=False)
 
     RETRYING = 'retrying'
     STRANDED = 'stranded'
@@ -227,11 +234,7 @@ class TransitionMessage(TimeStampedModel):
         now = timezone.now()
         started = row['started_at']
         newest = max(t for t in (row['modified'], started) if t is not None)
-        # The whole retry pipeline's span plus slack, floored so short
-        # test/dev retry configs don't classify a fresh row as stale.
-        retry_window = max(
-            conf.retry_minutes() * (conf.max_errors() + 1), 15,
-        )
+        retry_window = conf.retry_window_minutes()
         if now - newest > timedelta(minutes=retry_window):
             try:
                 if cls.worker_holds_row(row['pk']):
