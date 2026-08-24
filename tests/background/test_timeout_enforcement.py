@@ -83,6 +83,34 @@ class WaitForAttemptProcessTests(TransactionTestCase):
         self.assertEqual(exit_code, 0)
         self.assertFalse(timed_out)
 
+    def test_a_killed_attempt_reaped_elsewhere_is_still_a_timeout(self):
+        from unittest.mock import patch
+
+        def waitpid(pid, flags):
+            if flags == os.WNOHANG:
+                return (0, 0)
+            raise ChildProcessError
+
+        with patch('django_logic.background.pull.os.waitpid', side_effect=waitpid), \
+                patch('django_logic.background.pull.os.kill',
+                      return_value=None), \
+                patch('django_logic.background.pull.time.monotonic',
+                      return_value=10):
+            exit_code, timed_out = _wait_for_attempt_process(12345, 0)
+        self.assertTrue(timed_out)
+        self.assertNotEqual(exit_code, 0)
+
+    def test_an_attempt_reaped_elsewhere_inside_its_budget_is_a_normal_exit(self):
+        from unittest.mock import patch
+
+        with patch('django_logic.background.pull.os.waitpid',
+                   side_effect=ChildProcessError), \
+                patch('django_logic.background.pull.time.monotonic',
+                      return_value=0):
+            exit_code, timed_out = _wait_for_attempt_process(12345, 60)
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(timed_out)
+
 
 @override_settings(DJANGO_LOGIC=_PULL_SETTINGS)
 @requires_postgres

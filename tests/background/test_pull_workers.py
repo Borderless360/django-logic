@@ -137,12 +137,12 @@ class PullClaimTests(TransactionTestCase):
         self.assertEqual(widget.status, 'survived')
 
     def test_no_error_is_recorded_on_a_row_another_worker_completed(self):
-        from django_logic.background.pull import _record_error_if_uncompleted
+        from django_logic.background.pull import _record_attempt_error
 
         widget = Widget.objects.create(status='fulfilled')
         row = open_transition_message(widget, 'process', 'fulfil')
         TransitionMessage.objects.filter(pk=row.pk).update(is_completed=True)
-        _record_error_if_uncompleted(
+        _record_attempt_error(
             row.pk, '[crashed] the attempt process died (exit 1)')
         row.refresh_from_db()
         self.assertEqual(row.errors_count, 0)

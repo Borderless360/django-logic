@@ -90,10 +90,9 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     With ``isolate=True`` (what the worker loop uses) the attempt runs in
     a forked attempt process, so a crash — ``os._exit`` in consumer code, a
     segmentation fault, the platform's memory killer — kills the attempt,
-    not the worker. The worker records the death as an error on the row,
-    which gives a crashing attempt the same paced, bounded retries as a
-    failing one; before this, every crash killed the whole worker process
-    and the platform's restart backoff parked the queue group with it.
+    not the worker. The worker records the crash as an error on the row,
+    so a crashing attempt gets the same paced, bounded retries as a
+    failing one.
     """
     from django_logic.background.runner import run_background_transition
 
@@ -156,7 +155,7 @@ def _run_attempt_process(pk: int) -> None:
             f'declared timeout={timeout_seconds}s and was stopped. The error '
             f'recorded here paces the next claim.'
         )
-        _record_error_if_uncompleted(
+        _record_attempt_error(
             pk,
             f'[timeout] the attempt ran past timeout={timeout_seconds}s '
             f'and was stopped',
@@ -169,7 +168,7 @@ def _run_attempt_process(pk: int) -> None:
         f'(exit {exit_code}). Its row lock died with it; the error recorded '
         f'here paces the next claim.'
     )
-    _record_error_if_uncompleted(
+    _record_attempt_error(
         pk,
         f'[crashed] the attempt process died (exit {exit_code}) '
         f'before the attempt finished',
@@ -190,7 +189,12 @@ def _wait_for_attempt_process(attempt_pid: int, timeout_seconds) -> tuple[int, b
         return os.waitstatus_to_exitcode(raw_status), False
     deadline = time.monotonic() + timeout_seconds
     while True:
-        pid, raw_status = os.waitpid(attempt_pid, os.WNOHANG)
+        try:
+            pid, raw_status = os.waitpid(attempt_pid, os.WNOHANG)
+        except ChildProcessError:
+            # Something else reaped the attempt and the worker sent no kill,
+            # so this is a normal exit.
+            return 0, False
         if pid != 0:
             return os.waitstatus_to_exitcode(raw_status), False
         remaining = deadline - time.monotonic()
@@ -204,14 +208,15 @@ def _wait_for_attempt_process(attempt_pid: int, timeout_seconds) -> tuple[int, b
             try:
                 _, raw_status = os.waitpid(attempt_pid, 0)
             except ChildProcessError:
-                return 0, False
+                # Reaped elsewhere. A kill the worker sent is still a timeout.
+                return (-signal.SIGKILL, True) if sent_kill else (0, False)
             if sent_kill:
                 return -signal.SIGKILL, True
             return os.waitstatus_to_exitcode(raw_status), False
         time.sleep(min(1.0, max(0.01, remaining)))
 
 
-def _record_error_if_uncompleted(pk: int, message: str) -> None:
+def _record_attempt_error(pk: int, message: str) -> None:
     """Record one error on the row — unless the row completed first.
 
     Another worker on the same queue can claim the row the moment the
@@ -236,7 +241,7 @@ def _record_error_if_uncompleted(pk: int, message: str) -> None:
     if not updated:
         logger.info(
             f'pull: TransitionMessage#{pk} completed on another worker '
-            f'before the death could be recorded; nothing to record.'
+            f'before the error could be recorded; nothing to record.'
         )
 
 
