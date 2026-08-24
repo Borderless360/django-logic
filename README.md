@@ -38,7 +38,7 @@ Django Logic is a workflow library for Django. You declare transitions, permissi
 
 Extras:
 - `pip install django-logic[redis]` — installs `django-redis`, for deployments whose settings name `django_redis.cache.RedisCache`. It stopped being a core dependency in 0.11.0, because the engine has never imported it.
-- `[celery]` remains an **empty alias**, so existing `pip install django-logic[celery,redis]` pins keep resolving — 0.16.0 removed the broker, so nothing imports celery
+- `[celery]` is an empty alias. The engine has no broker; the alias only keeps an old `pip install django-logic[celery]` pin resolving.
 
 ## Installation
 
@@ -1085,7 +1085,7 @@ A queue is a column on the row, and each worker process names the queues it serv
 
 ### Retries, and the safety nets
 
-Retries need no scheduler: a row whose attempt failed becomes claimable again after `RETRY_MINUTES` — the claim's own filter is the retry rule. Three safety nets run inside every worker loop, once a minute, so nothing else has to be configured:
+Retries need no scheduler: a row whose attempt failed becomes claimable again after `RETRY_MINUTES` — the claim's own filter is the retry rule. Two safety nets run inside every worker loop, once a minute, so nothing else has to be configured:
 
 - `detect_stuck_transitions` — finalizes a row that sits at `MAX_ERRORS`: it writes `failed_state`, runs `failure_callbacks` and marks the row completed, so the retry loop stops. It also names every row that has waited past the retry window with no attempt ever started — the sign that no worker serves that row's queue.
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`, except the newest terminal-failure row per instance and process. That row is the only explanation for an instance parked in its `failed_state`, so it stays for the investigation, however late it comes.

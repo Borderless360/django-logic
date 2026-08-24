@@ -325,14 +325,9 @@ def _complete_terminal_failure(
     measure_duration: bool,
 ):
     """The one terminal-failure completion: write ``failed_state`` (when
-    declared), then mark the row completed. The worker attempt path and
-    the stuck finalizer both end here — the two used to carry their
-    own copies, and the copies drifted.
-
-    The write runs in a savepoint and never escapes: a rejected write
-    used to leave the row uncompleted at MAX_ERRORS, which the safety
-    net then retried forever. Completing the row is what stops the loop;
-    a failed write is recorded on the row where an operator will see it.
+    declared), then mark the row completed even if the write fails.
+    Completing the row is what stops the retry loop; a failed write is
+    recorded on the row where an operator will see it.
 
     Returns the ``(transition, state, kwargs, exception)`` tuple the
     caller needs to run ``failure_callbacks`` after its atomic block

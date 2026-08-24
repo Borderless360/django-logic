@@ -3,7 +3,7 @@
 > Design record for issue #217. Status: **the shipped design as of 0.16.0**
 > — pull is the default execution mode and the push machinery is removed.
 > The push design it replaced is recorded in
-> [BACKGROUND_TRANSITION_ANALYSIS.md](BACKGROUND_TRANSITION_ANALYSIS.md),
+> [BACKGROUND_TRANSITION_ANALYSIS.md](../history/BACKGROUND_TRANSITION_ANALYSIS.md),
 > which stays as the crash-by-crash analysis this design answers to.
 
 ---

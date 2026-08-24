@@ -29,17 +29,8 @@ def validate_on_ready() -> None:
 
 
 def _reject_sqlite_in_pull_mode() -> None:
-    """SQLite doesn't support ``select_for_update(nowait=True)`` nor
-    partial unique indexes, so the worker concurrency guard silently
-    degrades to "serialize everything" — which masks real bugs in dev
-    and fails in prod.
-
-    Only the alias that actually stores ``TransitionMessage`` is checked:
-    a Postgres-default deployment with an unrelated secondary SQLite alias
-    (a legacy read-only DB, a fixture/import DB) is fine. Read
-    ``settings.DATABASES`` directly (not ``django.db.connections``) so
-    tests using ``override_settings(DATABASES=...)`` are reflected.
-    """
+    """Pull mode claims rows with SELECT FOR UPDATE SKIP LOCKED, so refuse
+    SQLite on the alias that stores ``TransitionMessage``."""
     from django.db import router
 
     from django_logic.background.models import TransitionMessage
