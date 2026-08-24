@@ -4,7 +4,7 @@
 [![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master)
 [![License](https://img.shields.io/pypi/l/django-logic.svg)](https://github.com/Borderless360/django-logic/blob/master/LICENSE)
      
-Django Logic is a lightweight workflow framework for Django. It models business logic as a finite-state machine (FSM). You declare the state transitions, the permissions and the side effects in one place, away from your views, models and forms.
+Django Logic is a workflow library for Django. You declare transitions, permissions, and side-effects in one place, away from views, models, and forms. Work that must retry or run later is a background transition: a worker claims the row from the database.
 
 ## Table of Contents
 - [Features](#features)
@@ -14,7 +14,6 @@ Django Logic is a lightweight workflow framework for Django. It models business 
 - [Core Concepts](#core-concepts)
 - [Usage](#usage)
 - [Complete Example](#complete-example)
-- [Django-Logic vs Django FSM](#django-logic-vs-django-fsm)
 - [Background Transitions](#background-transitions)
 - [Testing Your Processes](#testing-your-processes)
 - [Contributing](#contributing)
@@ -669,25 +668,6 @@ Transition(
 
 When a side-effect fails, django-logic runs these steps in order: write `failed_state` (when you declare one), unlock, then run the **failure_callbacks**.
 
-## Django-Logic vs Django FSM
-[Django FSM](https://github.com/viewflow/django-fsm) came before Django-Logic.
-Django-Logic removes some of its limits and adds new features:
-
-### Key Differences:
-- **Processes**: Django-Logic groups transitions into processes
-- **Nested Processes**: Build workflows from sub-processes
-- **Built-in Locking**: Prevents race conditions out of the box
-- **Failure Handling**: Dedicated failure callbacks and failed states
-- **Better Separation**: Keeps business logic apart from the code that runs it
-- **Background Tasks**: Durable, queue-routed background execution built into `django_logic.background` ([Background Transitions](#background-transitions)) — no extra package
-
-### Migration from Django FSM:
-When you migrate from Django FSM, these are the main changes:
-1. Replace the `@transition` decorator with the `Transition` class
-2. Move the transition logic into side-effects and callbacks
-3. Group related transitions into Process classes
-4. Bind each model to its process with `ProcessManager.bind_model_process(...)` in your app's `AppConfig.ready()` (see [Bind the process](#4-bind-the-process-in-your-apps-appconfigready))
-
 ## Advanced Features
 
 ### Nested Processes
@@ -1265,7 +1245,7 @@ Also alert when the worker processes stop, because the safety nets run inside th
 
 ## Testing Your Processes
 
-FSM workflows are hard to test well, because states, conditions, permissions,
+Workflows are hard to test well, because states, conditions, permissions,
 side-effects, background jobs, failures, retries and locking all interact.
 `django_logic.testing` gives you a **scenario-based** test base class. A test
 reads like the business process, and everything runs **inline, with no services
