@@ -1,4 +1,4 @@
-"""Regression pins for the engine's own failure paths.
+"""The engine's own failure paths, pinned.
 
 Every test here fails if its fix is reverted. Each assertion was checked by
 mutation, because this suite has shipped assertions that passed against the

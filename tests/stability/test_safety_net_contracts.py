@@ -1,20 +1,12 @@
-"""
-Category 1.7, 1.8, 4.4: Periodic Task Tests
+"""The lock/state contracts the safety nets and the claim filter depend on.
 
-Tests for the safety-net periodic tasks that will be implemented in
-Stage 2 (BackgroundTransition). These tests define the expected behavior
-contracts and can be run once the tasks exist.
-
-Currently, these tests validate the underlying State/lock behavior that
-the periodic tasks will depend on, plus define the contract for:
-
-  - retry_stale_transitions: re-dispatch uncompleted messages
-  - detect_stuck_transitions: alert on max-error messages
-  - cleanup_completed_transitions: delete old completed messages
-
-NOTE: Tests that require the TransitionMessage model will be enabled
-once Stage 2 implementation lands. For now, they test the lock/state
-contracts that the periodic tasks depend on.
+After the pull cut nothing re-dispatches a row: the claim's WHERE clause
+is the retry rule, and the worker loop runs the safety nets
+(detect_stuck_transitions, cleanup_completed_transitions). These tests
+pin the underlying contracts those depend on: a crashed sync run leaves
+the instance at its source, a completed state is not retried, stuck rows
+are identified by the row (not the state), and terminal states are
+identifiable for cleanup.
 """
 from datetime import timedelta
 

@@ -1,7 +1,7 @@
-"""Pass-4 review fixes: the checks/settings/binding layer must not crash,
-lie, or reject working topologies.
+"""The checks/settings/binding layer must not crash, lie, or reject
+working topologies.
 
-Each test here pins one confirmed finding:
+Each test pins one confirmed finding:
 
 * A bound ``BackgroundTransition`` without ``django_logic.background`` in
   ``INSTALLED_APPS`` was reported by nothing — every check early-returns on
