@@ -225,6 +225,6 @@ same release's own fixes. Therefore:
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
   background engine.
-- `CHANGELOG.md` is the record of what shipped and why; `TODO.md` holds what
-  has not. Neither is a design document — do not add planning docs that
-  duplicate them.
+- `CHANGELOG.md` is the record of what shipped and why. Open GitHub issues
+  hold what has not. Do not add a TODO.md or planning docs that duplicate
+  issues.

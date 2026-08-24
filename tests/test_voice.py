@@ -54,7 +54,7 @@ def _scanned_files():
     for path in sorted((REPO_ROOT / 'django_logic').rglob('*.py')):
         if 'migrations' not in path.parts:
             yield path
-    for name in ('README.md', 'CLAUDE.md', 'RELEASING.md', 'TODO.md'):
+    for name in ('README.md', 'CLAUDE.md', 'RELEASING.md'):
         yield REPO_ROOT / name
     yield from sorted((REPO_ROOT / 'docs').rglob('*.md'))
 

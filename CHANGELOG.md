@@ -141,9 +141,10 @@ consumer API is unchanged except where noted.
   for a job that does not fit one attempt's budget (#219). Each chunk
   commits its own attempt, so an interruption loses one chunk, not the
   job, and every engine guarantee holds unchanged.
-- `TODO.md` carries the full 1.0 plan: the one-transition-type contract,
-  the bridge removals, the migration squash, and the lock-identity
-  rework (database alias + concrete-model identity in one key change).
+- The leftover cleanup lives in GitHub issues, not a TODO file:
+  one transition type (#243), one app (#242), drop unused knobs (#244),
+  migration squash (#233), lock identity (#245), pull-only production
+  (#237).
 
 ## [0.16.0] — 2026-08-21
 
