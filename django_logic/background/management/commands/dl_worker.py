@@ -8,7 +8,7 @@ pull mode needs no beat schedule. See docs/design/PULL_WORKERS.md.
 """
 from django.core.management.base import BaseCommand, CommandError
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 from django_logic.background.pull import run_worker
 
 
@@ -26,7 +26,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        if bg_settings.background_execution() != bg_settings.EXECUTION_PULL:
+        if conf.background_execution() != conf.EXECUTION_PULL:
             raise CommandError(
                 "dl_worker needs DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull'."
             )

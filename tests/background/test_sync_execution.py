@@ -200,7 +200,7 @@ class ValidateOnReadyTests(TestCase):
     def test_execution_mode_defaults_to_pull(self):
         # Workers claim committed rows from the database unless the project
         # opts into sync mode for tests or CI.
-        from django_logic.background import settings as bg_settings
+        from django_logic import conf as bg_settings
 
         cfg = {k: v for k, v in _SYNC_SETTINGS.items()
                if k != 'BACKGROUND_EXECUTION'}
@@ -211,7 +211,7 @@ class ValidateOnReadyTests(TestCase):
             )
 
     def test_celery_mode_reports_its_removal(self):
-        from django_logic.background import settings as bg_settings
+        from django_logic import conf as bg_settings
 
         cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
         with override_settings(DJANGO_LOGIC=cfg):
@@ -221,7 +221,7 @@ class ValidateOnReadyTests(TestCase):
             self.assertIn('dl_worker', str(ctx.exception))
 
     def test_validate_on_ready_rejects_sqlite_in_pull_mode(self):
-        from django_logic.background.settings import validate_on_ready
+        from django_logic.background.apps import validate_on_ready
 
         pull_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='pull')
         sqlite_db = {
@@ -239,7 +239,7 @@ class ValidateOnReadyTests(TestCase):
     def test_validate_on_ready_rejects_locmem_cache_in_pull_mode(self):
         # A per-process cache locks nothing across web processes and workers,
         # so boot must fail instead of running unprotected in production.
-        from django_logic.background.settings import validate_on_ready
+        from django_logic.background.apps import validate_on_ready
 
         pull_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='pull')
         pg_db = {
@@ -261,7 +261,7 @@ class ValidateOnReadyTests(TestCase):
             self.assertIn('per-process', str(ctx.exception))
 
     def test_locmem_cache_in_pull_mode_only_warns_with_debug(self):
-        from django_logic.background.settings import validate_on_ready
+        from django_logic.background.apps import validate_on_ready
 
         pull_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='pull')
         pg_db = {

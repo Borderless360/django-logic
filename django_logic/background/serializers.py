@@ -44,7 +44,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 from django_logic.logger import transition_logger
 
 
@@ -211,7 +211,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
             f"— worker hooks must not read it (the engine rehydrates "
             f"'user'; pass anything else as plain values)"
         )
-        if bg_settings.strict_kwargs_serialization():
+        if conf.strict_kwargs_serialization():
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
     # ``user_id`` is the engine's own wire form for ``user`` (restored in
@@ -228,7 +228,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
             f"it with a live user object, so a caller-supplied value could "
             f"never reach a hook. Pass it under a different name."
         )
-        if bg_settings.strict_kwargs_serialization():
+        if conf.strict_kwargs_serialization():
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
     out.pop('context', None)  # rebuilt in the worker
@@ -273,7 +273,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
             f"synchronous path saw 1, and colliding keys ({{1: …, '1': …}}) "
             f"silently lose data. Use string keys, or a list of pairs."
         )
-        if bg_settings.strict_kwargs_serialization():
+        if conf.strict_kwargs_serialization():
             raise KwargsSerializationError(message)
         transition_logger.warning(message)
 

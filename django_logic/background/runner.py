@@ -50,7 +50,7 @@ from django.apps import apps
 from django.db import DEFAULT_DB_ALIAS, OperationalError, transaction
 from django.utils import timezone
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
@@ -117,7 +117,7 @@ def run_background_transition(transition_message_id: int) -> None:
         # the row and the claim's retry wait owns retries; re-raising out
         # of the worker loop would only add noise.
         from django_logic.background.dispatch import _current_mode
-        if _current_mode() == bg_settings.EXECUTION_SYNC:
+        if _current_mode() == conf.EXECUTION_SYNC:
             raise outcome.exception
 
 
@@ -278,7 +278,7 @@ def abandon_timed_out_attempt(transition_message_id: int) -> bool:
         )
         transition_message.record_error(err)
 
-        max_errors = bg_settings.max_errors()
+        max_errors = conf.max_errors()
         if transition_message.errors_count >= max_errors:
             # Terminal. Finalize inside this same atomic block: we already hold
             # the row lock, so calling finalize_stuck_attempt would deadlock.
@@ -755,7 +755,7 @@ def _handle_restore_failure(
         f'{type(error).__name__}: {error}',
         exc_info=True,
     )
-    if transition_message.errors_count < bg_settings.max_errors():
+    if transition_message.errors_count < conf.max_errors():
         return _Outcome(terminal=False, succeeded=False, exception=error)
 
     transition_logger.error(
@@ -805,7 +805,7 @@ def _handle_failure(
         exc_info=True,
     )
 
-    max_errors = bg_settings.max_errors()
+    max_errors = conf.max_errors()
     if (
         transition_message.errors_count < max_errors
         and not _failure_is_permanent(transition, error)

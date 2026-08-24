@@ -26,7 +26,7 @@ from django.db import transaction
 from django.db.models import Min, Q
 from django.utils import timezone
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import (
     abandon_timed_out_attempt,
@@ -40,10 +40,10 @@ def _claimable(queues: list[str] | None = None):
     """Rows a worker may take now. The one place the visibility rule is
     written — the pull claim and the sync retry pass both read it."""
     retry_cutoff = timezone.now() - timedelta(
-        minutes=bg_settings.retry_minutes())
+        minutes=conf.retry_minutes())
     rows = TransitionMessage.objects.filter(
         is_completed=False,
-        errors_count__lt=bg_settings.max_errors(),
+        errors_count__lt=conf.max_errors(),
     ).filter(
         Q(last_error_dt__isnull=True) | Q(last_error_dt__lt=retry_cutoff)
     )
@@ -129,7 +129,7 @@ def detect_stuck_transitions() -> int:
     """
     now = timezone.now()
     report_after = max(
-        bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
+        conf.retry_minutes() * (conf.max_errors() + 1), 15,
     )
     never_started = (
         TransitionMessage.objects
@@ -149,7 +149,7 @@ def detect_stuck_transitions() -> int:
             f'(dl_worker --queues {queue_name}); it takes the row at once.'
         )
 
-    max_errors = bg_settings.max_errors()
+    max_errors = conf.max_errors()
     stuck_ids = list(
         TransitionMessage.objects
         .filter(is_completed=False, errors_count__gte=max_errors)
@@ -179,7 +179,7 @@ def cleanup_completed_transitions() -> int:
     """
     from django.db.models import OuterRef, Subquery
 
-    cutoff = timezone.now() - timedelta(days=bg_settings.cleanup_days())
+    cutoff = timezone.now() - timedelta(days=conf.cleanup_days())
     # ended_in_failure, not an errors_count comparison: a permanent failure
     # completes at one error, and a retried success can carry several, so
     # the count cannot tell them apart. Every terminal-failure path sets

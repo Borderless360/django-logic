@@ -173,7 +173,7 @@ def from_snapshot(data_or_path, *, model=None):
     tm_data = data.get('transition_message')
     if tm_data:
         from django_logic.background.models import TransitionMessage
-        from django_logic.background import settings as bg_settings
+        from django_logic import conf
         tm_process_name = tm_data.get('process_name', 'process')
         # The snapshot IS this instance+process's background state. Leaving an
         # existing row behind either replays a stale orphan (the older row wins
@@ -200,7 +200,7 @@ def from_snapshot(data_or_path, *, model=None):
             # resolves the exact transition (blank on legacy snapshots →
             # first-match fallback, unchanged behaviour).
             owning_process_class=tm_data.get('owning_process_class', ''),
-            queue_name=tm_data.get('queue_name') or bg_settings.default_queue(),
+            queue_name=tm_data.get('queue_name') or conf.default_queue(),
             is_completed=tm_data.get('is_completed', False),
             errors_count=tm_data.get('errors_count', 0),
             last_error_message=tm_data.get('last_error_message', ''),

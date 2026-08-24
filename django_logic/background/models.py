@@ -235,7 +235,7 @@ class TransitionMessage(TimeStampedModel):
           a queue backlogged for that long — the stranded message names
           both causes.
         """
-        from django_logic.background import settings as bg_settings
+        from django_logic import conf
 
         row = (
             cls.in_flight_for(instance, process_name)
@@ -256,7 +256,7 @@ class TransitionMessage(TimeStampedModel):
         # The whole retry pipeline's span plus slack, floored so short
         # test/dev retry configs don't classify a fresh row as stale.
         retry_window = max(
-            bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
+            conf.retry_minutes() * (conf.max_errors() + 1), 15,
         )
         if now - newest > timedelta(minutes=retry_window):
             try:

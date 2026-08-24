@@ -120,7 +120,7 @@ class NonDictSettingsBlockTests(SimpleTestCase):
                 self.assertIn(type(bad).__name__, str(ctx.exception))
 
     def test_background_readers_name_the_setting(self):
-        from django_logic.background import settings as bg_settings
+        from django_logic import conf as bg_settings
 
         with override_settings(DJANGO_LOGIC='BACKGROUND_EXECUTION=sync'):
             with self.assertRaises(ImproperlyConfigured) as ctx:

@@ -13,9 +13,9 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
-from django_logic.background.settings import (
-    _validate_bool,
+from django_logic.conf import (
     strict_kwargs_serialization,
+    validate_bool,
 )
 from django_logic.background.safety_nets import (
     run_pending,
@@ -400,7 +400,7 @@ class BooleanSettingTests(TestCase):
         variable read straight through — switched strict mode on."""
         self.assertFalse(strict_kwargs_serialization())
         with self.assertRaises(ImproperlyConfigured):
-            _validate_bool('STRICT_KWARGS_SERIALIZATION')
+            validate_bool('STRICT_KWARGS_SERIALIZATION')
 
     @override_settings(DJANGO_LOGIC={
         'BACKGROUND_EXECUTION': 'sync',
@@ -408,7 +408,7 @@ class BooleanSettingTests(TestCase):
     })
     def test_literal_true_enables_strict_mode(self):
         self.assertTrue(strict_kwargs_serialization())
-        _validate_bool('STRICT_KWARGS_SERIALIZATION')   # must not raise
+        validate_bool('STRICT_KWARGS_SERIALIZATION')   # must not raise
 
 
 class UnknownSettingsCheckTests(TestCase):

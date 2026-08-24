@@ -11,12 +11,8 @@ import math
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, override_settings
 
-from django_logic.background.settings import (
-    cleanup_days,
-    max_errors,
-    retry_minutes,
-    validate_on_ready,
-)
+from django_logic.background.apps import validate_on_ready
+from django_logic.conf import cleanup_days, max_errors, retry_minutes
 from django_logic.conf import lock_timeout
 from tests import dl_settings
 

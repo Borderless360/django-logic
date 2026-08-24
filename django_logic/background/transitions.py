@@ -22,7 +22,7 @@ from uuid import UUID
 from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
@@ -117,7 +117,7 @@ class BackgroundTransition(Transition):
         ``queue=`` and the ``DEFAULT_QUEUE`` setting are read when the
         transition actually runs.
         """
-        return self.queue or bg_settings.default_queue()
+        return self.queue or conf.default_queue()
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
         # Before the lock, and before the kwargs are serialized into a row

@@ -35,7 +35,6 @@ import time
 
 from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 
-from django_logic.background import settings as bg_settings
 from django_logic.logger import logger
 
 #: One channel for every queue. The notification carries no payload and

@@ -15,7 +15,7 @@ from under the pending row first.
 from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase, override_settings
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf as bg_settings
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import (
     finalize_stuck_attempt,

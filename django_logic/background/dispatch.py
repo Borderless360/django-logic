@@ -23,7 +23,7 @@ from contextvars import ContextVar
 
 from django.db import transaction
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 
 
 _force_sync: ContextVar[bool] = ContextVar('_dl_force_sync', default=False)
@@ -46,8 +46,8 @@ def sync_execution():
 
 def _current_mode() -> str:
     if _force_sync.get():
-        return bg_settings.EXECUTION_SYNC
-    return bg_settings.background_execution()
+        return conf.EXECUTION_SYNC
+    return conf.background_execution()
 
 
 def dispatch_transition(transition_message) -> None:
@@ -58,7 +58,7 @@ def dispatch_transition(transition_message) -> None:
 
     In Sync mode, execute inline. Exceptions propagate to the caller.
     """
-    if _current_mode() == bg_settings.EXECUTION_SYNC:
+    if _current_mode() == conf.EXECUTION_SYNC:
         from django_logic.background.runner import run_background_transition
         run_background_transition(transition_message.pk)
         return
