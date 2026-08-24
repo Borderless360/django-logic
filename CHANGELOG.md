@@ -125,6 +125,64 @@ consumer API is unchanged except where noted.
   one or two sentences; the incident history stays here in the
   changelog.
 
+### Changed — the review round (#239, #240, #244, #248, #250)
+
+- **A killed attempt reaped elsewhere is still a timeout** (#239
+  follow-up). When something else reaps the attempt process, `waitpid`
+  raises `ChildProcessError`. The handler returned a normal exit even
+  after the worker sent the kill, so the attempt was charged no
+  `[timeout]` error and the row was claimable again at once. The
+  handler now honours the kill flag, and the `WNOHANG` poll gets the
+  same guard. Two mocked tests pin both paths.
+- **One name each** (#240): `_record_attempt_error` (was
+  `_record_error_if_uncompleted`), `retry_pending` (was
+  `safety_nets.run_pending` under a public alias). Test prose stops
+  naming the removed periodic starter; `TestPeriodicStarterContract`
+  is `TestRetryVisibilityContract`. `in_flight`/`in_flight_for` stay:
+  they are public API the consumer calls.
+- **Handled outcomes log at WARNING** (#248): the timeout kill, the
+  recorded crash, a finalized stuck row, the unrestorable fallback,
+  and a failed `retry_pending` row. ERROR remains for what an operator
+  must act on: no worker on a queue, a failed completion write, a
+  failed safety net.
+- **`TransitionNotAllowed` names the state and the actions** (#250).
+  The resolver's refusal carries `current_state` and
+  `available_actions` and its message names both. Other raise sites
+  leave them `None`. The `TransitionTemporarilyUnavailable` split is
+  unchanged.
+- **`DEFER_UNLOCK_UNTIL_COMMIT` is removed** (#244). Nothing set it.
+  The knob, its deferred-unlock registry, the `deferrable=` threading
+  through every release path, and its tests are gone — 651 net lines.
+  Locks release when the transition finishes; drive follow-up work
+  from `transaction.on_commit` when it must see the caller's commit.
+  The key joins the removed-settings tombstones.
+- **The top-level re-export of the command classes is removed**
+  (#244). Import `Conditions`, `Permissions`, `SideEffects`,
+  `Callbacks` from `django_logic.commands`. Kept, against the issue's
+  list: the `*_class` swap hooks (the consumer overrides
+  `callbacks_class`, `permissions_class`, and `side_effects_class`),
+  the restore fallbacks (`open_transition_message` still creates
+  blank-owner rows, so that path is current behaviour), and
+  `AlreadyInProgress` as a named class (the consumer catches it by
+  name).
+- **Small cuts, each verified against the consumer**: the
+  instance+process keying is written once
+  (`TransitionMessage.instance_key`/`.for_instance`); the retry-window
+  formula moved to one `conf` reader; `snapshot()` stopped writing a
+  process block nothing reads; `redact_log_kwargs` was `dict(kwargs)`
+  under a name promising removed behaviour — inlined (its test file
+  went with it; the copy rule is stated at the call site);
+  `BackgroundAction.complete_transition` guarded a misuse nothing
+  reaches — deleted. `assert_idempotent` stays: the consumer's tests
+  call it.
+- **Docs match the engine**: the celery-era analysis doc moved to
+  `docs/history/`; CLAUDE.md's module list names files that exist and
+  points at `PULL_WORKERS.md`; the README safety-net count matches its
+  two-bullet list; the `celery` keyword and the empty-alias bullet
+  left the packaging docs; the wake-up's docstring and design doc say
+  it exists for direct-Postgres latency and falls back to the poll
+  floor behind pgbouncer (#227).
+
 ### Changed — the follow-up simplification pass
 
 - One copy of what still had two: the stuck finalizer decodes kwargs
