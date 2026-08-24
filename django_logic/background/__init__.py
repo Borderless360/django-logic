@@ -28,7 +28,7 @@ _PUBLIC = {
     'BackgroundTransition': ('django_logic.background.transitions', 'BackgroundTransition'),
     'BackgroundAction': ('django_logic.background.transitions', 'BackgroundAction'),
     'sync_execution': ('django_logic.conf', 'sync_execution'),
-    'retry_pending': ('django_logic.background.safety_nets', 'run_pending'),
+    'retry_pending': ('django_logic.background.safety_nets', 'retry_pending'),
     'in_flight': ('django_logic.background.models', 'in_flight'),
     'PermanentFailure': ('django_logic.background.exceptions', 'PermanentFailure'),
     'run_worker': ('django_logic.background.pull', 'run_worker'),

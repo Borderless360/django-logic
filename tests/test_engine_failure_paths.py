@@ -381,8 +381,8 @@ class UnclassifiedRestoreFailureProcess(Process):
 class UnclassifiedRestoreFailureTests(_BindCleanup, TestCase):
     """Restore treats the permanent failures (model uninstalled, row gone,
     transition renamed) as final and completes the row. Any other restore
-    error must still raise ``errors_count``, or the periodic starter sends
-    the row to the queue forever.
+    error must still raise ``errors_count``, or the row stays claimable
+    forever.
     """
 
     _bound = (UnclassifiedRestoreFailureProcess,)

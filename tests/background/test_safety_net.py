@@ -9,7 +9,7 @@ from django_logic.background.models import TransitionMessage
 from django_logic.background.safety_nets import (
     cleanup_completed_transitions,
     detect_stuck_transitions,
-    run_pending,
+    retry_pending,
 )
 from tests.background.models import Widget
 from tests import dl_settings
@@ -44,7 +44,7 @@ class RetryStaleTests(TestCase):
     def test_picks_up_uncompleted_message(self):
         widget = Widget.objects.create(status='fulfilling')
         _make_stale_message(widget)
-        dispatched = run_pending()
+        dispatched = retry_pending()
         self.assertEqual(dispatched, 1)
         widget.refresh_from_db()
         # Execute ran inline, so the widget reached its target state.
@@ -53,12 +53,12 @@ class RetryStaleTests(TestCase):
     def test_skips_completed(self):
         widget = Widget.objects.create(status='fulfilled')
         _make_stale_message(widget, completed=True)
-        self.assertEqual(run_pending(), 0)
+        self.assertEqual(retry_pending(), 0)
 
     def test_stops_at_max_errors(self):
         widget = Widget.objects.create(status='fulfilling')
         _make_stale_message(widget, errors=99)  # above MAX_ERRORS, which is 3
-        self.assertEqual(run_pending(), 0)
+        self.assertEqual(retry_pending(), 0)
 
     def test_retry_pending_helper_is_public(self):
         widget = Widget.objects.create(status='fulfilling')

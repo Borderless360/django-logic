@@ -140,7 +140,7 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
     The side effect raises OperationalError, then fail_transition runs and needs
     the database too. If fail_transition also fails, the lock is still released,
-    because it lives in the cache. The periodic starter re-dispatches later.
+    because it lives in the cache. The row stays claimable; a later claim retries it.
     """
 
     def test_db_error_in_side_effect_triggers_failure_path(self):

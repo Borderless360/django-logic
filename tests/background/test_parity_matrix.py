@@ -324,8 +324,8 @@ class ParityMatrixTests(TestCase):
                                             transition_name='bg_transition')
         self.assertEqual(row.errors_count, 1)
 
-        # Run the remaining attempts as the worker would. The periodic starter
-        # only picks a row up once RETRY_MINUTES have passed.
+        # Run the remaining attempts as the worker would. A row becomes
+        # claimable again once RETRY_MINUTES have passed.
         for _ in range(2):
             try:
                 run_background_transition(row.pk)

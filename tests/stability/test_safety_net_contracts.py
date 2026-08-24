@@ -21,21 +21,16 @@ from tests.stability.models import Order, OrderProcess
 
 
 @tag('stability')
-class TestPeriodicStarterContract(StabilityTestCase):
-    """
-    1.7 -- The periodic starter should only re-dispatch messages that are:
-      - Not completed (is_completed=False)
-      - Older than RETRY_MINUTES
-      - Under MAX_ERRORS limit
-      - Using their stored queue_name for dispatch
+class TestRetryVisibilityContract(StabilityTestCase):
+    """A row is claimable for retry only when it is uncompleted, past the
+    retry wait, under ``MAX_ERRORS``, and claimed from its stored
+    ``queue_name``.
     """
 
     def test_a_crashed_sync_run_leaves_the_instance_at_its_source(self):
-        """A hard-killed synchronous run leaves no trace (0.12.0): the
-        marker is background-only, so the instance stays at its source
-        state — re-drivable once the lock TTL expires, with nothing for a
-        sweep to find. (The stranded sweep this class used to pin was
-        retired with the marker.)
+        """A hard-killed synchronous run leaves no trace: the uncompleted
+        row is background-only, so the instance stays at its source state.
+        The transition can run again once the lock TTL expires.
         """
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')

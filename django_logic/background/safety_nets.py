@@ -7,7 +7,7 @@ the retry pass.
 
 What each one owns:
 
-* :func:`run_pending` — run every claimable row inline. The visibility
+* :func:`retry_pending` — run every claimable row inline. The visibility
   rule is the same one the pull claim uses: uncompleted, retries left,
   and past the retry wait after the last recorded error. Sync mode's
   "time passed" simulation.
@@ -53,7 +53,7 @@ def _claimable(queues: list[str] | None = None):
     return rows.order_by('created')
 
 
-def run_pending() -> int:
+def retry_pending() -> int:
     """Run every claimable row inline. Returns how many ran cleanly.
 
     A failing side-effect re-raises out of ``run_background_transition``
@@ -66,7 +66,7 @@ def run_pending() -> int:
         try:
             run_background_transition(pk)
         except Exception as e:
-            logger.error(f'run_pending: TransitionMessage#{pk} failed: {e}')
+            logger.error(f'retry_pending: TransitionMessage#{pk} failed: {e}')
             continue
         ran += 1
     return ran

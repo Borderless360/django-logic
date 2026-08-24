@@ -12,7 +12,7 @@ from django.test import TestCase, override_settings
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
-from django_logic.background.safety_nets import run_pending
+from django_logic.background.safety_nets import retry_pending
 from django_logic.logger import TransitionEventType
 from tests.models import Invoice, MtiChild, MtiParent
 
@@ -96,7 +96,7 @@ class RejectedStateWriteTests(_BindCleanup, TestCase):
         # And the retry loop terminates instead of running forever.
         for _ in range(5):
             try:
-                run_pending()
+                retry_pending()
             except ValueError:
                 pass
         row.refresh_from_db()

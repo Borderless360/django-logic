@@ -1,7 +1,7 @@
 """The row-lock probe, and the two places that consult it.
 
 ``retry_status`` must not call a row stranded while a worker holds it, and
-the periodic starter must not send such a row to the queue again. Holding a
+no claim may take such a row while it is held. Holding a
 row lock from a second connection needs PostgreSQL; on SQLite the probe
 always answers False, and the time-based classification stands — that
 degradation is pinned here too.
@@ -106,7 +106,7 @@ class HeldRowTests(TransactionTestCase):
         release.set()
 
     def test_the_retry_pass_leaves_a_held_row_alone(self):
-        from django_logic.background.safety_nets import run_pending
+        from django_logic.background.safety_nets import retry_pending
 
         widget = Widget.objects.create(status='fulfilling')
         row = open_transition_message(
@@ -115,7 +115,7 @@ class HeldRowTests(TransactionTestCase):
         release = self._hold(row.pk)
         # The attempt's row lock is the guard: the pass visits the row,
         # the runner gives it up, and nothing about it changes.
-        run_pending()
+        retry_pending()
         row.refresh_from_db()
         widget.refresh_from_db()
         self.assertFalse(row.is_completed)

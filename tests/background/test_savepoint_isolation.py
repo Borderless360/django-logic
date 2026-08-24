@@ -2,8 +2,8 @@
 
 A side-effect that raised a real database error used to abort the whole
 transaction the worker was running in. Recording the error then failed too, so
-``errors_count`` never reached ``MAX_ERRORS``, the periodic starter sent the row
-to the queue forever, and the partial unique index blocked every later
+``errors_count`` never reached ``MAX_ERRORS``, the row stayed claimable
+forever, and the partial unique index blocked every later
 background transition on the instance. With the savepoint, the database error is
 recorded like any other failure and the row reaches its terminal state.
 

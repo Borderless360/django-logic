@@ -112,7 +112,7 @@ class RestoreVerificationTests(TestCase):
         # The row must terminate here. Earlier the ImportError escaped, the
         # attempt rolled back with errors_count still 0, and the periodic
         # starter sent the row to the queue again forever.
-        from django_logic.background.safety_nets import run_pending
+        from django_logic.background.safety_nets import retry_pending
 
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
@@ -141,7 +141,7 @@ class RestoreVerificationTests(TestCase):
         # The starter has nothing left to send to the queue again.
         with override_settings(
                 DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_RETRY_MINUTES=0)):
-            self.assertEqual(run_pending(), 0)
+            self.assertEqual(retry_pending(), 0)
         transition_message.refresh_from_db()
         self.assertEqual(transition_message.errors_count, 0,
                          'errors must not grow')
