@@ -106,8 +106,8 @@ class TransitionMessage(TimeStampedModel):
     queue_name = models.CharField(max_length=100)
 
     # Per-attempt budget configured on ``BackgroundTransition(timeout=N)``.
-    # Null = unbounded. The worker parent reads it and kills a forked
-    # attempt that runs past it.
+    # Null = unbounded. The worker reads it and kills an attempt process
+    # that runs past it.
     timeout_seconds = models.PositiveIntegerField(blank=True, null=True)
 
 
@@ -405,14 +405,7 @@ def in_flight(instance, process_name: str = 'process') -> bool:
     engine's own guards stay authoritative. A stranded row (nothing is
     retrying it) answers ``False``, so a consumer answering 409 on this
     probe and 400 on plain ``TransitionNotAllowed`` stays consistent.
-
-    Answers ``False`` without a query when ``django_logic.background``
-    is not installed.
     """
-    from django.apps import apps
-
-    if not apps.is_installed('django_logic.background'):
-        return False
     return (
         TransitionMessage.retry_status(instance, process_name)
         == TransitionMessage.RETRYING

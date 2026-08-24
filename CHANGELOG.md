@@ -28,12 +28,12 @@ consumer API is unchanged except where noted.
 
 ### Changed — `timeout=` now means what it says (#229)
 
-- The worker parent enforces the declared budget: every forked attempt
-  is bounded, and a child that runs past its `timeout=` is killed. The
-  kill releases the attempt's row lock with its connection, one
-  `[timeout]` error is recorded on the row, the claim's retry wait paces
-  the next attempt, and at `MAX_ERRORS` the stuck finalizer ends the row
-  in `failed_state`.
+- The worker enforces the declared budget: every attempt runs in its
+  own forked attempt process, and one that runs past its `timeout=` is
+  killed. The kill releases the attempt's row lock with its connection,
+  one `[timeout]` error is recorded on the row, the claim's retry wait
+  paces the next attempt, and at `MAX_ERRORS` the stuck finalizer ends
+  the row in `failed_state`.
 - Removed with it: `abandon_timed_out_attempt`,
   `watchdog_stale_attempts`, the watchdog's safety-net step, and
   `retry_status`'s declared-budget branch with `RETRY_SLACK`. The
@@ -43,9 +43,9 @@ consumer API is unchanged except where noted.
   the third fix on one defect class is a design cut. A live long attempt
   stays protected by the row-lock probe (0.15.0).
 - Behaviour change: `timeout=` kills attempts instead of only charging
-  them, and enforcement exists only where a child exists — sync mode
-  runs in the caller's thread, unbounded. The consumer census found zero
-  `timeout=` declarations. The `timeout_seconds` column stays.
+  them, and enforcement exists only where an attempt process exists —
+  sync mode runs in the caller's thread, unbounded. The consumer census
+  found zero `timeout=` declarations. The `timeout_seconds` column stays.
 
 ### Changed — background enqueue no longer re-runs conditions (#231)
 
@@ -64,8 +64,8 @@ consumer API is unchanged except where noted.
   paths call it; the finalizer's divergent `set failed_state=` log line
   becomes the standard `SET_STATE` event.
 - `runner._complete_terminal_failure` is the one terminal completion for
-  the worker attempt path and the stuck finalizer (renamed
-  `_finalize_terminal_from_safety_net`).
+  the worker attempt path and the stuck finalizer
+  (`runner._finalize_stuck_row`).
 - One tree walk (`_find_transition`) answers which background transition
   a row names; the owner match wins during the walk, and the warning for
   a recorded-but-unmatched owner no longer misreports a renamed
@@ -83,7 +83,14 @@ consumer API is unchanged except where noted.
   inlined into `BackgroundTransition.change_state`, `in_flight` lives
   beside `retry_status` in `models.py`, and `retry_pending` is
   `safety_nets.run_pending`. Every documented import path keeps working
-  through the lazy public map.
+  through the lazy public map. `in_flight` no longer special-cases an
+  install without the background app: the background engine is default
+  functionality, so the probe reads the row, always.
+- One name for the forked process: it is the **attempt process**,
+  everywhere. `_run_attempt_process`, `_wait_for_attempt_process`, and
+  `_record_error_if_uncompleted` replace the child/death names from
+  0.16.0, and the prose says worker/attempt process instead of
+  parent/child.
 - Dead names cleared: `process._RESERVED_KWARGS`, `run_pending`'s
   never-passed `queues=`, `run_once`'s never-used `isolate` default,
   `observability.task_label`, two unused imports. Kept against the

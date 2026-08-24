@@ -16,9 +16,9 @@ What each one owns:
 * :func:`cleanup_completed_transitions` — delete old completed rows,
   keeping the newest terminal-failure row per instance and process.
 
-A hanging attempt needs no net here: the worker parent enforces the
-declared ``timeout=`` on its forked attempt (``pull``), and a dead
-worker's row lock dies with its connection.
+A hanging attempt needs no net here: the worker enforces the declared
+``timeout=`` on its attempt process (``pull``), and a dead worker's row
+lock dies with its connection.
 """
 from __future__ import annotations
 

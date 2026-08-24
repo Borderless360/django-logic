@@ -120,7 +120,7 @@ class PullClaimTests(TransactionTestCase):
         widget = Widget.objects.create(status='draft')
         marker = tempfile.mktemp(prefix='dl_die_once_')
         widget.process.die_once(marker_path=marker)
-        # First attempt: the child process hard-kills itself. The worker
+        # First attempt: the attempt process hard-kills itself. The worker
         # survives, and the death is an error on the row.
         self.assertTrue(run_once(_CRITICAL, isolate=True))
         row = TransitionMessage.objects.get()
@@ -136,13 +136,14 @@ class PullClaimTests(TransactionTestCase):
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'survived')
 
-    def test_a_death_is_not_recorded_on_a_row_another_worker_completed(self):
-        from django_logic.background.pull import _record_child_death
+    def test_no_error_is_recorded_on_a_row_another_worker_completed(self):
+        from django_logic.background.pull import _record_error_if_uncompleted
 
         widget = Widget.objects.create(status='fulfilled')
         row = open_transition_message(widget, 'process', 'fulfil')
         TransitionMessage.objects.filter(pk=row.pk).update(is_completed=True)
-        _record_child_death(row.pk, 1)
+        _record_error_if_uncompleted(
+            row.pk, '[crashed] the attempt process died (exit 1)')
         row.refresh_from_db()
         self.assertEqual(row.errors_count, 0)
         self.assertEqual(row.last_error_message, '')

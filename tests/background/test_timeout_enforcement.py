@@ -1,13 +1,13 @@
-"""timeout= stops a hanging attempt: the worker parent kills the child.
+"""timeout= stops a hanging attempt: the worker kills the attempt process.
 
 The attempt holds its row lock while it runs, so nothing else can reach
-it — the parent that forked it is the one place a budget can be
+it — the worker that forked it is the one place a budget can be
 enforced. A killed attempt is accounted like a crashed one: one error on
 the row, the claim's retry wait paces the next attempt, and MAX_ERRORS
 ends it in ``failed_state`` (through the stuck finalizer).
 
-Enforcement exists only where a child exists. In sync mode the attempt
-runs in the caller's own thread and no budget is enforced.
+Enforcement exists only where an attempt process exists. In sync mode
+the attempt runs in the caller's own thread and no budget is enforced.
 """
 import os
 import time
@@ -16,7 +16,7 @@ import unittest
 from django.test import TransactionTestCase, override_settings
 
 from django_logic.background.models import TransitionMessage
-from django_logic.background.pull import _wait_for_child, run_once
+from django_logic.background.pull import _wait_for_attempt_process, run_once
 from django_logic.testing import open_transition_message
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres
@@ -33,34 +33,34 @@ _CRITICAL = ['django_logic.critical']
 
 
 @unittest.skipUnless(hasattr(os, 'fork'), 'needs os.fork')
-class WaitForChildTests(TransactionTestCase):
+class WaitForAttemptProcessTests(TransactionTestCase):
     """The bounded wait itself, without a database row."""
 
-    def test_a_child_inside_its_budget_exits_normally(self):
-        child = os.fork()
-        if child == 0:
+    def test_an_attempt_process_inside_its_budget_exits_normally(self):
+        attempt_pid = os.fork()
+        if attempt_pid == 0:
             os._exit(0)
-        exit_code, timed_out = _wait_for_child(child, 5)
+        exit_code, timed_out = _wait_for_attempt_process(attempt_pid, 5)
         self.assertEqual(exit_code, 0)
         self.assertFalse(timed_out)
 
-    def test_a_child_past_its_budget_is_killed(self):
-        child = os.fork()
-        if child == 0:
+    def test_an_attempt_process_past_its_budget_is_killed(self):
+        attempt_pid = os.fork()
+        if attempt_pid == 0:
             time.sleep(30)
             os._exit(0)
         started = time.monotonic()
-        exit_code, timed_out = _wait_for_child(child, 0.2)
+        exit_code, timed_out = _wait_for_attempt_process(attempt_pid, 0.2)
         waited = time.monotonic() - started
         self.assertTrue(timed_out)
         self.assertNotEqual(exit_code, 0)
         self.assertLess(waited, 5.0, 'the kill did not bound the wait')
 
     def test_no_budget_means_an_unbounded_plain_wait(self):
-        child = os.fork()
-        if child == 0:
+        attempt_pid = os.fork()
+        if attempt_pid == 0:
             os._exit(0)
-        exit_code, timed_out = _wait_for_child(child, None)
+        exit_code, timed_out = _wait_for_attempt_process(attempt_pid, None)
         self.assertEqual(exit_code, 0)
         self.assertFalse(timed_out)
 

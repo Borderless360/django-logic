@@ -88,9 +88,9 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     """Claim and execute at most one row. Returns whether one ran.
 
     With ``isolate=True`` (what the worker loop uses) the attempt runs in
-    a forked child process, so a crash — ``os._exit`` in consumer code, a
+    a forked attempt process, so a crash — ``os._exit`` in consumer code, a
     segmentation fault, the platform's memory killer — kills the attempt,
-    not the worker. The parent records the death as an error on the row,
+    not the worker. The worker records the death as an error on the row,
     which gives a crashing attempt the same paced, bounded retries as a
     failing one; before this, every crash killed the whole worker process
     and the platform's restart backoff parked the queue group with it.
@@ -101,30 +101,32 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     if pk is None:
         return False
     if isolate and hasattr(os, 'fork'):
-        _run_attempt_in_child(pk)
+        _run_attempt_process(pk)
     else:
         run_background_transition(pk)
     return True
 
 
-def _run_attempt_in_child(pk: int) -> None:
-    """Run one attempt in a forked child, bound it, and account for its death.
+def _run_attempt_process(pk: int) -> None:
+    """Fork one attempt process, bound it by ``timeout=``, and account
+    for how it ended.
 
-    Both sides must not share a database connection — a connection closed
-    (or crashed) on one side poisons the other's session. The parent
-    closes every connection before the fork; each side then opens its
-    own lazily.
+    The worker and the attempt process must not share a database
+    connection — a connection closed (or crashed) on one side poisons
+    the other's session. The worker closes every connection before the
+    fork; each side then opens its own lazily.
 
-    The parent enforces the transition's declared ``timeout=``: when the
-    child runs past the budget, the parent kills it. This is the only
-    place a hanging attempt can be stopped — the attempt holds its row
-    lock while it runs, so nothing else can reach it.
+    The worker enforces the transition's declared ``timeout=``: an
+    attempt process that runs past the budget is killed. This is the
+    only place a hanging attempt can be stopped — the attempt holds its
+    row lock while it runs, so nothing else can reach it.
 
-    A child that dies without completing the row left no error on it, so
-    the parent records one: the claim's retry wait then paces the next
-    attempt, and ``MAX_ERRORS`` bounds a crash loop — a side-effect that
-    crashes (or hangs) every time ends in ``failed_state`` like one that
-    fails every time, instead of looping forever.
+    An attempt process that dies without completing the row left no
+    error on it, so the worker records one: the claim's retry wait then
+    paces the next attempt, and ``MAX_ERRORS`` bounds a crash loop — a
+    side-effect that crashes (or hangs) every time ends in
+    ``failed_state`` like one that fails every time, instead of looping
+    forever.
     """
     from django.db import connections
 
@@ -138,24 +140,25 @@ def _run_attempt_in_child(pk: int) -> None:
         .first()
     )
     connections.close_all()
-    child = os.fork()
-    if child == 0:
+    attempt_pid = os.fork()
+    if attempt_pid == 0:
+        # fork() answers 0 inside the attempt process itself.
         status = 1
         try:
             run_background_transition(pk)
             status = 0
         finally:
-            # _exit, so a crashing attempt cannot run the parent's cleanup
+            # _exit, so a crashing attempt cannot run the worker's cleanup
             # handlers or flush its buffers twice.
             os._exit(status)
-    exit_code, timed_out = _wait_for_child(child, timeout_seconds)
+    exit_code, timed_out = _wait_for_attempt_process(attempt_pid, timeout_seconds)
     if timed_out:
         logger.error(
             f'pull: the attempt for TransitionMessage#{pk} ran past its '
             f'declared timeout={timeout_seconds}s and was stopped. The error '
             f'recorded here paces the next claim.'
         )
-        _record_child_death(
+        _record_error_if_uncompleted(
             pk,
             f'[timeout] the attempt ran past timeout={timeout_seconds}s '
             f'and was stopped',
@@ -168,44 +171,45 @@ def _run_attempt_in_child(pk: int) -> None:
         f'(exit {exit_code}). Its row lock died with it; the error recorded '
         f'here paces the next claim.'
     )
-    _record_child_death(
+    _record_error_if_uncompleted(
         pk,
         f'[crashed] the attempt process died (exit {exit_code}) '
         f'before the attempt finished',
     )
 
 
-def _wait_for_child(child: int, timeout_seconds) -> tuple[int, bool]:
-    """Reap the child. Returns ``(exit_code, timed_out)``.
+def _wait_for_attempt_process(attempt_pid: int, timeout_seconds) -> tuple[int, bool]:
+    """Wait for the attempt process. Returns ``(exit_code, timed_out)``.
 
     With no declared budget the wait is plain and unbounded. With one,
-    the parent polls the child and kills it (``SIGKILL`` — the attempt
-    may hang inside code that ignores gentler signals) when the budget
-    passes. The kill releases the child's row lock with its connection.
+    the worker polls the attempt process and kills it (``SIGKILL`` — the
+    attempt may hang inside code that ignores gentler signals) when the
+    budget passes. The kill releases the attempt's row lock with its
+    connection.
     """
     if timeout_seconds is None:
-        _, raw_status = os.waitpid(child, 0)
+        _, raw_status = os.waitpid(attempt_pid, 0)
         return os.waitstatus_to_exitcode(raw_status), False
     deadline = time.monotonic() + timeout_seconds
     while True:
-        pid, raw_status = os.waitpid(child, os.WNOHANG)
+        pid, raw_status = os.waitpid(attempt_pid, os.WNOHANG)
         if pid != 0:
             return os.waitstatus_to_exitcode(raw_status), False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            os.kill(child, signal.SIGKILL)
-            os.waitpid(child, 0)
+            os.kill(attempt_pid, signal.SIGKILL)
+            os.waitpid(attempt_pid, 0)
             return -signal.SIGKILL, True
         time.sleep(min(1.0, max(0.01, remaining)))
 
 
-def _record_child_death(pk: int, message: str) -> None:
-    """Record a died attempt on the row — unless the row completed first.
+def _record_error_if_uncompleted(pk: int, message: str) -> None:
+    """Record one error on the row — unless the row completed first.
 
     Another worker on the same queue can claim the row the moment the
-    child's lock dies and finish it before this write. One conditional
-    UPDATE keeps the guard and the write in the same statement, so a
-    completed row can never take the death as an error.
+    dead attempt's lock is released and finish it before this write. One
+    conditional UPDATE keeps the guard and the write in the same
+    statement, so a completed row can never take the error.
     """
     from django.db.models import F
     from django.utils import timezone

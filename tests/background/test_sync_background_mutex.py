@@ -22,7 +22,6 @@ from django.db import IntegrityError
 from django.test import (
     TestCase,
     TransactionTestCase,
-    modify_settings,
     override_settings,
 )
 from django.utils import timezone
@@ -216,19 +215,6 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         with self.assertRaises(AlreadyInProgress):
             with sync_execution():
                 self.widget.process.fulfil()
-
-    @modify_settings(INSTALLED_APPS={'remove': 'django_logic.background'})
-    def test_probe_and_gate_answer_not_installed_with_no_query(self):
-        # With the background app uninstalled, in_flight() answers False
-        # without querying, and the synchronous gate lets the transition
-        # through — even though the row is still in the table.
-        _make_row(self.widget)
-
-        with self.assertNumQueries(0):
-            self.assertFalse(in_flight(self.widget, 'process'))
-        self.widget.process.cancel()
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'cancelled')
 
     def test_public_in_flight_probe_reads_the_row(self):
         # in_flight() is the documented probe for consumer API seams. One

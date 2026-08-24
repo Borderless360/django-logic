@@ -224,7 +224,7 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
         err = RuntimeError(
             f'[detect_stuck] {transition_message.last_error_message or "transition stuck"}'
         )
-        hooks = _finalize_terminal_from_safety_net(transition_message, err, source='detect_stuck')
+        hooks = _finalize_stuck_row(transition_message, err)
 
     # Run failure_callbacks after the atomic commits (best-effort).
     if hooks is not None:
@@ -232,10 +232,9 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
     return True
 
 
-def _finalize_terminal_from_safety_net(
+def _finalize_stuck_row(
     transition_message: TransitionMessage,
     exception: BaseException,
-    source: str,
 ):
     """The stuck finalizer's terminal path.
 
@@ -274,7 +273,7 @@ def _finalize_terminal_from_safety_net(
         # in_progress_state, which is an implicit source of the same
         # transition.
         transition_logger.error(
-            f'{source}: TransitionMessage#{transition_message.pk} could not be restored '
+            f'detect_stuck: TransitionMessage#{transition_message.pk} could not be restored '
             f'({type(exc).__name__}: {exc}); completing it so the safety net '
             f'stops retrying. The instance stays in its in_progress_state; '
             f'run the transition again from there to move it on.',
@@ -293,7 +292,7 @@ def _finalize_terminal_from_safety_net(
         # and retries stop. The savepoint keeps the outer transaction healthy
         # when the failure is a DatabaseError from reading the user table.
         transition_logger.error(
-            f'{source}: TransitionMessage#{transition_message.pk} kwargs failed to decode '
+            f'detect_stuck: TransitionMessage#{transition_message.pk} kwargs failed to decode '
             f'({type(exc).__name__}: {exc}); finalizing with empty kwargs.'
         )
         kwargs = {}
@@ -309,14 +308,14 @@ def _finalize_terminal_from_safety_net(
     matches, expected, current = _state_guard_matches(transition, state)
     if not matches:
         note = (
-            f'[superseded] {source} state guard: expected {expected}, found '
+            f'[superseded] detect_stuck state guard: expected {expected}, found '
             f'{current!r}. Something else moved the instance while this row '
             f'was pending, so failed_state and the failure callbacks are '
             f'skipped and the other state change wins. Earlier error: '
             f'{transition_message.last_error_message or "(none recorded)"}'
         )
         transition_logger.error(
-            f'{source}: TransitionMessage#{transition_message.pk} {transition.action_name} '
+            f'detect_stuck: TransitionMessage#{transition_message.pk} {transition.action_name} '
             f'{state.instance_key}: {note}'
         )
         transition_message.mark_as_superseded(note)
@@ -326,7 +325,7 @@ def _finalize_terminal_from_safety_net(
     # the abandoned attempt, so measuring from it would inflate duration_ms.
     return _complete_terminal_failure(
         transition_message, transition, state, kwargs, exception,
-        prefix=f'{source}:',
+        prefix='detect_stuck:',
         consequence='Completing the row anyway so it stops retrying.',
         measure_duration=False,
     )
@@ -345,7 +344,7 @@ def _complete_terminal_failure(
 ):
     """The one terminal-failure completion: write ``failed_state`` (when
     declared), then mark the row completed. The worker attempt path and
-    the safety-net finalizer both end here — the two used to carry their
+    the stuck finalizer both end here — the two used to carry their
     own copies, and the copies drifted.
 
     The write runs in a savepoint and never escapes: a rejected write

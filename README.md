@@ -1127,7 +1127,7 @@ BackgroundTransition(
 )
 ```
 
-The worker parent enforces the budget: every attempt runs in a forked child process, and when the child runs past `timeout`, the parent kills it. The kill releases the attempt's row lock with its connection, the parent records one `[timeout]` error on the row, the claim's retry wait paces the next attempt, and at `MAX_ERRORS` the stuck finalizer ends the row in `failed_state`. A row without `timeout` is unbounded. Enforcement exists only where a child exists: in sync mode the attempt runs in the caller's own thread and no budget is enforced. A killed attempt's database writes roll back with it, but an external API call it already made has happened. **Side-effects must be idempotent against external systems.**
+The worker enforces the budget: every attempt runs in its own forked attempt process, and when it runs past `timeout`, the worker kills it. The kill releases the attempt's row lock with its connection, the worker records one `[timeout]` error on the row, the claim's retry wait paces the next attempt, and at `MAX_ERRORS` the stuck finalizer ends the row in `failed_state`. A row without `timeout` is unbounded. Enforcement exists only where an attempt process exists: in sync mode the attempt runs in the caller's own thread and no budget is enforced. A killed attempt's database writes roll back with it, but an external API call it already made has happened. **Side-effects must be idempotent against external systems.**
 
 ### Concurrency and locking
 
