@@ -3,7 +3,7 @@
 > **Historical record.** This file describes the broker design (Celery
 > `apply_async` enqueue, `@shared_task(acks_late=True)` execute) that
 > 0.16.0 removed. The current design record is
-> [`PULL_WORKERS.md`](PULL_WORKERS.md): workers claim committed
+> [`PULL_WORKERS.md`](../design/PULL_WORKERS.md): workers claim committed
 > `TransitionMessage` rows straight from the database.
 
 > Design document for `BackgroundTransition` / `BackgroundAction`, first

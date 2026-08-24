@@ -471,6 +471,6 @@ pyramid backing it:
    a deployed harness (RabbitMQ + PostgreSQL + Redis + separate worker/beat
    dynos) running an 18-row matrix on real infrastructure — worker SIGKILL
    mid-task, deploys mid-flight, queue isolation, pgbouncer transaction
-   pooling, stuck-row finalization, timeout watchdogs.
+   pooling, stuck-row finalization, the timeout kill.
 
 That layering is exactly why your own tests can stop at the process level.

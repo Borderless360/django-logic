@@ -279,13 +279,29 @@ class Process:
             raise TransitionNotAllowed("There are several transitions available")
 
         current_state = self.state.get_state()
-        available_actions = self.get_available_actions(user=user)
+        try:
+            available_actions = self.get_available_actions(user=user)
+        except Exception as list_error:
+            # Listing the actions runs every transition's conditions and
+            # permissions. One of them raising must not replace the
+            # refusal with its own exception — the caller asked why the
+            # action was refused, and it still gets that answer.
+            transition_logger.info(
+                f'Listing the available actions for '
+                f'{self.state.instance_key} failed: '
+                f'{type(list_error).__name__}: {list_error}'
+            )
+            available_actions = None
+        known_actions = (
+            'unknown' if available_actions is None
+            else ', '.join(available_actions) or 'none'
+        )
         message = (
             f"Process class {self.__class__} for object "
             f"{self.state.instance.pk} has no transition "
             f"with action name {action_name}, user {user}. "
             f"The instance is in state {current_state!r}; "
-            f"available actions: {', '.join(available_actions) or 'none'}."
+            f"available actions: {known_actions}."
         )
         transition_logger.info(message)
         error = TransitionNotAllowed(message)
