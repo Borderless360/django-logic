@@ -2,8 +2,8 @@
 
 A side-effect that raised a real database error used to abort the whole
 transaction the worker was running in. Recording the error then failed too, so
-``errors_count`` never reached ``MAX_ERRORS``, the periodic starter sent the row
-to the queue forever, and the partial unique index blocked every later
+``errors_count`` never reached ``MAX_ERRORS``, the row stayed claimable
+forever, and the partial unique index blocked every later
 background transition on the instance. With the savepoint, the database error is
 recorded like any other failure and the row reaches its terminal state.
 
@@ -20,7 +20,7 @@ from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process
 from django_logic.background import BackgroundTransition, sync_execution
-from django_logic.background.dispatch import retry_pending
+from django_logic.background import retry_pending
 from django_logic.background.models import TransitionMessage
 from tests.background.models import Widget
 from tests import dl_settings

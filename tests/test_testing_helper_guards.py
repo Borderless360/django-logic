@@ -134,14 +134,14 @@ class SnapshotRestoreGuardTests(ProcessScenario):
         self.assertEqual(rows.get().errors_count, 1)
         self.assertNotIn('stale orphan', rows.get().last_error_message)
 
-    def test_snapshot_round_trips_the_retry_and_watchdog_clock(self):
+    def test_snapshot_round_trips_the_retry_clock(self):
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'fulfil', fail_side_effect='bg_ok',
             fail_with=ValueError('hung'))
 
         # A row from production that started an attempt, timed out, and whose
-        # cleanup hook also raised. A watchdog test replays this shape.
+        # cleanup hook also raised. A timeout-incident test replays this shape.
         now = timezone.now().replace(microsecond=123456)
         transition_message = TransitionMessage.objects.get(
             instance_id=str(widget.pk), process_name='process')
@@ -182,11 +182,11 @@ class BackgroundEntrypointGuardTests(ProcessScenario):
     state_field = 'status'
     process_name = 'process'
 
-    @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='celery'))
-    def test_transition_refuses_a_background_action_under_celery_mode(self):
-        # A test environment left on the global default. This used to enqueue a
-        # task no worker runs, so the test failed later and somewhere else, with
-        # an uncompleted row left behind.
+    @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='pull'))
+    def test_transition_refuses_a_background_action_under_pull_mode(self):
+        # A test environment left on the global default. This used to leave a
+        # committed row no worker runs, so the test failed later and somewhere
+        # else, with an uncompleted row left behind.
         widget = self.create_instance(status='draft')
         with self.assertRaises(AssertionError) as ctx:
             self.transition(widget, 'fulfil')

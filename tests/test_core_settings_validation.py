@@ -1,29 +1,20 @@
 """Core-knob validation must not depend on the background app.
 
-``LOCK_TIMEOUT`` and ``DEFER_UNLOCK_UNTIL_COMMIT`` are consumed by the
-core engine (state locks, unlock semantics) whether or not
-``django_logic.background`` is installed. ``DjangoLogicConfig.ready``
+``LOCK_TIMEOUT`` is consumed by the core engine (state locks) whether or
+not ``django_logic.background`` is installed. ``DjangoLogicConfig.ready``
 calls ``django_logic.conf.validate_core_settings()`` so a sync-only
-install fails fast too; and the runtime reader for
-``DEFER_UNLOCK_UNTIL_COMMIT`` is strict — only a literal ``True``
-changes lock-release semantics, so truthy garbage that slipped past a
-never-run boot gate still cannot flip it.
+install fails fast too.
 """
 import math
 
 from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import SimpleTestCase, override_settings
 
 from django_logic.conf import (
-    defer_unlock_until_commit,
     lock_timeout,
     validate_core_settings,
 )
-from django_logic.process import Process
-from django_logic.state import State
-from django_logic.transition import Transition
-from tests.models import Invoice
 from tests import dl_settings
 
 def _conf(**overrides):
@@ -42,26 +33,15 @@ class CoreSettingsValidationTests(SimpleTestCase):
             with self.subTest(value=bad):
                 self.assert_rejected(_conf(LOCK_TIMEOUT=bad), 'LOCK_TIMEOUT')
 
-    def test_defer_unlock_rejections(self):
-        for bad in ('false', 'true', 1, 0, None):
-            with self.subTest(value=bad):
-                self.assert_rejected(
-                    _conf(DEFER_UNLOCK_UNTIL_COMMIT=bad),
-                    'DEFER_UNLOCK_UNTIL_COMMIT')
-
     def test_valid_values_accepted(self):
-        with override_settings(DJANGO_LOGIC=_conf(
-            LOCK_TIMEOUT=0.5, DEFER_UNLOCK_UNTIL_COMMIT=True,
-        )):
+        with override_settings(DJANGO_LOGIC=_conf(LOCK_TIMEOUT=0.5)):
             validate_core_settings()
             self.assertEqual(lock_timeout(), 0.5)
-            self.assertIs(defer_unlock_until_commit(), True)
 
     def test_defaults_accepted_with_empty_conf(self):
         with override_settings(DJANGO_LOGIC={}):
             validate_core_settings()
             self.assertEqual(lock_timeout(), 7200)
-            self.assertIs(defer_unlock_until_commit(), False)
 
     def test_core_app_ready_runs_the_gate(self):
         """The gate fires from the CORE AppConfig — a sync-only install
@@ -74,25 +54,45 @@ class CoreSettingsValidationTests(SimpleTestCase):
         config.ready()
 
 
-class StrictDeferReaderTests(TestCase):
-    """Runtime behavior with garbage that bypassed boot validation: only
-    a literal True defers — 'false' must NOT silently enable deferral."""
+class SyncIsATestRuntimeTests(SimpleTestCase):
+    """Sync runs the worker path inline, in the caller's own thread. A
+    deployment must not be able to choose it from a settings value or an
+    environment variable, so boot refuses it unless a test settings
+    module opted in."""
 
-    def test_truthy_string_does_not_enable_deferral(self):
+    def test_boot_refuses_sync_without_the_opt_in(self):
+        from unittest.mock import patch
+
+        from django_logic.background.apps import validate_on_ready
+
+        with patch('django_logic.conf._sync_enabled', False), \
+                override_settings(DJANGO_LOGIC=_conf(
+                    BACKGROUND_EXECUTION='sync')):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                validate_on_ready()
+        message = str(ctx.exception)
+        self.assertIn('test runtime', message)
+        self.assertIn('enable_sync', message)
+
+    def test_boot_accepts_sync_after_the_opt_in(self):
+        """tests/settings.py calls enable_sync(), which is how the whole
+        suite runs inline."""
+        from django_logic.background.apps import validate_on_ready
+        from django_logic.conf import sync_enabled
+
+        self.assertTrue(sync_enabled())
         with override_settings(DJANGO_LOGIC=_conf(
-            DEFER_UNLOCK_UNTIL_COMMIT='false',
-        )):
-            self.assertIs(defer_unlock_until_commit(), False)
+                BACKGROUND_EXECUTION='sync')):
+            validate_on_ready()
 
-            class _P(Process):
-                process_name = 'strict_defer_process'
-                transitions = [
-                    Transition('approve', sources=['draft'], target='approved'),
-                ]
+    def test_one_block_runs_inline_without_the_opt_in(self):
+        from unittest.mock import patch
 
-            invoice = Invoice.objects.create(status='draft')
-            _P(field_name='status', instance=invoice).approve()
-            # Deferral did NOT engage: unlocked immediately even inside
-            # the test's atomic block.
-            self.assertFalse(State(invoice, 'status').is_locked())
-            self.assertEqual(invoice.status, 'approved')
+        from django_logic.conf import sync_execution, sync_mode
+
+        with patch('django_logic.conf._sync_enabled', False), \
+                override_settings(DJANGO_LOGIC=_conf(
+                    BACKGROUND_EXECUTION='pull')):
+            self.assertFalse(sync_mode())
+            with sync_execution():
+                self.assertTrue(sync_mode())

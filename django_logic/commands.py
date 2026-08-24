@@ -11,7 +11,6 @@ from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.exceptions import TransitionTemporarilyUnavailable
 from django_logic.logger import (
-    redact_log_kwargs,
     transition_logger,
     TransitionEventType,
 )
@@ -26,50 +25,6 @@ def _in_open_transaction(instance) -> tuple[str, bool]:
     return using, transaction.get_connection(using).in_atomic_block
 
 
-def _deferred_unlocks(conn) -> list:
-    if not hasattr(conn, '_dl_deferred_unlocks'):
-        conn._dl_deferred_unlocks = []
-    return conn._dl_deferred_unlocks
-
-
-def note_deferred_unlock(using: str, state: State) -> None:
-    """Record a DEFER_UNLOCK_UNTIL_COMMIT unlock so hook
-    savepoints can release it if their rollback discards the
-    ``transaction.on_commit`` registration (see ``_run_in_savepoint``).
-    Called by ``Transition._release_lock`` right after registering the
-    on_commit hook."""
-    conn = transaction.get_connection(using)
-    registry = _deferred_unlocks(conn)
-    # Re-register the clear unless ours is still queued. Keying on
-    # ``not registry`` leaked: a rollback discards the on_commit hook (Django
-    # drops run_on_commit) but leaves the entries on the connection, so the
-    # registry was never empty again, no further clear was ever registered,
-    # and the list grew for the life of the connection — pinning every State
-    # it held. Asking Django whether our hook is still queued makes this
-    # self-healing, and anything left when it is NOT queued is stale by
-    # definition (its hook was discarded), so it is safe to drop.
-    queued = any(
-        any(getattr(item, '_dl_deferred_clear', False)
-            for item in entry if callable(item))
-        for entry in getattr(conn, 'run_on_commit', ()) or ()
-    )
-    if not queued:
-        # Re-register only. Do NOT clear here, however stale the entries look:
-        # ``_run_in_savepoint`` tracks its own entries by INDEX WINDOW
-        # (``before = len(registry)`` … ``registry[before:]``), so clearing
-        # mid-transaction shifts those indices and would drop deferred unlocks
-        # an enclosing window is still responsible for releasing — leaking the
-        # exact locks this registry exists to release. The hook registered
-        # below drains everything at the next successful commit, which is
-        # bounded and cannot interleave with an active window.
-        def _clear():
-            registry.clear()
-
-        _clear._dl_deferred_clear = True
-        transaction.on_commit(_clear, using=using)
-    registry.append(state)
-
-
 class _SilentRollback(Exception):
     """Internal: the savepoint rolled back with NO exception propagating.
 
@@ -82,43 +37,22 @@ class _SilentRollback(Exception):
 
 
 def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
-    """Run ``fn`` inside a savepoint, without losing deferred unlocks.
-
-    When the savepoint rolls back, Django discards every
-    ``transaction.on_commit`` hook registered inside it — including the
-    DEFER_UNLOCK_UNTIL_COMMIT unlocks of transitions the hook
-    drove. Their state writes roll back with the savepoint, so those
-    locks protect nothing anymore; dropping the hooks would leak them
-    until TTL *while the outer transaction commits successfully*.
-    On rollback, release exactly the unlocks registered within this
-    savepoint's window (``unlock()`` is a token compare-and-delete, so
-    this can never race a lock that was legitimately re-acquired).
+    """Run ``fn`` inside a savepoint.
 
     ``require_commit`` turns the silent rollback below into a raised
     ``_SilentRollback`` — for callers whose next act is to record the work
     as done."""
     conn = transaction.get_connection(using)
-    registry = _deferred_unlocks(conn)
-    before = len(registry)
-    rolled_back = False
-    try:
-        with transaction.atomic(using=using):
-            result = fn()
-            # A savepoint also rolls back with NO exception propagating:
-            # Atomic.__exit__ takes the rollback branch on
-            # `exc_type is None and connection.needs_rollback`, and
-            # needs_rollback is set by mark_for_rollback_on_error — which
-            # Model.save_base wraps every write in — whenever a database error
-            # is raised inside the block, even if the hook caught it. That
-            # silent rollback strips the same on_commit hooks, so the deferred
-            # unlocks it discards must be released here too.
-            rolled_back = bool(conn.needs_rollback)
-    except BaseException:
-        rolled_back = True
-        _release_dropped(registry, before)
-        raise
+    with transaction.atomic(using=using):
+        result = fn()
+        # A savepoint also rolls back with NO exception propagating:
+        # Atomic.__exit__ takes the rollback branch on
+        # `exc_type is None and connection.needs_rollback`, and
+        # needs_rollback is set by mark_for_rollback_on_error — which
+        # Model.save_base wraps every write in — whenever a database error
+        # is raised inside the block, even if the hook caught it.
+        rolled_back = bool(conn.needs_rollback)
     if rolled_back:
-        _release_dropped(registry, before)
         # Worth a line even where the caller tolerates it (best-effort hook
         # bundles): the writes are gone and nothing raised, so their absence
         # is the only other trace anyone gets.
@@ -133,22 +67,47 @@ def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
     return result
 
 
-def _release_dropped(registry, before) -> None:
-    """Release the deferred unlocks registered inside a rolled-back window."""
-    dropped = registry[before:]
-    del registry[before:]
-    for state in dropped:
-        # Each release is contained: one cache blip must not skip the
-        # remaining sibling unlocks or replace the hook's original exception
-        # (a missed release degrades to the TTL-bounded leak).
-        try:
-            state.unlock()
-        except Exception:
-            transition_logger.exception(
-                f'failed to release a deferred unlock for '
-                f'{state.instance_key} after a savepoint rollback; '
-                f'the lock expires via its TTL.'
-            )
+def write_failed_state(state, failed_state, *, prefix, consequence):
+    """Write ``failed_state`` in a savepoint. The one copy of this write.
+
+    Returns ``None`` when the write landed (and logs the ``SET_STATE``
+    line), or the write's exception when it did not. On a failed write
+    the instance attribute is restored to the pre-write value — a
+    discarded savepoint leaves it refreshed to a value the database
+    never had, and the failure hooks must not read that. The caller
+    decides what a failed write means: the synchronous paths re-raise
+    the original side-effect exception unchanged; the worker paths
+    record the error on the row and complete it anyway. ``prefix``
+    starts both log lines; ``consequence`` tells the operator what
+    happens next.
+
+    The savepoint opens on the instance's alias, not DEFAULT: set_state
+    routes its write with ``hints={'instance': ...}``, so a savepoint
+    opened on DEFAULT would guard the wrong connection.
+    ``require_commit``, because the success branch logs ``SET_STATE`` —
+    a savepoint Django discards without an exception must surface as
+    the failure it is, not log a state change that never landed.
+    """
+    previous = state.get_state()
+    try:
+        _run_in_savepoint(
+            state.instance._state.db or DEFAULT_DB_ALIAS,
+            lambda: state.set_state(failed_state),
+            require_commit=True,
+        )
+    except Exception as write_error:
+        setattr(state.instance, state.field_name, previous)
+        transition_logger.error(
+            f'{prefix} could not write failed_state {failed_state!r} on '
+            f'{state.instance_key}: {type(write_error).__name__}: '
+            f'{write_error}. {consequence}',
+            exc_info=True,
+        )
+        return write_error
+    transition_logger.info(
+        f'{prefix} {TransitionEventType.SET_STATE.value} {failed_state}'
+    )
+    return None
 
 
 def _log_hook_error(message: str, error: BaseException, **log_kwargs) -> None:
@@ -269,7 +228,7 @@ class Callbacks(BaseCommand):
                     f'{command_name}: {error}',
                     error,
                     exc_info=True,
-                    extra={'kwargs': redact_log_kwargs(kwargs)},
+                    extra={'kwargs': dict(kwargs)},
                 )
 
 

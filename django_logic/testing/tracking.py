@@ -54,9 +54,8 @@ def _name(fn) -> str:
 def _coerce_exception(fail_with, hook_name) -> BaseException:
     if isinstance(fail_with, BaseException):
         return fail_with
-    if isinstance(fail_with, type) and issubclass(fail_with, BaseException):
-        return fail_with()
     if callable(fail_with):
+        # Covers an exception CLASS too — calling it constructs the instance.
         return fail_with()
     return Exception(f'injected failure in side-effect {hook_name!r}')
 

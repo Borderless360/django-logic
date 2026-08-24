@@ -156,8 +156,8 @@ class KwargsRoundTripTests(TestCase):
 
     def test_undecodable_kwargs_row_counts_errors_and_routes_failed_state(self):
         # A decode that really raises (a user_id that cannot be a primary key)
-        # counts as an attempt failure. Otherwise errors_count stays at 0 and
-        # the periodic starter sends the row to the queue again forever.
+        # counts as an attempt failure. Otherwise errors_count stays at 0
+        # and the row stays claimable forever.
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
         transition_message = TransitionMessage.objects.create(
@@ -175,8 +175,8 @@ class KwargsRoundTripTests(TestCase):
         self.assertFalse(transition_message.is_completed)
         self.assertEqual(transition_message.errors_count, 1)
 
-        # Run the remaining attempts as the worker would. The periodic starter
-        # only picks a row up once RETRY_MINUTES have passed.
+        # Run the remaining attempts as the worker would. A row becomes
+        # claimable again once RETRY_MINUTES have passed.
         for _ in range(2):
             with self.assertRaises(TypeError):
                 run_background_transition(transition_message.pk)

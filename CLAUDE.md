@@ -218,13 +218,14 @@ same release's own fixes. Therefore:
   `tests/background`. There is no pytest configuration — do not add one
   without wiring `DJANGO_SETTINGS_MODULE`.
 - `django_logic/background/` is the durable engine: `transitions.py`
-  (enqueue), `dispatch.py`, `pull.py` (the worker loop), `runner.py`
-  (execute on the worker), `safety_nets.py`, `models.py`
-  (`TransitionMessage`), `settings.py`.
-- Read `docs/design/BACKGROUND_TRANSITION_ANALYSIS.md` and
+  (enqueue), `pull.py` (the worker loop), `runner.py` (execute on the
+  worker), `safety_nets.py`, `models.py` (`TransitionMessage`),
+  `serializers.py` (kwargs round-trip). Settings readers live in
+  `django_logic/conf.py`.
+- Read `docs/design/PULL_WORKERS.md` and
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
-  background engine.
-- `CHANGELOG.md` is the record of what shipped and why; `TODO.md` holds what
-  has not. Neither is a design document — do not add planning docs that
-  duplicate them.
+  background engine. `docs/history/` holds superseded design records.
+- `CHANGELOG.md` is the record of what shipped and why. Open GitHub issues
+  hold what has not. Do not add a TODO.md or planning docs that duplicate
+  issues.

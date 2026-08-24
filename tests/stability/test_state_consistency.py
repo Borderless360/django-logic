@@ -92,7 +92,7 @@ class TestStateConsistencyAfterLockExpiry(StabilityTestCase):
         """After TTL expiry the Redis key is gone and the DB state is
         whatever the last COMMITTED transition wrote — a killed sync run
         rolls back to its source (0.12.0: no in-progress marker), so
-        nothing needs detecting or handling; the instance is re-drivable.
+        nothing needs detecting or handling; the transition can run again.
         """
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')

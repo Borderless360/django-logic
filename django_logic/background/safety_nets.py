@@ -1,4 +1,4 @@
-"""The safety nets: the watchdog, the stuck finalizer, the cleanup sweep.
+"""The safety nets: the stuck finalizer and the cleanup sweep.
 
 Plain functions. The pull worker loop runs them on a fixed cadence
 (``pull.run_worker``), so no scheduler has to be configured for them.
@@ -7,29 +7,30 @@ the retry pass.
 
 What each one owns:
 
-* :func:`run_pending` — run every claimable row inline. The visibility
+* :func:`retry_pending` — run every claimable row inline. The visibility
   rule is the same one the pull claim uses: uncompleted, retries left,
   and past the retry wait after the last recorded error. Sync mode's
   "time passed" simulation.
-* :func:`watchdog_stale_attempts` — record a timeout error on attempts
-  that outlived their declared ``timeout=``.
 * :func:`detect_stuck_transitions` — finalize rows stuck at
   ``MAX_ERRORS``, and report rows that no worker has ever picked up.
 * :func:`cleanup_completed_transitions` — delete old completed rows,
   keeping the newest terminal-failure row per instance and process.
+
+A hanging attempt needs no net here: the worker enforces the declared
+``timeout=`` on its attempt process (``pull``), and a dead worker's row
+lock dies with its connection.
 """
 from __future__ import annotations
 
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Min, Q
+from django.db.models import Q
 from django.utils import timezone
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import (
-    abandon_timed_out_attempt,
     finalize_stuck_attempt,
     run_background_transition,
 )
@@ -40,10 +41,10 @@ def _claimable(queues: list[str] | None = None):
     """Rows a worker may take now. The one place the visibility rule is
     written — the pull claim and the sync retry pass both read it."""
     retry_cutoff = timezone.now() - timedelta(
-        minutes=bg_settings.retry_minutes())
+        minutes=conf.retry_minutes())
     rows = TransitionMessage.objects.filter(
         is_completed=False,
-        errors_count__lt=bg_settings.max_errors(),
+        errors_count__lt=conf.max_errors(),
     ).filter(
         Q(last_error_dt__isnull=True) | Q(last_error_dt__lt=retry_cutoff)
     )
@@ -52,7 +53,7 @@ def _claimable(queues: list[str] | None = None):
     return rows.order_by('created')
 
 
-def run_pending(queues: list[str] | None = None) -> int:
+def retry_pending() -> int:
     """Run every claimable row inline. Returns how many ran cleanly.
 
     A failing side-effect re-raises out of ``run_background_transition``
@@ -61,58 +62,14 @@ def run_pending(queues: list[str] | None = None) -> int:
     the runner's own row-lock guard.
     """
     ran = 0
-    for pk in list(_claimable(queues).values_list('pk', flat=True)):
+    for pk in list(_claimable(None).values_list('pk', flat=True)):
         try:
             run_background_transition(pk)
         except Exception as e:
-            logger.error(f'run_pending: TransitionMessage#{pk} failed: {e}')
+            logger.warning(f'retry_pending: TransitionMessage#{pk} failed: {e}')
             continue
         ran += 1
     return ran
-
-
-def watchdog_stale_attempts() -> int:
-    """Record a timeout error on attempts past their declared ``timeout=``.
-
-    The scan is narrowed by a database-side ``started_at`` floor: first
-    ``Min(timeout_seconds)`` over uncompleted timeout rows, then
-    ``started_at < now - min_timeout``. That bound excludes every row
-    whose attempt cannot be stale yet; the per-row comparison runs in
-    Python, portable across backends. Rows a worker holds are skipped
-    (``abandon_timed_out_attempt`` gives up on a held row) — the watchdog
-    is for abandoned attempts, not slow ones.
-
-    Returns the number of rows touched.
-    """
-    now = timezone.now()
-    base = TransitionMessage.objects.filter(
-        is_completed=False,
-        started_at__isnull=False,
-        timeout_seconds__isnull=False,
-    )
-    min_timeout = base.aggregate(m=Min('timeout_seconds'))['m']
-    if min_timeout is None:
-        return 0
-
-    floor = now - timedelta(seconds=min_timeout)
-    candidates = (
-        base.filter(started_at__lt=floor)
-        .values_list('pk', 'started_at', 'timeout_seconds')
-    )
-
-    touched = 0
-    for pk, started_at, timeout_seconds in candidates:
-        if started_at + timedelta(seconds=timeout_seconds) >= now:
-            continue
-        try:
-            if abandon_timed_out_attempt(pk):
-                touched += 1
-        except Exception as e:
-            logger.error(
-                f'watchdog_stale_attempts: failed on '
-                f'TransitionMessage#{pk}: {e}'
-            )
-    return touched
 
 
 def detect_stuck_transitions() -> int:
@@ -128,9 +85,7 @@ def detect_stuck_transitions() -> int:
     Returns the number of rows finalized.
     """
     now = timezone.now()
-    report_after = max(
-        bg_settings.retry_minutes() * (bg_settings.max_errors() + 1), 15,
-    )
+    report_after = conf.retry_window_minutes()
     never_started = (
         TransitionMessage.objects
         .filter(
@@ -149,7 +104,7 @@ def detect_stuck_transitions() -> int:
             f'(dl_worker --queues {queue_name}); it takes the row at once.'
         )
 
-    max_errors = bg_settings.max_errors()
+    max_errors = conf.max_errors()
     stuck_ids = list(
         TransitionMessage.objects
         .filter(is_completed=False, errors_count__gte=max_errors)
@@ -179,7 +134,7 @@ def cleanup_completed_transitions() -> int:
     """
     from django.db.models import OuterRef, Subquery
 
-    cutoff = timezone.now() - timedelta(days=bg_settings.cleanup_days())
+    cutoff = timezone.now() - timedelta(days=conf.cleanup_days())
     # ended_in_failure, not an errors_count comparison: a permanent failure
     # completes at one error, and a retried success can carry several, so
     # the count cannot tell them apart. Every terminal-failure path sets

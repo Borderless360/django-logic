@@ -1,7 +1,7 @@
-"""Pass-4 review fixes: the checks/settings/binding layer must not crash,
-lie, or reject working topologies.
+"""The checks/settings/binding layer must not crash, lie, or reject
+working topologies.
 
-Each test here pins one confirmed finding:
+Each test pins one confirmed finding:
 
 * A bound ``BackgroundTransition`` without ``django_logic.background`` in
   ``INSTALLED_APPS`` was reported by nothing — every check early-returns on
@@ -120,7 +120,7 @@ class NonDictSettingsBlockTests(SimpleTestCase):
                 self.assertIn(type(bad).__name__, str(ctx.exception))
 
     def test_background_readers_name_the_setting(self):
-        from django_logic.background import settings as bg_settings
+        from django_logic import conf as bg_settings
 
         with override_settings(DJANGO_LOGIC='BACKGROUND_EXECUTION=sync'):
             with self.assertRaises(ImproperlyConfigured) as ctx:

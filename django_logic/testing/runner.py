@@ -46,18 +46,16 @@ def _messages(instance, process_name, **filters):
     fields of the same model are independent state machines and their rows
     must not be confused."""
     from django_logic.background.models import TransitionMessage
-    return TransitionMessage.objects.filter(
-        app_label=instance._meta.app_label,
-        model_name=instance._meta.model_name,
-        instance_id=str(instance.pk),
-        process_name=process_name,
-        **filters,
-    ).order_by('-id')
+    return (
+        TransitionMessage.for_instance(instance, process_name)
+        .filter(**filters)
+        .order_by('-id')
+    )
 
 
 def uncompleted_message(instance, process_name):
-    """The bound process's uncompleted ``TransitionMessage`` (what the
-    periodic starter would re-dispatch), or ``None``."""
+    """The bound process's uncompleted ``TransitionMessage`` (what a
+    worker's next claim would pick up), or ``None``."""
     return _messages(instance, process_name, is_completed=False).first()
 
 
@@ -79,8 +77,8 @@ def message_for(instance, transition_name, process_name):
 
 
 def rerun_message(message_id):
-    """Re-run a specific TransitionMessage inline — what the periodic starter
-    does, but synchronous and immediate (ignores the recency guard)."""
+    """Re-run a specific TransitionMessage inline — what a worker's next
+    claim does, but synchronous and immediate (ignores the retry wait)."""
     from django_logic.background import sync_execution
     from django_logic.background.runner import run_background_transition
     with sync_execution():

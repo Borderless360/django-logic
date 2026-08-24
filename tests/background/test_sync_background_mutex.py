@@ -22,13 +22,12 @@ from django.db import IntegrityError
 from django.test import (
     TestCase,
     TransactionTestCase,
-    modify_settings,
     override_settings,
 )
 from django.utils import timezone
 
 from django_logic import Action
-from django_logic.background.dispatch import in_flight, sync_execution
+from django_logic.background import in_flight, sync_execution
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import (
@@ -146,23 +145,10 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         # The refusal path must still release the lock.
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
-    def test_running_attempt_inside_its_timeout_is_still_running(self):
-        # An attempt inside started_at + timeout_seconds is still running,
-        # however old `modified` is. Without that signal a healthy 40-minute
-        # attempt read as stranded at minute 16.
-        row = _make_row(self.widget)
-        TransitionMessage.objects.filter(pk=row.pk).update(
-            modified=timezone.now() - timedelta(minutes=16),
-            started_at=timezone.now() - timedelta(minutes=16),
-            timeout_seconds=3600,
-        )
-
-        with self.assertRaises(TransitionTemporarilyUnavailable):
-            self.widget.process.cancel()
-
     def test_attempt_past_its_timeout_and_retry_window_is_stranded(self):
-        # The timeout has passed and nothing was recorded since, so the
-        # watchdog would have abandoned the attempt: the retry window decides.
+        # The timeout has passed, nothing was recorded since, and no worker
+        # holds the row: the retry window decides. (A live long attempt is
+        # protected by the row-lock probe — see test_worker_holds_row.)
         row = _make_row(self.widget)
         TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(hours=2),
@@ -229,19 +215,6 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         with self.assertRaises(AlreadyInProgress):
             with sync_execution():
                 self.widget.process.fulfil()
-
-    @modify_settings(INSTALLED_APPS={'remove': 'django_logic.background'})
-    def test_probe_and_gate_answer_not_installed_with_no_query(self):
-        # With the background app uninstalled, in_flight() answers False
-        # without querying, and the synchronous gate lets the transition
-        # through — even though the row is still in the table.
-        _make_row(self.widget)
-
-        with self.assertNumQueries(0):
-            self.assertFalse(in_flight(self.widget, 'process'))
-        self.widget.process.cancel()
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'cancelled')
 
     def test_public_in_flight_probe_reads_the_row(self):
         # in_flight() is the documented probe for consumer API seams. One

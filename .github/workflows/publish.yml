@@ -1,0 +1,43 @@
+name: Publish
+
+# A tag publishes the release. Nothing publishes from a branch push, so
+# the tag is the only thing that can reach PyPI.
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # PyPI trusted publishing signs the upload with this token, so the
+      # repo holds no PyPI credential.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check the tag matches the packaged version
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          packaged=$(python -c "import importlib.metadata as m; print(m.version('django-logic'))")
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$packaged" != "$tagged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match pyproject version $packaged"
+            exit 1
+          fi
+
+      - name: Run the tests
+        run: python tests/manage.py test
+
+      - name: Build
+        run: |
+          pip install build
+          python -m build
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,4 +1,4 @@
-"""Regression pins for the engine's own failure paths.
+"""The engine's own failure paths, pinned.
 
 Every test here fails if its fix is reverted. Each assertion was checked by
 mutation, because this suite has shipped assertions that passed against the
@@ -9,7 +9,7 @@ from datetime import timedelta
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from django_logic import Action, Process, ProcessManager, Transition
@@ -17,7 +17,6 @@ from django_logic.background import BackgroundTransition
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.runner import (
-    abandon_timed_out_attempt,
     finalize_stuck_attempt,
     run_background_transition,
 )
@@ -51,101 +50,6 @@ def _noop(instance, **kwargs):
 
 def _boom(instance, **kwargs):
     raise ValueError('boom')
-
-
-# --- The watchdog re-checks staleness under the row lock -------------------
-
-class WatchdogUnderLockRecheckProcess(Process):
-    process_name = 'wd_recheck_proc'
-    transitions = [
-        BackgroundTransition(
-            'go', sources=['draft'], target='done',
-            in_progress_state='wd_running', failed_state='wd_failed',
-            side_effects=[_noop], timeout=60,
-        ),
-    ]
-
-
-@override_settings(DJANGO_LOGIC=_SYNC)
-class WatchdogUnderLockRecheckTests(_BindCleanup, TestCase):
-    """The candidate scan takes no lock, so its staleness verdict is a hint.
-    Without a second check under the lock, the watchdog charges a timeout to
-    an attempt that started after the scan.
-    """
-
-    _bound = (WatchdogUnderLockRecheckProcess,)
-
-    def setUp(self):
-        super().setUp()
-        ProcessManager.bind_model_process(
-            Invoice, WatchdogUnderLockRecheckProcess, state_field='status')
-        cache.clear()
-        self.addCleanup(cache.clear)
-
-    def _stale_row(self, **overrides):
-        invoice = Invoice.objects.create(status='wd_running')
-        fields = dict(
-            app_label='tests', model_name='invoice',
-            instance_id=str(invoice.pk),
-            process_name='wd_recheck_proc', transition_name='go',
-            queue_name='django_logic', timeout_seconds=60,
-            started_at=timezone.now() - timedelta(hours=1),
-        )
-        fields.update(overrides)
-        return invoice, TransitionMessage.objects.create(**fields)
-
-    def test_a_stale_attempt_is_still_charged(self):
-        """Control: the watchdog still charges a genuinely stale attempt."""
-        _, transition_message = self._stale_row()
-
-        self.assertTrue(abandon_timed_out_attempt(transition_message.pk))
-
-        transition_message.refresh_from_db()
-        self.assertEqual(transition_message.errors_count, 1)
-        self.assertIn(
-            '[watchdog timeout]', transition_message.last_error_message)
-
-    def test_an_attempt_restarted_after_the_scan_is_not_charged(self):
-        """The row was stale when scanned, but a new attempt started before
-        the watchdog took the lock. Charging it would spend a retry the
-        consumer still needs."""
-        _, transition_message = self._stale_row()
-        transition_message.record_error(
-            ValueError('the previous attempt failed'))
-        # A retry stamps the new attempt after that error, which is what the
-        # worker does before it starts the attempt.
-        TransitionMessage.objects.filter(pk=transition_message.pk).update(
-            started_at=timezone.now())
-
-        with self.assertLogs('django-logic.transition', level='INFO') as logs:
-            self.assertFalse(abandon_timed_out_attempt(transition_message.pk))
-        self.assertTrue(
-            any('not stale when re-checked' in line for line in logs.output),
-            logs.output,
-        )
-
-        transition_message.refresh_from_db()
-        self.assertEqual(
-            transition_message.errors_count, 1,
-            'the running attempt was charged again')
-        self.assertFalse(transition_message.is_completed)
-
-    def test_a_restart_at_max_errors_cannot_complete_a_running_attempt(self):
-        """Without the re-check the row is completed while its worker still
-        runs. The worker then succeeds against a completed row and the
-        instance keeps failed_state."""
-        invoice, transition_message = self._stale_row(errors_count=2)
-        # errors_count reaches MAX_ERRORS.
-        transition_message.record_error(ValueError('second failure'))
-        TransitionMessage.objects.filter(pk=transition_message.pk).update(
-            errors_count=2, started_at=timezone.now())
-
-        self.assertFalse(abandon_timed_out_attempt(transition_message.pk))
-
-        transition_message.refresh_from_db()
-        invoice.refresh_from_db()
-        self.assertFalse(transition_message.is_completed)
-        self.assertEqual(invoice.status, 'wd_running')
 
 
 # --- The safety-net finalizers respect a manual state fix ------------------
@@ -212,21 +116,6 @@ class SupersedeParityTests(_BindCleanup, TestCase):
             transition_message.last_error_message.startswith('[superseded]'))
         self.assertIn(
             'the original cause', transition_message.last_error_message)
-        self.assertEqual(invoice.status, 'fixed_by_hand')
-        self.assertEqual(_HOOK_LOG, [], 'failure hooks ran on a fixed row')
-
-    def test_watchdog_finalizer_supersedes_and_runs_no_hooks(self):
-        invoice, transition_message = self._row_at_max(
-            status='fixed_by_hand', errors_count=2,
-            started_at=timezone.now() - timedelta(hours=1),
-        )
-
-        self.assertTrue(abandon_timed_out_attempt(transition_message.pk))
-
-        transition_message.refresh_from_db()
-        invoice.refresh_from_db()
-        self.assertTrue(transition_message.is_completed)
-        self.assertIn('[superseded]', transition_message.last_error_message)
         self.assertEqual(invoice.status, 'fixed_by_hand')
         self.assertEqual(_HOOK_LOG, [], 'failure hooks ran on a fixed row')
 
@@ -330,9 +219,9 @@ class ReservedKwargProcess(Process):
 @override_settings(DJANGO_LOGIC=_SYNC)
 class ReservedKwargTests(_BindCleanup, TestCase):
     """A caller keyword named like an engine parameter (``exception``,
-    ``deferrable``, ``state``) used to collide on the failure path. The real
-    error became a TypeError, ``failed_state`` was never written, and the lock
-    stayed until it expired.
+    ``state``) used to collide on the failure path. The real error became
+    a TypeError, ``failed_state`` was never written, and the lock stayed
+    until it expired.
     """
 
     _bound = (ReservedKwargProcess,)
@@ -346,7 +235,7 @@ class ReservedKwargTests(_BindCleanup, TestCase):
 
     def test_transition_refuses_and_leaves_no_lock(self):
         invoice = Invoice.objects.create(status='draft')
-        for kwarg in ('exception', 'deferrable', 'state'):
+        for kwarg in ('exception', 'state'):
             with self.subTest(kwarg=kwarg):
                 with self.assertRaises(TypeError) as ctx:
                     invoice.reserved_kwarg_proc.go(**{kwarg: 'anything'})
@@ -492,8 +381,8 @@ class UnclassifiedRestoreFailureProcess(Process):
 class UnclassifiedRestoreFailureTests(_BindCleanup, TestCase):
     """Restore treats the permanent failures (model uninstalled, row gone,
     transition renamed) as final and completes the row. Any other restore
-    error must still raise ``errors_count``, or the periodic starter sends
-    the row to the queue forever.
+    error must still raise ``errors_count``, or the row stays claimable
+    forever.
     """
 
     _bound = (UnclassifiedRestoreFailureProcess,)
@@ -539,85 +428,6 @@ class UnclassifiedRestoreFailureTests(_BindCleanup, TestCase):
             transition_message.is_completed, 'the row would retry forever')
 
 
-# --- A rolled-back attempt releases nested deferred unlocks ----------------
-
-_NESTED_INSTANCE: dict = {}
-
-
-class NestedInstanceProcess(Process):
-    process_name = 'nested_instance_proc'
-    transitions = [
-        Transition('approve', sources=['draft'], target='approved'),
-    ]
-
-
-def _drive_the_nested_instance(instance, **kwargs):
-    nested = Invoice.objects.get(pk=_NESTED_INSTANCE['pk'])
-    NestedInstanceProcess(field_name='status', instance=nested).approve()
-
-
-class DeferLeakProcess(Process):
-    process_name = 'defer_leak_proc'
-    transitions = [
-        BackgroundTransition(
-            'go', sources=['draft'], target='done',
-            in_progress_state='dl_running', failed_state='dl_failed',
-            side_effects=[_drive_the_nested_instance, _boom],
-        ),
-    ]
-
-
-class AttemptRollbackDeferredUnlockTests(TransactionTestCase):
-    """A side-effect may drive a second instance. Under
-    ``DEFER_UNLOCK_UNTIL_COMMIT`` that nested transition registers its unlock
-    on ``transaction.on_commit`` inside the attempt savepoint. When a later
-    side-effect fails, the savepoint rolls back the nested state write and
-    Django discards the unlock with it. The second instance then stayed locked
-    until its lock expired.
-    """
-
-    def setUp(self):
-        super().setUp()
-        ProcessManager.bind_model_process(
-            Invoice, DeferLeakProcess, state_field='status')
-        ProcessManager.bind_model_process(
-            Invoice, NestedInstanceProcess, state_field='status')
-        cache.clear()
-        self.addCleanup(cache.clear)
-        self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, DeferLeakProcess)
-        self.addCleanup(
-            ProcessManager.unbind_model_process,
-            Invoice, NestedInstanceProcess)
-
-    def test_attempt_rollback_releases_the_nested_instances_lock(self):
-        from django_logic.state import State
-        from tests import dl_settings
-
-        driver = Invoice.objects.create(status='draft')
-        nested = Invoice.objects.create(status='draft')
-        _NESTED_INSTANCE['pk'] = nested.pk
-
-        with override_settings(DJANGO_LOGIC=dl_settings(
-            BACKGROUND_EXECUTION='sync',
-            DEFER_UNLOCK_UNTIL_COMMIT=True,
-            TRANSITION_MESSAGE_MAX_ERRORS=3,
-        )):
-            with self.assertRaises(ValueError):
-                driver.defer_leak_proc.go()
-
-        nested.refresh_from_db()
-        # The nested write rolled back with the attempt savepoint...
-        self.assertEqual(nested.status, 'draft')
-        # ...so its lock guards nothing and must have been released.
-        nested_state = State(
-            nested, 'status', process_name='nested_instance_proc')
-        self.assertFalse(
-            nested_state.is_locked(),
-            'the rolled-back attempt left the nested instance locked',
-        )
-
-
 # --- The runner's tree walks need the cycle guard --------------------------
 
 class CycleBackProcess(Process):
@@ -649,39 +459,47 @@ CycleBackProcess.nested_processes = [CycleRootProcess]  # close the cycle
 
 
 class RunnerTreeWalkCycleTests(TestCase):
-    """A process may nest back into a parent, so every walk over
-    ``nested_processes`` needs the cycle guard. The two walks in the restore
-    path missed it and raised ``RecursionError``, which left the row
-    impossible to restore or complete.
+    """A process may nest back into a parent, so the restore lookup's walk
+    over ``nested_processes`` needs the cycle guard. It used to miss it and
+    raise ``RecursionError``, which left the row impossible to restore or
+    complete. A transition reached through two nested paths is one shared
+    object, so it must count as one match, not an ambiguity.
     """
 
-    def test_owner_lookup_terminates_on_a_cycle(self):
-        from django_logic.background.runner import (
-            _find_background_transition_in_owner,
+    @staticmethod
+    def _row(action_name, owner=''):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            pk=1, transition_name=action_name, owning_process_class=owner,
         )
 
+    def test_owner_lookup_terminates_on_a_cycle(self):
+        from django_logic.background.runner import _find_transition
+
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        found = _find_background_transition_in_owner(
-            root, 'inner',
+        found = _find_transition(root, self._row(
+            'inner',
             f'{CycleBackProcess.__module__}.{CycleBackProcess.__name__}',
-        )
+        ))
         self.assertIsNotNone(found)
         self.assertEqual(found.action_name, 'inner')
 
-    def test_owner_lookup_terminates_when_the_owner_is_gone(self):
-        from django_logic.background.runner import (
-            _find_background_transition_in_owner,
-        )
+    def test_gone_owner_falls_back_to_the_unambiguous_name(self):
+        from django_logic.background.runner import _find_transition
 
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        self.assertIsNone(_find_background_transition_in_owner(
-            root, 'inner', 'gone.RenamedProcess'))
+        found = _find_transition(root, self._row('inner', 'gone.RenamedProcess'))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.action_name, 'inner')
 
-    def test_name_lookup_terminates_on_a_cycle(self):
-        from django_logic.background.runner import _background_transitions_named
+    def test_name_lookup_terminates_on_a_cycle_and_counts_shared_once(self):
+        from django_logic.background.runner import _find_transition
 
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        matches = _background_transitions_named(root, 'inner')
-        self.assertEqual(len(matches), 1, 'a shared transition counted twice')
-        self.assertEqual(
-            _background_transitions_named(root, 'nope'), [])
+        # 'inner' is reachable through the cycle twice, but it is one shared
+        # object: one match, not an ambiguity refusal.
+        found = _find_transition(root, self._row('inner'))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.action_name, 'inner')
+        self.assertIsNone(_find_transition(root, self._row('nope')))

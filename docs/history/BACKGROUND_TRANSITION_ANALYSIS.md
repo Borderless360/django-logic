@@ -1,5 +1,11 @@
 # Background Transition — Design & Failure Analysis
 
+> **Historical record.** This file describes the broker design (Celery
+> `apply_async` enqueue, `@shared_task(acks_late=True)` execute) that
+> 0.16.0 removed. The current design record is
+> [`PULL_WORKERS.md`](../design/PULL_WORKERS.md): workers claim committed
+> `TransitionMessage` rows straight from the database.
+
 > Design document for `BackgroundTransition` / `BackgroundAction`, first
 > shipped in Django Logic v0.3.0. This file records the rationale and the
 > crash-by-crash analysis behind the design. The README documents the

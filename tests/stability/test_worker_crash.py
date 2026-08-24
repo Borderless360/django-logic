@@ -5,9 +5,9 @@ Proves that the durable BackgroundTransition design recovers from worker
 crashes at every point in the execution timeline.
 
 Each test simulates a crash by raising WorkerCrashSimulated at a specific
-step, then verifies the system can recover via the periodic starter.
+step, then verifies the system recovers through the next claim.
 
-Reference: docs/design/BACKGROUND_TRANSITION_ANALYSIS.md "Complete Execution
+Reference: docs/history/BACKGROUND_TRANSITION_ANALYSIS.md "Complete Execution
 Timeline: Every Crash Point"
 """
 from unittest.mock import patch, MagicMock
@@ -35,8 +35,8 @@ class TestCrashDuringSideEffects(StabilityTestCase):
     """
     1.1 -- Worker crashes mid-side-effects.
 
-    Side effects partially execute. On recovery (periodic starter),
-    ALL side effects must re-run from scratch. Requires idempotency.
+    Side effects partially execute. On recovery, all side effects
+    re-run from scratch. Requires idempotency.
     """
 
     def test_crash_during_second_side_effect_then_recover(self):
@@ -191,8 +191,8 @@ class TestCrashBetweenCommitAndDispatch(StabilityTestCase):
     """
     1.4 -- The enqueue atomic block commits but on_commit never fires.
 
-    The TransitionMessage row exists in DB but no Celery task was dispatched.
-    The periodic starter must find and re-dispatch the message.
+    The TransitionMessage row exists but no attempt has started it.
+    The next claim must take the row.
 
     NOTE: This test validates the contract at the state/lock level.
     Full TransitionMessage integration requires the BackgroundTransition
@@ -258,7 +258,7 @@ class TestMaxRetriesExhausted(StabilityTestCase):
 
     def test_no_failed_state_leaves_the_source_state(self):
         """Without failed_state, a failed sync run leaves the instance at its
-        source (0.12.0: no in-progress marker) — re-drivable, not parked."""
+        source with no in-progress state written — it can run again, not parked."""
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
         self.track_lock(state)

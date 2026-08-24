@@ -2,6 +2,344 @@
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-08-24
+
+The cleanup after the pull cut (#221): the words now match the engine,
+one copy exists of what had four, and two mechanisms that could not do
+their jobs were replaced by ones that can. Library size shrinks; the
+consumer API is unchanged except where noted.
+
+### Fixed
+
+- **The worker wake-up works on psycopg 3** (#227). `_wait_for_work`
+  called `poll()` and `notifies.clear()` — psycopg 2 methods — on the
+  psycopg 3 connection the project pins, so every wait raised into a
+  bare `except` and slept a second full poll interval; a notification
+  made pickup slower than a plain poll. psycopg 3 (>=3.2) now waits
+  inside `notifies(timeout=..., stop_after=1)`; psycopg 2 keeps
+  `select` + `poll()` and drains a notification that arrived during
+  earlier statements. `LISTEN` is issued once per connection. Validated
+  against PostgreSQL 17: the wait returns at the notification, not the
+  timeout. Two new tests pin it (one live-NOTIFY, one degrade-to-sleep).
+- **Migration 0008's docstring** no longer describes two columns that
+  migration 0009 removed (#233). The file rename waits for the squash:
+  renaming an applied migration ghosts it in every consumer's
+  `django_migrations`.
+- **A timeout kill that races the attempt's own exit no longer takes
+  down the worker** (#239). After `WNOHANG` says the attempt is still
+  running, the process can exit before `os.kill`. That used to raise
+  `ProcessLookupError` out of the worker loop. The wait now treats a
+  vanished process as a normal exit unless the kill was sent.
+
+### Changed — `timeout=` now means what it says (#229)
+
+- The worker enforces the declared budget: every attempt runs in its
+  own forked attempt process, and one that runs past its `timeout=` is
+  killed. The kill releases the attempt's row lock with its connection,
+  one `[timeout]` error is recorded on the row, the claim's retry wait
+  paces the next attempt, and at `MAX_ERRORS` the stuck finalizer ends
+  the row in `failed_state`.
+- Removed with it: `abandon_timed_out_attempt`,
+  `watchdog_stale_attempts`, the watchdog's safety-net step, and
+  `retry_status`'s declared-budget branch with `RETRY_SLACK`. The
+  watchdog could only reach an attempt whose row lock was already gone
+  (side-effects run inside that lock), so it charged budgets it could
+  not enforce; five fixes across four releases guarded that scan, and
+  the third fix on one defect class is a design cut. A live long attempt
+  stays protected by the row-lock probe (0.15.0).
+- Behaviour change: `timeout=` kills attempts instead of only charging
+  them, and enforcement exists only where an attempt process exists —
+  sync mode runs in the caller's thread, unbounded. The consumer census
+  found zero `timeout=` declarations. The `timeout_seconds` column stays.
+
+### Changed — background enqueue no longer re-runs conditions (#231)
+
+- `BackgroundTransition.change_state` re-ran the conditions and
+  permissions the resolver had already evaluated, before taking the
+  lock, so the re-check closed no race and cost every enqueue a
+  duplicate query burst. The synchronous path never had it. The guard
+  that matters is unchanged: `_ensure_db_state_in_sources` runs under
+  the lock. A condition that flips between resolution and enqueue now
+  enqueues — the behaviour the synchronous path already had.
+
+### Changed — one copy of what had four (#228, #225, #230)
+
+- `commands.write_failed_state` is the one savepointed `failed_state`
+  write. Both synchronous `fail_transition`s and both worker terminal
+  paths call it; the finalizer's divergent `set failed_state=` log line
+  becomes the standard `SET_STATE` event.
+- `runner._complete_terminal_failure` is the one terminal completion for
+  the worker attempt path and the stuck finalizer
+  (`runner._finalize_stuck_row`).
+- One tree walk (`_find_transition`) answers which background transition
+  a row names; the owner match wins during the walk, and the warning for
+  a recorded-but-unmatched owner no longer misreports a renamed
+  transition as a missing class.
+
+### Changed — one module per concern (#232, #235)
+
+- `django_logic/conf.py` owns every `DJANGO_LOGIC` key: one reader per
+  key, one number validator, one bool validator, one place per default.
+  `django_logic/background/settings.py` is gone; the background boot
+  gate (with the two pull-mode deployment checks) lives in
+  `background/apps.py`.
+- `django_logic/background/dispatch.py` is gone: `sync_execution` and
+  the `sync_mode()` reader live in `conf`, the two-branch handoff is
+  inlined into `BackgroundTransition.change_state`, `in_flight` lives
+  beside `retry_status` in `models.py`, and `retry_pending` lives in
+  `safety_nets`. Every documented import path keeps working
+  through the lazy public map. `in_flight` no longer special-cases an
+  install without the background app: the background engine is default
+  functionality, so the probe reads the row, always.
+- One name for the forked process: it is the **attempt process**,
+  everywhere. `_start_attempt`, `_harvest`, and `_record_attempt_error`
+  replace the child/death names from 0.16.0, and the prose says
+  worker/attempt process instead of parent/child.
+- Dead names cleared: `process._RESERVED_KWARGS`, `run_pending`'s
+  never-passed `queues=`, `run_once`'s never-used `isolate` default,
+  `observability.task_label`, two unused imports. Kept against the
+  issue's suggestion: `State.unlock`'s token-less force-release — it is
+  pinned by two tests and is the documented manual repair path for the
+  defer-unlock rollback trade-off.
+
+### Changed — the words match the pull engine (#222, #223, #224, #234)
+
+- No comment, docstring, test, or document still says the periodic
+  starter re-dispatches rows, names `STARTER_QUEUE` (the README's
+  install example carried it), or pins Celery `acks_late`. The claim's
+  `WHERE` clause is the retry rule and the prose now says so.
+  `BACKGROUND_TRANSITION_ANALYSIS.md` is marked as the broker-era
+  historical record; `PULL_WORKERS.md` is the current one. The README
+  carries the four-type lock/gate/chain contract table until 1.0
+  unifies the types.
+- `__all__` stops advertising the command classes (`Conditions`,
+  `Permissions`, `SideEffects`, `Callbacks`); consumers declare lists of
+  functions, and direct imports from `django_logic.commands` (and the
+  top level) keep working.
+- Test files are named for the contract they pin, not the review that
+  found the defect; every assertion kept. `test_issue_fixes_0_12.py`
+  split into `test_write_failure_accounting.py` and
+  `test_definition_validation_pins.py`.
+- Comments in `process.py` and `background/models.py` state the rule in
+  one or two sentences; the incident history stays here in the
+  changelog.
+
+### Changed — the review round (#239, #240, #244, #248, #250)
+
+- **A killed attempt reaped elsewhere is still a timeout** (#239
+  follow-up). When something else reaps the attempt process, `waitpid`
+  raises `ChildProcessError`. The handler returned a normal exit even
+  after the worker sent the kill, so the attempt was charged no
+  `[timeout]` error and the row was claimable again at once. The
+  handler now honours the kill flag, and the `WNOHANG` poll gets the
+  same guard. Two mocked tests pin both paths.
+- **One name each** (#240): the recorder is `_record_attempt_error`
+  and the retry pass is `retry_pending`, with no alias beside either.
+  Test prose stops naming the removed periodic starter;
+  `TestPeriodicStarterContract` is `TestRetryVisibilityContract`.
+  `in_flight`/`in_flight_for` stay: they are public API the consumer
+  calls.
+- **Handled outcomes log at WARNING** (#248): the timeout kill, the
+  recorded crash, a finalized stuck row, the unrestorable fallback,
+  and a failed `retry_pending` row. ERROR remains for what an operator
+  must act on: no worker on a queue, a failed completion write, a
+  failed safety net.
+- **`TransitionNotAllowed` names the state and the actions** (#250).
+  The resolver's refusal carries `current_state` and
+  `available_actions` and its message names both. Other raise sites
+  leave them `None`. The `TransitionTemporarilyUnavailable` split is
+  unchanged.
+- **`DEFER_UNLOCK_UNTIL_COMMIT` is removed** (#244). Nothing set it.
+  The knob, its deferred-unlock registry, the `deferrable=` threading
+  through every release path, and its tests are gone — 651 net lines.
+  Locks release when the transition finishes; drive follow-up work
+  from `transaction.on_commit` when it must see the caller's commit.
+  The key joins the removed-settings tombstones.
+- **The top-level re-export of the command classes is removed**
+  (#244). Import `Conditions`, `Permissions`, `SideEffects`,
+  `Callbacks` from `django_logic.commands`. Kept, against the issue's
+  list: the `*_class` swap hooks — the consumer overrides
+  `Process.permissions_class` on three processes, and its
+  `callbacks_class` and `side_effects_class` overrides belong to the
+  legacy fork, not to this engine; removing the four unused attributes
+  is a public break worth about ten lines, so they wait for 1.0. Also
+  kept: the restore fallbacks (`open_transition_message` still creates
+  blank-owner rows, so that path is current behaviour), and
+  `AlreadyInProgress` as a named class (the consumer catches it by
+  name).
+- **Small cuts, each verified against the consumer**: the
+  instance+process keying is written once
+  (`TransitionMessage.instance_key`/`.for_instance`); the retry-window
+  formula moved to one `conf` reader; `snapshot()` stopped writing a
+  process block nothing reads; `redact_log_kwargs` was `dict(kwargs)`
+  under a name promising removed behaviour — inlined (its test file
+  went with it; the copy rule is stated at the call site);
+  `BackgroundAction.complete_transition` guarded a misuse nothing
+  reaches — deleted. `assert_idempotent` stays: the consumer's tests
+  call it.
+- **Docs match the engine**: the celery-era analysis doc moved to
+  `docs/history/`; CLAUDE.md's module list names files that exist and
+  points at `PULL_WORKERS.md`; the README safety-net count matches its
+  two-bullet list; the `celery` keyword and the empty-alias bullet
+  left the packaging docs; the wake-up's docstring and design doc say
+  it exists for direct-Postgres latency and falls back to the poll
+  floor behind pgbouncer (#227).
+
+### Added — a worker runs several attempts at a time (#257)
+
+- `manage.py dl_worker --concurrency=N` says how many attempts one
+  worker runs at a time. The default is 1, so an existing deployment
+  behaves exactly as before. Each attempt still runs in its own forked
+  attempt process, and each carries its own `timeout=`.
+- Why it exists: capacity used to be process count alone. On a platform
+  that sells fixed memory slices, every one-slot worker has to be sized
+  for its heaviest attempt, while one worker with several slots absorbs
+  the same peak out of one shared pool. The consumer's first production
+  day on 0.16.0 lost two of three workers to the platform's memory
+  quota and drained an hourly fan-out of 119 rows at 2.6 rows a minute.
+- The claim now skips the rows the worker already runs. A worker claims
+  faster than its attempt processes take their row locks, so without
+  that filter the head row would fill every free slot.
+- `docs/design/PULL_WORKERS.md` gains "Sizing a deployment": the memory
+  argument and the connection budget — each running attempt holds one
+  database connection, so budget `workers × (concurrency + 1)`.
+
+### Added — an operator command for an incident (#246)
+
+- `manage.py dl_transitions` lists every uncompleted background
+  transition and says why each one is not moving: at `MAX_ERRORS`,
+  waiting out the retry pause, running on a worker, or claimable with
+  no worker on its queue. `--queues` narrows the list.
+- `manage.py dl_transitions --send <pk>` clears the retry wait on one
+  row and notifies the workers, so the next claim takes it. It runs no
+  side-effects itself and adds no scheduler; a worker still claims the
+  row.
+- `docs/design/PULL_WORKERS.md` gains "Knowing a worker stopped". The
+  safety nets run inside the worker loop, so a dead worker means no
+  stuck report either. Alert on the process, not on the rows.
+
+### Changed — sync is a test runtime, not a deploy switch (#237)
+
+- Boot refuses `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` unless
+  `django_logic.conf.enable_sync()` ran first. Call it from a test
+  settings module, before Django boots. Production is always pull.
+- Why: sync runs every side-effect inline, in the caller's own thread,
+  and nothing retries what fails. In a web process that means the
+  request runs the work. A settings value or an environment variable
+  must not be able to choose it.
+- `sync_execution()` is unchanged and needs no opt-in: it forces one
+  block inline and is the supported way to do that anywhere.
+- The SQLite-in-pull error no longer offers sync as the way out. It
+  says to point the alias at PostgreSQL.
+- **Upgrade step**: a consumer whose test settings set
+  `BACKGROUND_EXECUTION='sync'` must add `enable_sync()` beside it.
+
+### Fixed — the state lock names the row, not the class (#245)
+
+- The lock key was built from `app_label`, `model_name`, the field and
+  the pk. A proxy model and the model it proxies have different model
+  names and one table, so they took two locks on one row and one state
+  column; the same holds for a multi-table-inheritance child and the
+  parent that declares the column. Two transitions could run on one row
+  at the same time.
+- The key now names the table that holds the column
+  (`instance._meta.get_field(field_name).model._meta.db_table`), the
+  column, and the pk. The consumer has four processes bound to one
+  physical export table through proxy models, which is where this was
+  found.
+- **This is the lock half only.** `TransitionMessage.instance_key` still
+  keys the durable row on the stored `model_name`, so a proxy and the
+  model it proxies still write two rows for one physical row and the
+  partial unique index does not tell them apart. Two enqueues one after
+  the other therefore still both succeed on a proxy pair — the shared
+  cache lock stops the concurrent race, not the sequential one.
+  Unifying the row key changes instance identity on a durable row and
+  needs a migration plan for the rows already written, so it is filed
+  rather than rushed. Every other shape is unaffected: where the model
+  name is the concrete one, the index keys exactly as before.
+- **Upgrade note, and it needs no drain**: the key is shared-cache
+  identity, so during a rolling deploy the old and new processes compute
+  different keys for one instance. That window is narrow and shallow.
+  The cache lock guards one critical section — validate, write the
+  `TransitionMessage`, write `in_progress_state` — and from then on the
+  uncompleted row gates concurrent transitions. Two background enqueues
+  that both take a lock meet the partial unique index, which is a
+  database constraint and knows nothing about the cache, so the second
+  gets `AlreadyInProgress`. The worker's attempt is guarded by
+  `select_for_update(nowait=True)` on the row. What the split window
+  weakens is the synchronous path's fast mutex, for the minutes a
+  rolling deploy takes. Draining the workers first would cost more than
+  it buys.
+- The database alias is deliberately **not** in the key. No consumer
+  runs a process model on a second write alias, and picking the wrong
+  alias source would split the key for an instance read from a
+  follower.
+
+### Fixed — a refusal stays a refusal
+
+- Building `available_actions` for a `TransitionNotAllowed` message runs
+  every transition's conditions and permissions. A consumer condition
+  that raised replaced the refusal with its own exception, so a caller
+  catching `TransitionNotAllowed` got a 500 instead of an answer. The
+  listing is now guarded: the refusal is raised either way, and the
+  message says the actions are unknown.
+- An attempt process that ended on its own just before the worker's
+  kill is no longer charged a `[timeout]`. `os.kill` succeeds on a
+  process waiting to be reaped, so the kill alone cannot decide the
+  outcome; the status the reap returns does. A kill whose status never
+  arrives is still a timeout.
+
+### Changed — the README tells the reader what to do (#238)
+
+- 1,387 lines become 363. What stays: install, bind in `ready()`, one
+  synchronous example, one background example, `dl_worker` and
+  `dl_transitions`, the two safety nets, the PostgreSQL and
+  cross-process-cache requirements, and a pointer per topic.
+- What goes: the release numbers and upgrade notes (this file owns
+  them), the extras paragraph that narrated three releases, sync as a
+  product feature, the Django FSM comparison, the assistant-facing
+  declaration rules, the four repeats of the bind lecture, the
+  500-line background section that retold `PULL_WORKERS.md` and
+  `TESTING_GUIDE.md`, the install dict listing every knob, and the
+  wiki pointer.
+- The install example no longer sets `BACKGROUND_EXECUTION`. Pull is
+  the default, and sync now appears once, in the testing section, as
+  the test-only opt-in it is.
+
+### Added — a tag publishes the release (#251)
+
+- `.github/workflows/publish.yml` builds and uploads to PyPI on a
+  `v*` tag, through PyPI trusted publishing, so the repo stores no
+  token. The job refuses to publish when the tag and the packaged
+  version disagree, and it runs the test suite first. Nothing publishes
+  from a branch push.
+
+### Changed — the follow-up simplification pass
+
+- One copy of what still had two: the stuck finalizer decodes kwargs
+  through `_decode_kwargs`, `_restore` loads the recorded class in one
+  shared block, `_handle_failure` builds one outcome, and the
+  "has no transition" message is built once. `db_safe_text` loses a
+  `limit=` parameter nothing passed.
+- `BACKGROUND_EXECUTION='celery'` no longer has a bespoke removal
+  message: the migration it guided is complete, and an unknown mode
+  still fails loudly at boot naming the valid ones.
+- Comments and docstrings across the engine and the testing package
+  state the rule and stop narrating the defect history that produced it
+  (the changelog owns that history). The mode-durability rule is written
+  once; version-number citations in prose are gone.
+
+### Added
+
+- `docs/recipes/long-jobs.md` — one row per chunk: the supported shape
+  for a job that does not fit one attempt's budget (#219). Each chunk
+  commits its own attempt, so an interruption loses one chunk, not the
+  job, and every engine guarantee holds unchanged.
+- The leftover cleanup lives in GitHub issues, not a TODO file:
+  one transition type (#243), one app (#242), drop unused knobs (#244),
+  migration squash (#233), lock identity (#245), pull-only production
+  (#237).
+
 ## [0.16.0] — 2026-08-21
 
 The design cut (#217): workers pull committed rows from the database, so

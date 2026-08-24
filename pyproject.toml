@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "0.16.0"
+version = "0.17.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -12,7 +12,7 @@ authors = [
     { name = "Emil Balashov", email = "emil@borderless360.com" },
     { name = "Andrey Omelyanuk", email = "omelyanukandrey@gmail.com" }
 ]
-keywords = ["django", "fsm", "state-machine", "workflow", "celery", "background", "business-logic"]
+keywords = ["django", "fsm", "state-machine", "workflow", "background", "business-logic"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
@@ -42,9 +42,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 0.16.0 removed the broker: workers claim committed rows from the database,
-# so nothing imports celery. The empty alias stays so an existing
-# `pip install django-logic[celery,redis]` pin still resolves.
+# The engine has no broker. The empty alias keeps an existing
+# `pip install django-logic[celery]` pin resolving.
 celery = []
 # The engine never imports django_redis: the state lock goes through Django's
 # cache API (`State.lock` calls `cache.add`), so any cross-process backend
@@ -57,7 +56,7 @@ dev = [
     # Driver for the PostgreSQL stability suite (make stability-*) and the
     # PostgreSQL concurrency tests. Without it, `uv sync --extra dev` runs the
     # SQLite suite but not tests.stability.
-    "psycopg[binary]>=3.1",
+    "psycopg[binary]>=3.2",
     # Client for Django's built-in Redis cache backend. The real-Redis and
     # stability test settings use that backend for the state lock.
     "redis>=4.2",

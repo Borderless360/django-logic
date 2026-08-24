@@ -99,10 +99,6 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     # --- internals -------------------------------------------------------
 
-    # ``_process_name`` lives on ScenarioAssertions — one implementation, not
-    # two. A copy here would shadow the mixin's via the MRO, leaving the one
-    # the assertions were written against dead code.
-
     def _process(self, instance):
         return getattr(instance, self._process_name)
 
@@ -179,8 +175,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def retry_transition(self, instance, *, fail_side_effect=None, fail_with=None,
                          expect_raises=None):
-        """Re-run the instance's uncompleted transition inline — what the
-        periodic starter would do."""
+        """Re-run the instance's uncompleted transition inline — what a
+        worker's next claim would do."""
         transition_message = uncompleted_message(instance, process_name=self._process_name)
         if transition_message is None:
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
@@ -270,18 +266,10 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
             detail += f'; ran={tracker.side_effects_ran}'
         if tracker.failed_side_effect:
             detail += f'; failed={tracker.failed_side_effect}'
-        # Whether an exception reaching the CALLER of the entrypoint was
-        # expected — the re-raise/swallow contract. SideEffects re-raise (the
-        # caller sees the exception); Callbacks / NextTransition /
-        # NextTransition swallows (the caller sees nothing). A failure test
-        # that does not declare which it expects cannot tell the two apart —
-        # the exact blind spot that let the 0.1.6->0.2.0 swallow flip pass.
-        # The predicates live in assert_raised / assert_not_raised — this
-        # used to re-implement all three (raised-is-None, isinstance,
-        # raised-is-not-None) with its own copies of the failure messages, so
-        # the contract was pinned by two independent code paths reading the
-        # same self._last_raised. Only the timeline record is local, because
-        # it carries the drive label the assertions do not know about.
+        # The re-raise/swallow contract: side-effects re-raise to the
+        # caller; callbacks and next_transition swallow. assert_raised /
+        # assert_not_raised own the predicates; only the timeline record
+        # is local, because it carries the drive label.
         if expect_raises is not None and expect_raises is not False:
             if raised is None:
                 self._record(label, 'FAILED',
@@ -305,13 +293,9 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                 self._fail(f'{label} raised unexpectedly: '
                            f'{type(raised).__name__}: {raised}', instance=instance)
         # A requested injection that never fired silently turns a failure
-        # test into a happy-path run. track() already rejects
-        # names that exist nowhere; this catches a hook that exists but did
-        # not execute during this drive (e.g. wrong action, gated earlier).
-        # An exception that DID propagate is no evidence the injection fired:
-        # only identity with tracker.injected_exception is, and the tracker
-        # records that moment as failed_side_effect. A different hook raising
-        # the expect_raises type used to buy the injection an alibi.
+        # test into a happy-path run. Only identity with
+        # tracker.injected_exception proves the injection fired — a
+        # different hook raising the expected type is no evidence.
         if (tracker.requested_fail_side_effect is not None
                 and tracker.failed_side_effect is None):
             self._record(label, 'FAILED',

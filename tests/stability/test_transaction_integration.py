@@ -8,14 +8,12 @@ import threading
 import unittest
 from unittest.mock import patch, MagicMock, call
 
-from django.conf import settings
 from django.db import transaction, connection, connections
 from django.core.cache import cache
-from django.test import override_settings, tag
+from django.test import tag
 
 from django_logic import Transition, Process
 from django_logic.state import State
-from django_logic.exceptions import TransitionNotAllowed
 
 from tests.stability.base import StabilityTestCase
 from tests.stability.models import (
@@ -84,15 +82,14 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'draft')
 
-        # In default mode complete_transition released the lock before the
-        # rollback (lock -> side_effects -> set_target -> unlock -> callbacks).
+        # complete_transition released the lock before the rollback
+        # (lock -> side_effects -> set_target -> unlock -> callbacks).
         # The database state rolls back while the lock is already gone, so the
         # next attempt works. Another connection can still read the old
         # committed state between unlock and commit, which is what
-        # TestDeferUnlockTwoConnections below reproduces. Projects that need
-        # exclusion over the whole uncommitted span set
-        # DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT']; a rollback then leaves the
-        # lock to expire on its own timeout.
+        # TestUnlockBeforeCommitWindow below reproduces. Callers who need the
+        # transition to see the surrounding write start it from
+        # transaction.on_commit instead.
 
 
 @tag('stability')
@@ -140,7 +137,7 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
     The side effect raises OperationalError, then fail_transition runs and needs
     the database too. If fail_transition also fails, the lock is still released,
-    because it lives in the cache. The periodic starter re-dispatches later.
+    because it lives in the cache. The row stays claimable; a later claim retries it.
     """
 
     def test_db_error_in_side_effect_triggers_failure_path(self):
@@ -208,16 +205,15 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
 
 @tag('stability')
-class TestDeferUnlockTwoConnections(StabilityTestCase):
+class TestUnlockBeforeCommitWindow(StabilityTestCase):
     """The unlock-before-commit window, on two real database connections.
 
     T1 runs a synchronous transition inside an outer atomic block and holds the
-    transaction open. In default mode T1 has already released the cache lock, so
-    T2 on another connection reads the old committed state, accepts it as a
-    source, and runs the same transition again. Both attempts run the
-    side-effects, and the final state depends on commit order. With
-    DEFER_UNLOCK_UNTIL_COMMIT, T1 holds the lock until it commits and T2 is
-    rejected.
+    transaction open. T1 has already released the cache lock, so T2 on another
+    connection reads the old committed state, accepts it as a source, and runs
+    the same transition again. Both attempts run the side-effects, and the
+    final state depends on commit order. Callers who need to avoid this window
+    start the transition from ``transaction.on_commit``.
     """
 
     def _run_t1_holding_transaction_open(self, order, t1_transitioned, t2_probed):
@@ -241,8 +237,8 @@ class TestDeferUnlockTwoConnections(StabilityTestCase):
 
     @unittest.skipUnless(connection.vendor == 'postgresql',
                          'needs two concurrent writer connections')
-    def test_default_mode_second_transition_reads_stale_committed_state(self):
-        """Default mode leaves the window open. Pin that."""
+    def test_second_transition_reads_stale_committed_state(self):
+        """The window is open by design. Pin that."""
         order = Order.objects.create(status='draft')
         t1_transitioned, t2_probed = threading.Event(), threading.Event()
         thread = self._run_t1_holding_transaction_open(
@@ -263,38 +259,3 @@ class TestDeferUnlockTwoConnections(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')
-
-    @unittest.skipUnless(connection.vendor == 'postgresql',
-                         'needs two concurrent writer connections')
-    def test_defer_mode_excludes_second_transition_until_commit(self):
-        order = Order.objects.create(status='draft')
-        state = State(order, 'status', process_name='process')
-        with override_settings(DJANGO_LOGIC={
-            **settings.DJANGO_LOGIC, 'DEFER_UNLOCK_UNTIL_COMMIT': True,
-        }):
-            t1_transitioned, t2_probed = threading.Event(), threading.Event()
-            thread = self._run_t1_holding_transaction_open(
-                order, t1_transitioned, t2_probed)
-            try:
-                self.assertTrue(t1_transitioned.wait(10))
-                # T1 still holds the lock, so T2 must not run from the old
-                # committed source while T1's write is uncommitted.
-                with self.assertRaises(TransitionNotAllowed):
-                    OrderProcess(
-                        field_name='status',
-                        instance=Order.objects.get(pk=order.pk),
-                    ).approve()
-            finally:
-                t2_probed.set()
-                thread.join(timeout=15)
-            self.assertFalse(thread.is_alive())
-
-        # T1's commit ran the deferred unlock, on_commit, in its own thread.
-        self.assertFalse(state.is_locked())
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'approved')
-
-        # The follow-up transition then proceeds normally.
-        OrderProcess(field_name='status', instance=order).fulfill()
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilled')

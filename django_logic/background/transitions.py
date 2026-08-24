@@ -9,8 +9,8 @@
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
   row is what gates concurrent transitions,
-* hand off to the dispatcher, which notifies the pull workers after
-  commit (Pull mode) or executes the worker path inline (Sync mode).
+* hand off: notify the pull workers after commit (Pull mode), or execute
+  the worker path inline (Sync mode).
 
 The worker path lives in :mod:`django_logic.background.runner` and is
 shared between both modes.
@@ -22,7 +22,7 @@ from uuid import UUID
 from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 
-from django_logic.background import settings as bg_settings
+from django_logic import conf
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
@@ -31,7 +31,6 @@ from django_logic.background.serializers import (
 )
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import (
-    redact_log_kwargs,
     transition_logger,
     TransitionEventType,
 )
@@ -117,7 +116,7 @@ class BackgroundTransition(Transition):
         ``queue=`` and the ``DEFAULT_QUEUE`` setting are read when the
         transition actually runs.
         """
-        return self.queue or bg_settings.default_queue()
+        return self.queue or conf.default_queue()
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
         # Before the lock, and before the kwargs are serialized into a row
@@ -131,19 +130,13 @@ class BackgroundTransition(Transition):
             f'{process_class_name} {self.action_name} {state.instance_key} '
             f'{kwargs.get("root_id")} {kwargs.get("parent_id")} '
             f'[background queue={queue_name}]',
-            extra={'kwargs': redact_log_kwargs(kwargs), 'state_hash': state._get_hash()},
+            extra={'kwargs': dict(kwargs), 'state_hash': state._get_hash()},
         )
 
-        if not self.is_valid(state.instance, kwargs.get('user')):
-            # A rejection with no log line leaves a Start with no explanation.
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {self.action_name} '
-                f'{state.instance_key} rejected by conditions or permissions'
-            )
-            raise TransitionNotAllowed(
-                f"BackgroundTransition '{self.action_name}' rejected by "
-                f"its conditions or permissions."
-            )
+        # The resolver already ran the conditions and permissions; the
+        # synchronous path does not run them again, and neither does this
+        # one. The guard that matters runs under the lock below:
+        # _ensure_db_state_in_sources.
 
         # The cache lock guards only this critical section (validate →
         # create the TransitionMessage → write in_progress_state). It is
@@ -201,8 +194,18 @@ class BackgroundTransition(Transition):
                 f'{state.instance_key}'
             )
 
-        from django_logic.background.dispatch import dispatch_transition
-        dispatch_transition(transition_message)
+        if conf.sync_mode():
+            # Inline, bypassing transaction.on_commit, so Django's
+            # TestCase (whose wrapping transaction never commits) still
+            # executes the worker path. Exceptions propagate to the caller.
+            from django_logic.background.runner import run_background_transition
+            run_background_transition(transition_message.pk)
+        else:
+            # The committed row is what the workers run; the notification
+            # only says "ask the database now", so a lost one costs one
+            # poll interval, never the work.
+            from django_logic.background.pull import notify_workers
+            transaction.on_commit(notify_workers)
 
         return kwargs.get('tr_id')
 
@@ -344,10 +347,3 @@ class BackgroundAction(BackgroundTransition):
     def __str__(self) -> str:
         return f"BackgroundAction: {self.action_name}"
 
-    def complete_transition(self, state: State, **kwargs):
-        # Defensive no-op for direct/manual invocation only — the engine
-        # never calls this: enqueue stops at the TransitionMessage row and
-        # the worker writes state / runs hooks itself (_handle_success /
-        # _run_success_hooks). The inherited implementation would write an
-        # empty target state; an action must not change state on success.
-        pass

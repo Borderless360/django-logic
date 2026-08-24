@@ -102,7 +102,7 @@ class RetriesRemainTests(_Base):
         transition_message = TransitionMessage.objects.get(
             instance_id=str(invoice.pk))
         invoice.refresh_from_db()
-        # Charged and left uncompleted, so the periodic starter retries it.
+        # Charged and left uncompleted, so the next claim retries it.
         self.assertEqual(transition_message.errors_count, 1)
         self.assertFalse(transition_message.is_completed)
         # The attempt's write is gone, so the rollback really happened.

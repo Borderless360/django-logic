@@ -39,15 +39,6 @@ class _ProcessAccessor(property):
 #: cannot see them.
 _PROCESS_INSTANCE_ATTRS = frozenset({'state', 'instance', 'field_name'})
 
-#: Kwarg names the engine sets on every call, and forwards through
-#: ``__getattr__`` when it chains a ``next_transition``. A caller who passes one
-#: has it overwritten. The engine cannot tell its own forwarding from a caller's
-#: here, so the README documents them as reserved instead of refusing them.
-_RESERVED_KWARGS = frozenset({
-    'tr_id', 'root_id', 'parent_id', 'process_class', 'owning_process_class',
-})
-
-
 class Process:
     """Declarative container of transitions and nested processes.
 
@@ -123,9 +114,9 @@ class Process:
             # Drop an 'action_name' key the caller passed: it would clash with
             # _get_transition_method's first parameter and raise "multiple
             # values for argument 'action_name'". No engine path forwards it;
-            # only a hand-built kwargs dict does. The other names in
-            # _RESERVED_KWARGS stay, because next_transition forwards tr_id,
-            # root_id, parent_id and process_class through this same path.
+            # only a hand-built kwargs dict does. The reserved engine names
+            # stay, because next_transition forwards tr_id, root_id,
+            # parent_id and process_class through this same path.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 
@@ -144,7 +135,7 @@ class Process:
             kwargs.setdefault('root_id', parent_ctx['root_id'])
             kwargs.setdefault('tr_id', parent_ctx['tr_id'])
 
-        user = kwargs['user'] if 'user' in kwargs else None
+        user = kwargs.get('user')
         transition, owning_process = self._resolve_transition_with_owner(
             action_name, user
         )
@@ -225,17 +216,12 @@ class Process:
         and filtering are identical to ``get_available_transitions``; that
         method is a thin wrapper that drops the owner.
         """
-        # Visit each Process CLASS once per walk. Without this, a
-        # nested process reachable by two paths — a diamond, or a duplicated
-        # entry in ``nested_processes`` — yielded every one of its
-        # transitions twice, and ``_resolve_transition_with_owner`` rejected
-        # the single declaration as "several transitions available", with a
-        # hint no condition could satisfy (both matches being the same
-        # object). ``get_available_actions`` set-dedupes, so the action was
-        # advertised and then failed on every call. A nested cycle recursed
-        # until RecursionError. Deduping by class preserves the supported
-        # pattern of one ``action_name`` on *distinct* nested classes
-        # disambiguated by conditions. Mirrors ``_iter_process_tree``.
+        # Visit each Process CLASS once per walk: a class reachable by two
+        # paths shares its transition objects, so it must yield them once
+        # (twice reads as "several transitions available" and no condition
+        # can satisfy the hint), and a nested cycle must terminate. Deduping
+        # by class keeps one ``action_name`` on *distinct* nested classes
+        # legal. Mirrors ``_iter_process_tree``.
         if _seen is None:
             _seen = set()
         if id(type(self)) in _seen:
@@ -292,16 +278,36 @@ class Process:
             )
             raise TransitionNotAllowed("There are several transitions available")
 
-        transition_logger.info(
+        current_state = self.state.get_state()
+        try:
+            available_actions = self.get_available_actions(user=user)
+        except Exception as list_error:
+            # Listing the actions runs every transition's conditions and
+            # permissions. One of them raising must not replace the
+            # refusal with its own exception — the caller asked why the
+            # action was refused, and it still gets that answer.
+            transition_logger.info(
+                f'Listing the available actions for '
+                f'{self.state.instance_key} failed: '
+                f'{type(list_error).__name__}: {list_error}'
+            )
+            available_actions = None
+        known_actions = (
+            'unknown' if available_actions is None
+            else ', '.join(available_actions) or 'none'
+        )
+        message = (
             f"Process class {self.__class__} for object "
             f"{self.state.instance.pk} has no transition "
-            f"with action name {action_name}, user {user}"
+            f"with action name {action_name}, user {user}. "
+            f"The instance is in state {current_state!r}; "
+            f"available actions: {known_actions}."
         )
-        raise TransitionNotAllowed(
-            f"Process class {self.__class__} for object "
-            f"{self.state.instance.pk} has no transition "
-            f"with action name {action_name}, user {user}"
-        )
+        transition_logger.info(message)
+        error = TransitionNotAllowed(message)
+        error.current_state = current_state
+        error.available_actions = available_actions
+        raise error
 
 
 def _iter_process_tree(process_cls, _seen=None):
@@ -337,12 +343,8 @@ def _validate_action_names_not_shadowed(process_cls):
 
     Only the root's own attributes can shadow, because dispatch enters
     through the BOUND process's ``__getattr__`` — a nested class is never
-    the lookup target. Checking every class in the tree instead rejected a
-    working topology: a sibling nested process holding a helper (say a
-    staticmethod) named like some other branch's transition. Nothing is
-    lost by looking at the root alone — every ``Process`` subclass is
-    validated as its own root when it is defined, so each class is covered
-    for the bindings that use it as the entry point.
+    the lookup target. The root alone is enough: every ``Process``
+    subclass is validated as its own root when it is defined.
     """
     for proc_cls in _iter_process_tree(process_cls):
         for transition in proc_cls.transitions or []:
@@ -371,41 +373,16 @@ def _validate_action_names_not_shadowed(process_cls):
 
 
 def _validate_unique_background_action_names(process_cls):
-    """A background transition must be uniquely identifiable by
-    ``(process class that declared it, action_name)`` across a Process
-    *and its nested processes*.
+    """A background ``action_name`` must be unique within one process class.
 
-    Enqueue records the (possibly nested) process class that declared
-    the transition on the ``TransitionMessage``
-    (``owning_process_class``); worker restore
-    (``runner._find_transition``) uses it to select the exact background
-    transition. So the only configuration the worker genuinely cannot
-    resolve — and the only one rejected here — is **two background
-    transitions sharing an ``action_name`` within a single process
-    class**: the class + name pair no longer identifies one transition.
-
-    Everything else is allowed, because the worker can always resolve it:
-
-    * The same background ``action_name`` on **distinct** nested process
-      classes — the pattern that uses conditions to choose (e.g.
-      per-integration ``Gmail`` / ``Dummy`` sub-processes each declaring
-      a background ``send_message_via_integration``). Enqueue's
-      transition resolution picks exactly one (the conditions are
-      mutually exclusive); the worker restores that exact one via the
-      recorded class.
-    * A background ``action_name`` that **coincides with a synchronous
-      ``Transition``** of the same name. The worker only ever restores
-      background transitions and ``runner._find_transition`` filters to
-      ``is_background``, so a synchronous namesake is invisible to
-      restore. Enqueue resolves the *call* by conditions/permissions
-      exactly as it does for duplicate synchronous names — a genuinely
-      ambiguous call raises ``TransitionNotAllowed`` at runtime, the
-      same runtime-validated contract that already governs duplicate
-      synchronous ``action_name``s (courier-style polymorphism).
-
-    So the single structural invariant the worker needs — and all this
-    validator enforces — is background-``action_name`` uniqueness
-    *within one class*.
+    ``(process class that declared it, action_name)`` is the worker's
+    whole restore key: enqueue records the declaring class on the row,
+    and restore selects by that class plus the name. Two background
+    transitions sharing a name in one class are indistinguishable, so
+    they are rejected here. Everything else stays legal: the same name
+    on distinct nested classes is resolved by conditions at enqueue and
+    by the recorded class at restore, and a synchronous namesake is
+    invisible to restore (it filters to ``is_background``).
     """
     def _where(proc_cls, transition):
         return (
@@ -414,12 +391,6 @@ def _validate_unique_background_action_names(process_cls):
         )
 
     for proc_cls in _iter_process_tree(process_cls):
-        # Within ONE process class a background action_name must be unique —
-        # (declaring class, action_name) is the worker's whole key, so two
-        # in the same class are indistinguishable. Across classes, and
-        # against synchronous transitions, duplicates are fine (resolved
-        # by conditions at enqueue, by the class + is_background filter
-        # at execute).
         local_background: dict[str, str] = {}
         for transition in proc_cls.transitions or []:
             if not getattr(transition, 'is_background', False):
@@ -432,15 +403,11 @@ def _validate_unique_background_action_names(process_cls):
                     f"has two background transitions sharing "
                     f"action_name='{name}' within a single process class "
                     f"({local_background[name]} and "
-                    f"{_where(proc_cls, transition)}). The worker "
-                    f"identifies a background transition by (process "
-                    f"class that declared it, action_name) — two in the "
-                    f"same class "
-                    f"are indistinguishable, so background action_names "
-                    f"must be unique within a process class. Move one to "
-                    f"a separate nested process (duplicates across "
-                    f"distinct nested processes are allowed, disambiguated "
-                    f"by conditions) or rename it."
+                    f"{_where(proc_cls, transition)}). The worker restores "
+                    f"a background transition by (declaring class, "
+                    f"action_name), so background action_names must be "
+                    f"unique within a process class. Move one to a "
+                    f"separate nested process or rename it."
                 )
             local_background[name] = _where(proc_cls, transition)
 
@@ -464,15 +431,7 @@ def _validate_hook_signatures(process_cls) -> None:
     offenders = collect_hook_signature_offenders(process_cls)
     if not offenders:
         return
-    message = _hook_signature_message(offenders)
-    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION.
-    if strict_hook_signatures():
-        raise ImproperlyConfigured(message)
-    transition_logger.warning(message)
-
-
-def _hook_signature_message(offenders) -> str:
-    return (
+    message = (
         'FSM hooks without a named instance-first parameter — the engine '
         'calls hooks as fn(instance, **kwargs) (permissions as '
         'fn(instance, user, **kwargs)), so give each hook a named first '
@@ -480,6 +439,10 @@ def _hook_signature_message(offenders) -> str:
         'need functools.wraps to expose the real signature: '
         f'{"; ".join(sorted(set(offenders)))}'
     )
+    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION.
+    if strict_hook_signatures():
+        raise ImproperlyConfigured(message)
+    transition_logger.warning(message)
 
 
 def collect_hook_signature_offenders(process_cls) -> list:
@@ -528,14 +491,6 @@ def collect_hook_signature_offenders(process_cls) -> list:
                 for fn in getattr(wrapper, 'commands', None) or []:
                     check(fn, f'{owner}.{getattr(transition, "action_name", "?")}')
     return offenders
-
-
-# The stranded-recovery ownership cluster (_recovery_signature,
-# collect_ambiguous_in_progress_states, _state_storage_label — feeding
-# django_logic.E001 and recover_stranded_states) was retired in 0.12.0:
-# in_progress_state is background-only now, written atomically with the
-# TransitionMessage row, so recovery works from that row and no record-less
-# stranded instance can exist for an owner to be picked for.
 
 
 #: One record per ``bind_model_process`` call.
@@ -596,21 +551,13 @@ class ProcessManager:
                 )
 
         # setattr below replaces whatever descriptor the name currently
-        # holds, so check what would ACTUALLY be overwritten: any attribute
-        # defined anywhere on the model's MRO. Asking _meta for field names
-        # instead got this wrong in both directions — it flagged reverse
-        # FK/M2M *query* names, which own no class attribute at all (so a
-        # sound binding raised at import), and it missed every non-field
-        # descriptor: a model method, a property, a cached_property, a
-        # manager. `process` — the DEFAULT process_name — is a very plausible
-        # method name on a model.
-        # Skip accessors django-logic itself installed. A multi-table-
-        # inheritance child legitimately binds the same process_name as its
-        # parent — setattr puts its own accessor on the child, shadowing the
-        # parent's, and each model drives its own process. Flagging the
-        # ancestor's accessor rejected that working shape. An identical rebind
-        # returns early above, and a same-model name reuse is caught by the
-        # duplicate-binding check, so nothing is lost by ignoring them here.
+        # holds, so check what would actually be overwritten: any attribute
+        # defined anywhere on the model's MRO (not _meta field names — a
+        # model method, property, or manager can clash too, and `process`
+        # is a very plausible method name). Skip accessors django-logic
+        # itself installed: a multi-table-inheritance child legitimately
+        # re-binds its parent's process_name, and its own accessor shadows
+        # the parent's.
         clashing = next(
             (klass for klass in model.__mro__
              if process_class.process_name in vars(klass)

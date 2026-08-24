@@ -18,7 +18,7 @@ These tests pin:
 from django.db import IntegrityError, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 
-from django_logic.background.dispatch import sync_execution
+from django_logic.background import sync_execution
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.state import State

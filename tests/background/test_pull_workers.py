@@ -72,7 +72,7 @@ class PullClaimTests(TransactionTestCase):
         # on its own; no capture is needed.
         widget = Widget.objects.create(status='draft')
         widget.process.fulfil()
-        self.assertTrue(run_once(_CRITICAL))
+        self.assertTrue(run_once(_CRITICAL, isolate=False))
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'fulfilled')
         self.assertTrue(TransitionMessage.objects.get().is_completed)
@@ -120,7 +120,7 @@ class PullClaimTests(TransactionTestCase):
         widget = Widget.objects.create(status='draft')
         marker = tempfile.mktemp(prefix='dl_die_once_')
         widget.process.die_once(marker_path=marker)
-        # First attempt: the child process hard-kills itself. The worker
+        # First attempt: the attempt process hard-kills itself. The worker
         # survives, and the death is an error on the row.
         self.assertTrue(run_once(_CRITICAL, isolate=True))
         row = TransitionMessage.objects.get()
@@ -136,13 +136,14 @@ class PullClaimTests(TransactionTestCase):
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'survived')
 
-    def test_a_death_is_not_recorded_on_a_row_another_worker_completed(self):
-        from django_logic.background.pull import _record_child_death
+    def test_no_error_is_recorded_on_a_row_another_worker_completed(self):
+        from django_logic.background.pull import _record_attempt_error
 
         widget = Widget.objects.create(status='fulfilled')
         row = open_transition_message(widget, 'process', 'fulfil')
         TransitionMessage.objects.filter(pk=row.pk).update(is_completed=True)
-        _record_child_death(row.pk, 1)
+        _record_attempt_error(
+            row.pk, '[crashed] the attempt process died (exit 1)')
         row.refresh_from_db()
         self.assertEqual(row.errors_count, 0)
         self.assertEqual(row.last_error_message, '')
@@ -167,6 +168,101 @@ class PullClaimTests(TransactionTestCase):
         self.assertEqual(first.status, 'fulfilled')
         self.assertEqual(second.status, 'fulfilled')
 
+    def test_the_claim_skips_the_rows_this_worker_already_runs(self):
+        """A worker claims faster than its attempt processes take their
+        row locks. Without this the head row fills every free slot."""
+        _, first = self._row()
+        _, second = self._row()
+        self.assertEqual(claim_next(_CRITICAL), first.pk)
+        self.assertEqual(
+            claim_next(_CRITICAL, exclude_pks=[first.pk]), second.pk)
+        self.assertIsNone(
+            claim_next(_CRITICAL, exclude_pks=[first.pk, second.pk]))
+
+    def test_several_attempts_run_at_the_same_time(self):
+        """The side-effect only finishes when all three attempts stand
+        in it together, so three completed rows prove three slots."""
+        import shutil
+        import tempfile
+
+        barrier_dir = tempfile.mkdtemp(prefix='dl_rendezvous_')
+        self.addCleanup(shutil.rmtree, barrier_dir, ignore_errors=True)
+
+        widgets = [Widget.objects.create(status='draft') for _ in range(3)]
+        for widget in widgets:
+            widget.process.rendezvous(barrier_dir=barrier_dir, width=3)
+
+        run_worker(_CRITICAL, forever=False, concurrency=3)
+
+        for widget in widgets:
+            widget.refresh_from_db()
+            self.assertEqual(widget.status, 'met')
+        self.assertFalse(
+            TransitionMessage.objects.filter(is_completed=False).exists()
+        )
+
+    def test_a_free_slot_takes_work_that_arrives_while_an_attempt_runs(self):
+        """The burst the concurrency option exists for: a long attempt is
+        running, more work arrives, and the free slots must take it
+        instead of waiting out the long attempt."""
+        import shutil
+        import tempfile
+        from unittest.mock import patch
+
+        class _Stop(Exception):
+            """Ends the loop from inside the wait, since it runs forever."""
+
+        barrier_dir = tempfile.mkdtemp(prefix='dl_burst_')
+        self.addCleanup(shutil.rmtree, barrier_dir, ignore_errors=True)
+
+        # Neither attempt can finish until both stand in the side-effect
+        # together, so the second one has to start while the first runs.
+        running = Widget.objects.create(status='draft')
+        running.process.rendezvous(barrier_dir=barrier_dir, width=2)
+        arrives_later = Widget.objects.create(status='draft')
+
+        waits = []
+
+        def wait(timeout):
+            waits.append(timeout)
+            if len(waits) == 1:
+                # The work arrives while the first attempt is still running.
+                arrives_later.process.rendezvous(
+                    barrier_dir=barrier_dir, width=2)
+                return
+            if (TransitionMessage.objects.filter(is_completed=False).exists()
+                    and len(waits) < 50):
+                # The worker still has an attempt to account for. Stopping
+                # here would leave its row uncompleted and blame the worker
+                # for the test's own timing.
+                return
+            raise _Stop
+
+        with patch('django_logic.background.pull._wait_for_work', wait):
+            with self.assertRaises(_Stop):
+                run_worker(_CRITICAL, concurrency=2)
+
+        for widget in (running, arrives_later):
+            widget.refresh_from_db()
+            self.assertEqual(widget.status, 'met')
+
+    def test_a_worker_that_cannot_claim_keeps_its_attempts(self):
+        """A database blip must not end the loop: the worker is the only
+        thing that accounts for the attempts it forked."""
+        from unittest.mock import patch
+
+        from django.db import OperationalError
+
+        widget = Widget.objects.create(status='draft')
+        widget.process.fulfil()
+        with patch('django_logic.background.pull.claim_next',
+                   side_effect=OperationalError('the connection went away')):
+            run_worker(_CRITICAL, forever=False, concurrency=2)
+        # The loop returned instead of raising, and the row is untouched.
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'fulfilling')
+        self.assertEqual(TransitionMessage.objects.get().errors_count, 0)
+
     def test_one_loop_pass_drains_and_runs_the_safety_nets(self):
         first = Widget.objects.create(status='draft')
         second = Widget.objects.create(status='draft')
@@ -180,3 +276,54 @@ class PullClaimTests(TransactionTestCase):
         self.assertFalse(
             TransitionMessage.objects.filter(is_completed=False).exists()
         )
+
+
+class WaitDegradeTests(TestCase):
+    """When the connection cannot listen, the wait sleeps the poll
+    interval instead of raising — the poll floor carries the loop."""
+
+    def test_wait_degrades_to_a_plain_sleep(self):
+        from unittest.mock import MagicMock, patch
+
+        from django_logic.background.pull import _wait_for_work
+
+        fake_connections = MagicMock()
+        fake_connections.__getitem__.side_effect = RuntimeError('no connection')
+        with patch('django_logic.background.pull.connections', fake_connections), \
+                patch('django_logic.background.pull.time.sleep') as fake_sleep:
+            _wait_for_work(3.5)
+        fake_sleep.assert_called_once_with(3.5)
+
+
+@override_settings(DJANGO_LOGIC=_PULL_SETTINGS)
+@requires_postgres
+class NotificationWakeUpTests(TransactionTestCase):
+    """A committed NOTIFY wakes a waiting worker before the poll floor."""
+
+    databases = '__all__'
+
+    def test_a_notification_wakes_the_wait_before_the_timeout(self):
+        import time
+
+        from django_logic.background.pull import _wait_for_work, notify_workers
+
+        # The first wait issues LISTEN for the session.
+        _wait_for_work(0.01)
+
+        def notify_from_another_connection():
+            try:
+                time.sleep(0.3)
+                notify_workers()
+            finally:
+                connections.close_all()
+
+        notifier = threading.Thread(target=notify_from_another_connection)
+        started = time.monotonic()
+        notifier.start()
+        try:
+            _wait_for_work(10.0)
+        finally:
+            notifier.join()
+        waited = time.monotonic() - started
+        # A wait that ignores the notification takes the whole timeout.
+        self.assertLess(waited, 5.0)

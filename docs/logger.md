@@ -79,10 +79,8 @@ Without it, a permanently frozen instance (leaked lock) and a healthy start
 were indistinguishable: both emitted one `Start` line and nothing else. It is
 INFO, not ERROR, because losing the lock race is an expected concurrency
 outcome (#154) — the *pattern* of repeated `Lock failed` lines with no
-interleaved `Unlock` for that instance is the leak signal. Under
-`DEFER_UNLOCK_UNTIL_COMMIT` the release line reads
-`Unlock instance_key deferred until commit`; a revalidation failure releases
-with `Unlock instance_key after revalidation failure`.
+interleaved `Unlock` for that instance is the leak signal. A revalidation
+failure releases with `Unlock instance_key after revalidation failure`.
 
 (`Complete` is a background-only event — the synchronous path ends with the
 `Unlock` + `Callback` lines.)
@@ -103,9 +101,9 @@ gate afterwards). Execute (the worker, or inline in Sync mode) logs
 `Complete`. Before 0.14.0 that first line read `Phase2 Start`; update any
 log query or alert that matches on the old text.
 
-All side-effects **and** the target-state write run inside a single Celery task
-(`acks_late=True`) — there is no per-callback Celery fan-out. There are no
-`Celery`, `CeleryCallbacks`, or `Done` events; that was a pre-0.3.0 design.
+All side-effects **and** the target-state write run inside a single worker
+attempt — there is no per-callback fan-out. There are no `Celery`,
+`CeleryCallbacks`, or `Done` events; that was a pre-0.3.0 design.
 
 ```
 tr_id Start ProcessName fulfil instance_key root_id parent_id [background queue=django_logic.critical]

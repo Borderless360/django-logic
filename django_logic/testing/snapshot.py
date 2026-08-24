@@ -1,7 +1,7 @@
 """State capture & restore — close the loop between production bugs and tests.
 
 ``snapshot(instance)`` serialises an instance (its concrete fields, current
-state, the related ``TransitionMessage`` if any, and process status) to a plain
+state, and the related ``TransitionMessage`` if any) to a plain
 JSON-able dict. ``from_snapshot(data)`` rebuilds that instance — and restores
 the ``TransitionMessage`` — so a production bug can be reproduced in a test and
 kept as a regression guard.
@@ -81,29 +81,15 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
                 'last_error_message': transition_message.last_error_message,
                 'timeout_seconds': transition_message.timeout_seconds,
                 'kwargs': transition_message.kwargs,
-                # The retry/watchdog clock. Without these a snapshot of a hung
-                # or timed-out production row replays as a pristine row: the
-                # retry backoff, the stale-attempt watchdog and the
-                # stuck-transition detector all read them, so the very
-                # behaviour the snapshot was taken to reproduce could not be
-                # reproduced.
+                # The retry clock: the retry backoff, the retry
+                # classification and the stuck report all read these, so
+                # a hung production row must replay as hung, not pristine.
                 'last_error_dt': _jsonable(transition_message.last_error_dt),
                 'failure_side_effect_error': transition_message.failure_side_effect_error,
                 'started_at': _jsonable(transition_message.started_at),
                 'completed_at': _jsonable(transition_message.completed_at),
                 'duration_ms': transition_message.duration_ms,
             }
-    except Exception:
-        pass
-
-    # Best-effort process status.
-    try:
-        process = getattr(instance, process_name)
-        data['process'] = {
-            'class': f'{type(process).__module__}.{type(process).__name__}',
-            'available_actions': process.get_available_actions(),
-            'is_locked': process.state.is_locked(),
-        }
     except Exception:
         pass
 
@@ -140,9 +126,8 @@ def from_snapshot(data_or_path, *, model=None):
 
     recorded = data.get('model')
     if recorded and recorded.lower() != model._meta.label.lower():
-        # Field names of a different model mostly do not overlap, so restoring
-        # into the wrong one used to drop them silently (below) and hand back a
-        # corrupted instance that "reproduces" nothing.
+        # Field names of a different model mostly do not overlap, so the
+        # unknown-field drop below would silently corrupt the restore.
         raise ValueError(
             f'snapshot: captured from {recorded!r} but restoring into '
             f'{model._meta.label!r}. Pass the model the snapshot came from '
@@ -173,24 +158,16 @@ def from_snapshot(data_or_path, *, model=None):
     tm_data = data.get('transition_message')
     if tm_data:
         from django_logic.background.models import TransitionMessage
-        from django_logic.background import settings as bg_settings
+        from django_logic import conf
         tm_process_name = tm_data.get('process_name', 'process')
         # The snapshot IS this instance+process's background state. Leaving an
         # existing row behind either replays a stale orphan (the older row wins
         # every lookup ordered by id... or loses, unpredictably) or trips the
         # uncompleted-per-(instance, process) unique constraint with a cryptic
         # IntegrityError instead of restoring.
-        TransitionMessage.objects.filter(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-            process_name=tm_process_name,
-        ).delete()
+        TransitionMessage.for_instance(instance, tm_process_name).delete()
         TransitionMessage.objects.create(
-            app_label=instance._meta.app_label,
-            model_name=instance._meta.model_name,
-            instance_id=str(instance.pk),
-            process_name=tm_process_name,
+            **TransitionMessage.instance_key(instance, tm_process_name),
             # Restore the recorded field so the worker takes the same
             # recorded-field path the production row would have used
             # ('' = legacy pre-0.4 row, inference fallback).
@@ -200,18 +177,14 @@ def from_snapshot(data_or_path, *, model=None):
             # resolves the exact transition (blank on legacy snapshots →
             # first-match fallback, unchanged behaviour).
             owning_process_class=tm_data.get('owning_process_class', ''),
-            queue_name=tm_data.get('queue_name') or bg_settings.default_queue(),
+            queue_name=tm_data.get('queue_name') or conf.default_queue(),
             is_completed=tm_data.get('is_completed', False),
             errors_count=tm_data.get('errors_count', 0),
             last_error_message=tm_data.get('last_error_message', ''),
             timeout_seconds=tm_data.get('timeout_seconds'),
             kwargs=tm_data.get('kwargs') or {},
-            # Restore the retry/watchdog clock so a hung or timed-out
-            # production row replays as hung, not pristine. Without
-            # started_at in particular, the watchdog's filter
-            # (started_at__isnull=False) can never match a replayed row, so a
-            # snapshot of the exact row a timeout incident produced could not
-            # reproduce the timeout.
+            # The retry clock again — see snapshot(): a hung row must
+            # replay as hung, not pristine.
             last_error_dt=_restore_dt(tm_data.get('last_error_dt')),
             failure_side_effect_error=tm_data.get(
                 'failure_side_effect_error', ''),

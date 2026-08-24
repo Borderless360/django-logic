@@ -30,17 +30,14 @@ def open_transition_message(
     long ago — ``started_at`` and ``modified`` both move back, so the
     retry-window classification answers for that age.
     """
-    from django_logic.background import settings as bg_settings
+    from django_logic import conf
     from django_logic.background.models import TransitionMessage
 
     row = TransitionMessage.objects.create(
-        app_label=instance._meta.app_label,
-        model_name=instance._meta.model_name,
-        instance_id=str(instance.pk),
-        process_name=process_name,
+        **TransitionMessage.instance_key(instance, process_name),
         field_name=field_name,
         transition_name=transition_name,
-        queue_name=queue_name or bg_settings.default_queue(),
+        queue_name=queue_name or conf.default_queue(),
         errors_count=errors_count,
         kwargs={},
     )

@@ -75,6 +75,12 @@ CACHES = {
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
+from django_logic.conf import enable_sync
+
+# Sync is a test runtime, so boot refuses it unless a test settings
+# module says so. This is the only place the suite opts in.
+enable_sync()
+
 DJANGO_LOGIC = {
     'LOCK_TIMEOUT': 7200,
     'BACKGROUND_EXECUTION': 'sync',

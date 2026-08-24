@@ -13,12 +13,9 @@ from django_logic.testing.runner import latest_message, message_for
 def _names(value, assertion: str, argument: str = 'names') -> list:
     """Normalise a collection-of-names argument, rejecting a bare string.
 
-    ``assert_not_available(obj, 'approve')`` iterates ``'approve'`` per
-    character, so every "is it in the available actions?" test is against
-    ``'a'``, ``'p'``, ... — none of which is ever an action name, and the
-    assertion passes VACUOUSLY (the ``not_ran`` / ``not_available`` variants
-    silently assert nothing at all). Same failure mode, same loud rejection as
-    a bare-string ``sources`` on a Transition.
+    A bare string iterates per character, so the ``not_ran`` /
+    ``not_available`` variants would pass vacuously — same loud rejection
+    as a bare-string ``sources`` on a Transition.
     """
     if isinstance(value, str):
         raise TypeError(
@@ -35,10 +32,9 @@ class ScenarioAssertions:
     def _process_name(self) -> str:
         """The accessor the process is bound under.
 
-        Never read the raw ``process_name`` here: its default is ``None`` (it
-        derives from ``process_class.process_name``), so a direct read passed
-        ``process_name=None`` into the message lookups below, which then found
-        no row and made the assertion pass or fail for the wrong reason.
+        Never read the raw ``process_name`` here: its default is ``None``
+        (it derives from ``process_class.process_name``), and ``None``
+        makes the message lookups find no row.
         """
         explicit = getattr(self, 'process_name', None)
         if explicit is not None:
@@ -283,7 +279,7 @@ class ScenarioAssertions:
         classes); ``match`` optionally requires a substring of ``str(exc)``.
         Reads the exception the harness captured, so it pins that a failing
         side-effect surfaces to the caller — a swallow-vs-reraise regression
-        (the 0.1.6->0.2.0 flip) makes this assertion fail.
+        (a swallow-vs-reraise flip) makes this assertion fail.
         """
         raised = self._last_raised
         if raised is None:

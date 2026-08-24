@@ -15,6 +15,14 @@ class Invoice(models.Model):
         return self.status
 
 
+class InvoiceProxy(Invoice):
+    """A proxy over Invoice. One table, one row, one status column, two
+    class names — which is what the lock key has to see through."""
+
+    class Meta:
+        proxy = True
+
+
 class MtiParent(models.Model):
     """Multi-table-inheritance parent. Exists so the binding collision check
     can be tested against a real MTI child, which is the shape that check

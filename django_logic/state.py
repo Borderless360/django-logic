@@ -7,7 +7,7 @@ from django.db import DEFAULT_DB_ALIAS
 from django_logic.conf import lock_timeout as _get_lock_timeout
 
 
-class State(object):
+class State:
     def __init__(self, instance, field_name: str, process_name=None):
         self.instance = instance
         self.field_name = field_name
@@ -27,10 +27,10 @@ class State(object):
         model = type(self.instance)
         # Route to the instance's own connection. Every WRITE path is already
         # instance-aware (Model.save and refresh_from_db pass
-        # hints={'instance': ...}; _release_lock reads instance._state.db), but
-        # this read was unrouted, so on a non-default alias the under-lock
-        # revalidation and the worker's state guard compared against whatever
-        # row the DEFAULT database happened to hold.
+        # hints={'instance': ...}), but this read was unrouted, so on a
+        # non-default alias the under-lock revalidation and the worker's
+        # state guard compared against whatever row the DEFAULT database
+        # happened to hold.
         using = self.instance._state.db or DEFAULT_DB_ALIAS
         return (
             model._base_manager
@@ -64,8 +64,17 @@ class State(object):
 
     @property
     def instance_key(self):
-        return f'{self.instance._meta.app_label}-' \
-               f'{self.instance._meta.model_name}-' \
+        """One key per physical row and state column.
+
+        The key names the table that holds the column, not the class the
+        caller happened to load. A proxy model and its concrete model,
+        and a multi-table-inheritance child and the parent that declares
+        the column, all write the same column of the same row. Keyed by
+        class name they took different locks, so two transitions ran on
+        one row at the same time.
+        """
+        declaring_model = self.instance._meta.get_field(self.field_name).model
+        return f'{declaring_model._meta.db_table}-' \
                f'{self.field_name}-' \
                f'{self.instance.pk}'
 
@@ -111,9 +120,7 @@ class State(object):
             cache.delete(key)
 
     def is_locked(self):
-        """
-        It checks whether the state was locked or not.
-        It might return False due to the race conditions.
-        However, `lock` method should guarantees it will be locked only once.
-        """
+        """Whether the lock key exists right now. Racy — a lock can appear
+        or expire between this read and the caller's next step; ``lock()``
+        is the only atomic gate."""
         return cache.get(self._get_hash()) is not None

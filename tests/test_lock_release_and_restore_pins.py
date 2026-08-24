@@ -1,4 +1,4 @@
-"""Four engine rules, each one written after a consumer hit the defect.
+"""Three engine rules, each one written after a consumer hit the defect.
 
 The cache lock is released on every failure path after it is taken: a failed
 ``in_progress_state`` write, a failed target write, and a failed
@@ -11,10 +11,6 @@ used to be dropped, so ``instance.process.verify(user)`` ran with
 
 The background runner reloads the instance through ``_base_manager``, so a
 default manager that hides archived rows cannot strand a running transition.
-
-Every django-logic Celery task sets both ``acks_late=True`` and
-``reject_on_worker_lost=True``, so crash re-delivery does not depend on the
-consumer's global Celery configuration.
 """
 from unittest.mock import patch
 

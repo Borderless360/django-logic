@@ -12,23 +12,10 @@ Configure both via ``LOGGING`` in Django settings.
 import logging
 from enum import Enum
 
-from django.conf import settings
 
 
 logger: logging.Logger = logging.getLogger('django-logic')
 transition_logger: logging.Logger = logging.getLogger('django-logic.transition')
-
-
-def redact_log_kwargs(kwargs: dict) -> dict:
-    """The kwargs value to attach to a log record's ``extra``.
-
-    A shallow copy, not the live dict: log records are formatted lazily and
-    the caller keeps mutating kwargs after the log call (``restore_user``
-    pops ``user_id``, nested transitions rewrite ``tr_id``/``parent_id``), so
-    sharing the reference would let later mutations leak into an
-    already-emitted record.
-    """
-    return dict(kwargs)
 
 
 class TransitionEventType(Enum):

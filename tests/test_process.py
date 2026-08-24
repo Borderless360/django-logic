@@ -97,6 +97,16 @@ class SyncProcessAvailabilityScenario(ProcessScenario):
         self.assertEqual(widget.status, 'draft')
         self.assertNotIn('staff,', widget.se_log)
 
+    def test_refusal_names_the_state_and_the_available_actions(self):
+        widget = self.create_instance(status='draft')
+        with self.assertRaises(TransitionNotAllowed) as caught:
+            self._process(widget).no_such_action()
+        error = caught.exception
+        self.assertEqual(error.current_state, 'draft')
+        self.assertIn('approve', error.available_actions)
+        self.assertIn("state 'draft'", str(error))
+        self.assertIn('approve', str(error))
+
 
 class SyncProcessDrivingScenario(ProcessScenario):
     """How the object changes as it is driven through actions."""

@@ -2,9 +2,16 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    """Three nullable/defaulted columns — instant on PostgreSQL. No new
-    index: every read of these columns goes through the uncompleted set
-    (small by design, already indexed) or the cleanup sweep's full scan."""
+    """Nullable/defaulted columns — instant on PostgreSQL. Of the three,
+    only ``ended_in_failure`` is still live: migration 0009 removed
+    ``last_dispatched_at`` and ``dispatch_count`` with the broker-era
+    dispatch marker. The file name predates that removal; renaming an
+    applied migration would ghost it in every consumer's
+    ``django_migrations``, so the rename waits for the 1.0 squash.
+
+    No new index: every read of ``ended_in_failure`` goes through the
+    uncompleted set (small by design, already indexed) or the cleanup
+    sweep's full scan."""
 
     dependencies = [
         ('django_logic_background', '0007_transitionmessage_owning_process_class'),
