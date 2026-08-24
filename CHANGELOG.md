@@ -247,10 +247,19 @@ consumer API is unchanged except where noted.
   column, and the pk. The consumer has four processes bound to one
   physical export table through proxy models, which is where this was
   found.
-- **Upgrade step**: the key is shared-cache identity, so during a
-  rolling deploy the old and new processes compute different keys.
-  Drain the workers first, or accept one `LOCK_TIMEOUT` window in which
-  a rolling pair could both hold a lock on one instance.
+- **Upgrade note, and it needs no drain**: the key is shared-cache
+  identity, so during a rolling deploy the old and new processes compute
+  different keys for one instance. That window is narrow and shallow.
+  The cache lock guards one critical section — validate, write the
+  `TransitionMessage`, write `in_progress_state` — and from then on the
+  uncompleted row gates concurrent transitions. Two background enqueues
+  that both take a lock still meet the partial unique index, which is a
+  database constraint and knows nothing about the cache; the second gets
+  `AlreadyInProgress`. The worker's attempt is guarded by
+  `select_for_update(nowait=True)` on the row. What the split window
+  weakens is the synchronous path's fast mutex, for the minutes a
+  rolling deploy takes. Draining the workers first would cost more than
+  it buys.
 - The database alias is deliberately **not** in the key. No consumer
   runs a process model on a second write alias, and picking the wrong
   alias source would split the key for an instance read from a
