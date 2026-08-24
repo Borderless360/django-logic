@@ -649,39 +649,47 @@ CycleBackProcess.nested_processes = [CycleRootProcess]  # close the cycle
 
 
 class RunnerTreeWalkCycleTests(TestCase):
-    """A process may nest back into a parent, so every walk over
-    ``nested_processes`` needs the cycle guard. The two walks in the restore
-    path missed it and raised ``RecursionError``, which left the row
-    impossible to restore or complete.
+    """A process may nest back into a parent, so the restore lookup's walk
+    over ``nested_processes`` needs the cycle guard. It used to miss it and
+    raise ``RecursionError``, which left the row impossible to restore or
+    complete. A transition reached through two nested paths is one shared
+    object, so it must count as one match, not an ambiguity.
     """
 
-    def test_owner_lookup_terminates_on_a_cycle(self):
-        from django_logic.background.runner import (
-            _find_background_transition_in_owner,
+    @staticmethod
+    def _row(action_name, owner=''):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            pk=1, transition_name=action_name, owning_process_class=owner,
         )
 
+    def test_owner_lookup_terminates_on_a_cycle(self):
+        from django_logic.background.runner import _find_transition
+
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        found = _find_background_transition_in_owner(
-            root, 'inner',
+        found = _find_transition(root, self._row(
+            'inner',
             f'{CycleBackProcess.__module__}.{CycleBackProcess.__name__}',
-        )
+        ))
         self.assertIsNotNone(found)
         self.assertEqual(found.action_name, 'inner')
 
-    def test_owner_lookup_terminates_when_the_owner_is_gone(self):
-        from django_logic.background.runner import (
-            _find_background_transition_in_owner,
-        )
+    def test_gone_owner_falls_back_to_the_unambiguous_name(self):
+        from django_logic.background.runner import _find_transition
 
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        self.assertIsNone(_find_background_transition_in_owner(
-            root, 'inner', 'gone.RenamedProcess'))
+        found = _find_transition(root, self._row('inner', 'gone.RenamedProcess'))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.action_name, 'inner')
 
-    def test_name_lookup_terminates_on_a_cycle(self):
-        from django_logic.background.runner import _background_transitions_named
+    def test_name_lookup_terminates_on_a_cycle_and_counts_shared_once(self):
+        from django_logic.background.runner import _find_transition
 
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        matches = _background_transitions_named(root, 'inner')
-        self.assertEqual(len(matches), 1, 'a shared transition counted twice')
-        self.assertEqual(
-            _background_transitions_named(root, 'nope'), [])
+        # 'inner' is reachable through the cycle twice, but it is one shared
+        # object: one match, not an ambiguity refusal.
+        found = _find_transition(root, self._row('inner'))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.action_name, 'inner')
+        self.assertIsNone(_find_transition(root, self._row('nope')))

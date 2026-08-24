@@ -1046,75 +1046,60 @@ def _load_process_from_path(instance, dotted: str, transition_message: Transitio
 
 
 def _find_transition(process, transition_message: TransitionMessage):
-    """Resolve the exact background transition a ``TransitionMessage`` refers to.
+    """Resolve the exact background transition a ``TransitionMessage`` names.
 
-    Enqueue can record a background transition declared on a *nested*
-    process, because the synchronous lookup recurses into
-    ``nested_processes``. The row records only the *bound* ``process_name``,
-    so the worker restores the parent and walks down the
-    ``nested_processes`` tree. It builds each sub-process with the parent's
-    shared ``state``, the way ``Process.get_available_transitions`` does.
-    Without that walk the nested transition is never found: the row is
-    marked completed, the side-effects never run, and the instance is
-    stranded in ``in_progress_state``.
+    One walk over the ``nested_processes`` tree (``_iter_process_tree``
+    supplies the cycle guard — A nesting B nesting A is legal). A
+    transition is a candidate when its ``action_name`` matches and it is
+    a background one. Only background transitions: the worker never
+    restores a synchronous transition, and the lookup skips state
+    membership on purpose — the instance sits in ``in_progress_state``,
+    which is not in the transition's declared ``sources``.
 
-    Enqueue also records the process class that declared the transition, on
-    ``transition_message.owning_process_class``. When it is set, the search
-    is limited to that class. An ``action_name`` shared by nested processes
-    that pick between themselves with conditions then resolves to the one
-    enqueue chose. Every background transition started through the Process
-    entrypoint records it; for a transition on the bound process it equals
-    the bound class. It is blank only for rows enqueued before the column
-    existed, or for the rare row created outside the Process entrypoint.
+    Enqueue records the process class that declared the transition on
+    ``transition_message.owning_process_class``. A candidate declared on
+    that class wins at once — that is how an ``action_name`` shared by
+    nested processes resolves to the one enqueue chose. The owner is
+    blank only for rows enqueued before the column existed, or for the
+    rare row created outside the Process entrypoint.
 
-    When the owner is blank or no longer in the tree, we fall back to
-    matching by ``action_name``, and only when the name matches exactly one
-    background transition in the whole tree. The validator allows the same
-    background ``action_name`` on separate nested processes, so a fallback
-    for an ambiguous name would pick between siblings at random. It could
-    run the wrong integration's side-effects (a ``BackgroundAction``, whose
-    state guard cannot tell the siblings apart) or strand the instance (a
-    ``BackgroundTransition``, where the different ``in_progress_state``
-    makes the state guard supersede the row). So for an ambiguous name with
-    no owner we refuse to guess and raise ``_RestoreError``: the row is
-    finalized, retries stop, and no side-effects run. This only happens to a
-    row that is pending across the deploy which turns a unique background
-    ``action_name`` into a shared nested one. Let such rows complete before
-    that refactor.
-
-    Only ``is_background`` transitions are candidates. The worker never
-    restores a synchronous transition, because only enqueue creates a
-    ``TransitionMessage``. A state-aware lookup would not work here either:
-    the worker runs while the instance sits in ``in_progress_state``, which
-    is not in the transition's declared ``sources``, and the synchronous
-    lookup requires state membership. We skip that check on purpose.
+    When the owner is blank or did not match (the class was renamed or
+    removed, or no longer declares the transition), the name decides —
+    but only when it matches exactly one background transition in the
+    whole tree. For an ambiguous name we refuse to guess and raise
+    ``_RestoreError``: running a random sibling could run the wrong
+    integration's side-effects or strand the instance. The row is
+    finalized, retries stop, and no side-effects run.
     """
+    action_name = transition_message.transition_name
     owning_path = (transition_message.owning_process_class or '').strip()
+    seen, matches = set(), []
+    for process_cls in _iter_process_tree(type(process)):
+        proc_path = f'{process_cls.__module__}.{process_cls.__name__}'
+        for transition in process_cls.transitions:
+            if (
+                transition.action_name == action_name
+                and getattr(transition, 'is_background', False)
+            ):
+                if proc_path == owning_path:
+                    return transition
+                if id(transition) not in seen:
+                    # By identity: a Process class reached through two
+                    # nested paths shares its class-level transition
+                    # objects, and a shared object is one match, not two.
+                    seen.add(id(transition))
+                    matches.append(transition)
     if owning_path:
-        found = _find_background_transition_in_owner(
-            process, transition_message.transition_name, owning_path
-        )
-        if found is not None:
-            return found
-        # The row records an owner that is not in the tree: the nested process
-        # class was renamed or removed between enqueue and execute. Fall
-        # through to the name-based fallback, which refuses to guess when the
-        # name is ambiguous, and log so the mismatch is visible.
         transition_logger.warning(
             f'TransitionMessage#{transition_message.pk}: recorded process class '
-            f'{owning_path!r} for background transition '
-            f'{transition_message.transition_name!r} was not found in the process tree '
-            f'(renamed or removed?); attempting name-based fallback.'
+            f'{owning_path!r} does not declare background transition '
+            f'{transition_message.transition_name!r} (class renamed or removed, '
+            f'or the transition moved); attempting name-based fallback.'
         )
-
-    matches = _background_transitions_named(process, transition_message.transition_name)
     if len(matches) == 1:
         # One match, so the name is enough: the common case for older rows.
         return matches[0]
     if len(matches) > 1:
-        # The name is ambiguous and no owner resolved, so do NOT guess.
-        # _RestoreError finalizes the row and stops retries without running
-        # any side-effects, which beats running the wrong sibling.
         raise _RestoreError(
             f'background transition {transition_message.transition_name!r} matches '
             f'{len(matches)} transitions across the process tree and the '
@@ -1126,49 +1111,3 @@ def _find_transition(process, transition_message: TransitionMessage):
             f'move a background action_name onto shared nested processes.'
         )
     return None  # zero matches -> generic not-found _RestoreError in _restore
-
-
-def _find_background_transition_in_owner(process, action_name, owning_path):
-    """Return the background transition named ``action_name`` declared on the
-    process in the tree whose dotted class path equals ``owning_path``.
-
-    Walks through ``_iter_process_tree`` for its cycle guard. A nested layout
-    that reaches a class twice (A nests B nests A) is legal and the
-    synchronous walk allows it, but here it recursed until ``RecursionError``.
-    """
-    for process_cls in _iter_process_tree(type(process)):
-        proc_path = f'{process_cls.__module__}.{process_cls.__name__}'
-        if proc_path != owning_path:
-            continue
-        for transition in process_cls.transitions:
-            if (
-                transition.action_name == action_name
-                and getattr(transition, 'is_background', False)
-            ):
-                return transition
-        # Class matched but it no longer declares the transition (renamed).
-        return None
-    return None
-
-
-def _background_transitions_named(process, action_name):
-    """All distinct ``is_background`` transitions named ``action_name`` across the
-    process and its nested tree.
-
-    Counts each transition object once. A Process class can be reached through
-    two nested paths, and its class-level ``transitions`` are shared objects,
-    so without that the ambiguity check in ``_find_transition`` would reject a
-    reused sub-process. ``_iter_process_tree`` supplies the cycle guard (see
-    ``_find_background_transition_in_owner``).
-    """
-    seen, out = set(), []
-    for process_cls in _iter_process_tree(type(process)):
-        for transition in process_cls.transitions:
-            if (
-                transition.action_name == action_name
-                and getattr(transition, 'is_background', False)
-                and id(transition) not in seen
-            ):
-                seen.add(id(transition))
-                out.append(transition)
-    return out
