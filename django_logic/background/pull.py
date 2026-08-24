@@ -26,6 +26,10 @@ for pickup latency on a direct Postgres connection; pgbouncer
 transaction pooling rejects LISTEN, and there the worker falls back to
 the poll floor.
 
+Each attempt runs in a forked attempt process, so a crash kills the
+attempt and not the worker. ``--concurrency`` says how many of them a
+worker runs at a time; the default of one keeps the worker sequential.
+
 The worker loop also runs the safety nets (the stuck finalizer and its
 no-worker report, the cleanup sweep), so nothing has to be scheduled
 anywhere else.
@@ -36,6 +40,7 @@ import os
 import select
 import signal
 import time
+from dataclasses import dataclass
 
 from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 
@@ -67,7 +72,7 @@ def notify_workers() -> None:
         logger.warning('pull: NOTIFY failed (the poll floor covers it): %s', exc)
 
 
-def claim_next(queues: list[str]) -> int | None:
+def claim_next(queues: list[str], *, exclude_pks=()) -> int | None:
     """Return the pk of one claimable row for ``queues``, or ``None``.
 
     The lock taken by ``SKIP LOCKED`` is released when this short
@@ -75,12 +80,19 @@ def claim_next(queues: list[str]) -> int | None:
     attempt. Two workers can race through that gap, and the loser exits
     through the runner's existing skip-if-locked guard — wasteful once
     in a while, never wrong.
+
+    ``exclude_pks`` names the rows this worker already runs. One worker
+    claims faster than its own attempt processes take their row locks, so
+    without this it would claim the same head row into every free slot.
     """
     from django_logic.background.safety_nets import _claimable
 
+    rows = _claimable(queues)
+    if exclude_pks:
+        rows = rows.exclude(pk__in=exclude_pks)
     with transaction.atomic():
         return (
-            _claimable(queues)
+            rows
             .select_for_update(skip_locked=True)
             .values_list('pk', flat=True)
             .first()
@@ -103,32 +115,31 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     if pk is None:
         return False
     if isolate and hasattr(os, 'fork'):
-        _run_attempt_process(pk)
+        attempts: dict[int, _Attempt] = {}
+        _start_attempt(pk, attempts)
+        _harvest(attempts, block=True)
     else:
         run_background_transition(pk)
     return True
 
 
-def _run_attempt_process(pk: int) -> None:
-    """Fork one attempt process, bound it by ``timeout=``, and account
-    for how it ended.
+@dataclass
+class _Attempt:
+    """One forked attempt process the worker is responsible for."""
+
+    pk: int
+    timeout_seconds: float | None
+    deadline: float | None
+    killed: bool = False
+
+
+def _start_attempt(pk: int, attempts: dict[int, _Attempt]) -> None:
+    """Fork one attempt process for ``pk`` and record it in ``attempts``.
 
     The worker and the attempt process must not share a database
     connection — a connection closed (or crashed) on one side poisons
     the other's session. The worker closes every connection before the
     fork; each side then opens its own lazily.
-
-    The worker enforces the transition's declared ``timeout=``: an
-    attempt process that runs past the budget is killed. This is the
-    only place a hanging attempt can be stopped — the attempt holds its
-    row lock while it runs, so nothing else can reach it.
-
-    An attempt process that dies without completing the row left no
-    error on it, so the worker records one: the claim's retry wait then
-    paces the next attempt, and ``MAX_ERRORS`` bounds a crash loop — a
-    side-effect that crashes (or hangs) every time ends in
-    ``failed_state`` like one that fails every time, instead of looping
-    forever.
     """
     from django_logic.background.models import TransitionMessage
     from django_logic.background.runner import run_background_transition
@@ -151,72 +162,118 @@ def _run_attempt_process(pk: int) -> None:
             # _exit, so a crashing attempt cannot run the worker's cleanup
             # handlers or flush its buffers twice.
             os._exit(status)
-    exit_code, timed_out = _wait_for_attempt_process(attempt_pid, timeout_seconds)
-    if timed_out:
+    attempts[attempt_pid] = _Attempt(
+        pk=pk,
+        timeout_seconds=timeout_seconds,
+        deadline=(
+            None if timeout_seconds is None
+            else time.monotonic() + timeout_seconds
+        ),
+    )
+
+
+def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
+    """Account for the attempt processes that ended, and kill the ones
+    that ran past their declared ``timeout=``.
+
+    Killing is the only way to stop a hanging attempt: the attempt holds
+    its row lock while it runs, so nothing else can reach it. The signal
+    is ``SIGKILL`` because the attempt may hang inside code that ignores
+    gentler signals, and the kill releases the row lock with the
+    attempt's connection.
+
+    With ``block`` the call returns after one attempt ends. It blocks in
+    ``waitpid`` when no attempt carries a budget, and polls when one
+    does, because a budget has to be enforced while nothing exits.
+    """
+    while attempts:
+        now = time.monotonic()
+        for pid, attempt in attempts.items():
+            if attempt.killed or attempt.deadline is None:
+                continue
+            if now < attempt.deadline:
+                continue
+            attempt.killed = True
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # It ended between the poll and the kill. The wait below
+                # reaps it, and the budget passed either way, so the
+                # attempt is still charged a timeout.
+                pass
+        next_deadline = min(
+            (
+                attempt.deadline for attempt in attempts.values()
+                if attempt.deadline is not None and not attempt.killed
+            ),
+            default=None,
+        )
+        try:
+            pid, raw_status = os.waitpid(
+                -1, 0 if block and next_deadline is None else os.WNOHANG)
+        except ChildProcessError:
+            # Something else reaped them, so no exit status is coming.
+            for attempt in attempts.values():
+                _account(attempt, None)
+            attempts.clear()
+            return
+        if pid == 0:
+            if not block:
+                return
+            time.sleep(min(1.0, max(0.01, next_deadline - now)))
+            continue
+        attempt = attempts.pop(pid, None)
+        if attempt is None:
+            # Not an attempt process. The worker is the only supervisor
+            # here, so this is a stray child left by consumer code.
+            continue
+        _account(attempt, os.waitstatus_to_exitcode(raw_status))
+        if block:
+            return
+
+
+def _account(attempt: _Attempt, exit_code: int | None) -> None:
+    """Record one error on the row when the attempt did not end cleanly.
+    ``exit_code`` is ``None`` when something else reaped the attempt, so
+    no status reached the worker.
+
+    An attempt process that dies without completing the row left no
+    error on it, so the worker records one: the claim's retry wait then
+    paces the next attempt, and ``MAX_ERRORS`` bounds a crash loop — a
+    side-effect that crashes (or hangs) every time ends in
+    ``failed_state`` like one that fails every time, instead of looping
+    forever.
+
+    An attempt the worker killed is a timeout even when its status never
+    arrives. It is not a timeout when the status shows it ended on its
+    own first: ``os.kill`` succeeds on a process that has exited and is
+    waiting to be reaped, so the kill alone does not prove the attempt
+    was still running.
+    """
+    if attempt.killed and exit_code in (None, -signal.SIGKILL):
         logger.warning(
-            f'pull: the attempt for TransitionMessage#{pk} ran past its '
-            f'declared timeout={timeout_seconds}s and was stopped. The error '
-            f'recorded here paces the next claim.'
+            f'pull: the attempt for TransitionMessage#{attempt.pk} ran past '
+            f'its declared timeout={attempt.timeout_seconds}s and was '
+            f'stopped. The error recorded here paces the next claim.'
         )
         _record_attempt_error(
-            pk,
-            f'[timeout] the attempt ran past timeout={timeout_seconds}s '
-            f'and was stopped',
+            attempt.pk,
+            f'[timeout] the attempt ran past '
+            f'timeout={attempt.timeout_seconds}s and was stopped',
         )
         return
-    if exit_code == 0:
+    if exit_code in (None, 0):
         return
     logger.warning(
-        f'pull: the attempt process for TransitionMessage#{pk} died '
+        f'pull: the attempt process for TransitionMessage#{attempt.pk} died '
         f'(exit {exit_code}). Its row lock died with it; the error recorded '
         f'here paces the next claim.'
     )
     _record_attempt_error(
-        pk,
+        attempt.pk,
         f'[crashed] the attempt process died (exit {exit_code}) '
         f'before the attempt finished',
     )
-
-
-def _wait_for_attempt_process(attempt_pid: int, timeout_seconds) -> tuple[int, bool]:
-    """Wait for the attempt process. Returns ``(exit_code, timed_out)``.
-
-    With no declared budget the wait is plain and unbounded. With one,
-    the worker polls the attempt process and kills it (``SIGKILL`` — the
-    attempt may hang inside code that ignores gentler signals) when the
-    budget passes. The kill releases the attempt's row lock with its
-    connection.
-    """
-    if timeout_seconds is None:
-        _, raw_status = os.waitpid(attempt_pid, 0)
-        return os.waitstatus_to_exitcode(raw_status), False
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        try:
-            pid, raw_status = os.waitpid(attempt_pid, os.WNOHANG)
-        except ChildProcessError:
-            # Something else reaped the attempt and the worker sent no kill,
-            # so this is a normal exit.
-            return 0, False
-        if pid != 0:
-            return os.waitstatus_to_exitcode(raw_status), False
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            sent_kill = False
-            try:
-                os.kill(attempt_pid, signal.SIGKILL)
-                sent_kill = True
-            except ProcessLookupError:
-                pass
-            try:
-                _, raw_status = os.waitpid(attempt_pid, 0)
-            except ChildProcessError:
-                # Reaped elsewhere. A kill the worker sent is still a timeout.
-                return (-signal.SIGKILL, True) if sent_kill else (0, False)
-            if sent_kill:
-                return -signal.SIGKILL, True
-            return os.waitstatus_to_exitcode(raw_status), False
-        time.sleep(min(1.0, max(0.01, remaining)))
 
 
 def _record_attempt_error(pk: int, message: str) -> None:
@@ -316,27 +373,49 @@ def _wait_for_work(timeout: float) -> None:
         time.sleep(timeout)
 
 
-def run_worker(queues: list[str], *, forever: bool = True) -> None:
-    """The worker loop: drain claimable rows, run the safety nets on
+def run_worker(
+    queues: list[str], *, forever: bool = True, concurrency: int = 1,
+) -> None:
+    """The worker loop: fill the free attempt slots from the claimable
+    rows, account for the attempts that end, run the safety nets on
     schedule, wait for a notification, repeat.
 
-    ``forever=False`` runs exactly one drain-and-safety-net pass — for
-    tests and for a one-off catch-up command.
+    ``concurrency`` is how many attempts this worker runs at a time. One
+    worker with several slots shares one memory pool and one set of
+    safety nets across them; several one-slot workers each reserve memory
+    for their heaviest attempt. Every slot holds its own database
+    connection while it runs, so size ``concurrency`` against the
+    connection cap (see docs/design/PULL_WORKERS.md).
+
+    ``forever=False`` drains what is claimable now, waits for the
+    attempts it started, runs the safety nets, and returns — for tests
+    and for a one-off catch-up command.
     """
-    logger.info('pull worker starting: queues=%s', ','.join(queues))
+    logger.info(
+        'pull worker starting: queues=%s, attempts at a time=%s',
+        ','.join(queues), concurrency,
+    )
+    attempts: dict[int, _Attempt] = {}
     last_safety_net = 0.0
     while True:
-        ran_any = False
-        while run_once(queues, isolate=True):
-            ran_any = True
-            # A sustained backlog must not starve the safety nets: break
-            # out of the drain when they are due and come back after.
-            if time.monotonic() - last_safety_net >= SAFETY_NET_SECONDS:
+        claimed_any = False
+        while len(attempts) < concurrency:
+            pk = claim_next(
+                queues,
+                exclude_pks=[attempt.pk for attempt in attempts.values()],
+            )
+            if pk is None:
                 break
+            _start_attempt(pk, attempts)
+            claimed_any = True
+        # Every slot is full, or nothing is claimable. Either way the
+        # worker has nothing else to do until an attempt ends, so this
+        # wait is what keeps a full backlog from spinning on the claim.
+        _harvest(attempts, block=True)
         if time.monotonic() - last_safety_net >= SAFETY_NET_SECONDS:
             _run_safety_nets()
             last_safety_net = time.monotonic()
-        if ran_any:
+        if claimed_any or attempts:
             continue
         if not forever:
             return

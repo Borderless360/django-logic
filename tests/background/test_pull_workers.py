@@ -168,6 +168,39 @@ class PullClaimTests(TransactionTestCase):
         self.assertEqual(first.status, 'fulfilled')
         self.assertEqual(second.status, 'fulfilled')
 
+    def test_the_claim_skips_the_rows_this_worker_already_runs(self):
+        """A worker claims faster than its attempt processes take their
+        row locks. Without this the head row fills every free slot."""
+        _, first = self._row()
+        _, second = self._row()
+        self.assertEqual(claim_next(_CRITICAL), first.pk)
+        self.assertEqual(
+            claim_next(_CRITICAL, exclude_pks=[first.pk]), second.pk)
+        self.assertIsNone(
+            claim_next(_CRITICAL, exclude_pks=[first.pk, second.pk]))
+
+    def test_several_attempts_run_at_the_same_time(self):
+        """The side-effect only finishes when all three attempts stand
+        in it together, so three completed rows prove three slots."""
+        import shutil
+        import tempfile
+
+        barrier_dir = tempfile.mkdtemp(prefix='dl_rendezvous_')
+        self.addCleanup(shutil.rmtree, barrier_dir, ignore_errors=True)
+
+        widgets = [Widget.objects.create(status='draft') for _ in range(3)]
+        for widget in widgets:
+            widget.process.rendezvous(barrier_dir=barrier_dir, width=3)
+
+        run_worker(_CRITICAL, forever=False, concurrency=3)
+
+        for widget in widgets:
+            widget.refresh_from_db()
+            self.assertEqual(widget.status, 'met')
+        self.assertFalse(
+            TransitionMessage.objects.filter(is_completed=False).exists()
+        )
+
     def test_one_loop_pass_drains_and_runs_the_safety_nets(self):
         first = Widget.objects.create(status='draft')
         second = Widget.objects.create(status='draft')

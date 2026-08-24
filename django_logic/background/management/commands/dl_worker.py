@@ -2,9 +2,10 @@
 
     python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 
-One process per SLA group. The
-loop also runs the safety nets (stuck report, cleanup), so
-pull mode needs no beat schedule. See docs/design/PULL_WORKERS.md.
+One process per SLA group. ``--concurrency`` says how many attempts the
+process runs at a time. The loop also runs the safety nets (stuck
+report, cleanup), so pull mode needs no beat schedule. See
+docs/design/PULL_WORKERS.md.
 """
 from django.core.management.base import BaseCommand, CommandError
 
@@ -24,6 +25,13 @@ class Command(BaseCommand):
             '--once', action='store_true',
             help='drain what is claimable now, run the safety nets, exit',
         )
+        parser.add_argument(
+            '--concurrency', type=int, default=1,
+            help=(
+                'how many attempts this worker runs at a time (default 1). '
+                'Each one holds a database connection while it runs.'
+            ),
+        )
 
     def handle(self, *args, **options):
         if conf.background_execution() != conf.EXECUTION_PULL:
@@ -33,4 +41,11 @@ class Command(BaseCommand):
         queues = [q for q in options['queues'].split(',') if q]
         if not queues:
             raise CommandError('--queues must name at least one queue.')
-        run_worker(queues, forever=not options['once'])
+        concurrency = options['concurrency']
+        if concurrency < 1:
+            raise CommandError('--concurrency must be 1 or more.')
+        run_worker(
+            queues,
+            forever=not options['once'],
+            concurrency=concurrency,
+        )

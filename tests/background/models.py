@@ -30,6 +30,23 @@ def bg_refuse(instance, **kwargs):
     raise PermanentFailure('the rule says no')
 
 
+def bg_rendezvous(instance, barrier_dir='', width=1, **kwargs):
+    """Wait until ``width`` attempts stand inside this side-effect at once.
+
+    Attempt processes share no memory, so they meet through files. A
+    worker that runs one attempt at a time never fills the barrier, and
+    the wait ends in a failure the test can see.
+    """
+    import os
+    import time
+    open(os.path.join(barrier_dir, str(instance.pk)), 'w').close()
+    deadline = time.monotonic() + 10
+    while len(os.listdir(barrier_dir)) < width:
+        if time.monotonic() > deadline:
+            raise TimeoutError('the attempts did not run at the same time')
+        time.sleep(0.02)
+
+
 def bg_die_once(instance, marker_path='', **kwargs):
     """Hard-kill the attempt process on the first run; succeed after."""
     import os
@@ -124,6 +141,14 @@ class WidgetProcess(Process):
             queue='django_logic.slow',
             side_effects=[bg_ok],
             timeout=60,
+        ),
+        BackgroundTransition(
+            action_name='rendezvous',
+            sources=['draft'],
+            target='met',
+            failed_state='alone',
+            queue='django_logic.critical',
+            side_effects=[bg_rendezvous],
         ),
         BackgroundTransition(
             action_name='die_once',

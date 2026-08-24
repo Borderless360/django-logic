@@ -108,9 +108,11 @@ every worker holds one LISTEN connection, and a payload-free notification
 means "ask the database now". Losing a notification costs one poll
 interval, nothing more — the row waits in the database either way.
 
-The wake-up pays off only on a direct Postgres connection. pgbouncer
-transaction pooling rejects LISTEN, so a worker behind it falls back to
-the poll floor and every row still runs within `POLL_SECONDS`.
+The wake-up pays off only on a direct Postgres connection. There it is
+worth keeping: the Heroku rig measured pickup at 0.9 s against the 5 s
+poll floor. pgbouncer transaction pooling rejects LISTEN, so a worker
+behind it falls back to the poll floor and every row still runs within
+`POLL_SECONDS`.
 
 ## 6. Two open choices
 
@@ -149,10 +151,58 @@ python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 ```
 
 One process per SLA group, exactly like one broker worker per queue
-before. Concurrency by running more processes (Heroku: more dynos; a
-`--concurrency` flag can come later). Celery is no longer a dependency:
-nothing imports it, and `'celery'` as a mode reports its removal with the
-migration steps at boot.
+before. Celery is no longer a dependency: nothing imports it, and
+`'celery'` as a mode reports its removal with the migration steps at
+boot.
+
+`--concurrency=N` says how many attempts one worker runs at a time
+(default 1). Each attempt still runs in its own forked process, and
+`SKIP LOCKED` already makes concurrent claims safe.
+
+## 7a. Sizing a deployment
+
+Two numbers decide the shape: memory and database connections.
+
+**Memory.** Every worker process carries the full Django image, and
+every running attempt adds its own peak on top. Demand is spiky — most
+attempts need little and a few need a lot — so N one-slot workers each
+have to be sized for their heaviest attempt, while one worker with N
+slots absorbs the same peak out of one shared pool. Prefer fewer, larger
+workers with `--concurrency`. Keep separate workers where the queues
+need SLA isolation, not to buy parallelism.
+
+The first production day on 0.16.0 showed the cost of the other shape:
+three one-slot workers on 512 MB, two of them killed by the platform's
+memory quota, an import attempt peaking at 804 MB, and an hourly fan-out
+of 119 rows draining at 2.6 rows a minute across two swapping workers.
+
+**Connections.** Each running attempt holds one database connection —
+two where the app opens a second one. Budget
+`workers × (concurrency + 1)` connections per queue group (the extra one
+is the worker's own LISTEN connection) and keep the total under the
+database plan's cap, or under the pgbouncer pool size. A worker that
+cannot connect logs and retries; a database at its cap refuses the web
+processes too, so leave headroom for them.
+
+## 7b. Knowing a worker stopped
+
+The safety nets run inside the worker loop. A dead `dl_worker` therefore
+means no stuck finalizer and no cleanup sweep as well as no attempts —
+nothing else reports the backlog. Alert on the process, not on the rows:
+
+- a process supervisor that restarts the worker and reports the restart
+  (on Heroku, dyno-crash alerts);
+- a heartbeat check — a cron or Sentry cron monitor that fails if no
+  worker has logged `pull worker starting` or completed a row inside a
+  known window;
+- `python manage.py dl_transitions` during an incident: it lists the
+  uncompleted rows and names the ones nothing is serving.
+
+`detect_stuck_transitions` already logs at ERROR when a row has waited
+past the retry window with no attempt started, naming the queue and the
+`dl_worker` line that would serve it. That log line is the one to page
+on. It only fires while some worker is alive to run it, which is why the
+process alert comes first.
 
 ## 8. Migration path
 
@@ -174,7 +224,7 @@ migration steps at boot.
   attempt is running is skipped; a crashed claim is re-claimable at once;
   the queue filter holds; NOTIFY wakes a waiting worker.
 - The Heroku matrix (`django-logic-test`): every row that exercises
-  dispatch, recovery, retries, watchdog, and concurrency, driven under
+  dispatch, recovery, retries, the timeout kill, and concurrency, driven under
   pull, alongside the recorded push results. The rows the mirror made
   necessary (lost dispatch, dispatch bounds) must become trivially green
   or provably meaningless.
