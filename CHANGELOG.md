@@ -158,9 +158,12 @@ consumer API is unchanged except where noted.
 - **The top-level re-export of the command classes is removed**
   (#244). Import `Conditions`, `Permissions`, `SideEffects`,
   `Callbacks` from `django_logic.commands`. Kept, against the issue's
-  list: the `*_class` swap hooks (the consumer overrides
-  `callbacks_class`, `permissions_class`, and `side_effects_class`),
-  the restore fallbacks (`open_transition_message` still creates
+  list: the `*_class` swap hooks — the consumer overrides
+  `Process.permissions_class` on three processes, and its
+  `callbacks_class` and `side_effects_class` overrides belong to the
+  legacy fork, not to this engine; removing the four unused attributes
+  is a public break worth about ten lines, so they wait for 1.0. Also
+  kept: the restore fallbacks (`open_transition_message` still creates
   blank-owner rows, so that path is current behaviour), and
   `AlreadyInProgress` as a named class (the consumer catches it by
   name).
@@ -266,6 +269,23 @@ consumer API is unchanged except where noted.
   process waiting to be reaped, so the kill alone cannot decide the
   outcome; the status the reap returns does. A kill whose status never
   arrives is still a timeout.
+
+### Changed — the README tells the reader what to do (#238)
+
+- 1,387 lines become 363. What stays: install, bind in `ready()`, one
+  synchronous example, one background example, `dl_worker` and
+  `dl_transitions`, the two safety nets, the PostgreSQL and
+  cross-process-cache requirements, and a pointer per topic.
+- What goes: the release numbers and upgrade notes (this file owns
+  them), the extras paragraph that narrated three releases, sync as a
+  product feature, the Django FSM comparison, the assistant-facing
+  declaration rules, the four repeats of the bind lecture, the
+  500-line background section that retold `PULL_WORKERS.md` and
+  `TESTING_GUIDE.md`, the install dict listing every knob, and the
+  wiki pointer.
+- The install example no longer sets `BACKGROUND_EXECUTION`. Pull is
+  the default, and sync now appears once, in the testing section, as
+  the test-only opt-in it is.
 
 ### Added — a tag publishes the release (#251)
 
