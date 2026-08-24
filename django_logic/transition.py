@@ -129,18 +129,9 @@ class Transition:
         self.sources = list(sources)
         self.in_progress_state = kwargs.get('in_progress_state')
         if self.in_progress_state and not self.is_background:
-            # Background-only (0.12.0). On a background transition the
-            # state is written atomically with the TransitionMessage row,
-            # so every marked instance names its exact transition. A
-            # synchronous transition wrote it under a cache lock with no
-            # durable record: a hard-killed worker left the instance
-            # parked in a state with no outbound edges and nothing that
-            # could ever move it. Without that write a killed sync run
-            # rolls back to its source state and can simply be run again.
-            # Model a visible "busy" step as a real state instead: a
-            # fast transition into it, chained via next_transition to the
-            # transition that does the work (see the README migration
-            # note).
+            # A durable busy marker needs a durable owner. Only a
+            # background transition writes one (atomically with its
+            # TransitionMessage row); the raise message says the rest.
             raise ImproperlyConfigured(
                 f"Transition {action_name!r}: in_progress_state is only "
                 f"supported on BackgroundTransition, where it is written "
@@ -247,11 +238,7 @@ class Transition:
         # by now a concurrent transition may have won the race and moved
         # the state (validate-then-lock TOCTOU). One cheap query closes it.
         # Any failure here must release the lock or the instance's FSM
-        # freezes until the lock TTL expires. (No state is written under the
-        # lock before the side-effects anymore: in_progress_state is
-        # background-only since 0.12.0 — a sync run that dies leaves the
-        # instance at its source state, ready to run again, with nothing
-        # to sweep.)
+        # freezes until the lock TTL expires.
         try:
             self._ensure_db_state_in_sources(state)
             self._ensure_no_background_in_flight(state)
@@ -507,22 +494,13 @@ class Action(Transition):
     def fail_transition(self, state: State, exception: Exception, **kwargs):
         """Run the failure path, taking the lock only around the write.
 
-        An Action runs its side-effects without the state lock, so
-        inheriting ``Transition.fail_transition`` — whose unconditional
-        ``state.unlock()`` would delete the lock a concurrent ``Transition``
-        on the same instance/field legitimately holds — is not an option.
-        This mirrors the lock/unlock asymmetry already present in
-        ``complete_transition``.
-
-        ``failed_state`` is written only under an atomically-acquired lock:
-        checking ``is_locked()`` and then writing left a window for a
-        concurrent transition to start between the check and the write, and
-        the Action's stale write then clobbered that transition's state.
-        The cache lock only covers sync runs and enqueue, so under the
-        lock the uncompleted ``TransitionMessage`` is consulted too:
-        while one exists, the worker owns the state field and the write
-        is skipped — otherwise it would supersede the worker (or be
-        destroyed by its target write). Whenever the write is skipped,
+        An Action runs its side-effects without the state lock, so it
+        must not unlock unconditionally — that would delete a lock a
+        concurrent ``Transition`` on the same instance/field holds.
+        ``failed_state`` is written only under an atomically-acquired
+        lock, and under that lock the uncompleted ``TransitionMessage``
+        is consulted too: while one exists, the worker owns the state
+        field and the write is skipped. Whenever the write is skipped,
         the failure is still fully visible — the exception propagates
         and the failure hooks run.
         """

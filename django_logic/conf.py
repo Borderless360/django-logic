@@ -81,16 +81,6 @@ def background_execution() -> str:
     configured = _conf().get('BACKGROUND_EXECUTION')
     if configured is None:
         return EXECUTION_PULL
-    if configured == 'celery':
-        raise ImproperlyConfigured(
-            "DJANGO_LOGIC['BACKGROUND_EXECUTION']='celery' was removed: "
-            "workers now claim committed rows from the database, so no "
-            "broker carries them. Set 'pull' and run one "
-            "`manage.py dl_worker --queues <names>` process per queue "
-            "group (the worker loop also runs the safety nets, so no "
-            "beat schedule is needed). Drain the old broker queues once "
-            "before switching. See the README's background section."
-        )
     if configured not in _VALID_EXECUTION_MODES:
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC['BACKGROUND_EXECUTION'] must be one of "

@@ -182,11 +182,11 @@ class BackgroundEntrypointGuardTests(ProcessScenario):
     state_field = 'status'
     process_name = 'process'
 
-    @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='celery'))
-    def test_transition_refuses_a_background_action_under_celery_mode(self):
-        # A test environment left on the global default. This used to enqueue a
-        # task no worker runs, so the test failed later and somewhere else, with
-        # an uncompleted row left behind.
+    @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='pull'))
+    def test_transition_refuses_a_background_action_under_pull_mode(self):
+        # A test environment left on the global default. This used to leave a
+        # committed row no worker runs, so the test failed later and somewhere
+        # else, with an uncompleted row left behind.
         widget = self.create_instance(status='draft')
         with self.assertRaises(AssertionError) as ctx:
             self.transition(widget, 'fulfil')

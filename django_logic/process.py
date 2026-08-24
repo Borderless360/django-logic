@@ -135,7 +135,7 @@ class Process:
             kwargs.setdefault('root_id', parent_ctx['root_id'])
             kwargs.setdefault('tr_id', parent_ctx['tr_id'])
 
-        user = kwargs['user'] if 'user' in kwargs else None
+        user = kwargs.get('user')
         transition, owning_process = self._resolve_transition_with_owner(
             action_name, user
         )
@@ -278,16 +278,13 @@ class Process:
             )
             raise TransitionNotAllowed("There are several transitions available")
 
-        transition_logger.info(
+        message = (
             f"Process class {self.__class__} for object "
             f"{self.state.instance.pk} has no transition "
             f"with action name {action_name}, user {user}"
         )
-        raise TransitionNotAllowed(
-            f"Process class {self.__class__} for object "
-            f"{self.state.instance.pk} has no transition "
-            f"with action name {action_name}, user {user}"
-        )
+        transition_logger.info(message)
+        raise TransitionNotAllowed(message)
 
 
 def _iter_process_tree(process_cls, _seen=None):
@@ -411,15 +408,7 @@ def _validate_hook_signatures(process_cls) -> None:
     offenders = collect_hook_signature_offenders(process_cls)
     if not offenders:
         return
-    message = _hook_signature_message(offenders)
-    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION.
-    if strict_hook_signatures():
-        raise ImproperlyConfigured(message)
-    transition_logger.warning(message)
-
-
-def _hook_signature_message(offenders) -> str:
-    return (
+    message = (
         'FSM hooks without a named instance-first parameter — the engine '
         'calls hooks as fn(instance, **kwargs) (permissions as '
         'fn(instance, user, **kwargs)), so give each hook a named first '
@@ -427,6 +416,10 @@ def _hook_signature_message(offenders) -> str:
         'need functools.wraps to expose the real signature: '
         f'{"; ".join(sorted(set(offenders)))}'
     )
+    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION.
+    if strict_hook_signatures():
+        raise ImproperlyConfigured(message)
+    transition_logger.warning(message)
 
 
 def collect_hook_signature_offenders(process_cls) -> list:

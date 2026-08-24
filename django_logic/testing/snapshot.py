@@ -81,12 +81,9 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
                 'last_error_message': transition_message.last_error_message,
                 'timeout_seconds': transition_message.timeout_seconds,
                 'kwargs': transition_message.kwargs,
-                # The retry clock. Without these a snapshot of a hung or
-                # timed-out production row replays as a pristine row: the
-                # retry backoff, the retry classification and the
-                # stuck-transition detector all read them, so the very
-                # behaviour the snapshot was taken to reproduce could not be
-                # reproduced.
+                # The retry clock: the retry backoff, the retry
+                # classification and the stuck report all read these, so
+                # a hung production row must replay as hung, not pristine.
                 'last_error_dt': _jsonable(transition_message.last_error_dt),
                 'failure_side_effect_error': transition_message.failure_side_effect_error,
                 'started_at': _jsonable(transition_message.started_at),
@@ -140,9 +137,8 @@ def from_snapshot(data_or_path, *, model=None):
 
     recorded = data.get('model')
     if recorded and recorded.lower() != model._meta.label.lower():
-        # Field names of a different model mostly do not overlap, so restoring
-        # into the wrong one used to drop them silently (below) and hand back a
-        # corrupted instance that "reproduces" nothing.
+        # Field names of a different model mostly do not overlap, so the
+        # unknown-field drop below would silently corrupt the restore.
         raise ValueError(
             f'snapshot: captured from {recorded!r} but restoring into '
             f'{model._meta.label!r}. Pass the model the snapshot came from '
@@ -206,12 +202,8 @@ def from_snapshot(data_or_path, *, model=None):
             last_error_message=tm_data.get('last_error_message', ''),
             timeout_seconds=tm_data.get('timeout_seconds'),
             kwargs=tm_data.get('kwargs') or {},
-            # Restore the retry clock so a hung or timed-out production
-            # row replays as hung, not pristine. Without started_at in
-            # particular, the retry classification and the stuck report
-            # can never see a replayed row as started, so a snapshot of
-            # the exact row a timeout incident produced could not
-            # reproduce it.
+            # The retry clock again — see snapshot(): a hung row must
+            # replay as hung, not pristine.
             last_error_dt=_restore_dt(tm_data.get('last_error_dt')),
             failure_side_effect_error=tm_data.get(
                 'failure_side_effect_error', ''),

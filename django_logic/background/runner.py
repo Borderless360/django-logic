@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
 from django.apps import apps
@@ -147,25 +146,15 @@ def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -
     row later finds an explanation next to the completion.
 
     Runs as a single UPDATE outside the worker atomic block, which has
-    already exited and rolled back. What survives depends on the execution
-    mode:
-
-    * Pull mode — the worker is the top-level unit of work with no
-      surrounding transaction, so this UPDATE commits on its own. This is
-      the path the original infinite-retry bug lived on.
-    * Sync mode — enqueue (which created the row) and execute share the
-      caller's transaction. If the caller wraps the whole call in
-      ``atomic()`` and later rolls back, this UPDATE rolls back with it, and
-      so does the enqueue INSERT. No row survives to be retried, so the
-      stop-retry promise still holds. This write does not survive a parent
-      rollback on its own.
+    already exited and rolled back. Durability is mode-dependent, with
+    the same rule as ``TransitionMessage.stamp_attempt_started``; in sync
+    mode a caller rollback also discards the enqueue INSERT, so no row
+    survives to be retried and the stop-retry promise still holds.
     """
     now = timezone.now()
-    # db_safe_text, not a plain slice: ``reason`` carries arbitrary exception
-    # text, such as a consumer module that failed to import. A NUL byte or a
-    # lone surrogate in it made PostgreSQL reject this very UPDATE, so the row
-    # never completed and was retried forever — the exact outcome this
-    # function exists to prevent.
+    # db_safe_text, not a plain slice: ``reason`` carries arbitrary
+    # exception text, and PostgreSQL rejects a NUL or a lone surrogate —
+    # this completion write must never be the statement that fails.
     note = db_safe_text(f'{UNRESTORABLE_MARKER} {reason or "restore failed"}')
     try:
         TransitionMessage.objects.filter(pk=transition_message_id, is_completed=False).update(
@@ -283,21 +272,14 @@ def _finalize_stuck_row(
             measure_duration=False, ended_in_failure=True)
         return None
 
-    try:
-        with transaction.atomic():
-            kwargs = deserialize_kwargs(transition_message.kwargs)
-    except Exception as exc:
-        # kwargs that no longer decode must not block the finalization. Carry
-        # on with empty kwargs so failed_state and the completion still land
-        # and retries stop. The savepoint keeps the outer transaction healthy
-        # when the failure is a DatabaseError from reading the user table.
+    kwargs, decode_error = _decode_kwargs(transition_message)
+    if decode_error is not None:
+        # kwargs that no longer decode must not block the finalization:
+        # failed_state and the completion still land, so retries stop.
         transition_logger.error(
             f'detect_stuck: TransitionMessage#{transition_message.pk} kwargs failed to decode '
-            f'({type(exc).__name__}: {exc}); finalizing with empty kwargs.'
+            f'({type(decode_error).__name__}: {decode_error}); finalizing with empty kwargs.'
         )
-        kwargs = {}
-    # Mirror the sync path: side-effects/callbacks may read ``context``.
-    kwargs.setdefault('context', {})
     state = process.state
 
     # Same state guard as the worker attempt path, and with the same result: a
@@ -374,7 +356,7 @@ def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
     finalizing atomic block has committed and released the row lock.
 
     Every terminal-failure path runs through here: a row that reached
-    MAX_ERRORS during an attempt, and a row the watchdog or detect_stuck
+    MAX_ERRORS during an attempt, and a row detect_stuck
     finalized. ``Callbacks.execute`` already swallows exceptions; the guard
     here also covers a malformed hook list.
     """
@@ -699,43 +681,32 @@ def _handle_failure(
         exc_info=True,
     )
 
-    max_errors = conf.max_errors()
-    if (
-        transition_message.errors_count < max_errors
-        and not _failure_is_permanent(transition, error)
-    ):
-        # Leave uncompleted → claimable again after the retry wait.
-        return _Outcome(
-            terminal=False,
-            succeeded=False,
-            exception=error,
-            transition=transition,
-            state_obj=state,
-            kwargs=kwargs,
-        )
-    if transition_message.errors_count < max_errors:
+    exhausted = transition_message.errors_count >= conf.max_errors()
+    terminal = exhausted or _failure_is_permanent(transition, error)
+    if terminal and not exhausted:
         transition_logger.info(
             f'{kwargs.get("tr_id")} {transition.action_name} failed '
             f'permanently ({type(error).__name__}); not retried.'
         )
-
-    # Terminal failure. The completion comes AFTER record_error, so letting
-    # a rejected failed_state write propagate would roll that error back and
-    # hold errors_count one below MAX_ERRORS forever. The instance then stays
-    # in its in_progress_state, which is an implicit source of the same
-    # transition, so it can be run again.
-    _complete_terminal_failure(
-        transition_message, transition, state, kwargs, error,
-        prefix=f'{kwargs.get("tr_id")}',
-        consequence=(
-            f'Completing the row anyway so it stops retrying. The instance '
-            f'stays in {transition.in_progress_state!r}; run the transition '
-            f'again from there to move it on.'
-        ),
-        measure_duration=True,
-    )
+    if terminal:
+        # The completion comes AFTER record_error, so letting a rejected
+        # failed_state write propagate would roll that error back and hold
+        # errors_count one below MAX_ERRORS forever. The instance then stays
+        # in its in_progress_state, which is an implicit source of the same
+        # transition, so it can be run again.
+        _complete_terminal_failure(
+            transition_message, transition, state, kwargs, error,
+            prefix=f'{kwargs.get("tr_id")}',
+            consequence=(
+                f'Completing the row anyway so it stops retrying. The instance '
+                f'stays in {transition.in_progress_state!r}; run the transition '
+                f'again from there to move it on.'
+            ),
+            measure_duration=True,
+        )
+    # Not terminal: leave uncompleted → claimable again after the retry wait.
     return _Outcome(
-        terminal=True,
+        terminal=terminal,
         succeeded=False,
         exception=error,
         transition=transition,
@@ -846,17 +817,7 @@ def _restore(transition_message: TransitionMessage):
                 f'instance has no process named {transition_message.process_name!r} and '
                 f'no process_class stored on the message'
             )
-        try:
-            process = _load_process_from_path(instance, recorded_path, transition_message)
-        except Exception as exc:
-            # Fail closed through the stop-retry path. A bare ImportError
-            # would escape _run_atomic, which catches only _RestoreError, and
-            # roll the attempt back with errors_count unchanged, so
-            # the claim filter would offer the row forever.
-            raise _RestoreError(
-                f'recorded process_class {recorded_path!r} could not be '
-                f'loaded: {exc}'
-            ) from exc
+        process = None
     else:
         # Check that the attribute resolved to the class enqueue recorded.
         # Every Process defaults to process_name='process', so two processes
@@ -871,20 +832,21 @@ def _restore(transition_message: TransitionMessage):
                     f'the message was enqueued by {recorded_path}; using '
                     f'the recorded class.'
                 )
-                try:
-                    process = _load_process_from_path(
-                        instance, recorded_path, transition_message
-                    )
-                except Exception as exc:
-                    # Fail closed. Running the process the attribute resolved
-                    # to would execute side-effects enqueue never asked for.
-                    # The row completes as unrestorable, with no side-effects
-                    # and no state write. Let pending rows complete before you
-                    # rename a Process class.
-                    raise _RestoreError(
-                        f'recorded process_class {recorded_path!r} could '
-                        f'not be loaded: {exc}'
-                    ) from exc
+                process = None
+    if process is None:
+        try:
+            process = _load_process_from_path(instance, recorded_path, transition_message)
+        except Exception as exc:
+            # Fail closed through the stop-retry path: the row completes as
+            # unrestorable, with no side-effects and no state write. A bare
+            # ImportError would escape _run_atomic, which catches only
+            # _RestoreError, and roll the attempt back with errors_count
+            # unchanged, so the claim filter would offer the row forever.
+            # Let pending rows complete before you rename a Process class.
+            raise _RestoreError(
+                f'recorded process_class {recorded_path!r} could not be '
+                f'loaded: {exc}'
+            ) from exc
 
     transition = _find_transition(process, transition_message)
     if transition is None:

@@ -7,7 +7,7 @@ from django.db import DEFAULT_DB_ALIAS
 from django_logic.conf import lock_timeout as _get_lock_timeout
 
 
-class State(object):
+class State:
     def __init__(self, instance, field_name: str, process_name=None):
         self.instance = instance
         self.field_name = field_name
@@ -111,9 +111,7 @@ class State(object):
             cache.delete(key)
 
     def is_locked(self):
-        """
-        It checks whether the state was locked or not.
-        It might return False due to the race conditions.
-        However, `lock` method should guarantees it will be locked only once.
-        """
+        """Whether the lock key exists right now. Racy — a lock can appear
+        or expire between this read and the caller's next step; ``lock()``
+        is the only atomic gate."""
         return cache.get(self._get_hash()) is not None

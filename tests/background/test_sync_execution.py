@@ -182,7 +182,7 @@ class ConcurrencyTests(TestCase):
 
 class SyncExecutionContextManagerTests(TestCase):
     """sync_execution() forces sync mode even when the global setting is
-    'celery'."""
+    'pull'."""
 
     def test_context_manager_overrides_setting(self):
         pull_cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='pull')
@@ -210,15 +210,15 @@ class ValidateOnReadyTests(TestCase):
                 bg_settings.EXECUTION_PULL,
             )
 
-    def test_celery_mode_reports_its_removal(self):
+    def test_an_unknown_mode_is_refused_naming_the_valid_ones(self):
         from django_logic import conf as bg_settings
 
         cfg = dict(_SYNC_SETTINGS, BACKGROUND_EXECUTION='celery')
         with override_settings(DJANGO_LOGIC=cfg):
             with self.assertRaises(ImproperlyConfigured) as ctx:
                 bg_settings.background_execution()
-            self.assertIn('removed', str(ctx.exception))
-            self.assertIn('dl_worker', str(ctx.exception))
+            self.assertIn('pull', str(ctx.exception))
+            self.assertIn('sync', str(ctx.exception))
 
     def test_validate_on_ready_rejects_sqlite_in_pull_mode(self):
         from django_logic.background.apps import validate_on_ready

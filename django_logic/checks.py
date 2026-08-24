@@ -38,15 +38,6 @@ def check_hook_signatures(app_configs, **kwargs):
     return findings
 
 
-# A check used to refuse two transitions that shared an in_progress_state but
-# recovered differently. It was removed in 0.12.0 with the stranded sweep it
-# guarded: that sweep found a stranded instance with no row to explain it, so
-# transitions sharing the state had to agree on how to recover. in_progress_state
-# is now background-only and is written in the same transaction as the
-# TransitionMessage row. Every marked instance therefore names its transition on
-# its own row, recovery works from that row, and sharing the state is harmless.
-
-
 def _process_tree_has_background_transition(process_class) -> bool:
     """Does ``process_class`` (or any process nested under it) declare a
     background transition? Duck-typed via ``is_background`` so the check

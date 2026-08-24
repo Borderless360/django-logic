@@ -120,6 +120,21 @@ consumer API is unchanged except where noted.
   one or two sentences; the incident history stays here in the
   changelog.
 
+### Changed — the follow-up simplification pass
+
+- One copy of what still had two: the stuck finalizer decodes kwargs
+  through `_decode_kwargs`, `_restore` loads the recorded class in one
+  shared block, `_handle_failure` builds one outcome, and the
+  "has no transition" message is built once. `db_safe_text` loses a
+  `limit=` parameter nothing passed.
+- `BACKGROUND_EXECUTION='celery'` no longer has a bespoke removal
+  message: the migration it guided is complete, and an unknown mode
+  still fails loudly at boot naming the valid ones.
+- Comments and docstrings across the engine and the testing package
+  state the rule and stop narrating the defect history that produced it
+  (the changelog owns that history). The mode-durability rule is written
+  once; version-number citations in prose are gone.
+
 ### Added
 
 - `docs/recipes/long-jobs.md` — one row per chunk: the supported shape

@@ -128,8 +128,6 @@ def _run_attempt_process(pk: int) -> None:
     ``failed_state`` like one that fails every time, instead of looping
     forever.
     """
-    from django.db import connections
-
     from django_logic.background.models import TransitionMessage
     from django_logic.background.runner import run_background_transition
 

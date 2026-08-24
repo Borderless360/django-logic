@@ -27,7 +27,7 @@ from model_utils.models import TimeStampedModel
 _TEXT_LIMIT = 10_000
 
 
-def db_safe_text(value: str, limit: int = _TEXT_LIMIT) -> str:
+def db_safe_text(value: str) -> str:
     """Make ``value`` storable in a Postgres text column.
 
     NUL (U+0000) and lone surrogates are rejected by PostgreSQL, so an
@@ -44,7 +44,7 @@ def db_safe_text(value: str, limit: int = _TEXT_LIMIT) -> str:
         text.encode('utf-8')
     except UnicodeEncodeError:
         text = text.encode('utf-8', 'replace').decode('utf-8')
-    return text[:limit]
+    return text[:_TEXT_LIMIT]
 
 
 class TransitionMessage(TimeStampedModel):
@@ -255,8 +255,7 @@ class TransitionMessage(TimeStampedModel):
         rolls the stamp back with it. Written here it survives both
         cases.
 
-        Durability is mode-dependent, as for
-        ``runner._mark_unrestorable_completed``:
+        Durability is mode-dependent:
 
         * **Pull mode** — the worker is the top-level unit of work with
           no surrounding transaction, so this UPDATE autocommits and is
@@ -270,10 +269,9 @@ class TransitionMessage(TimeStampedModel):
 
         Acquires the row lock with ``nowait`` first and gives up if another
         attempt holds it. Not an optimisation: a bare ``UPDATE`` BLOCKS on
-        the live attempt's row lock, defeating the skip-if-locked design
-        (``tests/background/test_concurrency_pg.py`` pins this). A held row
-        means a live attempt has already stamped itself, so there is
-        nothing to record and ``_run_atomic`` will skip anyway.
+        the live attempt's row lock, defeating the skip-if-locked design.
+        A held row means a live attempt has already stamped itself, so
+        there is nothing to record and ``_run_atomic`` will skip anyway.
 
         Because a losing dispatcher never writes, ``started_at`` only ever
         moves forward, and ``duration_ms`` cannot absorb lock wait.
