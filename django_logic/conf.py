@@ -11,6 +11,8 @@ the pull-mode deployment requirements on top. Both paths are idempotent
 — pure reads, no state.
 """
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -205,6 +207,31 @@ def strict_kwargs_serialization() -> bool:
     non-bools and this reader stays safe where that has not run.
     """
     return _conf().get('STRICT_KWARGS_SERIALIZATION', False) is True
+
+
+_force_sync: ContextVar[bool] = ContextVar('_dl_force_sync', default=False)
+
+
+@contextmanager
+def sync_execution():
+    """Force sync mode for the duration of the ``with`` block.
+
+    Useful inside a test / management command when the global setting
+    is ``'pull'`` but you want the worker path to run inline for this
+    block.
+    """
+    token = _force_sync.set(True)
+    try:
+        yield
+    finally:
+        _force_sync.reset(token)
+
+
+def sync_mode() -> bool:
+    """Whether the worker path runs inline right now: a
+    :func:`sync_execution` block is active, or ``BACKGROUND_EXECUTION``
+    is ``'sync'``."""
+    return _force_sync.get() or background_execution() == EXECUTION_SYNC
 
 
 def validate_core_settings() -> None:

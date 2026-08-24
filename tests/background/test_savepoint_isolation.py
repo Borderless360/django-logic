@@ -20,7 +20,7 @@ from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process
 from django_logic.background import BackgroundTransition, sync_execution
-from django_logic.background.dispatch import retry_pending
+from django_logic.background import retry_pending
 from django_logic.background.models import TransitionMessage
 from tests.background.models import Widget
 from tests import dl_settings

@@ -47,9 +47,10 @@ from django_logic.state import State
 #: A caller kwarg carrying one raises TypeError inside ``fail_transition``/
 #: ``_release_lock`` — on the failure path, after the lock was taken: no
 #: ``failed_state``, the real exception replaced, the lock leaked until TTL.
-#: Refused up front, before anything is acquired. Distinct from
-#: ``process._RESERVED_KWARGS`` (names the engine forwards itself —
-#: documented, not refused).
+#: Refused up front, before anything is acquired. Distinct from the names
+#: the engine forwards itself (``tr_id``, ``root_id``, ``parent_id``,
+#: ``process_class``, ``owning_process_class``) — the README documents
+#: those as reserved instead of refusing them.
 _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception', 'deferrable'})
 
 

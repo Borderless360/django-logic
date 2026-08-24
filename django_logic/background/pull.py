@@ -84,7 +84,7 @@ def claim_next(queues: list[str]) -> int | None:
         )
 
 
-def run_once(queues: list[str], *, isolate: bool = False) -> bool:
+def run_once(queues: list[str], *, isolate: bool) -> bool:
     """Claim and execute at most one row. Returns whether one ran.
 
     With ``isolate=True`` (what the worker loop uses) the attempt runs in
@@ -123,7 +123,6 @@ def _run_attempt_in_child(pk: int) -> None:
     """
     from django.db import connections
 
-    from django_logic.background.models import TransitionMessage
     from django_logic.background.runner import run_background_transition
 
     connections.close_all()

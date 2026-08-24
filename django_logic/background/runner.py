@@ -116,8 +116,7 @@ def run_background_transition(transition_message_id: int) -> None:
         # Pull mode must NOT re-raise. The outcome is already recorded on
         # the row and the claim's retry wait owns retries; re-raising out
         # of the worker loop would only add noise.
-        from django_logic.background.dispatch import _current_mode
-        if _current_mode() == conf.EXECUTION_SYNC:
+        if conf.sync_mode():
             raise outcome.exception
 
 

@@ -12,7 +12,6 @@ Configure both via ``LOGGING`` in Django settings.
 import logging
 from enum import Enum
 
-from django.conf import settings
 
 
 logger: logging.Logger = logging.getLogger('django-logic')

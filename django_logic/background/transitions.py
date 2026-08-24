@@ -9,8 +9,8 @@
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
   row is what gates concurrent transitions,
-* hand off to the dispatcher, which notifies the pull workers after
-  commit (Pull mode) or executes the worker path inline (Sync mode).
+* hand off: notify the pull workers after commit (Pull mode), or execute
+  the worker path inline (Sync mode).
 
 The worker path lives in :mod:`django_logic.background.runner` and is
 shared between both modes.
@@ -195,8 +195,18 @@ class BackgroundTransition(Transition):
                 f'{state.instance_key}'
             )
 
-        from django_logic.background.dispatch import dispatch_transition
-        dispatch_transition(transition_message)
+        if conf.sync_mode():
+            # Inline, bypassing transaction.on_commit, so Django's
+            # TestCase (whose wrapping transaction never commits) still
+            # executes the worker path. Exceptions propagate to the caller.
+            from django_logic.background.runner import run_background_transition
+            run_background_transition(transition_message.pk)
+        else:
+            # The committed row is what the workers run; the notification
+            # only says "ask the database now", so a lost one costs one
+            # poll interval, never the work.
+            from django_logic.background.pull import notify_workers
+            transaction.on_commit(notify_workers)
 
         return kwargs.get('tr_id')
 

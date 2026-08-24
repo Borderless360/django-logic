@@ -395,7 +395,7 @@ class FulfilmentTests(TestCase):     # DJANGO_LOGIC['BACKGROUND_EXECUTION']='syn
 Two lower-level helpers mirror production behaviour exactly:
 
 ```python
-from django_logic.background.dispatch import retry_pending
+from django_logic.background import retry_pending
 retry_pending()   # run every claimable row inline, as a worker pass would (sync mode)
 
 from django_logic.background.runner import run_background_transition

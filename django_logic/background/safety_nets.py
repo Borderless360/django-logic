@@ -52,7 +52,7 @@ def _claimable(queues: list[str] | None = None):
     return rows.order_by('created')
 
 
-def run_pending(queues: list[str] | None = None) -> int:
+def run_pending() -> int:
     """Run every claimable row inline. Returns how many ran cleanly.
 
     A failing side-effect re-raises out of ``run_background_transition``
@@ -61,7 +61,7 @@ def run_pending(queues: list[str] | None = None) -> int:
     the runner's own row-lock guard.
     """
     ran = 0
-    for pk in list(_claimable(queues).values_list('pk', flat=True)):
+    for pk in list(_claimable(None).values_list('pk', flat=True)):
         try:
             run_background_transition(pk)
         except Exception as e:

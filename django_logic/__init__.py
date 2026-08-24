@@ -1,4 +1,6 @@
-from .commands import Permissions, Conditions, SideEffects, Callbacks
+# Back-compat only: the command classes are not advertised in __all__,
+# but an existing `from django_logic import Permissions` keeps working.
+from .commands import Permissions, Conditions, SideEffects, Callbacks  # noqa: F401
 from .process import Process, ProcessManager
 from .transition import Transition, Action
 

@@ -6,7 +6,7 @@ Public API:
   background-executed transitions with per-transition queue routing.
 * :func:`sync_execution` — context manager that forces the current block
   to run the worker path inline (for tests, management commands, the shell).
-* :func:`retry_pending` — run the periodic safety-net task once inline.
+* :func:`retry_pending` — run every claimable row inline, once.
 * :func:`in_flight` — racy read of whether an uncompleted row is still
   being retried, for shaping "busy, try again shortly" answers at API
   seams.
@@ -27,9 +27,9 @@ from __future__ import annotations
 _PUBLIC = {
     'BackgroundTransition': ('django_logic.background.transitions', 'BackgroundTransition'),
     'BackgroundAction': ('django_logic.background.transitions', 'BackgroundAction'),
-    'sync_execution': ('django_logic.background.dispatch', 'sync_execution'),
-    'retry_pending': ('django_logic.background.dispatch', 'retry_pending'),
-    'in_flight': ('django_logic.background.dispatch', 'in_flight'),
+    'sync_execution': ('django_logic.conf', 'sync_execution'),
+    'retry_pending': ('django_logic.background.safety_nets', 'run_pending'),
+    'in_flight': ('django_logic.background.models', 'in_flight'),
     'PermanentFailure': ('django_logic.background.exceptions', 'PermanentFailure'),
     'run_worker': ('django_logic.background.pull', 'run_worker'),
 }

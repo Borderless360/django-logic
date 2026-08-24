@@ -420,3 +420,27 @@ class TransitionMessage(TimeStampedModel):
             f'{existing}; {note}' if existing else note
         )
         self.save(update_fields=['failure_side_effect_error', 'modified'])
+
+
+def in_flight(instance, process_name: str = 'process') -> bool:
+    """Whether a background transition is still being retried for
+    ``instance`` + ``process_name``.
+
+    For shaping answers at API seams ("busy, try again shortly"), NOT as
+    a pre-flight gate: the read is racy — a transition can start or
+    complete between this call and whatever the caller does next. The
+    engine's own guards stay authoritative. A stranded row (nothing is
+    retrying it) answers ``False``, so a consumer answering 409 on this
+    probe and 400 on plain ``TransitionNotAllowed`` stays consistent.
+
+    Answers ``False`` without a query when ``django_logic.background``
+    is not installed.
+    """
+    from django.apps import apps
+
+    if not apps.is_installed('django_logic.background'):
+        return False
+    return (
+        TransitionMessage.retry_status(instance, process_name)
+        == TransitionMessage.RETRYING
+    )

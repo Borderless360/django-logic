@@ -72,7 +72,7 @@ class PullClaimTests(TransactionTestCase):
         # on its own; no capture is needed.
         widget = Widget.objects.create(status='draft')
         widget.process.fulfil()
-        self.assertTrue(run_once(_CRITICAL))
+        self.assertTrue(run_once(_CRITICAL, isolate=False))
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'fulfilled')
         self.assertTrue(TransitionMessage.objects.get().is_completed)

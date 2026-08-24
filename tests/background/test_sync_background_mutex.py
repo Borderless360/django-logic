@@ -28,7 +28,7 @@ from django.test import (
 from django.utils import timezone
 
 from django_logic import Action
-from django_logic.background.dispatch import in_flight, sync_execution
+from django_logic.background import in_flight, sync_execution
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import (

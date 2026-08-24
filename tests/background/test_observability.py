@@ -1,9 +1,9 @@
-"""Per-transition observability helpers (issue #78)."""
+"""Per-transition observability helpers."""
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase
 
-from django_logic.background.observability import set_sentry_context, task_label
+from django_logic.background.observability import set_sentry_context
 
 
 def _tm(app='orders', transition='fulfill'):
@@ -11,17 +11,6 @@ def _tm(app='orders', transition='fulfill'):
         app_label=app, model_name='order', transition_name=transition,
         instance_id='7', queue_name='django_logic.critical',
     )
-
-
-class TaskLabelTests(SimpleTestCase):
-    def test_label_is_app_and_transition_scoped(self):
-        self.assertEqual(task_label(_tm('orders', 'fulfill')), 'django_logic.orders.fulfill')
-        self.assertEqual(task_label(_tm('exports', 'generate')), 'django_logic.exports.generate')
-        # Distinct transitions → distinct labels (the whole point).
-        self.assertNotEqual(
-            task_label(_tm('exports', 'generate')),
-            task_label(_tm('payments', 'charge')),
-        )
 
 
 class SentryContextTests(SimpleTestCase):

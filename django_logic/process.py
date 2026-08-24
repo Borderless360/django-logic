@@ -39,15 +39,6 @@ class _ProcessAccessor(property):
 #: cannot see them.
 _PROCESS_INSTANCE_ATTRS = frozenset({'state', 'instance', 'field_name'})
 
-#: Kwarg names the engine sets on every call, and forwards through
-#: ``__getattr__`` when it chains a ``next_transition``. A caller who passes one
-#: has it overwritten. The engine cannot tell its own forwarding from a caller's
-#: here, so the README documents them as reserved instead of refusing them.
-_RESERVED_KWARGS = frozenset({
-    'tr_id', 'root_id', 'parent_id', 'process_class', 'owning_process_class',
-})
-
-
 class Process:
     """Declarative container of transitions and nested processes.
 
@@ -123,9 +114,9 @@ class Process:
             # Drop an 'action_name' key the caller passed: it would clash with
             # _get_transition_method's first parameter and raise "multiple
             # values for argument 'action_name'". No engine path forwards it;
-            # only a hand-built kwargs dict does. The other names in
-            # _RESERVED_KWARGS stay, because next_transition forwards tr_id,
-            # root_id, parent_id and process_class through this same path.
+            # only a hand-built kwargs dict does. The reserved engine names
+            # stay, because next_transition forwards tr_id, root_id,
+            # parent_id and process_class through this same path.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 
