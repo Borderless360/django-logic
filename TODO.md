@@ -25,9 +25,8 @@ Carried over from the Heroku validation round.
       connection, or two when the app opens a second one per task. Size
       `concurrency × workers` against the database limit (pgbouncer or plan
       cap).
-- [ ] Document how to alert when beat stops running — for example Sentry cron
-      monitors with `CeleryIntegration(monitor_beat_tasks=True)`. The system
-      check that reports a schedule without the recovery tasks is related.
+- [ ] Document how to alert when `dl_worker` stops running — the safety nets
+      run inside the worker loop, so a dead worker also means no safety nets.
 - [ ] Lower the log level for outcomes the engine already handles.
       `detect_stuck` completing a row, the watchdog timeout, and the
       "cannot be restored" path all log at ERROR, which fills Sentry with
@@ -37,6 +36,5 @@ Carried over from the Heroku validation round.
 
 - [ ] Durable callbacks — an opt-in column on `TransitionMessage` that records
       how far the row got, so a crash cannot lose the callbacks
-- [ ] Non-Celery backends (RQ, Dramatiq) behind a pluggable dispatcher interface
 - [ ] `django-logic-viz` (Mermaid/Graphviz from process definitions)
 - [ ] `django-logic-history` (generalised audit log)

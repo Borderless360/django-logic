@@ -179,8 +179,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def retry_transition(self, instance, *, fail_side_effect=None, fail_with=None,
                          expect_raises=None):
-        """Re-run the instance's uncompleted transition inline — what the
-        periodic starter would do."""
+        """Re-run the instance's uncompleted transition inline — what a
+        worker's next claim would do."""
         transition_message = uncompleted_message(instance, process_name=self._process_name)
         if transition_message is None:
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')

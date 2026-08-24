@@ -111,9 +111,11 @@ def max_errors() -> int:
 
 
 def retry_minutes():
-    """Age (minutes) before the periodic starter re-dispatches an
-    uncompleted row. Must be >= 0; zero means "retry immediately" and is
-    used by tests to drive the starter without back-dating rows."""
+    """Minutes a failed row stays unclaimable after ``last_error_dt``.
+    The pull claim's ``WHERE`` clause is the retry rule: nothing
+    re-dispatches a row; it simply becomes claimable again after this
+    wait. Must be >= 0; zero means "claimable immediately" and is used
+    by tests to retry without back-dating rows."""
     return _validated_number(
         'TRANSITION_MESSAGE_RETRY_MINUTES', 2, minimum=0)
 

@@ -80,12 +80,12 @@ def run_background_transition(transition_message_id: int) -> None:
     """
     # Committed BEFORE the attempt's atomic block, and deliberately not rolled
     # back with it (see TransitionMessage.stamp_attempt_started). The watchdog
-    # and the retry starter both read this stamp, and inside the atomic block
+    # and the claim filter both read this stamp, and inside the atomic block
     # it was invisible to them.
     if not TransitionMessage.stamp_attempt_started(transition_message_id):
         # Another attempt holds the row, or the row is completed or gone. Both
-        # are exit-silently cases: the periodic starter sends the row to the
-        # queue again, so skipping loses nothing.
+        # are exit-silently cases: the row stays claimable, so a later claim
+        # retries it and skipping loses nothing.
         transition_logger.info(
             f'TransitionMessage#{transition_message_id}: another attempt holds '
             f'the row (or it is already completed); skipping this dispatch.'
@@ -141,8 +141,8 @@ UNRESTORABLE_MARKER = '[unrestorable]'
 
 
 def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -> None:
-    """Mark an unrestorable row completed so the periodic starter stops
-    sending it to the queue, and record why on ``last_error_message``. The
+    """Mark an unrestorable row completed so no worker claims it again,
+    and record why on ``last_error_message``. The
     note follows the ``'[superseded]'`` convention (see
     ``TransitionMessage.mark_as_superseded``) so an operator who reads the
     row later finds an explanation next to the completion.
@@ -568,8 +568,8 @@ def _lock_uncompleted_row(transition_message_id: int) -> TransitionMessage:
     """Lock the row for this attempt, or raise ``_NothingToDo``.
 
     Already completed / missing, and held by another worker, are the
-    documented exit-silently cases: the periodic starter re-dispatches,
-    so nothing is lost by skipping.
+    documented exit-silently cases: the row stays claimable and a later
+    claim retries it, so nothing is lost by skipping.
     """
     try:
         return (
@@ -596,7 +596,7 @@ def _decode_kwargs(transition_message) -> 'tuple[dict, BaseException | None]':
 
     A decode failure counts like any other attempt failure. Raised here it
     would escape before record_error, leaving errors_count at 0, and
-    retry_stale_transitions would send the row to the queue forever. So we
+    the claim filter would offer the row to workers forever. So we
     return the error and the caller passes it to _handle_failure once the
     row is restored. The savepoint keeps the outer transaction healthy when
     the failure is a DatabaseError, so the error bookkeeping still runs.
@@ -644,8 +644,8 @@ def _restore_for_attempt(transition_message):
         # _restore raises _RestoreError only for the permanent failures.
         # Everything else — a consumer ``process`` property raising, a
         # corrupt instance_id, a temporary database error — used to escape
-        # the worker with errors_count still 0, so the starter sent the row
-        # to the queue forever. Count it like any other attempt failure:
+        # the worker with errors_count still 0, so the row stayed claimable
+        # forever. Count it like any other attempt failure:
         # temporary causes get their retries, permanent ones reach
         # MAX_ERRORS and stop.
         return None, exc
@@ -810,7 +810,7 @@ def _handle_failure(
         transition_message.errors_count < max_errors
         and not _failure_is_permanent(transition, error)
     ):
-        # Leave uncompleted → periodic starter will retry.
+        # Leave uncompleted → claimable again after the retry wait.
         return _Outcome(
             terminal=False,
             succeeded=False,
@@ -988,7 +988,7 @@ def _restore(transition_message: TransitionMessage):
             # Fail closed through the stop-retry path. A bare ImportError
             # would escape _run_atomic, which catches only _RestoreError, and
             # roll the attempt back with errors_count unchanged, so
-            # retry_stale_transitions would retry the row forever.
+            # the claim filter would offer the row forever.
             raise _RestoreError(
                 f'recorded process_class {recorded_path!r} could not be '
                 f'loaded: {exc}'

@@ -103,9 +103,9 @@ gate afterwards). Execute (the worker, or inline in Sync mode) logs
 `Complete`. Before 0.14.0 that first line read `Phase2 Start`; update any
 log query or alert that matches on the old text.
 
-All side-effects **and** the target-state write run inside a single Celery task
-(`acks_late=True`) — there is no per-callback Celery fan-out. There are no
-`Celery`, `CeleryCallbacks`, or `Done` events; that was a pre-0.3.0 design.
+All side-effects **and** the target-state write run inside a single worker
+attempt — there is no per-callback fan-out. There are no `Celery`,
+`CeleryCallbacks`, or `Done` events; that was a pre-0.3.0 design.
 
 ```
 tr_id Start ProcessName fulfil instance_key root_id parent_id [background queue=django_logic.critical]

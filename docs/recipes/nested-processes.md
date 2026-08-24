@@ -112,8 +112,9 @@ state actually fires the transition; the rest get `TransitionNotAllowed` and
 are swallowed. Each child's callback runs after its own commit, so at least one
 observes the complete terminal set; the parent's post-`start` `recheck` is a
 backstop. Crash safety is inherited from the children (durable background
-transitions): if a worker dies mid-child, the periodic starter re-runs it and
-its callback fires when it finally reaches a terminal state.
+transitions): if a worker dies mid-child, the row becomes claimable again and
+a later attempt re-runs it; its callback fires when it finally reaches a
+terminal state.
 
 A full, tested implementation lives in the validation harness:
 [django-logic-test `fulfillment/`](https://github.com/Borderless360/django-logic-test/tree/main/fulfillment)

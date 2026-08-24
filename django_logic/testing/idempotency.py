@@ -1,7 +1,8 @@
 """Idempotency assertion for background side-effects.
 
-Background side-effects re-run FROM SCRATCH on every retry (crash
-re-delivery, watchdog requeue, the periodic starter), so every side-effect
+Background side-effects re-run FROM SCRATCH on every retry (a crashed
+worker's released row, a failed row claimed again after the retry wait),
+so every side-effect
 must be idempotent: a second application must change nothing observable.
 Consumers hand-rolled "call twice, compare" — or skipped the check.
 ``assert_idempotent`` makes it one call::

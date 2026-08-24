@@ -231,6 +231,20 @@ Use next_transition to automatically continue the process.
 > run it, from the worker. For a synchronous `Action`, start the follow-up from a
 > callback instead, or use a `Transition`.
 
+The four transition types do **not** share one lock/gate/chain contract.
+Until 1.0 unifies them, this table is the reference:
+
+| | Writes target state | Cache lock on success | Gates on an in-flight row | Runs `next_transition` |
+|---|---|---|---|---|
+| `Transition` (sync) | yes | yes | yes | yes |
+| `Action` (sync) | no | no | no | **no** |
+| `BackgroundTransition` | yes | yes | yes | yes (worker) |
+| `BackgroundAction` | no | yes | yes | yes (worker) |
+
+A `BackgroundAction` subclasses `BackgroundTransition`, so it locks, raises
+`AlreadyInProgress` while a row is in flight, and chains — everything a sync
+`Action` does not.
+
 ```python 
 # Define permission and condition functions
 def is_accountant(instance, user):
@@ -785,7 +799,6 @@ DJANGO_LOGIC = {
     'LOCK_TIMEOUT': 7200,   # the state lock's TTL, seconds
     'BACKGROUND_EXECUTION': 'pull',     # the default; set 'sync' in test settings
     'DEFAULT_QUEUE': 'django_logic',    # queue for transitions without queue=
-    'STARTER_QUEUE': 'django_logic.starter',
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
     'TRANSITION_MESSAGE_RETRY_MINUTES': 2,
     'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,

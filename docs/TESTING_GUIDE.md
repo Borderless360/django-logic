@@ -299,7 +299,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg). Override for factories. |
 | `transition(obj, action, **kwargs)` | Run a synchronous transition through the normal entrypoint. |
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` enqueue **and** execute inline. |
-| `retry_transition(obj)` | Re-run the instance's uncompleted `TransitionMessage` — simulates the periodic starter. |
+| `retry_transition(obj)` | Re-run the instance's uncompleted `TransitionMessage` — simulates a worker's next claim. |
 | `snapshot(obj)` / `from_snapshot(data_or_path)` | Capture / rebuild instance + `TransitionMessage` state. |
 
 `transition`, `background_transition` and `retry_transition` all accept:
@@ -396,7 +396,7 @@ Two lower-level helpers mirror production behaviour exactly:
 
 ```python
 from django_logic.background.dispatch import retry_pending
-retry_pending()   # one tick of the periodic starter, inline (sync mode)
+retry_pending()   # run every claimable row inline, as a worker pass would (sync mode)
 
 from django_logic.background.runner import run_background_transition
 run_background_transition(transition_message.pk)   # one worker attempt for a specific row
