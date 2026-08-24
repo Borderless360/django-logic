@@ -21,11 +21,35 @@ def validate_on_ready() -> None:
     # Core knobs (LOCK_TIMEOUT, STRICT_HOOK_SIGNATURES) — shared with
     # DjangoLogicConfig.ready so sync-only installs validate them too.
     conf.validate_core_settings()
+    if mode == conf.EXECUTION_SYNC:
+        _reject_sync_without_opt_in()
     if mode == conf.EXECUTION_PULL:
         # The claim needs real row locks (SKIP LOCKED), and the state lock
         # must span the web process and the worker processes.
         _reject_sqlite_in_pull_mode()
         _check_lock_cache_in_pull_mode()
+
+
+def _reject_sync_without_opt_in() -> None:
+    """Sync runs the worker path inline, in the caller's own thread.
+
+    In a web process that means every side-effect runs inside the
+    request, and nothing retries what fails. It is a test runtime, so a
+    deployment must not be able to choose it from a settings value or an
+    environment variable. A test settings module opts in.
+    """
+    from django_logic import conf
+
+    if conf.sync_enabled():
+        return
+    raise ImproperlyConfigured(
+        "DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync' runs background "
+        "side-effects inline, in the caller's own thread, and nothing "
+        "retries what fails. It is a test runtime. Production is always "
+        "'pull'. If this is a test settings module, call "
+        "django_logic.conf.enable_sync() in it before Django boots. To run "
+        "one block inline elsewhere, use django_logic.conf.sync_execution()."
+    )
 
 
 def _reject_sqlite_in_pull_mode() -> None:
@@ -43,8 +67,8 @@ def _reject_sqlite_in_pull_mode() -> None:
             f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' requires "
             f"a database that supports SELECT FOR UPDATE with SKIP LOCKED "
             f"and partial unique indexes. TransitionMessage is routed to "
-            f"alias '{alias}', which uses {engine!r} (SQLite). Switch that "
-            f"alias to PostgreSQL or set BACKGROUND_EXECUTION='sync'."
+            f"alias '{alias}', which uses {engine!r} (SQLite). Point that "
+            f"alias at PostgreSQL."
         )
 
 

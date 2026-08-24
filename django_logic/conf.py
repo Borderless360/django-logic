@@ -63,13 +63,49 @@ def legacy_exception_base():
     return _conf().get('LEGACY_EXCEPTION_BASE') or None
 
 
+#: Set by :func:`enable_sync`. Boot reads it to decide whether
+#: ``BACKGROUND_EXECUTION='sync'`` is allowed in this process.
+_sync_enabled = False
+
+
+def enable_sync() -> None:
+    """Allow ``BACKGROUND_EXECUTION='sync'`` in this process.
+
+    Sync runs the worker path inline, in the caller's own thread. That
+    is a test runtime, not a deployment: in a web process it runs every
+    side-effect inside the request, and nothing retries what fails.
+    Production is always pull.
+
+    Call this from a test settings module, before Django boots::
+
+        from django_logic.conf import enable_sync
+
+        enable_sync()
+        DJANGO_LOGIC = {'BACKGROUND_EXECUTION': 'sync'}
+
+    It lives here, not in ``django_logic.testing``, because a settings
+    module is imported before the app registry is ready and that package
+    imports models.
+
+    A single block can run inline without this — use
+    :func:`sync_execution`.
+    """
+    global _sync_enabled
+    _sync_enabled = True
+
+
+def sync_enabled() -> bool:
+    """Whether :func:`enable_sync` ran in this process."""
+    return _sync_enabled
+
+
 def background_execution() -> str:
     """Return the configured execution mode.
 
     Defaults to ``'pull'`` — workers claim committed rows from the
     database (run them with ``manage.py dl_worker``). ``'sync'`` runs the
-    worker inline in the same process and exists for tests, CI,
-    management commands, and the shell.
+    worker inline in the same process; it is a test runtime and boot
+    refuses it unless :func:`enable_sync` ran.
     """
     configured = _conf().get('BACKGROUND_EXECUTION')
     if configured is None:
