@@ -17,7 +17,6 @@ from django_logic.background import BackgroundTransition
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.runner import (
-    abandon_timed_out_attempt,
     finalize_stuck_attempt,
     run_background_transition,
 )
@@ -51,101 +50,6 @@ def _noop(instance, **kwargs):
 
 def _boom(instance, **kwargs):
     raise ValueError('boom')
-
-
-# --- The watchdog re-checks staleness under the row lock -------------------
-
-class WatchdogUnderLockRecheckProcess(Process):
-    process_name = 'wd_recheck_proc'
-    transitions = [
-        BackgroundTransition(
-            'go', sources=['draft'], target='done',
-            in_progress_state='wd_running', failed_state='wd_failed',
-            side_effects=[_noop], timeout=60,
-        ),
-    ]
-
-
-@override_settings(DJANGO_LOGIC=_SYNC)
-class WatchdogUnderLockRecheckTests(_BindCleanup, TestCase):
-    """The candidate scan takes no lock, so its staleness verdict is a hint.
-    Without a second check under the lock, the watchdog charges a timeout to
-    an attempt that started after the scan.
-    """
-
-    _bound = (WatchdogUnderLockRecheckProcess,)
-
-    def setUp(self):
-        super().setUp()
-        ProcessManager.bind_model_process(
-            Invoice, WatchdogUnderLockRecheckProcess, state_field='status')
-        cache.clear()
-        self.addCleanup(cache.clear)
-
-    def _stale_row(self, **overrides):
-        invoice = Invoice.objects.create(status='wd_running')
-        fields = dict(
-            app_label='tests', model_name='invoice',
-            instance_id=str(invoice.pk),
-            process_name='wd_recheck_proc', transition_name='go',
-            queue_name='django_logic', timeout_seconds=60,
-            started_at=timezone.now() - timedelta(hours=1),
-        )
-        fields.update(overrides)
-        return invoice, TransitionMessage.objects.create(**fields)
-
-    def test_a_stale_attempt_is_still_charged(self):
-        """Control: the watchdog still charges a genuinely stale attempt."""
-        _, transition_message = self._stale_row()
-
-        self.assertTrue(abandon_timed_out_attempt(transition_message.pk))
-
-        transition_message.refresh_from_db()
-        self.assertEqual(transition_message.errors_count, 1)
-        self.assertIn(
-            '[watchdog timeout]', transition_message.last_error_message)
-
-    def test_an_attempt_restarted_after_the_scan_is_not_charged(self):
-        """The row was stale when scanned, but a new attempt started before
-        the watchdog took the lock. Charging it would spend a retry the
-        consumer still needs."""
-        _, transition_message = self._stale_row()
-        transition_message.record_error(
-            ValueError('the previous attempt failed'))
-        # A retry stamps the new attempt after that error, which is what the
-        # worker does before it starts the attempt.
-        TransitionMessage.objects.filter(pk=transition_message.pk).update(
-            started_at=timezone.now())
-
-        with self.assertLogs('django-logic.transition', level='INFO') as logs:
-            self.assertFalse(abandon_timed_out_attempt(transition_message.pk))
-        self.assertTrue(
-            any('not stale when re-checked' in line for line in logs.output),
-            logs.output,
-        )
-
-        transition_message.refresh_from_db()
-        self.assertEqual(
-            transition_message.errors_count, 1,
-            'the running attempt was charged again')
-        self.assertFalse(transition_message.is_completed)
-
-    def test_a_restart_at_max_errors_cannot_complete_a_running_attempt(self):
-        """Without the re-check the row is completed while its worker still
-        runs. The worker then succeeds against a completed row and the
-        instance keeps failed_state."""
-        invoice, transition_message = self._stale_row(errors_count=2)
-        # errors_count reaches MAX_ERRORS.
-        transition_message.record_error(ValueError('second failure'))
-        TransitionMessage.objects.filter(pk=transition_message.pk).update(
-            errors_count=2, started_at=timezone.now())
-
-        self.assertFalse(abandon_timed_out_attempt(transition_message.pk))
-
-        transition_message.refresh_from_db()
-        invoice.refresh_from_db()
-        self.assertFalse(transition_message.is_completed)
-        self.assertEqual(invoice.status, 'wd_running')
 
 
 # --- The safety-net finalizers respect a manual state fix ------------------
@@ -212,21 +116,6 @@ class SupersedeParityTests(_BindCleanup, TestCase):
             transition_message.last_error_message.startswith('[superseded]'))
         self.assertIn(
             'the original cause', transition_message.last_error_message)
-        self.assertEqual(invoice.status, 'fixed_by_hand')
-        self.assertEqual(_HOOK_LOG, [], 'failure hooks ran on a fixed row')
-
-    def test_watchdog_finalizer_supersedes_and_runs_no_hooks(self):
-        invoice, transition_message = self._row_at_max(
-            status='fixed_by_hand', errors_count=2,
-            started_at=timezone.now() - timedelta(hours=1),
-        )
-
-        self.assertTrue(abandon_timed_out_attempt(transition_message.pk))
-
-        transition_message.refresh_from_db()
-        invoice.refresh_from_db()
-        self.assertTrue(transition_message.is_completed)
-        self.assertIn('[superseded]', transition_message.last_error_message)
         self.assertEqual(invoice.status, 'fixed_by_hand')
         self.assertEqual(_HOOK_LOG, [], 'failure hooks ran on a fixed row')
 

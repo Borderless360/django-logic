@@ -23,14 +23,15 @@ notification after commit, and a waiting worker asks the database at
 once instead of at the next poll. A lost notification costs one poll
 interval — the row waits in the database either way.
 
-The worker loop also runs the safety nets (the watchdog, the stuck
-finalizer and its no-worker report, the cleanup sweep), so nothing has
-to be scheduled anywhere else.
+The worker loop also runs the safety nets (the stuck finalizer and its
+no-worker report, the cleanup sweep), so nothing has to be scheduled
+anywhere else.
 """
 from __future__ import annotations
 
 import os
 import select
+import signal
 import time
 
 from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
@@ -46,8 +47,7 @@ NOTIFY_CHANNEL = 'django_logic_work'
 #: this often even when no notification arrives.
 POLL_SECONDS = 5.0
 
-#: How often the loop runs the safety nets (watchdog, stuck report,
-#: cleanup) that beat used to schedule.
+#: How often the loop runs the safety nets (stuck report, cleanup).
 SAFETY_NET_SECONDS = 60.0
 
 
@@ -108,23 +108,35 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
 
 
 def _run_attempt_in_child(pk: int) -> None:
-    """Run one attempt in a forked child and account for its death.
+    """Run one attempt in a forked child, bound it, and account for its death.
 
     Both sides must not share a database connection — a connection closed
     (or crashed) on one side poisons the other's session. The parent
     closes every connection before the fork; each side then opens its
     own lazily.
 
+    The parent enforces the transition's declared ``timeout=``: when the
+    child runs past the budget, the parent kills it. This is the only
+    place a hanging attempt can be stopped — the attempt holds its row
+    lock while it runs, so nothing else can reach it.
+
     A child that dies without completing the row left no error on it, so
     the parent records one: the claim's retry wait then paces the next
     attempt, and ``MAX_ERRORS`` bounds a crash loop — a side-effect that
-    crashes every time ends in ``failed_state`` like one that fails every
-    time, instead of crash-looping forever.
+    crashes (or hangs) every time ends in ``failed_state`` like one that
+    fails every time, instead of looping forever.
     """
     from django.db import connections
 
+    from django_logic.background.models import TransitionMessage
     from django_logic.background.runner import run_background_transition
 
+    timeout_seconds = (
+        TransitionMessage.objects
+        .filter(pk=pk)
+        .values_list('timeout_seconds', flat=True)
+        .first()
+    )
     connections.close_all()
     child = os.fork()
     if child == 0:
@@ -136,8 +148,19 @@ def _run_attempt_in_child(pk: int) -> None:
             # _exit, so a crashing attempt cannot run the parent's cleanup
             # handlers or flush its buffers twice.
             os._exit(status)
-    _, raw_status = os.waitpid(child, 0)
-    exit_code = os.waitstatus_to_exitcode(raw_status)
+    exit_code, timed_out = _wait_for_child(child, timeout_seconds)
+    if timed_out:
+        logger.error(
+            f'pull: the attempt for TransitionMessage#{pk} ran past its '
+            f'declared timeout={timeout_seconds}s and was stopped. The error '
+            f'recorded here paces the next claim.'
+        )
+        _record_child_death(
+            pk,
+            f'[timeout] the attempt ran past timeout={timeout_seconds}s '
+            f'and was stopped',
+        )
+        return
     if exit_code == 0:
         return
     logger.error(
@@ -145,10 +168,38 @@ def _run_attempt_in_child(pk: int) -> None:
         f'(exit {exit_code}). Its row lock died with it; the error recorded '
         f'here paces the next claim.'
     )
-    _record_child_death(pk, exit_code)
+    _record_child_death(
+        pk,
+        f'[crashed] the attempt process died (exit {exit_code}) '
+        f'before the attempt finished',
+    )
 
 
-def _record_child_death(pk: int, exit_code: int) -> None:
+def _wait_for_child(child: int, timeout_seconds) -> tuple[int, bool]:
+    """Reap the child. Returns ``(exit_code, timed_out)``.
+
+    With no declared budget the wait is plain and unbounded. With one,
+    the parent polls the child and kills it (``SIGKILL`` — the attempt
+    may hang inside code that ignores gentler signals) when the budget
+    passes. The kill releases the child's row lock with its connection.
+    """
+    if timeout_seconds is None:
+        _, raw_status = os.waitpid(child, 0)
+        return os.waitstatus_to_exitcode(raw_status), False
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        pid, raw_status = os.waitpid(child, os.WNOHANG)
+        if pid != 0:
+            return os.waitstatus_to_exitcode(raw_status), False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+            return -signal.SIGKILL, True
+        time.sleep(min(1.0, max(0.01, remaining)))
+
+
+def _record_child_death(pk: int, message: str) -> None:
     """Record a died attempt on the row — unless the row completed first.
 
     Another worker on the same queue can claim the row the moment the
@@ -166,10 +217,7 @@ def _record_child_death(pk: int, exit_code: int) -> None:
         pk=pk, is_completed=False,
     ).update(
         errors_count=F('errors_count') + 1,
-        last_error_message=db_safe_text(
-            f'[crashed] the attempt process died (exit {exit_code}) '
-            f'before the attempt finished'
-        ),
+        last_error_message=db_safe_text(message),
         last_error_dt=now,
         modified=now,
     )
@@ -181,17 +229,15 @@ def _record_child_death(pk: int, exit_code: int) -> None:
 
 
 def _run_safety_nets() -> None:
-    """The periodic work beat used to own: abandoned-attempt watchdog,
-    the stuck finalizer and its never-started report, and the cleanup
-    sweep. Called from the loop, so pull mode needs no beat process."""
+    """The periodic work: the stuck finalizer and its never-started
+    report, and the cleanup sweep. Called from the loop, so pull mode
+    schedules nothing anywhere else."""
     from django_logic.background.safety_nets import (
         cleanup_completed_transitions,
         detect_stuck_transitions,
-        watchdog_stale_attempts,
     )
 
     for step in (
-        watchdog_stale_attempts,
         detect_stuck_transitions,
         cleanup_completed_transitions,
     ):

@@ -1107,7 +1107,6 @@ A queue is a column on the row, and each worker process names the queues it serv
 
 Retries need no scheduler: a row whose attempt failed becomes claimable again after `RETRY_MINUTES` — the claim's own filter is the retry rule. Three safety nets run inside every worker loop, once a minute, so nothing else has to be configured:
 
-- `watchdog_stale_attempts` — gives up on an attempt that ran past its declared `timeout` (see below).
 - `detect_stuck_transitions` — finalizes a row that sits at `MAX_ERRORS`: it writes `failed_state`, runs `failure_callbacks` and marks the row completed, so the retry loop stops. It also names every row that has waited past the retry window with no attempt ever started — the sign that no worker serves that row's queue.
 - `cleanup_completed_transitions` — deletes completed rows older than `CLEANUP_DAYS`, except the newest terminal-failure row per instance and process. That row is the only explanation for an instance parked in its `failed_state`, so it stays for the investigation, however late it comes.
 
@@ -1128,7 +1127,7 @@ BackgroundTransition(
 )
 ```
 
-`watchdog_stale_attempts` looks for an uncompleted row whose current attempt (`started_at`) has run past `timeout`. It records a `TimeoutError` as a failed attempt. Once `errors_count` reaches `MAX_ERRORS`, it finalizes the row to `failed_state`. The watchdog ignores a row without `timeout`. It counts one error per attempt at most: if the attempt has already recorded an error of its own since it started, the watchdog leaves it alone. django-logic writes `started_at` in its own committed statement before the attempt begins. The value therefore stays visible while the attempt runs and survives a worker that dies, which is what makes a hung or crashed attempt visible at all. The watchdog cannot tell a crashed attempt from a slow one, so a re-dispatched attempt may run the side-effects again while the first attempt still runs. **Side-effects must be idempotent against external systems.** Their database writes are atomic per attempt and roll back on failure, but an external API call that both attempts make happens twice.
+The worker parent enforces the budget: every attempt runs in a forked child process, and when the child runs past `timeout`, the parent kills it. The kill releases the attempt's row lock with its connection, the parent records one `[timeout]` error on the row, the claim's retry wait paces the next attempt, and at `MAX_ERRORS` the stuck finalizer ends the row in `failed_state`. A row without `timeout` is unbounded. Enforcement exists only where a child exists: in sync mode the attempt runs in the caller's own thread and no budget is enforced. A killed attempt's database writes roll back with it, but an external API call it already made has happened. **Side-effects must be idempotent against external systems.**
 
 ### Concurrency and locking
 
@@ -1210,7 +1209,7 @@ The worker restores the transition by name and skips the source-state check on p
 
 Before it runs the side-effects, the worker checks that the persisted state still matches what enqueue left behind — `in_progress_state`, or a declared source state when the transition has no `in_progress_state`. If it does not match, the worker completes the row as **superseded**: it skips the side-effects, the external state change wins, and it records the reason on the row (`last_error_message` starts with `[superseded]`) and logs it at ERROR.
 
-The same check guards the `failed_state` writes that the safety-net tasks make, so a watchdog that finalizes a long-stranded row never overwrites a manual fix.
+The same check guards the `failed_state` writes that the stuck finalizer makes, so finalizing a long-stranded row never overwrites a manual fix.
 
 ### Production deployment
 
@@ -1225,7 +1224,7 @@ python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 python manage.py dl_worker --queues django_logic.slow
 ```
 
-Crash recovery is the database's own: a worker that dies releases its row lock with its connection, and the next claim takes the row at once. An attempt that hangs while keeping its connection is the watchdog's job — declare `timeout=` on transitions that need it.
+Crash recovery is the database's own: a worker that dies releases its row lock with its connection, and the next claim takes the row at once. An attempt that hangs while keeping its connection is stopped by its own budget — declare `timeout=` and the worker kills the attempt when it runs past it.
 
 **Running behind pgbouncer (transaction pooling).** The concurrency guard —
 `select_for_update(nowait)` plus the partial unique constraint — works under
@@ -1250,7 +1249,7 @@ in-dyno pgbouncer.
 SELECT count(*) FROM django_logic_background_transitionmessage
  WHERE is_completed = false AND errors_count >= 5;            -- = TRANSITION_MESSAGE_MAX_ERRORS
 
--- attempts running far longer than expected (watchdog candidates)
+-- attempts running far longer than expected
 SELECT count(*) FROM django_logic_background_transitionmessage
  WHERE is_completed = false AND started_at < now() - interval '15 minutes';
 

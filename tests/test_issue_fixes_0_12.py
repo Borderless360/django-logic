@@ -17,10 +17,7 @@ from django_logic.conf import (
     strict_kwargs_serialization,
     validate_bool,
 )
-from django_logic.background.safety_nets import (
-    run_pending,
-    watchdog_stale_attempts,
-)
+from django_logic.background.safety_nets import run_pending
 from django_logic.checks import check_no_unknown_settings
 from django_logic.logger import TransitionEventType
 from tests.models import Invoice, MtiChild, MtiParent
@@ -139,7 +136,7 @@ class RejectedStateWriteTests(_BindCleanup, TestCase):
         )
 
 
-# --- The timeout watchdog --------------------------------------------------
+# --- The attempt-start stamp survives a crashed attempt ---------------------
 
 def _raise_slow(instance, **kwargs):
     raise ValueError('slow boom')
@@ -149,24 +146,13 @@ def _die(instance, **kwargs):
     raise SystemExit('worker killed mid-attempt')
 
 
-class WatchdogChargeProcess(Process):
-    process_name = 'wd_charge_proc'
-    transitions = [
-        BackgroundTransition(
-            'go', sources=['draft'], target='wd_done',
-            in_progress_state='wd_running', failed_state='wd_failed',
-            timeout=1, side_effects=[_raise_slow],
-        ),
-    ]
-
-
-class WatchdogCrashProcess(Process):
+class StampSurvivesCrashProcess(Process):
     process_name = 'wd_crash_proc'
     transitions = [
         BackgroundTransition(
             'go', sources=['draft'], target='wd2_done',
             in_progress_state='wd2_running', failed_state='wd2_failed',
-            timeout=1, side_effects=[_die],
+            side_effects=[_die],
         ),
     ]
 
@@ -175,48 +161,19 @@ class WatchdogCrashProcess(Process):
     'BACKGROUND_EXECUTION': 'sync',
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
 })
-class WatchdogAccountingTests(_BindCleanup, TestCase):
-    _bound = (WatchdogChargeProcess, WatchdogCrashProcess)
+class AttemptStampDurabilityTests(_BindCleanup, TestCase):
+    _bound = (StampSurvivesCrashProcess,)
 
     def setUp(self):
         super().setUp()
         cache.clear()
 
-    def _age_attempt(self, row):
-        """Push started_at past the timeout without sleeping."""
-        from datetime import timedelta
-        from django.utils import timezone
-        TransitionMessage.objects.filter(pk=row.pk).update(
-            started_at=timezone.now() - timedelta(seconds=30))
-        row.refresh_from_db()
-
-    def test_attempt_that_recorded_its_own_error_is_not_counted_again(self):
-        """Three watchdog runs with no new attempts used to take errors_count
-        from 1 to 4. That spent the consumer's retries and replaced the real
-        error message with a timeout message."""
+    def test_attempt_stamp_survives_the_attempt_rolling_back(self):
+        """started_at is committed before the attempt, so a worker that dies
+        part way through stays visible to the stuck report and the retry
+        classification. It used to vanish with the transaction."""
         ProcessManager.bind_model_process(
-            Invoice, WatchdogChargeProcess, state_field='status')
-        inv = Invoice.objects.create(status='draft')
-        with self.assertRaises(ValueError):
-            inv.wd_charge_proc.go()
-
-        row = TransitionMessage.objects.get(instance_id=str(inv.pk))
-        self.assertEqual(row.errors_count, 1)
-        self._age_attempt(row)
-
-        for _ in range(3):
-            self.assertEqual(watchdog_stale_attempts(), 0)
-        row.refresh_from_db()
-        self.assertEqual(row.errors_count, 1)
-        # The real cause survives.
-        self.assertEqual(row.last_error_message, 'slow boom')
-
-    def test_abandoned_attempt_is_visible_and_counted_exactly_once(self):
-        """started_at is committed before the attempt and survives the attempt
-        rolling back, so a worker that dies part way through is visible. It used
-        to vanish with the transaction, so ``timeout=`` could never fire."""
-        ProcessManager.bind_model_process(
-            Invoice, WatchdogCrashProcess, state_field='status')
+            Invoice, StampSurvivesCrashProcess, state_field='status')
         inv = Invoice.objects.create(status='draft')
         with self.assertRaises(SystemExit):
             inv.wd_crash_proc.go()
@@ -224,15 +181,6 @@ class WatchdogAccountingTests(_BindCleanup, TestCase):
         row = TransitionMessage.objects.get(instance_id=str(inv.pk))
         self.assertIsNotNone(row.started_at)   # survived the rollback
         self.assertEqual(row.errors_count, 0)  # the attempt recorded nothing
-        self._age_attempt(row)
-
-        self.assertEqual(watchdog_stale_attempts(), 1)
-        row.refresh_from_db()
-        self.assertEqual(row.errors_count, 1)
-        # Counted once, not once per watchdog run.
-        self.assertEqual(watchdog_stale_attempts(), 0)
-        row.refresh_from_db()
-        self.assertEqual(row.errors_count, 1)
 
 
 # --- Nested-process tree walk ---------------------------------------------

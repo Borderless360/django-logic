@@ -146,23 +146,10 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         # The refusal path must still release the lock.
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
-    def test_running_attempt_inside_its_timeout_is_still_running(self):
-        # An attempt inside started_at + timeout_seconds is still running,
-        # however old `modified` is. Without that signal a healthy 40-minute
-        # attempt read as stranded at minute 16.
-        row = _make_row(self.widget)
-        TransitionMessage.objects.filter(pk=row.pk).update(
-            modified=timezone.now() - timedelta(minutes=16),
-            started_at=timezone.now() - timedelta(minutes=16),
-            timeout_seconds=3600,
-        )
-
-        with self.assertRaises(TransitionTemporarilyUnavailable):
-            self.widget.process.cancel()
-
     def test_attempt_past_its_timeout_and_retry_window_is_stranded(self):
-        # The timeout has passed and nothing was recorded since, so the
-        # watchdog would have abandoned the attempt: the retry window decides.
+        # The timeout has passed, nothing was recorded since, and no worker
+        # holds the row: the retry window decides. (A live long attempt is
+        # protected by the row-lock probe — see test_worker_holds_row.)
         row = _make_row(self.widget)
         TransitionMessage.objects.filter(pk=row.pk).update(
             modified=timezone.now() - timedelta(hours=2),

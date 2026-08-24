@@ -81,9 +81,9 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
                 'last_error_message': transition_message.last_error_message,
                 'timeout_seconds': transition_message.timeout_seconds,
                 'kwargs': transition_message.kwargs,
-                # The retry/watchdog clock. Without these a snapshot of a hung
-                # or timed-out production row replays as a pristine row: the
-                # retry backoff, the stale-attempt watchdog and the
+                # The retry clock. Without these a snapshot of a hung or
+                # timed-out production row replays as a pristine row: the
+                # retry backoff, the retry classification and the
                 # stuck-transition detector all read them, so the very
                 # behaviour the snapshot was taken to reproduce could not be
                 # reproduced.
@@ -206,12 +206,12 @@ def from_snapshot(data_or_path, *, model=None):
             last_error_message=tm_data.get('last_error_message', ''),
             timeout_seconds=tm_data.get('timeout_seconds'),
             kwargs=tm_data.get('kwargs') or {},
-            # Restore the retry/watchdog clock so a hung or timed-out
-            # production row replays as hung, not pristine. Without
-            # started_at in particular, the watchdog's filter
-            # (started_at__isnull=False) can never match a replayed row, so a
-            # snapshot of the exact row a timeout incident produced could not
-            # reproduce the timeout.
+            # Restore the retry clock so a hung or timed-out production
+            # row replays as hung, not pristine. Without started_at in
+            # particular, the retry classification and the stuck report
+            # can never see a replayed row as started, so a snapshot of
+            # the exact row a timeout incident produced could not
+            # reproduce it.
             last_error_dt=_restore_dt(tm_data.get('last_error_dt')),
             failure_side_effect_error=tm_data.get(
                 'failure_side_effect_error', ''),

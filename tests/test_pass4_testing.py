@@ -134,14 +134,14 @@ class SnapshotRestoreGuardTests(ProcessScenario):
         self.assertEqual(rows.get().errors_count, 1)
         self.assertNotIn('stale orphan', rows.get().last_error_message)
 
-    def test_snapshot_round_trips_the_retry_and_watchdog_clock(self):
+    def test_snapshot_round_trips_the_retry_clock(self):
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'fulfil', fail_side_effect='bg_ok',
             fail_with=ValueError('hung'))
 
         # A row from production that started an attempt, timed out, and whose
-        # cleanup hook also raised. A watchdog test replays this shape.
+        # cleanup hook also raised. A timeout-incident test replays this shape.
         now = timezone.now().replace(microsecond=123456)
         transition_message = TransitionMessage.objects.get(
             instance_id=str(widget.pk), process_name='process')

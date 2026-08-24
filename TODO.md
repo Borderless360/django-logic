@@ -28,7 +28,7 @@ Carried over from the Heroku validation round.
 - [ ] Document how to alert when `dl_worker` stops running — the safety nets
       run inside the worker loop, so a dead worker also means no safety nets.
 - [ ] Lower the log level for outcomes the engine already handles.
-      `detect_stuck` completing a row, the watchdog timeout, and the
+      `detect_stuck` completing a row, the timeout kill, and the
       "cannot be restored" path all log at ERROR, which fills Sentry with
       handled cases.
 

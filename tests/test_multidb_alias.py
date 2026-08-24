@@ -26,7 +26,7 @@ from django.utils import timezone
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
-from django_logic.background.safety_nets import watchdog_stale_attempts
+from django_logic.background.runner import finalize_stuck_attempt
 from django_logic.state import State
 from tests.models import Invoice
 
@@ -158,10 +158,10 @@ class BackgroundAliasTests(TestCase):
 
 
 @override_settings(DATABASE_ROUTERS=[_InvoiceOnOtherRouter()])
-class WatchdogFinalizeAliasTests(TestCase):
-    """The watchdog is the other terminal writer, so its failed_state savepoint
-    must open on the instance's alias too. Without this test, pointing that
-    savepoint at 'default' leaves the suite green."""
+class StuckFinalizerAliasTests(TestCase):
+    """The stuck finalizer is the other terminal writer, so its failed_state
+    savepoint must open on the instance's alias too. Without this test,
+    pointing that savepoint at 'default' leaves the suite green."""
 
     databases = {'default', 'other'}
 
@@ -182,19 +182,18 @@ class WatchdogFinalizeAliasTests(TestCase):
             transition_name='go',
             queue_name='django_logic',
             started_at=timezone.now() - timedelta(seconds=120),
-            timeout_seconds=60,
-            errors_count=1,  # the watchdog's increment hits MAX_ERRORS=2
+            errors_count=2,  # already at MAX_ERRORS=2; the stuck finalizer takes it
         )
 
     @override_settings(DJANGO_LOGIC={
         'BACKGROUND_EXECUTION': 'sync',
         'TRANSITION_MESSAGE_MAX_ERRORS': 2,
     })
-    def test_watchdog_terminal_failed_state_lands_on_the_instance_alias(self):
+    def test_terminal_failed_state_lands_on_the_instance_alias(self):
         invoice = Invoice.objects.using('other').create(status='running')
-        self._stale_transition_message(invoice)
+        transition_message = self._stale_transition_message(invoice)
 
-        self.assertEqual(watchdog_stale_attempts(), 1)
+        self.assertTrue(finalize_stuck_attempt(transition_message.pk))
 
         self.assertEqual(
             Invoice.objects.using('other').get(pk=invoice.pk).status, 'failed')
@@ -207,7 +206,7 @@ class WatchdogFinalizeAliasTests(TestCase):
         'BACKGROUND_EXECUTION': 'sync',
         'TRANSITION_MESSAGE_MAX_ERRORS': 2,
     })
-    def test_vetoed_watchdog_write_rolls_back_on_the_instance_alias(self):
+    def test_vetoed_terminal_write_rolls_back_on_the_instance_alias(self):
         # A landed write proves nothing here: set_state routes by instance
         # whichever connection the savepoint guards. Only a rolled-back write
         # tells the aliases apart, because a savepoint opened on 'default'
@@ -224,7 +223,7 @@ class WatchdogFinalizeAliasTests(TestCase):
         post_save.connect(veto_failed, sender=Invoice)
         self.addCleanup(post_save.disconnect, veto_failed, sender=Invoice)
 
-        self.assertEqual(watchdog_stale_attempts(), 1)
+        self.assertTrue(finalize_stuck_attempt(transition_message.pk))
 
         transition_message.refresh_from_db()
         # The row completes despite the veto.

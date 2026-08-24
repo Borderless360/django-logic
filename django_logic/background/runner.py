@@ -79,9 +79,9 @@ def run_background_transition(transition_message_id: int) -> None:
     inline sync dispatcher.
     """
     # Committed BEFORE the attempt's atomic block, and deliberately not rolled
-    # back with it (see TransitionMessage.stamp_attempt_started). The watchdog
-    # and the claim filter both read this stamp, and inside the atomic block
-    # it was invisible to them.
+    # back with it (see TransitionMessage.stamp_attempt_started). The stuck
+    # report and the retry classification both read this stamp, and inside
+    # the atomic block it was invisible to them.
     if not TransitionMessage.stamp_attempt_started(transition_message_id):
         # Another attempt holds the row, or the row is completed or gone. Both
         # are exit-silently cases: the row stays claimable, so a later claim
@@ -181,113 +181,6 @@ def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -
             f'Failed to mark unrestorable TransitionMessage#{transition_message_id} '
             f'completed: {e}'
         )
-
-
-def abandon_timed_out_attempt(transition_message_id: int) -> bool:
-    """Record a synthetic timeout error on a row whose current attempt
-    has exceeded its declared ``timeout_seconds``.
-
-    Skips a row a worker holds (``select_for_update(nowait)`` raises
-    ``OperationalError``), because only abandoned attempts matter here. When
-    the error count reaches ``MAX_ERRORS`` the same atomic block finalizes the
-    row with ``failed_state`` and ``mark_as_completed``, so retries stop.
-
-    .. note::
-
-        The watchdog cannot tell a genuinely abandoned attempt (the
-        worker crashed or lost its database connection) from a slow one
-        that still runs but has dropped its row lock. In the second case
-        the watchdog takes the row and sends it to the queue again while
-        the first worker is still running side-effects. Side-effects must
-        be idempotent, so running them again from scratch is safe. The
-        first worker's later ``mark_as_completed`` / ``record_error``
-        either completes the row or does nothing against a row that is
-        already completed.
-
-    Returns True if the row was touched, False if skipped.
-    """
-    hooks = None
-    with transaction.atomic():
-        try:
-            transition_message = (
-                TransitionMessage.objects
-                .select_for_update(nowait=True)
-                .get(pk=transition_message_id, is_completed=False)
-            )
-        except TransitionMessage.DoesNotExist:
-            return False
-        except OperationalError:
-            transition_logger.info(
-                f'watchdog: TransitionMessage#{transition_message_id} currently locked '
-                f'by a worker; deferring abandon'
-            )
-            return False
-
-        # Check the timeout again against the row we just LOCKED. The
-        # candidate scan is not synchronised, so a retry dispatch can stamp a
-        # fresh started_at between the scan and this lock. The one-charge
-        # guard below cannot catch that, because the new stamp is newer than
-        # the previous attempt's error: the guard sees no error since this
-        # attempt started and lets it through. A healthy attempt a few
-        # milliseconds old then took a timeout error, and at MAX_ERRORS the
-        # watchdog finalized it while its worker was still running. The scan
-        # only suggests a candidate; the locked read decides.
-        if (
-            transition_message.started_at is None
-            or transition_message.timeout_seconds is None
-            or transition_message.started_at + timedelta(seconds=transition_message.timeout_seconds)
-            >= timezone.now()
-        ):
-            transition_logger.info(
-                f'watchdog: TransitionMessage#{transition_message.pk} is not stale when '
-                f're-checked under the row lock (started_at={transition_message.started_at}, '
-                f'timeout_seconds={transition_message.timeout_seconds}); a newer attempt '
-                f'started since the scan. Leaving it alone.'
-            )
-            return False
-
-        # One timeout error per attempt. If the row already records an error
-        # from this attempt, the attempt is not abandoned and a second error
-        # would consume a retry the consumer never used. Without this guard
-        # the watchdog charged the same attempt on every run (errors_count
-        # 1 -> 2 -> 3 -> 4 with no new attempts), so declaring a timeout made
-        # a transition less reliable than leaving it out.
-        if (
-            transition_message.last_error_dt is not None
-            and transition_message.started_at is not None
-            and transition_message.last_error_dt >= transition_message.started_at
-        ):
-            transition_logger.info(
-                f'watchdog: TransitionMessage#{transition_message.pk} exceeded '
-                f'timeout_seconds={transition_message.timeout_seconds} but its attempt '
-                f'already recorded an error at {transition_message.last_error_dt}; not '
-                f'charging it twice.'
-            )
-            return False
-
-        transition_logger.error(
-            f'watchdog: TransitionMessage#{transition_message.pk} '
-            f'{transition_message.app_label}.{transition_message.model_name}#{transition_message.instance_id} '
-            f'{transition_message.transition_name} exceeded timeout_seconds='
-            f'{transition_message.timeout_seconds}; recording timeout error'
-        )
-        err = TimeoutError(
-            f'[watchdog timeout] attempt exceeded '
-            f'timeout_seconds={transition_message.timeout_seconds}'
-        )
-        transition_message.record_error(err)
-
-        max_errors = conf.max_errors()
-        if transition_message.errors_count >= max_errors:
-            # Terminal. Finalize inside this same atomic block: we already hold
-            # the row lock, so calling finalize_stuck_attempt would deadlock.
-            hooks = _finalize_terminal_from_watchdog(transition_message, err, source='watchdog')
-
-    # Run failure_callbacks after the atomic commits and the row lock is
-    # released (best-effort) — see _run_failure_callbacks.
-    if hooks is not None:
-        _run_failure_callbacks(*hooks)
-    return True
 
 
 def finalize_stuck_attempt(transition_message_id: int) -> bool:

@@ -18,7 +18,7 @@ incident history:
 
 - the dispatcher (`transaction.on_commit` + `apply_async`),
 - the periodic starter, for rows whose message was lost,
-- the watchdog and its committed `started_at` stamp,
+- the committed `started_at` stamp,
 - the stuck-detector,
 - the beat wiring — with its own defect class: the silently ignored
   schedule assignment, the interval that reset on every deploy (#203),
@@ -77,7 +77,7 @@ than today's starter, which waits out the retry interval.
 | dispatch claim, counter, ceiling, refund | deleted |
 | "does that queue have a consumer?" | a query: uncompleted rows older than X in that queue |
 | beat schedule + its checks | deleted — cleanup runs inside the worker loop |
-| watchdog + `started_at` | kept at first; a lease can replace it later (§6) |
+| `timeout=` enforcement | moved into the worker parent: it kills a forked attempt that runs past its budget (0.17.0; the watchdog scan is gone) |
 | stuck-detector | a check at claim time, plus the never-started report |
 | queue routing (broker queues) | a column filter: `--queues critical,fast` per worker process |
 | `acks_late` / redelivery semantics | not needed — the row never left the database |
@@ -97,7 +97,7 @@ fewer mechanisms:
 | between commit and the send | starter re-dispatches within RETRY_MINUTES | nothing was sent; the row is already claimable; NOTIFY was best effort and the poll is the floor |
 | worker dies mid side-effects | broker redelivery + starter | the attempt runs in a forked child: the crash kills the child, the parent records it as an error on the row, the retry wait paces the next claim, and MAX_ERRORS bounds a crash loop |
 | two workers reach one row | `select_for_update(nowait)` skip | same guard, plus `SKIP LOCKED` prevents most collisions before they happen |
-| attempt hangs but holds its connection | watchdog on `started_at` | same watchdog, unchanged |
+| attempt hangs but holds its connection | nothing could stop it (the watchdog only reached unlocked rows) | the worker parent kills the forked attempt at its declared `timeout=` (0.17.0) |
 | broker loses everything | starter rebuilds from rows | there is no broker to lose |
 
 ## 5. Latency, and the wake-up
@@ -112,12 +112,13 @@ not new.
 
 ## 6. Two open choices
 
-**The lease.** This version keeps the watchdog: `started_at` +
-`timeout_seconds` still name an abandoned-but-unlocked attempt. A later
+**The lease.** 0.17.0 replaced the watchdog: the worker parent kills a
+forked attempt that runs past its declared `timeout=`, and a dead
+worker's row lock dies with its connection. A later
 step could fold that into the claim — a `claimed_until` column the worker
 extends while it runs — making "is this attempt alive?" one column read
-instead of a stamp plus a probe. Deferred: the watchdog works, and the cut
-should change one thing at a time.
+instead of a stamp plus a probe. Deferred: the parent-side kill works, and
+a cut should change one thing at a time.
 
 **Crash containment (decided during validation).** The first Heroku run
 showed why the worker cannot run attempts in its own process: an injected

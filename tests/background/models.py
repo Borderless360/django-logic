@@ -20,6 +20,11 @@ def bg_boom(instance, **kwargs):
     raise ValueError('boom')
 
 
+def bg_hang(instance, **kwargs):
+    import time
+    time.sleep(30)
+
+
 def bg_refuse(instance, **kwargs):
     from django_logic.background import PermanentFailure
     raise PermanentFailure('the rule says no')
@@ -101,6 +106,14 @@ class WidgetProcess(Process):
             queue='django_logic.critical',
             side_effects=[bg_boom],
             failure_callbacks=[bg_failure_callback],
+        ),
+        BackgroundTransition(
+            action_name='hang',
+            sources=['fulfilling'],
+            target='hang_done',
+            failed_state='hang_failed',
+            queue='django_logic.critical',
+            side_effects=[bg_hang],
         ),
         BackgroundTransition(
             action_name='timeboxed',
