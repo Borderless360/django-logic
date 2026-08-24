@@ -32,6 +32,11 @@ Breaking cleanup. Land it as one release with a migration guide in
 - [ ] **Freeze `nested_processes`.** They earn their keep for one pattern —
       same action name, mutually exclusive conditions, one bound accessor.
       No new restore fallbacks; fan-out stays separate machines.
+- [ ] **One app.** The background engine is default functionality, so
+      `INSTALLED_APPS` should list one entry, not `django_logic` plus
+      `django_logic.background`. Breaking: the background app owns the
+      `django_logic_background` app label and its migrations, so the fold
+      needs the same care as the migration squash — do both together.
 - [ ] **Squash migrations 0001–0009 into one initial migration.** Give the
       squash a distinct name (a squash named `0001_initial` that lists
       itself in `replaces` removes itself) and the full `replaces` list.
