@@ -247,15 +247,25 @@ consumer API is unchanged except where noted.
   column, and the pk. The consumer has four processes bound to one
   physical export table through proxy models, which is where this was
   found.
+- **This is the lock half only.** `TransitionMessage.instance_key` still
+  keys the durable row on the stored `model_name`, so a proxy and the
+  model it proxies still write two rows for one physical row and the
+  partial unique index does not tell them apart. Two enqueues one after
+  the other therefore still both succeed on a proxy pair — the shared
+  cache lock stops the concurrent race, not the sequential one.
+  Unifying the row key changes instance identity on a durable row and
+  needs a migration plan for the rows already written, so it is filed
+  rather than rushed. Every other shape is unaffected: where the model
+  name is the concrete one, the index keys exactly as before.
 - **Upgrade note, and it needs no drain**: the key is shared-cache
   identity, so during a rolling deploy the old and new processes compute
   different keys for one instance. That window is narrow and shallow.
   The cache lock guards one critical section — validate, write the
   `TransitionMessage`, write `in_progress_state` — and from then on the
   uncompleted row gates concurrent transitions. Two background enqueues
-  that both take a lock still meet the partial unique index, which is a
-  database constraint and knows nothing about the cache; the second gets
-  `AlreadyInProgress`. The worker's attempt is guarded by
+  that both take a lock meet the partial unique index, which is a
+  database constraint and knows nothing about the cache, so the second
+  gets `AlreadyInProgress`. The worker's attempt is guarded by
   `select_for_update(nowait=True)` on the row. What the split window
   weakens is the synchronous path's fast mutex, for the minutes a
   rolling deploy takes. Draining the workers first would cost more than
@@ -263,7 +273,7 @@ consumer API is unchanged except where noted.
 - The database alias is deliberately **not** in the key. No consumer
   runs a process model on a second write alias, and picking the wrong
   alias source would split the key for an instance read from a
-  follower. That half of the issue stays open.
+  follower.
 
 ### Fixed — a refusal stays a refusal
 

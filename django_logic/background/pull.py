@@ -55,6 +55,11 @@ NOTIFY_CHANNEL = 'django_logic_work'
 #: this often even when no notification arrives.
 POLL_SECONDS = 5.0
 
+#: The floor while the worker still has attempts running. Shorter than
+#: ``POLL_SECONDS``: an attempt that crashes leaves no error on its row,
+#: and only the worker can record one.
+BUSY_POLL_SECONDS = 1.0
+
 #: How often the loop runs the safety nets (stuck report, cleanup).
 SAFETY_NET_SECONDS = 60.0
 
@@ -399,24 +404,46 @@ def run_worker(
     last_safety_net = 0.0
     while True:
         claimed_any = False
-        while len(attempts) < concurrency:
-            pk = claim_next(
-                queues,
-                exclude_pks=[attempt.pk for attempt in attempts.values()],
+        try:
+            while len(attempts) < concurrency:
+                pk = claim_next(
+                    queues,
+                    exclude_pks=[attempt.pk for attempt in attempts.values()],
+                )
+                if pk is None:
+                    break
+                _start_attempt(pk, attempts)
+                claimed_any = True
+        except Exception as exc:
+            # A database blip or a failed fork must not end the loop while
+            # attempts run: the worker is the only thing that enforces
+            # their timeout= and records their crash, so its death would
+            # orphan them. The wait below paces the next try.
+            logger.error(
+                'pull: could not start an attempt (%s: %s). The attempts '
+                'already running are still accounted for.',
+                type(exc).__name__, exc,
             )
-            if pk is None:
-                break
-            _start_attempt(pk, attempts)
-            claimed_any = True
-        # Every slot is full, or nothing is claimable. Either way the
-        # worker has nothing else to do until an attempt ends, so this
-        # wait is what keeps a full backlog from spinning on the claim.
-        _harvest(attempts, block=True)
+        # A full worker has nothing to do but wait for a slot, so it waits
+        # in waitpid. A worker with a free slot must stay reachable: work
+        # arrives while a long attempt runs, and the notification wait is
+        # what hears it. Blocking here instead would leave those slots idle
+        # for the whole life of the longest attempt.
+        full = len(attempts) >= concurrency
+        _harvest(attempts, block=full)
         if time.monotonic() - last_safety_net >= SAFETY_NET_SECONDS:
             _run_safety_nets()
             last_safety_net = time.monotonic()
-        if claimed_any or attempts:
+        if claimed_any or full:
+            continue
+        if attempts and not forever:
+            # One pass must finish what it started before it returns.
+            _harvest(attempts, block=True)
             continue
         if not forever:
             return
-        _wait_for_work(POLL_SECONDS)
+        # A shorter wait while attempts run: an attempt that crashes leaves
+        # no error on its row, and the row is claimable the moment its lock
+        # dies, so the worker should not sit out a full poll interval
+        # before recording it.
+        _wait_for_work(BUSY_POLL_SECONDS if attempts else POLL_SECONDS)

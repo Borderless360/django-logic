@@ -201,6 +201,68 @@ class PullClaimTests(TransactionTestCase):
             TransitionMessage.objects.filter(is_completed=False).exists()
         )
 
+    def test_a_free_slot_takes_work_that_arrives_while_an_attempt_runs(self):
+        """The burst the concurrency option exists for: a long attempt is
+        running, more work arrives, and the free slots must take it
+        instead of waiting out the long attempt."""
+        import shutil
+        import tempfile
+        from unittest.mock import patch
+
+        class _Stop(Exception):
+            """Ends the loop from inside the wait, since it runs forever."""
+
+        barrier_dir = tempfile.mkdtemp(prefix='dl_burst_')
+        self.addCleanup(shutil.rmtree, barrier_dir, ignore_errors=True)
+
+        # Neither attempt can finish until both stand in the side-effect
+        # together, so the second one has to start while the first runs.
+        running = Widget.objects.create(status='draft')
+        running.process.rendezvous(barrier_dir=barrier_dir, width=2)
+        arrives_later = Widget.objects.create(status='draft')
+
+        waits = []
+
+        def wait(timeout):
+            waits.append(timeout)
+            if len(waits) == 1:
+                # The work arrives while the first attempt is still running.
+                arrives_later.process.rendezvous(
+                    barrier_dir=barrier_dir, width=2)
+                return
+            if (TransitionMessage.objects.filter(is_completed=False).exists()
+                    and len(waits) < 50):
+                # The worker still has an attempt to account for. Stopping
+                # here would leave its row uncompleted and blame the worker
+                # for the test's own timing.
+                return
+            raise _Stop
+
+        with patch('django_logic.background.pull._wait_for_work', wait):
+            with self.assertRaises(_Stop):
+                run_worker(_CRITICAL, concurrency=2)
+
+        for widget in (running, arrives_later):
+            widget.refresh_from_db()
+            self.assertEqual(widget.status, 'met')
+
+    def test_a_worker_that_cannot_claim_keeps_its_attempts(self):
+        """A database blip must not end the loop: the worker is the only
+        thing that accounts for the attempts it forked."""
+        from unittest.mock import patch
+
+        from django.db import OperationalError
+
+        widget = Widget.objects.create(status='draft')
+        widget.process.fulfil()
+        with patch('django_logic.background.pull.claim_next',
+                   side_effect=OperationalError('the connection went away')):
+            run_worker(_CRITICAL, forever=False, concurrency=2)
+        # The loop returned instead of raising, and the row is untouched.
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'fulfilling')
+        self.assertEqual(TransitionMessage.objects.get().errors_count, 0)
+
     def test_one_loop_pass_drains_and_runs_the_safety_nets(self):
         first = Widget.objects.create(status='draft')
         second = Widget.objects.create(status='draft')
