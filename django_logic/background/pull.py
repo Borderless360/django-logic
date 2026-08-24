@@ -195,9 +195,19 @@ def _wait_for_attempt_process(attempt_pid: int, timeout_seconds) -> tuple[int, b
             return os.waitstatus_to_exitcode(raw_status), False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            os.kill(attempt_pid, signal.SIGKILL)
-            os.waitpid(attempt_pid, 0)
-            return -signal.SIGKILL, True
+            sent_kill = False
+            try:
+                os.kill(attempt_pid, signal.SIGKILL)
+                sent_kill = True
+            except ProcessLookupError:
+                pass
+            try:
+                _, raw_status = os.waitpid(attempt_pid, 0)
+            except ChildProcessError:
+                return 0, False
+            if sent_kill:
+                return -signal.SIGKILL, True
+            return os.waitstatus_to_exitcode(raw_status), False
         time.sleep(min(1.0, max(0.01, remaining)))
 
 

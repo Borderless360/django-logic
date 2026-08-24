@@ -64,6 +64,25 @@ class WaitForAttemptProcessTests(TransactionTestCase):
         self.assertEqual(exit_code, 0)
         self.assertFalse(timed_out)
 
+    def test_a_process_that_exits_before_the_kill_is_a_normal_exit(self):
+        from unittest.mock import patch
+
+        def waitpid(pid, flags):
+            if flags == os.WNOHANG:
+                return (0, 0)
+            return (pid, 0)
+
+        with patch('django_logic.background.pull.os.waitpid', side_effect=waitpid), \
+                patch('django_logic.background.pull.os.kill',
+                      side_effect=ProcessLookupError), \
+                patch('django_logic.background.pull.os.waitstatus_to_exitcode',
+                      return_value=0), \
+                patch('django_logic.background.pull.time.monotonic',
+                      return_value=10):
+            exit_code, timed_out = _wait_for_attempt_process(12345, 0)
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(timed_out)
+
 
 @override_settings(DJANGO_LOGIC=_PULL_SETTINGS)
 @requires_postgres

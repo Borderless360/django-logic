@@ -22,9 +22,14 @@ consumer API is unchanged except where noted.
   against PostgreSQL 17: the wait returns at the notification, not the
   timeout. Two new tests pin it (one live-NOTIFY, one degrade-to-sleep).
 - **Migration 0008's docstring** no longer describes two columns that
-  migration 0009 removed (#233). The file rename waits for the 1.0
-  squash: renaming an applied migration ghosts it in every consumer's
+  migration 0009 removed (#233). The file rename waits for the squash:
+  renaming an applied migration ghosts it in every consumer's
   `django_migrations`.
+- **A timeout kill that races the attempt's own exit no longer takes
+  down the worker** (#239). After `WNOHANG` says the attempt is still
+  running, the process can exit before `os.kill`. That used to raise
+  `ProcessLookupError` out of the worker loop. The wait now treats a
+  vanished process as a normal exit unless the kill was sent.
 
 ### Changed — `timeout=` now means what it says (#229)
 
