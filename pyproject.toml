@@ -57,7 +57,7 @@ dev = [
     # Driver for the PostgreSQL stability suite (make stability-*) and the
     # PostgreSQL concurrency tests. Without it, `uv sync --extra dev` runs the
     # SQLite suite but not tests.stability.
-    "psycopg[binary]>=3.1",
+    "psycopg[binary]>=3.2",
     # Client for Django's built-in Redis cache backend. The real-Redis and
     # stability test settings use that backend for the state lock.
     "redis>=4.2",

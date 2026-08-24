@@ -207,9 +207,14 @@ def _run_safety_nets() -> None:
 def _wait_for_work(timeout: float) -> None:
     """Sleep until a notification arrives or ``timeout`` passes.
 
-    Holds one LISTEN connection per worker process. When the connection
-    cannot listen (a pooler that rejects LISTEN, a broken socket), the
-    wait degrades to a plain sleep and the poll floor carries the loop.
+    Holds one LISTEN connection per worker process. ``LISTEN`` lasts for
+    the session, so it is issued once per connection, not per wait.
+    psycopg 2 and 3 expose notifications differently, so the wait
+    branches on the driver: psycopg 2 keeps a ``notifies`` list the
+    caller drains after ``select``; psycopg 3 waits inside the
+    ``notifies()`` generator. When the connection cannot listen (a
+    pooler that rejects LISTEN, a broken socket), the wait degrades to
+    a plain sleep and the poll floor carries the loop.
     """
     from django_logic.background.models import TransitionMessage
 
@@ -218,12 +223,32 @@ def _wait_for_work(timeout: float) -> None:
         connection = connections[alias]
         connection.ensure_connection()
         raw = connection.connection
-        with raw.cursor() as cursor:
-            cursor.execute(f'LISTEN {NOTIFY_CHANNEL}')
-        select.select([raw], [], [], timeout)
-        raw.poll()
-        raw.notifies.clear()
-    except Exception:
+        if not getattr(raw, '_django_logic_listening', False):
+            with raw.cursor() as cursor:
+                cursor.execute(f'LISTEN {NOTIFY_CHANNEL}')
+            raw._django_logic_listening = True
+        if hasattr(raw, 'poll'):
+            # psycopg 2. A notification that arrived during earlier
+            # statements already sits in the list, so check it before
+            # sleeping on the socket.
+            raw.poll()
+            if raw.notifies:
+                del raw.notifies[:]
+                return
+            select.select([raw], [], [], timeout)
+            raw.poll()
+            del raw.notifies[:]
+        else:
+            # psycopg 3 (3.2 or later). The generator returns at the
+            # first notification or when the timeout passes, and it
+            # consumes what it yields, so nothing accumulates.
+            for _ in raw.notifies(timeout=timeout, stop_after=1):
+                pass
+    except Exception as exc:
+        logger.warning(
+            'pull: the notification wait failed (%s); sleeping the poll '
+            'interval instead.', exc,
+        )
         time.sleep(timeout)
 
 

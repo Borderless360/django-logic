@@ -180,3 +180,54 @@ class PullClaimTests(TransactionTestCase):
         self.assertFalse(
             TransitionMessage.objects.filter(is_completed=False).exists()
         )
+
+
+class WaitDegradeTests(TestCase):
+    """When the connection cannot listen, the wait sleeps the poll
+    interval instead of raising — the poll floor carries the loop."""
+
+    def test_wait_degrades_to_a_plain_sleep(self):
+        from unittest.mock import MagicMock, patch
+
+        from django_logic.background.pull import _wait_for_work
+
+        fake_connections = MagicMock()
+        fake_connections.__getitem__.side_effect = RuntimeError('no connection')
+        with patch('django_logic.background.pull.connections', fake_connections), \
+                patch('django_logic.background.pull.time.sleep') as fake_sleep:
+            _wait_for_work(3.5)
+        fake_sleep.assert_called_once_with(3.5)
+
+
+@override_settings(DJANGO_LOGIC=_PULL_SETTINGS)
+@requires_postgres
+class NotificationWakeUpTests(TransactionTestCase):
+    """A committed NOTIFY wakes a waiting worker before the poll floor."""
+
+    databases = '__all__'
+
+    def test_a_notification_wakes_the_wait_before_the_timeout(self):
+        import time
+
+        from django_logic.background.pull import _wait_for_work, notify_workers
+
+        # The first wait issues LISTEN for the session.
+        _wait_for_work(0.01)
+
+        def notify_from_another_connection():
+            try:
+                time.sleep(0.3)
+                notify_workers()
+            finally:
+                connections.close_all()
+
+        notifier = threading.Thread(target=notify_from_another_connection)
+        started = time.monotonic()
+        notifier.start()
+        try:
+            _wait_for_work(10.0)
+        finally:
+            notifier.join()
+        waited = time.monotonic() - started
+        # A wait that ignores the notification takes the whole timeout.
+        self.assertLess(waited, 5.0)
