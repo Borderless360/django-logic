@@ -96,22 +96,12 @@ class TransitionMessage(TimeStampedModel):
     field_name = models.CharField(max_length=100, blank=True, default='')
     transition_name = models.CharField(max_length=100)
     # Dotted path of the (possibly nested) Process class that declared the
-    # transition. The worker uses it to restore that exact background
-    # transition when an ``action_name`` is shared across nested processes
-    # that use conditions to choose (e.g. per-integration Gmail/Dummy
-    # sub-processes). It is recorded for every background transition
-    # started through the Process entrypoint — for a transition on the
-    # bound process itself it equals the bound class path; for a nested
-    # one it is the nested class path. Blank only on rows created before
-    # this column existed (pre-0.4.x) or, rarely, ones enqueued outside
-    # the Process entrypoint; the worker then resolves by
-    # ``transition_name`` (only when that name is unambiguous across the
-    # tree).
-    #
-    # TextField (not a length-capped CharField) to mirror the unbounded
-    # ``process_class`` stored in ``kwargs``: a deeply-namespaced dotted
-    # path must never overflow and abort enqueue. Never indexed — only
-    # read by pk when the worker restores and compared for equality.
+    # transition. Restore selects the exact background transition by this
+    # class plus ``transition_name``. Blank on rows from before the column
+    # existed (or enqueued outside the Process entrypoint); restore then
+    # resolves by name alone, only when the name is unambiguous.
+    # TextField: a deeply-namespaced dotted path must never overflow and
+    # abort enqueue. Never indexed — read by pk, compared for equality.
     owning_process_class = models.TextField(blank=True, default='')
     queue_name = models.CharField(max_length=100)
 
