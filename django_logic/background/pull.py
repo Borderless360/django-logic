@@ -21,7 +21,10 @@ The claim's WHERE clause is the retry rule:
 ``LISTEN/NOTIFY`` is the wake-up: enqueue fires one payload-free
 notification after commit, and a waiting worker asks the database at
 once instead of at the next poll. A lost notification costs one poll
-interval — the row waits in the database either way.
+interval — the row waits in the database either way. The wake-up exists
+for pickup latency on a direct Postgres connection; pgbouncer
+transaction pooling rejects LISTEN, and there the worker falls back to
+the poll floor.
 
 The worker loop also runs the safety nets (the stuck finalizer and its
 no-worker report, the cleanup sweep), so nothing has to be scheduled

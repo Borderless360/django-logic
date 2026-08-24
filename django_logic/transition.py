@@ -19,7 +19,6 @@ live in ``django_logic.background.transitions`` (enqueue) and
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.commands import (
     Callbacks,
@@ -27,7 +26,6 @@ from django_logic.commands import (
     NextTransition,
     Permissions,
     SideEffects,
-    note_deferred_unlock,
     write_failed_state,
 )
 from django_logic.exceptions import (
@@ -38,19 +36,18 @@ from django_logic.logger import (
     transition_logger,
     TransitionEventType,
 )
-from django_logic.conf import defer_unlock_until_commit as _defer_unlock_until_commit
 from django_logic.state import State
 
 
 #: Names of the engine's OWN method parameters on the state-change path.
-#: A caller kwarg carrying one raises TypeError inside ``fail_transition``/
-#: ``_release_lock`` — on the failure path, after the lock was taken: no
-#: ``failed_state``, the real exception replaced, the lock leaked until TTL.
+#: A caller kwarg carrying one raises TypeError inside ``fail_transition``
+#: — on the failure path, after the lock was taken: no ``failed_state``,
+#: the real exception replaced, the lock leaked until TTL.
 #: Refused up front, before anything is acquired. Distinct from the names
 #: the engine forwards itself (``tr_id``, ``root_id``, ``parent_id``,
 #: ``process_class``, ``owning_process_class``) — the README documents
 #: those as reserved instead of refusing them.
-_ENGINE_PARAM_KWARGS = frozenset({'state', 'exception', 'deferrable'})
+_ENGINE_PARAM_KWARGS = frozenset({'state', 'exception'})
 
 
 def _refuse_engine_param_kwargs(action_name: str, kwargs: dict) -> None:
@@ -260,21 +257,15 @@ class Transition:
     def complete_transition(self, state: State, **kwargs):
         """Write target state, release the lock, then run callbacks.
 
-        By default the lock is released **before** callbacks run, so a
-        callback can safely trigger another transition on the same
-        instance. Under ``DEFER_UNLOCK_UNTIL_COMMIT`` inside an open
-        transaction the release rides ``transaction.on_commit`` instead —
-        callbacks then still find the state locked, and a same-instance
-        follow-up is skipped as best-effort (see ``_release_lock``). If
-        the worker crashes during callbacks they are lost — callbacks are
+        The lock is released **before** callbacks run, so a callback can
+        safely trigger another transition on the same instance. If the
+        worker crashes during callbacks they are lost — callbacks are
         best-effort.
 
         A failed target write must still release the lock (otherwise the
         instance's FSM freezes until the lock TTL): the transition fails
         loudly either way, but a leaked lock turns one failed request into
-        hours of rejected transitions. The release follows the same
-        deferral rule as ``fail_transition`` — immediate, since the rejected
-        write means nothing landed under this lock.
+        hours of rejected transitions.
         """
         try:
             state.set_state(self.target)
@@ -283,12 +274,7 @@ class Transition:
                 f'{kwargs.get("tr_id")} target-state write failed for '
                 f'{state.instance_key}; releasing the lock before re-raising.'
             )
-            # Same deferral rule as fail_transition: nothing was written
-            # under this lock (the rejected target never landed, and sync
-            # transitions write no marker since 0.12.0), so there is no
-            # invisible span to protect — release now; deferring would only
-            # leak the lock until TTL when the outer transaction rolls back.
-            self._release_lock(state, deferrable=False, **kwargs)
+            self._release_lock(state, **kwargs)
             raise
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
@@ -304,14 +290,6 @@ class Transition:
         # try/finally: a failed failed_state write must still release the
         # lock; the original side-effect exception keeps propagating out of
         # SideEffects.execute either way.
-        #
-        # Deferral only applies when a state write actually happened
-        # under this lock — the failed_state written below (sync
-        # transitions write no in-progress state since 0.12.0). A failure
-        # that wrote nothing has no invisible span to protect, so the unlock
-        # stays immediate (deferring would only leak the lock until TTL when
-        # the outer transaction rolls back).
-        wrote_state = False
         try:
             if self.failed_state:
                 # Savepointed so a rejected failed_state write cannot replace
@@ -319,44 +297,19 @@ class Transition:
                 # docstring above promised "the original exception keeps
                 # propagating either way"; without this the write's own
                 # exception won and the real cause was lost.
-                wrote_state = write_failed_state(
+                write_failed_state(
                     state, self.failed_state,
                     prefix=f'{kwargs.get("tr_id")}',
                     consequence='The original failure is re-raised unchanged.',
-                ) is None
+                )
         finally:
-            self._release_lock(state, deferrable=wrote_state, **kwargs)
+            self._release_lock(state, **kwargs)
 
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
     @staticmethod
-    def _release_lock(state: State, deferrable: bool = True, **kwargs):
-        """Release the state lock — now, or at commit under
-        ``DJANGO_LOGIC['DEFER_UNLOCK_UNTIL_COMMIT']``.
-
-        Deferring extends mutual exclusion over the span where a state
-        write is committed-but-invisible to other connections. The
-        trade-offs, and when to enable it, are in the README.
-
-        ``deferrable`` is False on the paths where nothing was written
-        under the lock (the early revalidation-failure unlock, a rejected
-        target write, and a failure path with no ``failed_state`` landed):
-        with no visibility window to protect, deferring would only leak the
-        lock until TTL on rollback.
-        """
-        if deferrable and _defer_unlock_until_commit():
-            using = state.instance._state.db or DEFAULT_DB_ALIAS
-            if transaction.get_connection(using).in_atomic_block:
-                transaction.on_commit(state.unlock, using=using)
-                # Registered so a hook savepoint that rolls back can
-                # release this lock instead of silently discarding the
-                # on_commit hook with it (commands._run_in_savepoint).
-                note_deferred_unlock(using, state)
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
-                    f'{state.instance_key} deferred until commit'
-                )
-                return
+    def _release_lock(state: State, **kwargs):
+        """Release the state lock and log the Unlock lifecycle line."""
         state.unlock()
         # instance_key on the lifecycle lines: Start used to be the only
         # line carrying it, so a per-instance log filter could not show
@@ -518,7 +471,6 @@ class Action(Transition):
                     f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
                     f'{state.instance_key}'
                 )
-                wrote_state = False
                 try:
                     # Probe guarded: the side-effect that brought us here
                     # may have rollback-poisoned the connection (or the
@@ -555,7 +507,7 @@ class Action(Transition):
                         # rejected write must not replace the original
                         # side-effect exception on its way out, and must not
                         # log a SET_STATE line for a write that never landed.
-                        wrote_state = write_failed_state(
+                        write_failed_state(
                             state, self.failed_state,
                             prefix=(
                                 f'{kwargs.get("tr_id")} Action '
@@ -564,10 +516,8 @@ class Action(Transition):
                             consequence=(
                                 'The original failure is re-raised unchanged.'
                             ),
-                        ) is None
+                        )
                 finally:
-                    # The shared release path: emits the Unlock lifecycle
-                    # line and honours DEFER_UNLOCK_UNTIL_COMMIT when a
-                    # state write landed under the lock.
-                    self._release_lock(state, deferrable=wrote_state, **kwargs)
+                    # The shared release path emits the Unlock lifecycle line.
+                    self._release_lock(state, **kwargs)
         self.failure_callbacks.execute(state, exception=exception, **kwargs)

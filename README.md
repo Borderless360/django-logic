@@ -38,7 +38,6 @@ Django Logic is a workflow library for Django. You declare transitions, permissi
 
 Extras:
 - `pip install django-logic[redis]` — installs `django-redis`, for deployments whose settings name `django_redis.cache.RedisCache`. It stopped being a core dependency in 0.11.0, because the engine has never imported it.
-- `[celery]` is an empty alias. The engine has no broker; the alias only keeps an old `pip install django-logic[celery]` pin resolving.
 
 ## Installation
 
@@ -784,7 +783,6 @@ DJANGO_LOGIC = {
     'TRANSITION_MESSAGE_CLEANUP_DAYS': 7,
     'STRICT_KWARGS_SERIALIZATION': False,  # True: raise (not warn) on dropped 'request' / non-string dict keys
     'STRICT_HOOK_SIGNATURES': False,    # True: refuse to bind hooks without a named instance-first parameter
-    'DEFER_UNLOCK_UNTIL_COMMIT': False,  # True: sync unlocks ride transaction.on_commit (see "Concurrency and locking")
     # 'LEGACY_EXCEPTION_BASE': '...',  # opt-in: dotted path of a fork's TransitionNotAllowed to mix in during a migration (see below)
 }
 ```
@@ -1160,13 +1158,7 @@ The gate is a database row, not a held lock, so nothing is left behind when the 
 
 **Lock ownership.** Every acquisition stores a unique token, and the release compares the token before it deletes the key. A synchronous run that outlives its lock TTL therefore cannot delete the lock that a later run acquired: the token does not match, so it leaves the lock alone and returns. A `State` object that never locked still deletes the key without a check, which gives you a way to release a lock by hand.
 
-**Synchronous transitions inside an outer `transaction.atomic()`.** By default django-logic releases the lock as soon as the transition completes, before the outer block commits. That window is real. Another connection can take the lock, read the *old committed* state, and run the same transition again. Both runs then execute the side-effects, and the final state depends on which one commits last. Opt in when your code drives transitions inside atomic blocks and needs the exclusion to cover the whole uncommitted span:
-
-```python
-DJANGO_LOGIC = {..., 'DEFER_UNLOCK_UNTIL_COMMIT': True}
-```
-
-The unlock then runs from `transaction.on_commit`. Design for two trade-offs. On **rollback** the hook never runs, so the lock waits for its TTL to expire — a lockout with a known end, the same as after a crashed process. And a follow-up on the same instance (`callbacks` / `next_transition`) inside the atomic block finds the state still locked, so django-logic skips it; start those from `transaction.on_commit` in the caller instead. You can also keep the default and call the transition from `transaction.on_commit`, so it starts only once the surrounding write is visible.
+**Synchronous transitions inside an outer `transaction.atomic()`.** django-logic releases the lock as soon as the transition completes, before the outer block commits. That window is real. Another connection can take the lock, read the *old committed* state, and run the same transition again. Both runs then execute the side-effects, and the final state depends on which one commits last. When your code drives transitions inside atomic blocks and that matters, call the transition from `transaction.on_commit`, so it starts only once the surrounding write is visible.
 
 One consequence: you **cannot** chain a background transition from another transition's `callbacks` or `next_transition` on the *same* instance while the first row is still uncompleted. The chained enqueue raises `AlreadyInProgress`. Start follow-up background work from a terminal hook — a success or failure callback that runs after django-logic marks the first row completed — or work on a different instance.
 

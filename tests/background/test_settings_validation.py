@@ -163,21 +163,7 @@ class SettingValidationTests(SimpleTestCase):
         with override_settings(DJANGO_LOGIC=_conf(LOCK_TIMEOUT=0.5)):
             self.assertEqual(lock_timeout(), 0.5)
 
-    # -- DEFER_UNLOCK_UNTIL_COMMIT (real bool) --------------------------------
-
-    def test_defer_unlock_rejects_truthy_garbage(self):
-        for garbage in ('false', 1, 0, None):
-            with self.subTest(value=garbage):
-                self.assert_rejected(
-                    _conf(DEFER_UNLOCK_UNTIL_COMMIT=garbage),
-                    'DEFER_UNLOCK_UNTIL_COMMIT')
-
-    def test_defer_unlock_accepts_real_bools(self):
-        self.assert_accepted(_conf(DEFER_UNLOCK_UNTIL_COMMIT=True))
-        self.assert_accepted(_conf(DEFER_UNLOCK_UNTIL_COMMIT=False))
-
-
     def test_unset_optional_settings_validate_clean(self):
-        # The documented defaults ({} aliases, False defer, no redactor)
-        # must pass without the keys present at all.
+        # The documented defaults must pass without the optional keys
+        # present at all.
         self.assert_accepted(_conf())

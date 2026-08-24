@@ -27,10 +27,10 @@ class State:
         model = type(self.instance)
         # Route to the instance's own connection. Every WRITE path is already
         # instance-aware (Model.save and refresh_from_db pass
-        # hints={'instance': ...}; _release_lock reads instance._state.db), but
-        # this read was unrouted, so on a non-default alias the under-lock
-        # revalidation and the worker's state guard compared against whatever
-        # row the DEFAULT database happened to hold.
+        # hints={'instance': ...}), but this read was unrouted, so on a
+        # non-default alias the under-lock revalidation and the worker's
+        # state guard compared against whatever row the DEFAULT database
+        # happened to hold.
         using = self.instance._state.db or DEFAULT_DB_ALIAS
         return (
             model._base_manager

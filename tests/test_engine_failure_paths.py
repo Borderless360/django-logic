@@ -9,7 +9,7 @@ from datetime import timedelta
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from django_logic import Action, Process, ProcessManager, Transition
@@ -219,9 +219,9 @@ class ReservedKwargProcess(Process):
 @override_settings(DJANGO_LOGIC=_SYNC)
 class ReservedKwargTests(_BindCleanup, TestCase):
     """A caller keyword named like an engine parameter (``exception``,
-    ``deferrable``, ``state``) used to collide on the failure path. The real
-    error became a TypeError, ``failed_state`` was never written, and the lock
-    stayed until it expired.
+    ``state``) used to collide on the failure path. The real error became
+    a TypeError, ``failed_state`` was never written, and the lock stayed
+    until it expired.
     """
 
     _bound = (ReservedKwargProcess,)
@@ -235,7 +235,7 @@ class ReservedKwargTests(_BindCleanup, TestCase):
 
     def test_transition_refuses_and_leaves_no_lock(self):
         invoice = Invoice.objects.create(status='draft')
-        for kwarg in ('exception', 'deferrable', 'state'):
+        for kwarg in ('exception', 'state'):
             with self.subTest(kwarg=kwarg):
                 with self.assertRaises(TypeError) as ctx:
                     invoice.reserved_kwarg_proc.go(**{kwarg: 'anything'})
@@ -426,85 +426,6 @@ class UnclassifiedRestoreFailureTests(_BindCleanup, TestCase):
         self.assertEqual(transition_message.errors_count, 3)
         self.assertTrue(
             transition_message.is_completed, 'the row would retry forever')
-
-
-# --- A rolled-back attempt releases nested deferred unlocks ----------------
-
-_NESTED_INSTANCE: dict = {}
-
-
-class NestedInstanceProcess(Process):
-    process_name = 'nested_instance_proc'
-    transitions = [
-        Transition('approve', sources=['draft'], target='approved'),
-    ]
-
-
-def _drive_the_nested_instance(instance, **kwargs):
-    nested = Invoice.objects.get(pk=_NESTED_INSTANCE['pk'])
-    NestedInstanceProcess(field_name='status', instance=nested).approve()
-
-
-class DeferLeakProcess(Process):
-    process_name = 'defer_leak_proc'
-    transitions = [
-        BackgroundTransition(
-            'go', sources=['draft'], target='done',
-            in_progress_state='dl_running', failed_state='dl_failed',
-            side_effects=[_drive_the_nested_instance, _boom],
-        ),
-    ]
-
-
-class AttemptRollbackDeferredUnlockTests(TransactionTestCase):
-    """A side-effect may drive a second instance. Under
-    ``DEFER_UNLOCK_UNTIL_COMMIT`` that nested transition registers its unlock
-    on ``transaction.on_commit`` inside the attempt savepoint. When a later
-    side-effect fails, the savepoint rolls back the nested state write and
-    Django discards the unlock with it. The second instance then stayed locked
-    until its lock expired.
-    """
-
-    def setUp(self):
-        super().setUp()
-        ProcessManager.bind_model_process(
-            Invoice, DeferLeakProcess, state_field='status')
-        ProcessManager.bind_model_process(
-            Invoice, NestedInstanceProcess, state_field='status')
-        cache.clear()
-        self.addCleanup(cache.clear)
-        self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, DeferLeakProcess)
-        self.addCleanup(
-            ProcessManager.unbind_model_process,
-            Invoice, NestedInstanceProcess)
-
-    def test_attempt_rollback_releases_the_nested_instances_lock(self):
-        from django_logic.state import State
-        from tests import dl_settings
-
-        driver = Invoice.objects.create(status='draft')
-        nested = Invoice.objects.create(status='draft')
-        _NESTED_INSTANCE['pk'] = nested.pk
-
-        with override_settings(DJANGO_LOGIC=dl_settings(
-            BACKGROUND_EXECUTION='sync',
-            DEFER_UNLOCK_UNTIL_COMMIT=True,
-            TRANSITION_MESSAGE_MAX_ERRORS=3,
-        )):
-            with self.assertRaises(ValueError):
-                driver.defer_leak_proc.go()
-
-        nested.refresh_from_db()
-        # The nested write rolled back with the attempt savepoint...
-        self.assertEqual(nested.status, 'draft')
-        # ...so its lock guards nothing and must have been released.
-        nested_state = State(
-            nested, 'status', process_name='nested_instance_proc')
-        self.assertFalse(
-            nested_state.is_locked(),
-            'the rolled-back attempt left the nested instance locked',
-        )
 
 
 # --- The runner's tree walks need the cycle guard --------------------------

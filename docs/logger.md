@@ -79,10 +79,8 @@ Without it, a permanently frozen instance (leaked lock) and a healthy start
 were indistinguishable: both emitted one `Start` line and nothing else. It is
 INFO, not ERROR, because losing the lock race is an expected concurrency
 outcome (#154) — the *pattern* of repeated `Lock failed` lines with no
-interleaved `Unlock` for that instance is the leak signal. Under
-`DEFER_UNLOCK_UNTIL_COMMIT` the release line reads
-`Unlock instance_key deferred until commit`; a revalidation failure releases
-with `Unlock instance_key after revalidation failure`.
+interleaved `Unlock` for that instance is the leak signal. A revalidation
+failure releases with `Unlock instance_key after revalidation failure`.
 
 (`Complete` is a background-only event — the synchronous path ends with the
 `Unlock` + `Callback` lines.)

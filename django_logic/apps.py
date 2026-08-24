@@ -18,7 +18,7 @@ class DjangoLogicConfig(AppConfig):
             validate_core_settings,
         )
 
-        # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) are used by
+        # Core knobs (LOCK_TIMEOUT, STRICT_HOOK_SIGNATURES) are used by
         # the engine with or without the background app installed — a
         # sync-only install must fail fast on misconfiguration too. The
         # background app's validate_on_ready() re-runs this as part of its

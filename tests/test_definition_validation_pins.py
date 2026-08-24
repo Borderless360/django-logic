@@ -8,7 +8,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
 from django.template import Context
 from django.template.engine import Engine
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TestCase, override_settings
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.conf import (
@@ -256,33 +256,6 @@ class BareStringSourcesTests(TestCase):
     def test_a_list_of_one_state_is_still_fine(self):
         t = Transition('go', sources=['draft'], target='approved')
         self.assertEqual(t.sources, ['draft'])
-
-
-class DeferredUnlockRegistryTests(TransactionTestCase):
-    """The registry registered its on_commit clear only while it was empty. A
-    rollback discards the hook but keeps the entries, so the registry was never
-    empty again, never cleared, and grew for the life of the connection."""
-
-    def test_registry_clears_after_a_rollback_then_commits(self):
-        from django.db import transaction
-        from django_logic.commands import _deferred_unlocks, note_deferred_unlock
-        from django_logic.state import State
-
-        inv = Invoice.objects.create(status='draft')
-        conn = transaction.get_connection('default')
-        _deferred_unlocks(conn).clear()
-
-        # A transaction that rolls back: its clear hook is discarded.
-        with self.assertRaises(RuntimeError):
-            with transaction.atomic():
-                note_deferred_unlock('default', State(inv, 'status'))
-                raise RuntimeError('rollback')
-
-        # Every later committing transaction must leave it empty.
-        for _ in range(3):
-            with transaction.atomic():
-                note_deferred_unlock('default', State(inv, 'status'))
-            self.assertEqual(len(_deferred_unlocks(conn)), 0)
 
 
 class ReservedUserIdKwargTests(TestCase):

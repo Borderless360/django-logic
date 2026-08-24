@@ -47,18 +47,11 @@ def lock_timeout():
     return _conf().get('LOCK_TIMEOUT', LOCK_TIMEOUT_DEFAULT)
 
 
-def defer_unlock_until_commit() -> bool:
-    """Strict runtime reader for ``DEFER_UNLOCK_UNTIL_COMMIT``: only a
-    literal ``True`` enables deferral. The setting gates lock-release
-    semantics, so truthy garbage (``'false'``, ``1``) must not flip it —
-    boot validation rejects non-bools, and this reader stays safe even
-    where that validation has not run."""
-    return _conf().get('DEFER_UNLOCK_UNTIL_COMMIT', False) is True
-
-
 def strict_hook_signatures() -> bool:
-    """Strict reader for ``STRICT_HOOK_SIGNATURES`` — literal ``True`` only,
-    same reasoning as :func:`defer_unlock_until_commit`. Read at bind time
+    """Strict reader for ``STRICT_HOOK_SIGNATURES``: only a literal
+    ``True`` enables it. Truthy garbage (``'false'``, ``1``) must not flip
+    a behaviour gate — boot validation rejects non-bools, and this reader
+    stays safe even where that validation has not run. Read at bind time
     by ``process._validate_hook_signatures``."""
     return _conf().get('STRICT_HOOK_SIGNATURES', False) is True
 
@@ -199,8 +192,8 @@ def strict_kwargs_serialization() -> bool:
     Only a literal ``True`` enables it. It used to be
     ``bool(...)``-coerced, so any non-empty string switched strict mode ON —
     reading ``DL_STRICT=false`` from an env var made enqueue start raising.
-    Mirrors :func:`defer_unlock_until_commit`; boot validation rejects
-    non-bools and this reader stays safe where that has not run.
+    Boot validation rejects non-bools and this reader stays safe where
+    that has not run.
     """
     return _conf().get('STRICT_KWARGS_SERIALIZATION', False) is True
 
@@ -245,13 +238,12 @@ def validate_core_settings() -> None:
             f"of seconds (it is the state lock's TTL, so it bounds how long a "
             f"crashed run can keep an instance locked), got {value!r}."
         )
-    # Both strict flags are read with `is True`, so truthy garbage disables
+    # The strict flags are read with `is True`, so truthy garbage disables
     # them rather than enabling — silent in the UNSAFE direction. Validated
     # here because STRICT_HOOK_SIGNATURES is a core setting read from
     # process.py at bind time, with no background app involved, so a
     # sync-only install must be covered too.
-    for key in ('DEFER_UNLOCK_UNTIL_COMMIT', 'STRICT_HOOK_SIGNATURES'):
-        validate_bool(key)
+    validate_bool('STRICT_HOOK_SIGNATURES')
     # Type check only — resolving the dotted path imports consumer code,
     # which does not belong in a pure-read validator. The import happens in
     # install_legacy_exception_base(), where failures are equally loud and

@@ -18,7 +18,7 @@ def validate_on_ready() -> None:
     conf.retry_minutes()
     conf.cleanup_days()
     conf.validate_bool('STRICT_KWARGS_SERIALIZATION')
-    # Core knobs (LOCK_TIMEOUT, DEFER_UNLOCK_UNTIL_COMMIT) — shared with
+    # Core knobs (LOCK_TIMEOUT, STRICT_HOOK_SIGNATURES) — shared with
     # DjangoLogicConfig.ready so sync-only installs validate them too.
     conf.validate_core_settings()
     if mode == conf.EXECUTION_PULL:

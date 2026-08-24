@@ -564,12 +564,9 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
     was sent to the queue forever, and it blocked every later background
     transition on the instance.
 
-    It runs through _run_in_savepoint and on the INSTANCE's alias.
-    Side-effects are consumer code that may drive synchronous transitions on
-    other instances, and their DEFER_UNLOCK unlocks run on
-    transaction.on_commit. A rollback here drops those hooks with the
-    savepoint while the outer transaction still commits the bookkeeping, so
-    the other instance keeps its lock until the TTL expires.
+    It runs through _run_in_savepoint on the INSTANCE's alias: set_state
+    routes its write to the instance's connection, so a savepoint opened
+    on DEFAULT would guard the wrong one.
 
     require_commit, because the caller records the work as done. A
     side-effect that raises a database error and swallows it

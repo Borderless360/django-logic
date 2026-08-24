@@ -185,6 +185,10 @@ _REMOVED_SETTINGS = {
     'STARTER_QUEUE':
         'the safety nets run inside the pull worker loop; nothing is '
         'scheduled on a queue anymore',
+    'DEFER_UNLOCK_UNTIL_COMMIT':
+        'locks always release when the transition finishes; drive a '
+        'transition from transaction.on_commit if it must start after '
+        'the surrounding write is visible',
 }
 
 
@@ -195,7 +199,6 @@ _KNOWN_SETTINGS = frozenset({
     'DEFAULT_QUEUE',
     'LEGACY_EXCEPTION_BASE',
     'LOCK_TIMEOUT',
-    'DEFER_UNLOCK_UNTIL_COMMIT',
     'STRICT_HOOK_SIGNATURES',
     'STRICT_KWARGS_SERIALIZATION',
     'TRANSITION_MESSAGE_MAX_ERRORS',

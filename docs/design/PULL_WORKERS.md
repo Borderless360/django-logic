@@ -106,9 +106,11 @@ Push delivers in milliseconds. A bare poll delivers in `POLL_SECONDS`.
 `LISTEN/NOTIFY` closes the gap: enqueue fires one NOTIFY after commit,
 every worker holds one LISTEN connection, and a payload-free notification
 means "ask the database now". Losing a notification costs one poll
-interval, nothing more — the row waits in the database either way. This is
-PostgreSQL-only; celery mode already refuses SQLite, so the requirement is
-not new.
+interval, nothing more — the row waits in the database either way.
+
+The wake-up pays off only on a direct Postgres connection. pgbouncer
+transaction pooling rejects LISTEN, so a worker behind it falls back to
+the poll floor and every row still runs within `POLL_SECONDS`.
 
 ## 6. Two open choices
 
