@@ -24,10 +24,6 @@ def _noop(instance, **kwargs):
     pass
 
 
-def _never(instance, **kwargs):
-    return False
-
-
 def _boom(instance, **kwargs):
     raise ValueError('boom')
 
@@ -42,11 +38,6 @@ class LockLoggingProcess(Process):
             'bg', sources=['draft'], target='done',
             in_progress_state='ll_running', failed_state='ll_failed',
             side_effects=[_noop],
-        ),
-        BackgroundTransition(
-            'bg_never', sources=['draft'], target='done',
-            in_progress_state='ll_never_running', failed_state='ll_never_failed',
-            side_effects=[_noop], conditions=[_never],
         ),
     ]
 
@@ -100,28 +91,6 @@ class FailedLockAcquisitionLoggingTests(TestCase):
             logs.output,
         )
 
-    def test_condition_rejection_is_logged(self):
-        # The Process resolver filters by is_valid (and logs its own
-        # "no transition" line), so change_state's recheck only fires when
-        # conditions flip between resolution and execution — drive the
-        # declared transition directly to pin that guard's log line.
-        inv = Invoice.objects.create(status='draft')
-        state = inv.lock_logging_proc.state
-        key = state.instance_key
-        bg_never = next(
-            t for t in LockLoggingProcess.transitions
-            if t.action_name == 'bg_never'
-        )
-
-        with self.assertLogs('django-logic.transition', level='INFO') as logs:
-            with self.assertRaises(TransitionNotAllowed):
-                bg_never.change_state(state)
-
-        self.assertTrue(
-            any(f'bg_never {key} rejected by conditions' in line
-                for line in logs.output),
-            logs.output,
-        )
 
 
 @override_settings(DJANGO_LOGIC=_SYNC)

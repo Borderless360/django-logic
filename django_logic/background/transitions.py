@@ -134,16 +134,10 @@ class BackgroundTransition(Transition):
             extra={'kwargs': redact_log_kwargs(kwargs), 'state_hash': state._get_hash()},
         )
 
-        if not self.is_valid(state.instance, kwargs.get('user')):
-            # A rejection with no log line leaves a Start with no explanation.
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {self.action_name} '
-                f'{state.instance_key} rejected by conditions or permissions'
-            )
-            raise TransitionNotAllowed(
-                f"BackgroundTransition '{self.action_name}' rejected by "
-                f"its conditions or permissions."
-            )
+        # The resolver already ran the conditions and permissions; the
+        # synchronous path does not run them again, and neither does this
+        # one. The guard that matters runs under the lock below:
+        # _ensure_db_state_in_sources.
 
         # The cache lock guards only this critical section (validate →
         # create the TransitionMessage → write in_progress_state). It is
