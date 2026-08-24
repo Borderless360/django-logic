@@ -27,8 +27,8 @@ from django_logic.commands import (
     NextTransition,
     Permissions,
     SideEffects,
-    _run_in_savepoint,
     note_deferred_unlock,
+    write_failed_state,
 )
 from django_logic.exceptions import (
     TransitionNotAllowed,
@@ -331,43 +331,11 @@ class Transition:
                 # docstring above promised "the original exception keeps
                 # propagating either way"; without this the write's own
                 # exception won and the real cause was lost.
-                previous = state.get_state()
-                try:
-                    # The instance's alias, not DEFAULT: set_state routes its
-                    # write with hints={'instance': ...}, so a savepoint opened
-                    # on DEFAULT would guard the wrong connection.
-                    # require_commit: the else-branch logs SET_STATE, so a
-                    # silently discarded savepoint must take the honest
-                    # except-path instead.
-                    _run_in_savepoint(
-                        state.instance._state.db or DEFAULT_DB_ALIAS,
-                        lambda: state.set_state(self.failed_state),
-                        require_commit=True,
-                    )
-                except Exception as write_error:
-                    # A silent rollback discards the write AFTER set_state
-                    # refreshed the attribute to the savepoint's uncommitted
-                    # value — restore it, or the failure hooks and the sync
-                    # caller observe a state the database never had.
-                    setattr(state.instance, state.field_name, previous)
-                    transition_logger.error(
-                        f'{kwargs.get("tr_id")} could not write failed_state '
-                        f'{self.failed_state!r} on {state.instance_key}: '
-                        f'{type(write_error).__name__}: {write_error}. The '
-                        f'original failure is re-raised unchanged.',
-                        exc_info=True,
-                    )
-                else:
-                    wrote_state = True
-                    # Inside the else: a rejected write must NOT log
-                    # SET_STATE. The line is the state-change record the
-                    # trace and log-based assertions read, so emitting it
-                    # for a write that did not land would be a false entry.
-                    transition_logger.info(
-                        f'{kwargs.get("tr_id")} '
-                        f'{TransitionEventType.SET_STATE.value} '
-                        f'{self.failed_state}'
-                    )
+                wrote_state = write_failed_state(
+                    state, self.failed_state,
+                    prefix=f'{kwargs.get("tr_id")}',
+                    consequence='The original failure is re-raised unchanged.',
+                ) is None
         finally:
             self._release_lock(state, deferrable=wrote_state, **kwargs)
 
@@ -608,42 +576,16 @@ class Action(Transition):
                         # rejected write must not replace the original
                         # side-effect exception on its way out, and must not
                         # log a SET_STATE line for a write that never landed.
-                        previous = state.get_state()
-                        try:
-                            # The instance's alias, not DEFAULT: set_state
-                            # routes its write with hints={'instance': ...},
-                            # so a savepoint opened on DEFAULT would guard
-                            # the wrong connection. require_commit: a
-                            # silently discarded savepoint must take the
-                            # honest except-path.
-                            _run_in_savepoint(
-                                state.instance._state.db or DEFAULT_DB_ALIAS,
-                                lambda: state.set_state(self.failed_state),
-                                require_commit=True,
-                            )
-                        except Exception as write_error:
-                            # Restore the attribute a discarded savepoint
-                            # left refreshed — hooks must not see a state
-                            # the database never had.
-                            setattr(
-                                state.instance, state.field_name, previous)
-                            transition_logger.error(
+                        wrote_state = write_failed_state(
+                            state, self.failed_state,
+                            prefix=(
                                 f'{kwargs.get("tr_id")} Action '
-                                f'{self.action_name!r}: could not write '
-                                f'failed_state {self.failed_state!r} on '
-                                f'{state.instance_key}: '
-                                f'{type(write_error).__name__}: '
-                                f'{write_error}. The original failure is '
-                                f're-raised unchanged.',
-                                exc_info=True,
-                            )
-                        else:
-                            wrote_state = True
-                            transition_logger.info(
-                                f'{kwargs.get("tr_id")} '
-                                f'{TransitionEventType.SET_STATE.value} '
-                                f'{self.failed_state}'
-                            )
+                                f'{self.action_name!r}:'
+                            ),
+                            consequence=(
+                                'The original failure is re-raised unchanged.'
+                            ),
+                        ) is None
                 finally:
                     # The shared release path: emits the Unlock lifecycle
                     # line and honours DEFER_UNLOCK_UNTIL_COMMIT when a

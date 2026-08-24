@@ -55,7 +55,7 @@ from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
 from django_logic.background.transitions import BackgroundAction, BackgroundTransition
-from django_logic.commands import _run_in_savepoint
+from django_logic.commands import _run_in_savepoint, write_failed_state
 from django_logic.logger import TransitionEventType, transition_logger
 from django_logic.process import _iter_process_tree, _transition_context
 
@@ -224,7 +224,7 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
         err = RuntimeError(
             f'[detect_stuck] {transition_message.last_error_message or "transition stuck"}'
         )
-        hooks = _finalize_terminal_from_watchdog(transition_message, err, source='detect_stuck')
+        hooks = _finalize_terminal_from_safety_net(transition_message, err, source='detect_stuck')
 
     # Run failure_callbacks after the atomic commits (best-effort).
     if hooks is not None:
@@ -232,16 +232,17 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
     return True
 
 
-def _finalize_terminal_from_watchdog(
+def _finalize_terminal_from_safety_net(
     transition_message: TransitionMessage,
     exception: BaseException,
     source: str,
 ):
-    """Shared terminal-failure path for the watchdog and detect-stuck tasks.
+    """The stuck finalizer's terminal path.
 
-    Must run inside the caller's atomic block, with the row already locked. It
-    does what ``_handle_failure`` does on a terminal failure: write
-    failed_state, then mark the row completed.
+    Must run inside the caller's atomic block, with the row already locked.
+    It restores the transition, applies the state guard, and ends in the
+    same shared completion as the worker attempt path
+    (``_complete_terminal_failure``).
 
     If the transition cannot be restored, because the model is uninstalled or
     the transition was renamed, we still mark the row completed so retries
@@ -321,49 +322,51 @@ def _finalize_terminal_from_watchdog(
         transition_message.mark_as_superseded(note)
         return None
 
-    if transition.failed_state:
-        # The write runs in a savepoint and never escapes. It runs inside the
-        # caller's atomic block with the row locked, so a rejected write used
-        # to abort the whole finalization and leave the row uncompleted with
-        # errors_count at MAX_ERRORS, which detect_stuck then retried forever.
-        # Completing the row is what stops the loop. The savepoint opens on the
-        # instance's alias, where set_state writes, and through
-        # _run_in_savepoint, so a rollback releases any deferred unlock
-        # registered inside it instead of holding it until the TTL expires.
-        previous = state.get_state()
-        try:
-            # require_commit, because the else-branch below logs the write as
-            # done. A savepoint Django discards without an exception must
-            # surface as the failure it is and take the except-branch.
-            _run_in_savepoint(
-                state.instance._state.db or DEFAULT_DB_ALIAS,
-                lambda: state.set_state(transition.failed_state),
-                require_commit=True,
-            )
-        except Exception as write_error:
-            # A discarded savepoint leaves the attribute holding a value the
-            # database never had, so put the previous one back before the
-            # failure callbacks read it.
-            setattr(state.instance, state.field_name, previous)
-            transition_logger.error(
-                f'{source}: could not write failed_state='
-                f'{transition.failed_state!r} on {state.instance_key}: '
-                f'{type(write_error).__name__}: {write_error}. '
-                f'Completing the row anyway so it stops retrying.',
-                exc_info=True,
-            )
-            transition_message.record_failure_side_effect_error(
-                write_error, label='failed_state write')
-        else:
-            transition_logger.info(
-                f'{source}: set failed_state={transition.failed_state} '
-                f'on {state.instance_key}'
-            )
-
     # A safety-net finalization is not a worker attempt. started_at belongs to
     # the abandoned attempt, so measuring from it would inflate duration_ms.
+    return _complete_terminal_failure(
+        transition_message, transition, state, kwargs, exception,
+        prefix=f'{source}:',
+        consequence='Completing the row anyway so it stops retrying.',
+        measure_duration=False,
+    )
+
+
+def _complete_terminal_failure(
+    transition_message: TransitionMessage,
+    transition,
+    state,
+    kwargs: dict,
+    exception: BaseException,
+    *,
+    prefix: str,
+    consequence: str,
+    measure_duration: bool,
+):
+    """The one terminal-failure completion: write ``failed_state`` (when
+    declared), then mark the row completed. The worker attempt path and
+    the safety-net finalizer both end here — the two used to carry their
+    own copies, and the copies drifted.
+
+    The write runs in a savepoint and never escapes: a rejected write
+    used to leave the row uncompleted at MAX_ERRORS, which the safety
+    net then retried forever. Completing the row is what stops the loop;
+    a failed write is recorded on the row where an operator will see it.
+
+    Returns the ``(transition, state, kwargs, exception)`` tuple the
+    caller needs to run ``failure_callbacks`` after its atomic block
+    commits and the row lock is released.
+    """
+    if transition.failed_state:
+        write_error = write_failed_state(
+            state, transition.failed_state,
+            prefix=prefix, consequence=consequence,
+        )
+        if write_error is not None:
+            transition_message.record_failure_side_effect_error(
+                write_error, label='failed_state write')
     transition_message.mark_as_completed(
-        measure_duration=False, ended_in_failure=True)
+        measure_duration=measure_duration, ended_in_failure=True)
     return (transition, state, kwargs, exception)
 
 
@@ -717,51 +720,21 @@ def _handle_failure(
             f'permanently ({type(error).__name__}); not retried.'
         )
 
-    # Terminal failure: write failed_state (if any) and mark completed.
-    #
-    # The write runs in a savepoint and never escapes. It comes AFTER
-    # record_error, so letting it propagate rolled that error back and held
-    # errors_count one below MAX_ERRORS forever: the row never reached a
-    # terminal state and retried without end. Completing the row stops the
-    # retry loop, so a rejected failed_state must not block it. Log it, record
-    # it where an operator will see it, and go on to mark_as_completed. The
-    # instance then stays in its in_progress_state, which is an implicit
-    # source of the same transition, so it can be run again.
-    if transition.failed_state:
-        previous = state.get_state()
-        try:
-            # On the instance's alias, and through _run_in_savepoint: see the
-            # attempt savepoint in _run_atomic for why both matter.
-            # require_commit, because the else-branch below logs SET_STATE. A
-            # savepoint Django discards without an exception must surface as
-            # the failure it is and take the except-branch.
-            _run_in_savepoint(
-                state.instance._state.db or DEFAULT_DB_ALIAS,
-                lambda: state.set_state(transition.failed_state),
-                require_commit=True,
-            )
-        except Exception as write_error:
-            # A discarded savepoint leaves the attribute holding a value the
-            # database never had, so put the previous one back before the
-            # failure callbacks read it.
-            setattr(state.instance, state.field_name, previous)
-            transition_logger.error(
-                f'{kwargs.get("tr_id")} could not write failed_state '
-                f'{transition.failed_state!r} on {state.instance_key}: '
-                f'{type(write_error).__name__}: {write_error}. Completing the '
-                f'row anyway so it stops retrying. The instance stays in '
-                f'{transition.in_progress_state!r}; run the transition again '
-                f'from there to move it on.',
-                exc_info=True,
-            )
-            transition_message.record_failure_side_effect_error(
-                write_error, label='failed_state write')
-        else:
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                f'{transition.failed_state}'
-            )
-    transition_message.mark_as_completed(ended_in_failure=True)
+    # Terminal failure. The completion comes AFTER record_error, so letting
+    # a rejected failed_state write propagate would roll that error back and
+    # hold errors_count one below MAX_ERRORS forever. The instance then stays
+    # in its in_progress_state, which is an implicit source of the same
+    # transition, so it can be run again.
+    _complete_terminal_failure(
+        transition_message, transition, state, kwargs, error,
+        prefix=f'{kwargs.get("tr_id")}',
+        consequence=(
+            f'Completing the row anyway so it stops retrying. The instance '
+            f'stays in {transition.in_progress_state!r}; run the transition '
+            f'again from there to move it on.'
+        ),
+        measure_duration=True,
+    )
     return _Outcome(
         terminal=True,
         succeeded=False,

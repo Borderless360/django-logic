@@ -133,6 +133,49 @@ def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
     return result
 
 
+def write_failed_state(state, failed_state, *, prefix, consequence):
+    """Write ``failed_state`` in a savepoint. The one copy of this write.
+
+    Returns ``None`` when the write landed (and logs the ``SET_STATE``
+    line), or the write's exception when it did not. On a failed write
+    the instance attribute is restored to the pre-write value — a
+    discarded savepoint leaves it refreshed to a value the database
+    never had, and the failure hooks must not read that. The caller
+    decides what a failed write means: the synchronous paths re-raise
+    the original side-effect exception unchanged; the worker paths
+    record the error on the row and complete it anyway. ``prefix``
+    starts both log lines; ``consequence`` tells the operator what
+    happens next.
+
+    The savepoint opens on the instance's alias, not DEFAULT: set_state
+    routes its write with ``hints={'instance': ...}``, so a savepoint
+    opened on DEFAULT would guard the wrong connection.
+    ``require_commit``, because the success branch logs ``SET_STATE`` —
+    a savepoint Django discards without an exception must surface as
+    the failure it is, not log a state change that never landed.
+    """
+    previous = state.get_state()
+    try:
+        _run_in_savepoint(
+            state.instance._state.db or DEFAULT_DB_ALIAS,
+            lambda: state.set_state(failed_state),
+            require_commit=True,
+        )
+    except Exception as write_error:
+        setattr(state.instance, state.field_name, previous)
+        transition_logger.error(
+            f'{prefix} could not write failed_state {failed_state!r} on '
+            f'{state.instance_key}: {type(write_error).__name__}: '
+            f'{write_error}. {consequence}',
+            exc_info=True,
+        )
+        return write_error
+    transition_logger.info(
+        f'{prefix} {TransitionEventType.SET_STATE.value} {failed_state}'
+    )
+    return None
+
+
 def _release_dropped(registry, before) -> None:
     """Release the deferred unlocks registered inside a rolled-back window."""
     dropped = registry[before:]
