@@ -64,8 +64,17 @@ class State:
 
     @property
     def instance_key(self):
-        return f'{self.instance._meta.app_label}-' \
-               f'{self.instance._meta.model_name}-' \
+        """One key per physical row and state column.
+
+        The key names the table that holds the column, not the class the
+        caller happened to load. A proxy model and its concrete model,
+        and a multi-table-inheritance child and the parent that declares
+        the column, all write the same column of the same row. Keyed by
+        class name they took different locks, so two transitions ran on
+        one row at the same time.
+        """
+        declaring_model = self.instance._meta.get_field(self.field_name).model
+        return f'{declaring_model._meta.db_table}-' \
                f'{self.field_name}-' \
                f'{self.instance.pk}'
 
