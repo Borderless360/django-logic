@@ -5,7 +5,13 @@ class DjangoLogicException(Exception):
 # Coexistence base: DJANGO_LOGIC['LEGACY_EXCEPTION_BASE'], applied at
 # ready() by conf.install_legacy_exception_base.
 class TransitionNotAllowed(DjangoLogicException):
-    pass
+    """When the process resolver raises this, it sets ``current_state``
+    and ``available_actions`` on the instance so an API layer does not
+    have to reconstruct them. Both stay ``None`` on other raise sites.
+    """
+
+    current_state = None
+    available_actions = None
 
 
 class TransitionTemporarilyUnavailable(TransitionNotAllowed):

@@ -278,13 +278,20 @@ class Process:
             )
             raise TransitionNotAllowed("There are several transitions available")
 
+        current_state = self.state.get_state()
+        available_actions = self.get_available_actions(user=user)
         message = (
             f"Process class {self.__class__} for object "
             f"{self.state.instance.pk} has no transition "
-            f"with action name {action_name}, user {user}"
+            f"with action name {action_name}, user {user}. "
+            f"The instance is in state {current_state!r}; "
+            f"available actions: {', '.join(available_actions) or 'none'}."
         )
         transition_logger.info(message)
-        raise TransitionNotAllowed(message)
+        error = TransitionNotAllowed(message)
+        error.current_state = current_state
+        error.available_actions = available_actions
+        raise error
 
 
 def _iter_process_tree(process_cls, _seen=None):

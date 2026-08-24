@@ -200,7 +200,7 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
             )
             return False
 
-        transition_logger.error(
+        transition_logger.warning(
             f'Stuck transition: TransitionMessage#{transition_message.pk} '
             f'{transition_message.app_label}.{transition_message.model_name}#{transition_message.instance_id} '
             f'{transition_message.transition_name} queue={transition_message.queue_name} '
@@ -261,7 +261,7 @@ def _finalize_stuck_row(
         # Completing it stops the loop, and the instance stays in its
         # in_progress_state, which is an implicit source of the same
         # transition.
-        transition_logger.error(
+        transition_logger.warning(
             f'detect_stuck: TransitionMessage#{transition_message.pk} could not be restored '
             f'({type(exc).__name__}: {exc}); completing it so the safety net '
             f'stops retrying. The instance stays in its in_progress_state; '
@@ -276,7 +276,7 @@ def _finalize_stuck_row(
     if decode_error is not None:
         # kwargs that no longer decode must not block the finalization:
         # failed_state and the completion still land, so retries stop.
-        transition_logger.error(
+        transition_logger.warning(
             f'detect_stuck: TransitionMessage#{transition_message.pk} kwargs failed to decode '
             f'({type(decode_error).__name__}: {decode_error}); finalizing with empty kwargs.'
         )

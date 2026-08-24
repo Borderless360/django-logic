@@ -150,7 +150,7 @@ def _run_attempt_process(pk: int) -> None:
             os._exit(status)
     exit_code, timed_out = _wait_for_attempt_process(attempt_pid, timeout_seconds)
     if timed_out:
-        logger.error(
+        logger.warning(
             f'pull: the attempt for TransitionMessage#{pk} ran past its '
             f'declared timeout={timeout_seconds}s and was stopped. The error '
             f'recorded here paces the next claim.'
@@ -163,7 +163,7 @@ def _run_attempt_process(pk: int) -> None:
         return
     if exit_code == 0:
         return
-    logger.error(
+    logger.warning(
         f'pull: the attempt process for TransitionMessage#{pk} died '
         f'(exit {exit_code}). Its row lock died with it; the error recorded '
         f'here paces the next claim.'

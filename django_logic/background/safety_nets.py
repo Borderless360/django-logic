@@ -66,7 +66,7 @@ def retry_pending() -> int:
         try:
             run_background_transition(pk)
         except Exception as e:
-            logger.error(f'retry_pending: TransitionMessage#{pk} failed: {e}')
+            logger.warning(f'retry_pending: TransitionMessage#{pk} failed: {e}')
             continue
         ran += 1
     return ran
