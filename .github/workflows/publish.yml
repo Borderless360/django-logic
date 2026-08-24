@@ -41,3 +41,6 @@ jobs:
           python -m build
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A re-run of a tag must not fail on files PyPI already has.
+          skip-existing: true
