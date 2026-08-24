@@ -1350,7 +1350,7 @@ class TestOrderFulfilment(ProcessScenario):
 | `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg) |
 | `transition(obj, action, **kwargs)` | Run a synchronous transition |
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` enqueue **and** execute inline |
-| `retry_transition(obj)` | Re-run the instance's uncompleted transition — does what the periodic starter does |
+| `retry_transition(obj)` | Re-run the instance's uncompleted transition — what a worker's next claim would do |
 
 Add `fail_side_effect='name'` and `fail_with=SomeError(...)` to `transition`, `background_transition` or `retry_transition` to make one named side-effect raise. django-logic wraps only that side-effect, so every other one runs for real and you exercise the true failure path. Add `expect_raises=SomeError` to assert the failure **reached the caller**, which is the contract for `side_effects`. Add `expect_raises=False` to assert django-logic **swallowed** it, which is the contract for `callbacks` and `next_transition`. Leave it out to absorb the injected exception and assert on the recorded error instead.
 

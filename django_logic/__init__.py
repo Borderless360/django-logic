@@ -7,14 +7,13 @@ from .transition import Transition, Action
 #: it here ``from django_logic import *`` leaked the submodules that happened
 #: to be imported, so the star-import namespace varied with INSTALLED_APPS.
 #: State, exceptions, background and testing are imported from their own
-#: modules by design — see the README.
+#: modules by design — see the README. The command classes (``Conditions``,
+#: ``Permissions``, ``SideEffects``, ``Callbacks``) are importable from
+#: ``django_logic.commands`` but are not advertised here: consumers declare
+#: lists of functions, not command classes.
 __all__ = [
     'Process',
     'ProcessManager',
     'Transition',
     'Action',
-    'Conditions',
-    'Permissions',
-    'SideEffects',
-    'Callbacks',
 ]

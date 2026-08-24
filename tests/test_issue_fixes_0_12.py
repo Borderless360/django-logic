@@ -515,12 +515,15 @@ class PublicSurfaceTests(TestCase):
         import django_logic
 
         self.assertEqual(sorted(django_logic.__all__), [
-            'Action', 'Callbacks', 'Conditions',
-            'Permissions', 'Process', 'ProcessManager', 'SideEffects',
-            'Transition',
+            'Action', 'Process', 'ProcessManager', 'Transition',
         ])
         for name in django_logic.__all__:
             self.assertTrue(hasattr(django_logic, name), name)
+        # The command classes are not advertised, but a direct import from
+        # django_logic.commands keeps working for existing consumers.
+        from django_logic.commands import (  # noqa: F401
+            Callbacks, Conditions, Permissions, SideEffects,
+        )
 
 
 class FailureBundleSwapTests(TestCase):
