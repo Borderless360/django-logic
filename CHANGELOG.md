@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-08-25
+
+### Fixed
+
+- **A failed accounting write no longer waits for a sibling attempt to
+  end.** When every slot was full and a live attempt carried no
+  ``timeout=``, the worker blocked in ``waitpid``, so the retry of a
+  failed crash or timeout write waited for that sibling's whole run.
+  The worker now polls while a write is waiting, and the retry keeps
+  its one-second pace. Found by review during gv's adoption of 0.17.1.
+- **``run_once`` returns only after the accounting write lands** (#263).
+  It ran one harvest pass and dropped a failed write with its verdict;
+  it now loops until the write lands. Only tests call ``run_once``
+  today, so no deployment saw the loss.
+
 ## [0.17.1] — 2026-08-25
 
 The two defects the consumer's adoption review of 0.17.0 found (#259,
