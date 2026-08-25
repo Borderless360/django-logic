@@ -6,7 +6,7 @@
 
 The two defects the consumer's adoption review of 0.17.0 found (#259,
 #260). Both sit in code 0.17.0 added, so the fix ships before any
-consumer runs it.
+consumer runs it. The wording fix came in through #261.
 
 ### Fixed
 
@@ -22,10 +22,11 @@ consumer runs it.
   pin the retry, one per verdict: a crash stays a crash and a kill
   stays a timeout.
 - **`dl_transitions` stops promising a worker that may not exist**
-  (#260). The finalizer it points at runs inside the worker loop, so
-  the MAX_ERRORS line now says the pass comes when a worker serves the
-  row's queue, and `--send` says the next worker serving that queue
-  claims the row.
+  (#260). Both lines pointed at work that only happens inside a worker
+  loop. The MAX_ERRORS line now says the finalizer's pass comes from
+  any running worker — that sweep reads every queue, not just the
+  worker's own — and `--send` says a worker claims the row once one
+  serves its queue, because the claim *is* queue-filtered.
 
 ## [0.17.0] — 2026-08-24
 
