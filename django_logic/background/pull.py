@@ -112,7 +112,8 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     segmentation fault, the platform's memory killer — kills the attempt,
     not the worker. The worker records the crash as an error on the row,
     so a crashing attempt gets the same paced, bounded retries as a
-    failing one.
+    failing one. The call returns only after the accounting write lands,
+    so a caller never drops a failed write.
     """
     from django_logic.background.runner import run_background_transition
 
@@ -122,7 +123,8 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     if isolate and hasattr(os, 'fork'):
         attempts: dict[int, _Attempt] = {}
         _start_attempt(pk, attempts)
-        _harvest(attempts, block=True)
+        while attempts:
+            _harvest(attempts, block=True)
     else:
         run_background_transition(pk)
     return True
@@ -239,9 +241,15 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
             ),
             default=None,
         )
+        # A reaped attempt here is a failed accounting write. A blocking
+        # wait would defer its retry for a sibling's whole run, so poll
+        # while one is waiting.
+        failed_write_waiting = any(a.reaped for a in attempts.values())
         try:
             pid, raw_status = os.waitpid(
-                -1, 0 if block and next_deadline is None else os.WNOHANG)
+                -1,
+                0 if block and next_deadline is None
+                and not failed_write_waiting else os.WNOHANG)
         except ChildProcessError:
             # Something else reaped them, so no exit status is coming.
             for attempt in attempts.values():
@@ -253,7 +261,10 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
         if pid == 0:
             if not block:
                 return
-            time.sleep(min(1.0, max(0.01, next_deadline - now)))
+            if next_deadline is None:
+                time.sleep(1.0)
+            else:
+                time.sleep(min(1.0, max(0.01, next_deadline - now)))
             continue
         attempt = attempts.get(pid)
         if attempt is None:

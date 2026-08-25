@@ -199,7 +199,43 @@ class HarvestTests(TransactionTestCase):
 
         self.assertEqual(len(self.recorded()), 1)
         self.assertIn('[timeout]', self.recorded()[0])
+        # The timeout is charged to the hanging attempt's own row.
         self.assertEqual(self.record.call_args_list[0].args[0], 1)
+
+    def test_a_failed_write_retries_while_a_sibling_still_runs(self):
+        """A sibling with no budget must not defer the retry of a failed
+        accounting write for its whole run: the worker polls while a
+        write is waiting."""
+        sibling_pid = os.fork()
+        if sibling_pid == 0:
+            time.sleep(3)
+            os._exit(0)
+        landed_at = []
+        calls = {'count': 0}
+
+        def record(pk, message):
+            calls['count'] += 1
+            if calls['count'] < 3:
+                raise RuntimeError('the database refused the write')
+            landed_at.append(time.monotonic())
+
+        self.record.side_effect = record
+        attempts = {
+            sibling_pid: _Attempt(pk=1, timeout_seconds=None, deadline=None),
+            999999: _Attempt(
+                pk=2, timeout_seconds=1, deadline=_PASSED,
+                killed=True, reaped=True),
+        }
+        started = time.monotonic()
+        _harvest(attempts, block=True)
+        self.assertEqual(attempts, {})
+        self.assertEqual(len(landed_at), 1)
+        self.assertLess(
+            landed_at[0] - started, 2.5,
+            'the retry waited for the sibling instead of polling',
+        )
+        # Every retried call carries the reaped attempt's own row.
+        self.assertEqual(self.record.call_args_list[0].args[0], 2)
 
     def test_harvesting_nothing_returns_at_once(self):
         attempts = {}
@@ -275,3 +311,25 @@ class TimeoutKillTests(TransactionTestCase):
         # The instance is untouched: the killed attempt rolled back.
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'fulfilling')
+
+
+@unittest.skipUnless(hasattr(os, 'fork'), 'needs os.fork')
+class RunOnceAccountingTests(TransactionTestCase):
+    """run_once returns only after the attempt's accounting write lands."""
+
+    def test_run_once_retries_a_failed_accounting_write(self):
+        from django_logic.background import pull
+
+        def crash(pk):
+            raise RuntimeError('the attempt crashes')
+
+        with patch('django_logic.background.pull.claim_next',
+                   return_value=1), \
+                patch('django_logic.background.runner.run_background_transition',
+                      side_effect=crash), \
+                patch('django_logic.background.pull._record_attempt_error',
+                      side_effect=[RuntimeError('the write is refused'),
+                                   None]) as record:
+            ran = pull.run_once(['django_logic'], isolate=True)
+        self.assertTrue(ran)
+        self.assertEqual(record.call_count, 2)
