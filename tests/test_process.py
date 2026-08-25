@@ -167,23 +167,23 @@ class SyncProcessDrivingScenario(ProcessScenario):
         self.assert_state(widget, 'poked_failed')
         self.assert_failure_callbacks_ran(['fcb_on_poke_fail'])
 
-    def test_failing_action_does_not_release_a_concurrent_lock(self):
-        # An Action never acquires the state lock; a failing Action must not
-        # release one a concurrent Transition legitimately holds. Drive
-        # through the entrypoint with a pre-held lock and assert it survives.
+    def test_a_held_lock_refuses_a_no_target_transition(self):
+        # A transition with no target takes the lock like any other, so a
+        # concurrent holder refuses it before its side-effects run, and
+        # the holder's lock survives. Drive through the entrypoint with a
+        # pre-held lock.
         widget = self.create_instance(status='draft')
         state = self._process(widget).state
         self.assertTrue(state.lock(), 'pre-condition: acquire the lock')
         try:
             self.transition(
-                widget, 'poke_fail',
-                fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
+                widget, 'poke_fail', expect_raises=TransitionNotAllowed,
             )
             self.assertTrue(
                 state.is_locked(),
-                'failing Action released a lock it never acquired',
+                'the refused transition released a lock another holder owns',
             )
-            # failed_state is skipped while locked — the object stays put.
+            # Nothing ran, so nothing was written.
             self.assert_state(widget, 'draft')
         finally:
             state.unlock()

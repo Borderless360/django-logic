@@ -7,7 +7,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, override_settings
 
 from django_logic import Process, Transition
-from django_logic.background import BackgroundAction, BackgroundTransition
+from django_logic.background import BackgroundTransition
 
 
 class QueueValidationTests(SimpleTestCase):
@@ -22,10 +22,6 @@ class QueueValidationTests(SimpleTestCase):
                 queue='',
             )
         self.assertIn('non-empty string', str(ctx.exception))
-
-    def test_background_action_rejects_empty_queue_string(self):
-        with self.assertRaises(ImproperlyConfigured):
-            BackgroundAction(action_name='x', sources=['a'], queue='')
 
     def test_queue_defaults_to_default_queue_setting(self):
         transition = BackgroundTransition(
@@ -42,15 +38,17 @@ class QueueValidationTests(SimpleTestCase):
         )
         self.assertEqual(transition.get_queue_name(), 'critical')
 
-    def test_background_action_rejects_in_progress_state(self):
+    def test_no_target_rejects_in_progress_state(self):
+        # Success writes no state, so the instance would stay parked in
+        # the in-progress state forever.
         with self.assertRaises(ImproperlyConfigured) as ctx:
-            BackgroundAction(
+            BackgroundTransition(
                 action_name='x',
                 sources=['a'],
                 queue='q',
                 in_progress_state='processing',
             )
-        self.assertIn('cannot declare in_progress_state', str(ctx.exception))
+        self.assertIn('in_progress_state needs a target', str(ctx.exception))
 
 
 class SharedInProgressStateTests(SimpleTestCase):
@@ -136,10 +134,10 @@ class SharedInProgressStateTests(SimpleTestCase):
         class _LooseProcess(Process):
             process_name = 'loose'
             transitions = [
-                BackgroundAction(
+                BackgroundTransition(
                     action_name='a', sources=['s'], queue='q',
                 ),
-                BackgroundAction(
+                BackgroundTransition(
                     action_name='b', sources=['s'], queue='q',
                 ),
             ]
@@ -190,7 +188,7 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
                         in_progress_state='one',
                         queue='q',
                     ),
-                    BackgroundAction(
+                    BackgroundTransition(
                         action_name='dup', sources=['s'], queue='q',
                     ),
                 ]
@@ -246,7 +244,7 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
                     in_progress_state='b_to_c',
                     queue='q',
                 ),
-                BackgroundAction(
+                BackgroundTransition(
                     action_name='bg2', sources=['c'], queue='q',
                 ),
             ]
@@ -297,18 +295,18 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         self.assertEqual(_Parent.nested_processes, [_ChildA, _ChildB])
 
     def test_background_action_duplication_across_nested_processes_allowed(self):
-        # Same with BackgroundAction, which has no in_progress_state: the
-        # process class is the only thing that tells the two apart.
+        # Same for two no-target transitions: the process class is the only
+        # thing that tells the two apart.
         class _ChildA(Process):
             process_name = 'act_child_a'
             transitions = [
-                BackgroundAction(action_name='dup', sources=['s'], queue='q'),
+                BackgroundTransition(action_name='dup', sources=['s'], queue='q'),
             ]
 
         class _ChildB(Process):
             process_name = 'act_child_b'
             transitions = [
-                BackgroundAction(action_name='dup', sources=['s'], queue='q'),
+                BackgroundTransition(action_name='dup', sources=['s'], queue='q'),
             ]
 
         class _Parent(Process):

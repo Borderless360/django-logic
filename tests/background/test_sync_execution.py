@@ -1,4 +1,4 @@
-"""End to end: BackgroundTransition and BackgroundAction in sync mode.
+"""End to end: background transitions with and without a target, in sync mode.
 
 The test suite runs in sync mode by default (see tests/settings.py), so
 ``instance.process.fulfil()`` enqueues and executes inline. The tests can then
@@ -69,8 +69,8 @@ class BackgroundActionTests(TestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilled')  # unchanged
         self.assertIn('ok,', self.widget.se_log)
-        # Success callbacks run for a BackgroundAction too. The only
-        # difference from a BackgroundTransition is the skipped state write.
+        # Success callbacks run for a no-target transition too. The only
+        # difference from a state-writing one is the skipped state write.
         self.assertIn('cb,', self.widget.cb_log)
 
     def test_action_records_transition_message(self):

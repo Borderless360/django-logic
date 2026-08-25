@@ -128,7 +128,7 @@ class DetectStuckTests(TestCase):
         """When the transition declares no failed_state, the row is marked
         completed and the instance is left in progress for an operator."""
         widget = Widget.objects.create(status='fulfilling')
-        # sync_inventory is a BackgroundAction with no failed_state.
+        # sync_inventory is a BackgroundTransition with no failed_state.
         widget.status = 'fulfilled'
         widget.save(update_fields=['status'])
         TransitionMessage.objects.create(

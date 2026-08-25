@@ -1,17 +1,22 @@
 """TransitionMessage — the durable record of an in-progress transition.
 
-Every ``BackgroundTransition`` / ``BackgroundAction`` creates one row
-when it enqueues, atomically with the ``in_progress_state`` write on the
-target instance. The worker reads the row under
+Every ``BackgroundTransition`` creates one row when it enqueues,
+atomically with the ``in_progress_state`` write on the target instance. The worker reads the row under
 ``select_for_update(nowait=True)`` and marks it completed at the end of
 a successful execution.
 
 The partial unique constraint ``(app_label, model_name, instance_id,
 process_name)`` where ``is_completed=False`` is the concurrency guard —
 only one uncompleted message can exist per instance *per process* at a
-time. Two processes bound to different state fields of the same model
-are independent state machines and may both have background work in
-progress.
+time. Two processes bound to different state fields of the same model,
+under distinct process names, are independent state machines and may
+both have background work in progress.
+
+The key columns name the concrete model. A proxy and the model it
+proxies are one physical row, so they must collide in the constraint
+the way they already share one state lock. The class the caller drove
+the transition through is recorded separately, on
+``proxy_model_label``, and restore instantiates that class.
 """
 from __future__ import annotations
 
@@ -88,6 +93,12 @@ class TransitionMessage(TimeStampedModel):
     # default managers), which coerces the string back to the model's
     # real pk type.
     instance_id = models.CharField(max_length=255)
+    # 'app_label.modelname' of the proxy class the caller drove the
+    # transition through. Blank when the caller drove the concrete model.
+    # The key columns above always name the concrete model, so this is
+    # what lets the worker restore the class the caller used — proxy
+    # methods and overrides stay visible to side-effects and callbacks.
+    proxy_model_label = models.CharField(max_length=201, blank=True, default='')
     process_name = models.CharField(max_length=100)
     # The model field the process is bound to. Lets the worker reconstruct
     # the process from the recorded ``process_class`` without guessing
@@ -141,23 +152,44 @@ class TransitionMessage(TimeStampedModel):
             ),
         ]
 
+    @property
+    def driving_model_label(self) -> str:
+        """'app_label.modelname' of the class the caller drove: the
+        recorded proxy when there is one, else the concrete key. Restore
+        and every operator-facing line read this, so a proxy-driven row
+        keeps naming the workflow the operator knows."""
+        return self.proxy_model_label or f'{self.app_label}.{self.model_name}'
+
     def __str__(self) -> str:
         return (
             f'TransitionMessage#{self.pk} '
-            f'{self.app_label}.{self.model_name}#{self.instance_id} '
+            f'{self.driving_model_label}#{self.instance_id} '
             f'{self.transition_name} on {self.queue_name}'
         )
 
     @classmethod
     def instance_key(cls, instance, process_name: str) -> dict:
         """The instance + process keying, written in one place so a future
-        change to it changes once."""
+        change to it changes once.
+
+        Keyed on the concrete model: a proxy and the model it proxies
+        write and read one row here, so two enqueues on one physical row
+        collide in the uncompleted-row constraint no matter which class
+        the caller drove.
+        """
+        concrete = instance._meta.concrete_model._meta
         return {
-            'app_label': instance._meta.app_label,
-            'model_name': instance._meta.model_name,
+            'app_label': concrete.app_label,
+            'model_name': concrete.model_name,
             'instance_id': str(instance.pk),
             'process_name': process_name,
         }
+
+    @classmethod
+    def proxy_label_for(cls, instance) -> str:
+        """Value for ``proxy_model_label``: the driving class's
+        'app_label.modelname' when it is a proxy, else blank."""
+        return instance._meta.label_lower if instance._meta.proxy else ''
 
     @classmethod
     def for_instance(cls, instance, process_name: str):
@@ -167,8 +199,7 @@ class TransitionMessage(TimeStampedModel):
     @classmethod
     def in_flight_for(cls, instance, process_name: str):
         """The uncompleted rows for ``instance`` + ``process_name``. The
-        sync gate, the Action failure path, and the public ``in_flight()``
-        probe all read through it."""
+        sync gate and the public ``in_flight()`` probe read through it."""
         return cls.for_instance(instance, process_name).filter(is_completed=False)
 
     RETRYING = 'retrying'

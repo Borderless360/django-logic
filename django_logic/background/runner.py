@@ -22,7 +22,7 @@ Structure:
      attempt rolls back every side-effect write. The savepoint also
      keeps the outer transaction healthy when a side-effect raises
      ``DatabaseError``, so the error bookkeeping below still runs,
-   * on success, writes ``target`` state (for ``BackgroundTransition``)
+   * on success, writes the ``target`` state (when one is declared)
      and marks the TransitionMessage completed,
    * on failure, records the error and either leaves the row for retry
      or, at ``MAX_ERRORS``, writes ``failed_state`` and marks completed.
@@ -53,7 +53,7 @@ from django_logic import conf
 from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
-from django_logic.background.transitions import BackgroundAction, BackgroundTransition
+from django_logic.background.transitions import BackgroundTransition
 from django_logic.commands import _run_in_savepoint, write_failed_state
 from django_logic.logger import TransitionEventType, transition_logger
 from django_logic.process import _iter_process_tree, _transition_context
@@ -202,7 +202,7 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
 
         transition_logger.warning(
             f'Stuck transition: TransitionMessage#{transition_message.pk} '
-            f'{transition_message.app_label}.{transition_message.model_name}#{transition_message.instance_id} '
+            f'{transition_message.driving_model_label}#{transition_message.instance_id} '
             f'{transition_message.transition_name} queue={transition_message.queue_name} '
             f'errors={transition_message.errors_count} '
             f'last_error={transition_message.last_error_message!r}; forcing terminal state'
@@ -590,7 +590,7 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
         # failure. Outside the savepoint the exception escaped the outer
         # atomic block and took record_error with it: errors_count stayed 0,
         # so the row was retried forever and no safety net could stop it.
-        if not isinstance(transition, BackgroundAction):
+        if transition.target is not None:
             state.set_state(transition.target)
             transition_logger.info(
                 f'{kwargs.get("tr_id")} '
@@ -757,8 +757,8 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
 
     * Transition with ``in_progress_state`` — enqueue wrote it, so the
       instance must still be exactly there.
-    * Transition without ``in_progress_state`` / BackgroundAction — the
-      instance must still be in one of the declared sources.
+    * Transition without ``in_progress_state`` — the instance must
+      still be in one of the declared sources.
 
     Returns ``(matches, expected_description, current_state)``.
     """
@@ -778,13 +778,16 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
 
 def _restore(transition_message: TransitionMessage):
     """Resolve ``(instance, process, transition)`` from a TransitionMessage row."""
+    # The key columns name the concrete model; driving_model_label names
+    # the class the caller drove. Restore that class, so proxy methods and
+    # overrides stay visible to side-effects and callbacks. Rows written
+    # before proxy_model_label existed record the driving class in
+    # model_name, so the same read restores them unchanged.
+    recorded_model = transition_message.driving_model_label
     try:
-        app = apps.get_app_config(transition_message.app_label)
-        model = app.get_model(transition_message.model_name)
+        model = apps.get_model(recorded_model)
     except LookupError as exc:
-        raise _RestoreError(
-            f'model {transition_message.app_label}.{transition_message.model_name} not installed'
-        ) from exc
+        raise _RestoreError(f'model {recorded_model} not installed') from exc
 
     try:
         # _base_manager, not objects. A filtered default manager, such as one

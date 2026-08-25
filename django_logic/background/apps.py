@@ -17,9 +17,8 @@ def validate_on_ready() -> None:
     conf.max_errors()
     conf.retry_minutes()
     conf.cleanup_days()
-    conf.validate_bool('STRICT_KWARGS_SERIALIZATION')
-    # Core knobs (LOCK_TIMEOUT, STRICT_HOOK_SIGNATURES) — shared with
-    # DjangoLogicConfig.ready so sync-only installs validate them too.
+    # Core knobs (LOCK_TIMEOUT) — shared with DjangoLogicConfig.ready so
+    # sync-only installs validate them too.
     conf.validate_core_settings()
     if mode == conf.EXECUTION_SYNC:
         _reject_sync_without_opt_in()
@@ -115,8 +114,3 @@ class BackgroundConfig(AppConfig):
     def ready(self) -> None:
         validate_on_ready()
         from django_logic import checks  # noqa: F401 — registers system checks
-        from django_logic.conf import install_legacy_exception_base
-
-        # Idempotent — covers an install shape where only the background
-        # app's ready() runs before denials are raised or caught.
-        install_legacy_exception_base()

@@ -2,8 +2,112 @@
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-08-25
+
+### Removed
+
+- **`STRICT_HOOK_SIGNATURES` and `STRICT_KWARGS_SERIALIZATION`.** The
+  strict behavior is the only behavior now. A hook without a named
+  instance-first parameter fails at bind time. A caller-passed
+  `request` or `user_id`, and non-string dict keys, fail at enqueue
+  with `KwargsSerializationError`. The engine's own chain hop still
+  strips `request` and `user_id` before a background follow-up — both
+  stay legal on the synchronous transition that chains. The
+  `django_logic.W001` check is retired with the lenient mode: a machine
+  with a bad hook never binds, so there is nothing left to report.
+- **`LEGACY_EXCEPTION_BASE`.** The fork-migration bridge that mixed a
+  legacy base class into `TransitionNotAllowed` at boot is gone. Catch
+  `django_logic.exceptions.TransitionNotAllowed` directly. A settings
+  dict still carrying any of these three keys gets the
+  `django_logic.W003` warning with the same advice.
+- **`DjangoLogicException` and `SourceStateChanged`.** Nothing caught
+  them by name. `TransitionNotAllowed` subclasses `Exception` directly,
+  and the enqueue source-state recheck raises
+  `TransitionTemporarilyUnavailable` with the same message. The
+  exceptions that remain are the ones consumers catch:
+  `TransitionNotAllowed`, `TransitionTemporarilyUnavailable`,
+  `AlreadyInProgress`, and `PermanentFailure`.
+- **The `conditions_class` and `failure_callbacks_class` swap hooks.**
+  Nothing set them. `side_effects_class`, `callbacks_class` and
+  `permissions_class` stay — the consumer subclasses all three.
+- **The empty `[celery]` extra.** The engine has no broker; the alias
+  only kept an old pin resolving, and 1.0 is where old pins end.
+- `nested_processes` are frozen as they are: same action name,
+  mutually exclusive conditions, one bound accessor. Fan-out stays
+  separate machines, and no new restore fallbacks will be added.
+- Still in the package, on purpose: the ten replaced migration files
+  (they leave once every install has applied the squash) and the
+  `ImportError` guidance for the removed `Action` names (it is the
+  migration guide for the jump to 1.0).
+
+- **`Action` and `BackgroundAction`** (#243). One transition contract
+  remains: every declaration takes the state lock, is refused with
+  `TransitionTemporarilyUnavailable` while a background transition is
+  uncompleted on the same instance and process, and runs
+  `next_transition`. `target=None` (the default) declares a transition
+  that writes no state on success. Importing the removed names raises
+  `ImportError` with this migration:
+  - `BackgroundAction(...)` → `BackgroundTransition(...)` with no
+    `target`. The behavior is identical.
+  - `Action(...)` → `Transition(...)` with no `target`. Behavior
+    changes: the old `Action` took no lock, ran while a background
+    transition was uncompleted, and ignored `next_transition`. Review
+    each declaration — a side-effect that must not wait for the
+    contract belongs in a plain method on the model, not in the
+    process.
+  - A transition with no target rejects `in_progress_state` at class
+    creation: success writes no state, so nothing would move the
+    instance out of it.
+  - The old `Action` failure path's special cases are gone with it: a
+    no-target transition holds the lock through its side-effects, so a
+    foreign lock refuses it up front and its `failed_state` write runs
+    under its own lock.
+
+### Fixed
+
+- **A proxy and the model it proxies now share one durable row key**
+  (#258). `TransitionMessage` keyed rows on the class the caller drove,
+  so two enqueues on one physical row through two proxy classes wrote
+  two uncompleted rows, the one-uncompleted-per-process constraint did
+  not see them collide, and side-effects could run twice on one row.
+  The key columns now name the concrete model: every proxy of one model
+  shares one key. A child in multi-table inheritance is its own
+  concrete model and keeps its own key, so the guard still splits there;
+  the state lock keys on the table that declares the field and does not
+  (#268 records the gap). `in_flight`, `in_flight_for` and
+  `retry_status` see a row written under the new key no matter which
+  proxy the caller passes. The guard is per concrete-model row and
+  process name: two state machines on one row need distinct process
+  names, the same rule one class already has.
+- The class the caller drove is recorded on the new `proxy_model_label`
+  column, and the worker restores that class — side-effects and
+  callbacks receive the proxy instance, exactly as before. Rows written
+  before this release carry the driving class in `model_name`, and the
+  worker reads them exactly as before.
+- Migration `0010` adds the column and rewrites uncompleted rows keyed
+  on a proxy name. Completed rows keep their historical key. Where two
+  uncompleted rows already exist for one physical row — the defect this
+  release fixes — the extra row keeps its proxy key, and the worker
+  still claims and completes it; the same holds for a row an old-code
+  process enqueues after the migration and before the deploy flips.
+  Such a proxy-keyed row stays outside the guard and invisible to the
+  probes until it completes, so run the migration and restart every
+  process in one deploy.
+- Operator-facing identity is unchanged: the Sentry tags, the
+  `dl_transitions` listing, the stuck-transition warning and
+  `TransitionMessage.__str__` name the class the caller drove, exactly
+  as before.
+
 ### Changed
 
+- **Fresh installs run one migration, not ten** (#233).
+  `0001_squashed_0010_proxy_model_label` replaces the ten migration
+  files on a new database. An existing install keeps using the
+  originals — Django applies the ones it is missing and records the
+  squash as applied, with no schema change. Rehearsed both ways on
+  PostgreSQL: the two paths produce byte-identical schemas. The
+  original files stay in the package until every install has applied
+  the squash.
 - **One `INSTALLED_APPS` entry** (#242). The documented install is
   `'django_logic.background'` alone. That entry always owned the
   `TransitionMessage` table and its migrations, the `dl_worker` and

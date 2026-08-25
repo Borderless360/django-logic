@@ -1,11 +1,11 @@
-"""BackgroundTransition / BackgroundAction — durable, queue-routed background work.
+"""BackgroundTransition — durable, queue-routed background work.
 
 ``change_state`` enqueues the work (same steps in Pull and Sync mode):
 
 * validate conditions + permissions,
 * acquire the state lock for the critical section and revalidate the
   persisted state under it,
-* atomically write ``in_progress_state`` (for ``BackgroundTransition``)
+* atomically write ``in_progress_state`` (when declared)
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
   row is what gates concurrent transitions,
@@ -23,13 +23,16 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 
 from django_logic import conf
-from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
+from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
     KwargsSerializationError,
     serialize_kwargs,
 )
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import (
+    TransitionNotAllowed,
+    TransitionTemporarilyUnavailable,
+)
 from django_logic.logger import (
     transition_logger,
     TransitionEventType,
@@ -39,7 +42,11 @@ from django_logic.transition import Transition, _refuse_engine_param_kwargs
 
 
 class BackgroundTransition(Transition):
-    """State-changing transition that runs its side-effects on a worker process.
+    """Transition that runs its side-effects on a worker process.
+
+    ``target=None`` declares a background transition that writes no
+    state on success — same durability, same lock, same one-uncompleted-
+    row gate, same chaining; the worker just skips the target write.
 
     Optional:
         - ``queue`` — the queue name this transition's row carries.
@@ -72,7 +79,7 @@ class BackgroundTransition(Transition):
         self,
         action_name: str,
         sources: list,
-        target: str,
+        target: str | None = None,
         *,
         queue: str | None = None,
         timeout: int | None = None,
@@ -218,17 +225,10 @@ class BackgroundTransition(Transition):
         constraint fires (another uncompleted TransitionMessage exists
         for the same instance + process).
         """
-        instance_lookup = {
-            'app_label': state.instance._meta.app_label,
-            'model_name': state.instance._meta.model_name,
-            # Models use different primary-key types (int, UUID, string).
-            # Store the key as text; _restore looks it up with get(pk=...).
-            'instance_id': str(state.instance.pk),
-        }
         try:
             serialized = serialize_kwargs(kwargs)
         except KwargsSerializationError:
-            # Re-raise so the precise strict-mode message is not wrapped
+            # Re-raise so the precise refusal message is not wrapped
             # as "not JSON-serializable".
             raise
         except TypeError as e:
@@ -249,7 +249,13 @@ class BackgroundTransition(Transition):
             # misleading "another transition is already in progress".
             try:
                 transition_message = TransitionMessage.objects.create(
-                    process_name=state.process_name,
+                    # The key columns name the concrete model; the class
+                    # the caller drove is recorded on proxy_model_label
+                    # so the worker restores that class.
+                    **TransitionMessage.instance_key(
+                        state.instance, state.process_name),
+                    proxy_model_label=TransitionMessage.proxy_label_for(
+                        state.instance),
                     # Recorded so the worker can reconstruct the process
                     # from the stored process_class even when the model
                     # property was renamed or rebound in between.
@@ -267,7 +273,6 @@ class BackgroundTransition(Transition):
                     queue_name=queue_name,
                     timeout_seconds=self.timeout,
                     kwargs=serialized,
-                    **instance_lookup,
                 )
             except IntegrityError as exc:
                 raise AlreadyInProgress(
@@ -288,7 +293,10 @@ class BackgroundTransition(Transition):
             current = state.get_persisted_state()
             if current not in self.sources:
                 # The atomic block rolls the TransitionMessage row back.
-                raise SourceStateChanged(
+                # Transient: the guard doing its job, the same class of
+                # event as AlreadyInProgress — it resolves when the other
+                # work completes, so the hook runner logs it at WARNING.
+                raise TransitionTemporarilyUnavailable(
                     f"BackgroundTransition '{self.action_name}' is not "
                     f"allowed: the persisted state moved to {current!r} "
                     f"while the insert waited on the unique constraint — "
@@ -311,39 +319,3 @@ class BackgroundTransition(Transition):
             f'created (queue={queue_name})'
         )
         return transition_message
-
-
-class BackgroundAction(BackgroundTransition):
-    """Background-executed action — runs side-effects with no state change.
-
-    Same durability contract as :class:`BackgroundTransition`. The only
-    differences:
-
-    * ``target`` is always empty (no state write on success),
-    * ``in_progress_state`` is not meaningful and is rejected at
-      construction time,
-    * failure at ``MAX_ERRORS`` optionally writes ``failed_state``.
-    """
-
-    def __init__(
-        self, action_name: str, sources: list, *, queue: str | None = None, **kwargs
-    ):
-        if kwargs.get('in_progress_state'):
-            raise ImproperlyConfigured(
-                f"BackgroundAction '{action_name}' cannot declare "
-                f"in_progress_state — actions do not change state on "
-                f"success. Use BackgroundTransition if you need to mark "
-                f"in-progress."
-            )
-        # target='' is the sentinel for "no state change".
-        super().__init__(
-            action_name=action_name,
-            sources=sources,
-            target='',
-            queue=queue,
-            **kwargs,
-        )
-
-    def __str__(self) -> str:
-        return f"BackgroundAction: {self.action_name}"
-

@@ -186,8 +186,6 @@ class NestedDisambiguatedBgChainScenario(ProcessScenario):
         self.assertNotIn('gmail_', dummy.se_log)
 
 
-_STRICT_SYNC_SETTINGS = {**_SYNC_SETTINGS, 'STRICT_KWARGS_SERIALIZATION': True}
-
 _CHAIN_SEEN: dict = {}
 
 
@@ -196,12 +194,12 @@ def _record_chain_kwargs(instance, **kwargs):
     _CHAIN_SEEN.update(kwargs)
 
 
-@override_settings(DJANGO_LOGIC=_STRICT_SYNC_SETTINGS)
+@override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class SyncToBackgroundRequestChainTests(TestCase):
-    """#129: a sync transition's next_transition into a BACKGROUND follow-up
-    must not forward ``request`` — under STRICT_KWARGS_SERIALIZATION the
-    follow-up's failure at enqueue is swallowed by NextTransition, silently
-    killing the chain. Sync follow-ups keep receiving request."""
+    """A sync transition's next_transition into a BACKGROUND follow-up
+    must not forward ``request`` — the follow-up's refusal at enqueue is
+    swallowed by NextTransition, silently killing the chain. Sync
+    follow-ups keep receiving request."""
 
     @classmethod
     def setUpClass(cls):
@@ -242,11 +240,21 @@ class SyncToBackgroundRequestChainTests(TestCase):
         _CHAIN_SEEN.clear()
         self.widget = Widget.objects.create(status='draft')
 
-    def test_background_follow_up_runs_despite_request_under_strict(self):
+    def test_background_follow_up_runs_despite_request(self):
         self.widget.request_chain_process.kick(request=object())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'done')
         self.assertNotIn('request', _CHAIN_SEEN)
+
+    def test_background_follow_up_runs_despite_user_id(self):
+        # user_id is refused at a direct enqueue (it is the engine's wire
+        # form for user), but it is ordinary data on the synchronous
+        # transition that chains — so the hop strips it the same way it
+        # strips request, instead of silently killing the chain.
+        self.widget.request_chain_process.kick(user_id=42)
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'done')
+        self.assertNotIn('user_id', _CHAIN_SEEN)
 
     def test_sync_follow_up_still_receives_request(self):
         sentinel = object()

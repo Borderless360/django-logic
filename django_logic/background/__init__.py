@@ -2,8 +2,9 @@
 
 Public API:
 
-* :class:`BackgroundTransition` / :class:`BackgroundAction` — declarative
-  background-executed transitions with per-transition queue routing.
+* :class:`BackgroundTransition` — declarative background-executed
+  transitions with per-transition queue routing. ``target=None``
+  declares one that writes no state on success.
 * :func:`sync_execution` — context manager that forces the current block
   to run the worker path inline (for tests, management commands, the shell).
 * :func:`retry_pending` — run every claimable row inline, once.
@@ -26,7 +27,6 @@ from __future__ import annotations
 
 _PUBLIC = {
     'BackgroundTransition': ('django_logic.background.transitions', 'BackgroundTransition'),
-    'BackgroundAction': ('django_logic.background.transitions', 'BackgroundAction'),
     'sync_execution': ('django_logic.conf', 'sync_execution'),
     'retry_pending': ('django_logic.background.safety_nets', 'retry_pending'),
     'in_flight': ('django_logic.background.models', 'in_flight'),
@@ -38,6 +38,13 @@ __all__ = list(_PUBLIC.keys())
 
 
 def __getattr__(name):
+    if name == 'BackgroundAction':
+        raise ImportError(
+            "BackgroundAction was removed in 1.0.0. Declare "
+            "BackgroundTransition(action_name=..., sources=[...]) with no "
+            "target — the behavior is identical: same durability, same "
+            "lock and gate, no state write on success."
+        )
     if name not in _PUBLIC:
         raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
     import importlib

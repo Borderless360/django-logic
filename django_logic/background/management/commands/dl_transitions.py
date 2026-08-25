@@ -64,7 +64,7 @@ class Command(BaseCommand):
             why = self._why(
                 row, claimable, max_errors, report_after, age_minutes)
             self.stdout.write(
-                f'#{row.pk} {row.app_label}.{row.model_name}'
+                f'#{row.pk} {row.driving_model_label}'
                 f'#{row.instance_id} {row.process_name}.{row.transition_name} '
                 f'queue={row.queue_name} errors={row.errors_count} '
                 f'age={age_minutes}m — {why}'

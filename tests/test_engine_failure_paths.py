@@ -12,9 +12,9 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from django_logic import Action, Process, ProcessManager, Transition
+from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
-from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
+from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.runner import (
     finalize_stuck_attempt,
@@ -207,7 +207,7 @@ class ReservedKwargProcess(Process):
             failed_state='rk_failed',
             side_effects=[_boom],
         ),
-        Action('act', sources=['draft'], side_effects=[_boom]),
+        Transition('act', sources=['draft'], side_effects=[_boom]),
         BackgroundTransition(
             'bg', sources=['draft'], target='done',
             in_progress_state='rk_bg_running', failed_state='rk_bg_failed',
@@ -287,15 +287,11 @@ class ConcurrencyGuardLogLevelTests(TestCase):
     contention, so it logs at WARNING and wakes nobody.
     """
 
-    def test_source_state_changed_is_a_transition_not_allowed(self):
-        # Consumers catching the base class must keep working.
-        self.assertTrue(issubclass(SourceStateChanged, TransitionNotAllowed))
-
     def test_guard_exceptions_log_at_warning(self):
         from django_logic.commands import _log_hook_error
 
         with self.assertLogs('django-logic.transition', level='DEBUG') as logs:
-            _log_hook_error('guard', SourceStateChanged('moved'))
+            _log_hook_error('guard', TransitionTemporarilyUnavailable('moved'))
         self.assertEqual(
             [r.levelno for r in logs.records], [logging.WARNING], logs.output)
 
@@ -320,8 +316,6 @@ class TemporarilyUnavailableBaseTests(TestCase):
     def test_guard_exceptions_share_the_transient_base(self):
         self.assertTrue(
             issubclass(AlreadyInProgress, TransitionTemporarilyUnavailable))
-        self.assertTrue(
-            issubclass(SourceStateChanged, TransitionTemporarilyUnavailable))
 
     def test_transient_base_is_a_transition_not_allowed(self):
         self.assertTrue(issubclass(

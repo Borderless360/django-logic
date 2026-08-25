@@ -153,8 +153,12 @@ Each declaration slot has one job:
 - `failure_callbacks` — functions that run after a side-effect fails. They
   receive `exception=`. Put cleanup and compensation here.
 
-Use `Action` instead of `Transition` for work that needs conditions,
-permissions and side-effects but changes no state.
+Declare a `Transition` with no `target` for work that needs conditions,
+permissions and side-effects but writes no state on success. It follows
+the same rules as every transition: it takes the state lock, it is
+refused while a background transition is uncompleted, and it runs
+`next_transition`. A side-effect that must not obey those rules is
+not a transition — write it as a plain method on the model.
 
 ## Bind the model to the process
 
@@ -205,8 +209,8 @@ order.process.approve(user=request.user)
 ## Background transitions
 
 `BackgroundTransition` runs its side-effects on a worker process, and retries
-them. `BackgroundAction` does the same and changes no state on success. Import
-both from `django_logic.background`.
+them. Declared with no `target`, it changes no state on success — same
+durability, same rules. Import it from `django_logic.background`.
 
 ```python
 # process.py

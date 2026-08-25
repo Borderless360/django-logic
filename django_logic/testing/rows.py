@@ -35,6 +35,7 @@ def open_transition_message(
 
     row = TransitionMessage.objects.create(
         **TransitionMessage.instance_key(instance, process_name),
+        proxy_model_label=TransitionMessage.proxy_label_for(instance),
         field_name=field_name,
         transition_name=transition_name,
         queue_name=queue_name or conf.default_queue(),

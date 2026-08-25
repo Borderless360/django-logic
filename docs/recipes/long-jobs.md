@@ -2,7 +2,7 @@
 
 ## The problem
 
-A `BackgroundAction` runs its whole side-effect inside one attempt, and
+A `BackgroundTransition` runs its whole side-effect inside one attempt, and
 the attempt is all-or-nothing: its database writes run in a savepoint
 and roll back together when the attempt fails, is killed at its
 `timeout=` budget, or dies with its worker. That rule is what lets a
@@ -22,7 +22,7 @@ attempt would make that attempt's retries unsafe. Split the job instead.
 
 ## The shape
 
-Give each chunk its own background action. Each chunk is then its own
+Give each chunk its own background transition. Each chunk is then its own
 `TransitionMessage` row, its own attempt, its own savepoint, its own
 retries, and its own commit:
 
@@ -51,7 +51,7 @@ def continue_if_more_pages(instance, **kwargs):
         instance.process.import_page()
 
 
-BackgroundAction(
+BackgroundTransition(
     action_name='import_page',
     sources=['importing'],
     side_effects=[import_next_page],

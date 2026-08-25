@@ -6,7 +6,7 @@ concurrency, crash recovery, and locking behavior, not business logic.
 """
 from django.db import models
 
-from django_logic import Process, Transition, Action
+from django_logic import Process, Transition
 
 # Process↔model binding for this app happens only in tests/stability/apps.py
 # (StabilityConfig.ready()) — the single binding site. See issue #100.

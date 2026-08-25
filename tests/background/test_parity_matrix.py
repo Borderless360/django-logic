@@ -1,16 +1,16 @@
-"""One set of assertions, run against all four transition classes.
+"""One set of assertions, run against all four transition shapes.
 
-The recurring consumer bug is divergence: the same hook behaves differently when
-its transition changes between Transition, Action, BackgroundTransition and
-BackgroundAction. This module drives all four on the same model and states the
-intended differences, so a new difference fails a test here.
+The recurring consumer bug is divergence: the same hook behaves
+differently when its transition changes shape — synchronous or
+background, with a target or without one. This module drives all four
+shapes on the same model and states the intended differences, so a new
+difference fails a test here.
 
-Pinned for every class:
+Pinned for every shape:
 
 * hook kwargs — the same values and the same Python types, plus a live ``user``;
-* ``request`` reaches synchronous hooks and never background hooks. Enqueue
-  drops it when it serializes the kwargs, and that is the one deliberate
-  difference;
+* ``request`` reaches synchronous hooks; a direct background drive
+  refuses it at enqueue, and that is the one deliberate difference;
 * every background drive serializes kwargs, so an unserializable kwarg fails at
   enqueue — inline sync-mode execution included;
 * failure routing — a synchronous transition raises to the caller and writes
@@ -22,8 +22,7 @@ Pinned for every class:
   failure, failed_state is written first and the failure callbacks second;
 * ``next_transition`` — the same background follow-up runs with the same typed
   kwargs and a live ``user`` whether the parent is synchronous or background,
-  and never sees ``request``. The declared difference: a synchronous ``Action``
-  never chains, a ``BackgroundAction`` does.
+  with a target or without one, and never sees ``request``.
 """
 from datetime import datetime, timezone as tz
 from decimal import Decimal
@@ -32,8 +31,8 @@ from uuid import UUID
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
-from django_logic import Action, Process, Transition
-from django_logic.background import BackgroundAction, BackgroundTransition
+from django_logic import Process, Transition
+from django_logic.background import BackgroundTransition
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.process import ProcessManager
 from tests.background.models import Widget
@@ -99,7 +98,7 @@ class ParityProcess(Process):
                    side_effects=[record_kwargs, record_order_side_effect],
                    callbacks=[record_callback_state, record_order_callback],
                    failure_callbacks=[record_order_failure_callback]),
-        Action('sync_action', sources=['draft'],
+        Transition('sync_action', sources=['draft'],
                side_effects=[record_kwargs, record_order_side_effect],
                callbacks=[record_callback_state, record_order_callback]),
         BackgroundTransition('bg_transition', sources=['draft'], target='done',
@@ -107,20 +106,20 @@ class ParityProcess(Process):
                              side_effects=[record_kwargs, record_order_side_effect],
                              callbacks=[record_callback_state, record_order_callback],
                              failure_callbacks=[record_order_failure_callback]),
-        BackgroundAction('bg_action', sources=['draft'],
+        BackgroundTransition('bg_action', sources=['draft'],
                          side_effects=[record_kwargs, record_order_side_effect],
                          callbacks=[record_callback_state, record_order_callback]),
-        # One chaining parent per class, all into the same background
-        # follow-up. The follow-up accepts 'draft' because Action parents
-        # change no state, and 'chained_src' because Transition parents
-        # write it.
+        # One chaining parent per shape, all into the same background
+        # follow-up. The follow-up accepts 'draft' because no-target
+        # parents change no state, and 'chained_src' because the
+        # state-writing parents write it.
         Transition('sync_transition_chain', sources=['draft'],
                    target='chained_src', next_transition='chain_hop'),
-        Action('sync_action_chain', sources=['draft'],
+        Transition('sync_action_chain', sources=['draft'],
                next_transition='chain_hop'),
         BackgroundTransition('bg_transition_chain', sources=['draft'],
                              target='chained_src', next_transition='chain_hop'),
-        BackgroundAction('bg_action_chain', sources=['draft'],
+        BackgroundTransition('bg_action_chain', sources=['draft'],
                          next_transition='chain_hop'),
         BackgroundTransition('chain_hop', sources=['draft', 'chained_src'],
                              target='chained', side_effects=[record_hop_kwargs]),
@@ -177,16 +176,22 @@ class ParityMatrixTests(TestCase):
             for key, value in TYPED_KWARGS.items():
                 self.assertIs(type(results[action][key]), type(value), f'{action}.{key}')
 
-    def test_request_reaches_sync_hooks_and_never_background_hooks(self):
-        # A live request cannot be serialized into the row, so a background
-        # hook never receives one.
+    def test_request_reaches_sync_hooks_and_is_refused_at_enqueue(self):
+        # A live request cannot be serialized into the row. A synchronous
+        # hook receives it; a direct background drive refuses it at
+        # enqueue. The engine's own chain hop is the exception: it strips
+        # request before a background follow-up (see test_bg_chain).
+        from django_logic.background.serializers import (
+            KwargsSerializationError,
+        )
+
         sentinel = object()
         for action in SYNC_ACTIONS:
             _drive(self._fresh(), action, request=sentinel)
             self.assertIs(SEEN.get('request'), sentinel, action)
         for action in BACKGROUND_ACTIONS:
-            _drive(self._fresh(), action, request=sentinel)
-            self.assertNotIn('request', SEEN, action)
+            with self.assertRaises(KwargsSerializationError):
+                _drive(self._fresh(), action, request=sentinel)
 
     def test_unserializable_kwarg_fails_at_enqueue_for_background_only(self):
         # Every background drive serializes kwargs, inline sync-mode execution
@@ -271,23 +276,21 @@ class ParityMatrixTests(TestCase):
             self.assertEqual(order, [('failure_callback', 'failed')], action)
         FAIL['on'] = False
 
-    def test_next_transition_chains_equivalently_across_all_four_classes(self):
-        # The parent's class must not change what the follow-up receives: the
-        # same typed kwargs, a live user, and never a request. The one declared
-        # difference is that a synchronous Action never runs next_transition,
-        # while a BackgroundAction does.
-        chains = {'sync_transition_chain': True, 'sync_action_chain': False,
-                  'bg_transition_chain': True, 'bg_action_chain': True}
+    def test_next_transition_chains_equivalently_across_all_four_shapes(self):
+        # The parent's shape must not change what the follow-up receives:
+        # the same typed kwargs, a live user, and never a request. Every
+        # shape chains — a transition with no target included.
         for parent in CHAIN_PARENTS:
             HOP_SEEN.clear()
             widget = self._fresh()
-            _drive(widget, parent, user=self.user, request=object(),
-                   **dict(TYPED_KWARGS))
+            kwargs = dict(TYPED_KWARGS)
+            if parent.startswith('sync'):
+                # request is legal on a synchronous parent; the engine
+                # strips it before the background hop. A background
+                # parent refuses it at its own enqueue, so it gets none.
+                kwargs['request'] = object()
+            _drive(widget, parent, user=self.user, **kwargs)
             widget.refresh_from_db()
-            if not chains[parent]:
-                self.assertEqual(HOP_SEEN, {}, parent)
-                self.assertEqual(widget.status, 'draft', parent)
-                continue
             self.assertEqual(widget.status, 'chained', parent)
             hop_kwargs = {k: v for k, v in HOP_SEEN.items()
                           if k not in _ENGINE_KEYS}

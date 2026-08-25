@@ -1,11 +1,11 @@
-"""kwargs serialization: typed round-trip, loud request drop, user_id swap."""
+"""kwargs serialization: typed round-trip, request refusal, user_id swap."""
 import json
 from datetime import date, datetime, time, timezone as tz
 from decimal import Decimal
 from unittest.mock import Mock
 from uuid import UUID
 
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase
 
 from django_logic.background.serializers import (
     decode_value, deserialize_kwargs, restore_user, serialize_kwargs,
@@ -20,20 +20,11 @@ def _roundtrip(kwargs):
 
 
 class SerializeKwargsTests(SimpleTestCase):
-    def test_request_is_dropped_with_a_warning(self):
-        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
-            out = serialize_kwargs({'request': Mock(), 'x': 1})
-        self.assertNotIn('request', out)
-        self.assertEqual(out['x'], 1)
-        self.assertIn("'request' dropped", logs.output[0])
-
-    @override_settings(DJANGO_LOGIC={'STRICT_KWARGS_SERIALIZATION': True})
-    def test_request_raises_under_strict_setting(self):
-        with self.assertRaisesMessage(TypeError, "'request' dropped"):
+    def test_request_is_refused(self):
+        with self.assertRaisesMessage(TypeError, "'request' cannot be passed"):
             serialize_kwargs({'request': Mock(), 'x': 1})
 
-    @override_settings(DJANGO_LOGIC={'STRICT_KWARGS_SERIALIZATION': True})
-    def test_strict_setting_leaves_clean_kwargs_alone(self):
+    def test_clean_kwargs_pass_through(self):
         self.assertEqual(serialize_kwargs({'x': 1}), {'x': 1})
 
     def test_user_replaced_with_user_id(self):
@@ -148,9 +139,9 @@ class SerializeKwargsTests(SimpleTestCase):
             serialize_kwargs({'stats': {'values': [1.0, float('nan')]}})
 
     def test_non_finite_float_in_a_dict_key_rejected(self):
-        # The reason allow_nan=False is the guard rather than a value scan:
-        # a non-finite float can also hide in a key.
-        with self.assertRaisesMessage(TypeError, 'kwargs are not valid JSON'):
+        # A float key is refused as a non-string key before the JSON
+        # round-trip could see that it is also non-finite.
+        with self.assertRaisesMessage(TypeError, 'non-string dict keys'):
             serialize_kwargs({'stats': {float('nan'): 1}})
 
     def test_finite_floats_still_pass(self):
@@ -170,29 +161,19 @@ class SerializeKwargsTests(SimpleTestCase):
         # The enqueue dispatcher wraps generic TypeError in
         # ImproperlyConfigured ("not JSON-serializable") — the strict-mode
         # rejection must stay distinguishable so it propagates verbatim.
-        with override_settings(DJANGO_LOGIC={'STRICT_KWARGS_SERIALIZATION': True}):
-            with self.assertRaises(KwargsSerializationError):
-                serialize_kwargs({'request': Mock()})
+        with self.assertRaises(KwargsSerializationError):
+            serialize_kwargs({'request': Mock()})
 
-    def test_non_string_dict_keys_warn(self):
+    def test_non_string_dict_keys_are_refused(self):
         # JSON stringifies int keys silently ({1: 'a'} -> {"1": "a"}), which
-        # breaks the type-faithful contract — enqueue must say so.
-        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
-            out = serialize_kwargs({'m': {1: 'a'}})
-        self.assertIn('non-string dict keys', logs.output[0])
-        self.assertIn("'m'", logs.output[0])
-        # The documented (lossy) persisted contract: keys become strings.
-        self.assertEqual(json.loads(json.dumps(out)), {'m': {'1': 'a'}})
-
-    def test_non_string_dict_keys_nested_in_containers_warn(self):
-        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
-            serialize_kwargs({'items': [{'deep': {2: 'b'}}]})
-        self.assertIn('non-string dict keys', logs.output[0])
-
-    @override_settings(DJANGO_LOGIC={'STRICT_KWARGS_SERIALIZATION': True})
-    def test_non_string_dict_keys_raise_under_strict_setting(self):
-        with self.assertRaisesMessage(TypeError, 'non-string dict keys'):
+        # breaks the type-faithful contract — enqueue refuses instead.
+        with self.assertRaisesMessage(TypeError, 'non-string dict keys') as ctx:
             serialize_kwargs({'m': {1: 'a'}})
+        self.assertIn("'m'", str(ctx.exception))
+
+    def test_non_string_dict_keys_nested_in_containers_are_refused(self):
+        with self.assertRaisesMessage(TypeError, 'non-string dict keys'):
+            serialize_kwargs({'items': [{'deep': {2: 'b'}}]})
 
 
 class DeserializeKwargsTests(SimpleTestCase):

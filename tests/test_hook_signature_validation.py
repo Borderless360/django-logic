@@ -1,10 +1,10 @@
-"""Bind-time hook-signature validation (#113): a task-style
+"""Bind-time hook-signature validation: a task-style
 ``def hook(*args, **kwargs)`` fails only at runtime on the worker, so
-``bind_model_process`` flags every hook whose first parameter is not a
-named positional — warning by default, raising under
-``DJANGO_LOGIC['STRICT_HOOK_SIGNATURES']``."""
+``bind_model_process`` refuses every hook whose first parameter is not a
+named positional. It raises ``ImproperlyConfigured`` at bind time —
+there is no lenient mode."""
 from django.core.exceptions import ImproperlyConfigured
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase
 
 from django_logic.process import Process, ProcessManager
 from django_logic.transition import Transition
@@ -78,14 +78,13 @@ class HookSignatureValidationTests(SimpleTestCase):
             b for b in ProcessManager.bindings if b.model is not Invoice]
         super().tearDown()
 
-    def test_clean_hooks_bind_silently(self):
-        with self.assertNoLogs('django-logic.transition', level='WARNING'):
-            ProcessManager.bind_model_process(Invoice, _GoodProcess, state_field='status')
+    def test_clean_hooks_bind(self):
+        ProcessManager.bind_model_process(Invoice, _GoodProcess, state_field='status')
 
-    def test_task_style_hooks_warn_at_bind_time(self):
-        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
+    def test_task_style_hooks_raise_at_bind_time(self):
+        with self.assertRaises(ImproperlyConfigured) as ctx:
             ProcessManager.bind_model_process(Invoice, _BadProcess, state_field='status')
-        message = logs.output[0]
+        message = str(ctx.exception)
         # Both the direct and the nested offender, each with its owner.
         self.assertIn('task_style_hook', message)
         self.assertIn('_BadProcess.approve', message)
@@ -93,32 +92,22 @@ class HookSignatureValidationTests(SimpleTestCase):
         self.assertIn('_NestedBad.reject', message)
         self.assertIn('fn(instance, **kwargs)', message)
 
-    @override_settings(DJANGO_LOGIC={'STRICT_HOOK_SIGNATURES': True})
-    def test_strict_setting_raises(self):
-        with self.assertRaises(ImproperlyConfigured):
-            ProcessManager.bind_model_process(Invoice, _BadProcess, state_field='status')
-
-    @override_settings(DJANGO_LOGIC={'STRICT_HOOK_SIGNATURES': True})
-    def test_strict_setting_accepts_clean_hooks(self):
-        ProcessManager.bind_model_process(Invoice, _GoodProcess, state_field='status')
-
     def test_process_level_conditions_and_permissions_are_validated(self):
         # Process.is_valid executes class-level conditions/permissions with
         # the same instance-first convention — they must not escape the walk.
-        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
+        with self.assertRaises(ImproperlyConfigured) as ctx:
             ProcessManager.bind_model_process(
                 Invoice, _ProcessLevelBad, state_field='status')
-        message = logs.output[0]
+        message = str(ctx.exception)
         self.assertIn('kwargs_only_hook', message)
         self.assertIn('task_style_hook', message)
         self.assertIn('_ProcessLevelBad', message)
 
     def test_duck_typed_transition_without_hook_attributes_binds(self):
-        # Regardless of the strict flag, a transition object exposing only
-        # part of the hook surface must not crash bind_model_process.
-        with override_settings(DJANGO_LOGIC={'STRICT_HOOK_SIGNATURES': True}):
-            ProcessManager.bind_model_process(
-                Invoice, _DuckProcess, state_field='status')
+        # A transition object exposing only part of the hook surface must
+        # not crash bind_model_process.
+        ProcessManager.bind_model_process(
+            Invoice, _DuckProcess, state_field='status')
 
 
 class PropertyConditionsRegressionTests(SimpleTestCase):

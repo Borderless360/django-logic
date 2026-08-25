@@ -1,4 +1,4 @@
-"""Behavior-focused Transition / Action tests.
+"""Behavior-focused synchronous transition tests.
 
 These tests replaced an older suite that drove ``transition.change_state(state)``
 directly (bypassing the ``instance.process.<action>()`` entrypoint users
@@ -18,6 +18,7 @@ from unittest import mock
 from django.core.cache import cache
 from django.test import override_settings
 
+from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 from django_logic.testing import JourneyStep, ProcessScenario
 from tests.background.models import (
@@ -34,7 +35,7 @@ from tests import dl_settings
 
 # ProcessScenario runs in sync mode by default (BACKGROUND_EXECUTION='sync'
 # is set per-class via override_settings where background work is involved;
-# the sync Transition/Action tests below don't touch the background engine,
+# the synchronous transition tests below don't touch the background engine,
 # so the default sync setting is fine).
 _SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
@@ -118,7 +119,7 @@ class ActionScenario(ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(widget, 'poke')
         self.assert_state(widget, 'draft')
-        self.assert_state_trace([])  # an Action never writes state on success
+        self.assert_state_trace([])  # no target: nothing writes state on success
         self.assert_side_effects_ran(['se_poke'])
         self.assert_callbacks_ran(['cb_after_poke'])
 
@@ -132,29 +133,28 @@ class ActionScenario(ProcessScenario):
         self.assert_state_trace(['poked_failed'])
         self.assert_failure_callbacks_ran(['fcb_on_poke_fail'])
 
-    def test_failing_action_does_not_release_a_concurrent_lock(self):
-        # An Action never acquires the state lock, so a failing Action must
-        # not release one a concurrent Transition holds. This is the
-        # regression behind Action.fail_transition not calling unlock().
+    def test_a_held_lock_refuses_a_no_target_transition(self):
+        # A transition with no target takes the lock like any other, so a
+        # concurrent holder refuses it before its side-effects run, and
+        # the holder's lock survives.
         widget = self.create_instance(status='draft')
         state = self._process(widget).state
         self.assertTrue(state.lock(), 'pre-condition: acquire the lock')
         try:
             self.transition(
-                widget, 'poke_fail',
-                fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
+                widget, 'poke_fail', expect_raises=TransitionNotAllowed,
             )
             self.assertTrue(
                 state.is_locked(),
-                'failing Action released a lock it never acquired',
+                'the refused transition released a lock another holder owns',
             )
-            # failed_state is skipped while locked — object stays put.
+            # Nothing ran, so nothing was written.
             self.assert_state(widget, 'draft')
         finally:
             state.unlock()
 
     def test_failed_state_write_happens_under_the_lock(self):
-        # The write must happen while the Action itself holds the lock —
+        # The write must happen while the Transition itself holds the lock —
         # observed by reading the lock key at write time (#185).
         widget = self.create_instance(status='draft')
         real_set_state = State.set_state
@@ -178,7 +178,7 @@ class ActionScenario(ProcessScenario):
 
     def test_concurrent_transition_cannot_start_during_failed_state_write(self):
         # The #185 TOCTOU: is_locked()-then-write left a window where a
-        # concurrent Transition could acquire the lock and the Action's stale
+        # concurrent Transition could acquire the lock and the Transition's stale
         # write then clobbered that flight's state. The atomic acquire closes
         # it — a rival lock() attempt mid-write must lose.
         widget = self.create_instance(status='draft')

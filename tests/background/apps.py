@@ -23,6 +23,8 @@ class BackgroundTestsConfig(AppConfig):
             Conversation,
             ConversationProcess,
             MixedSyncBgProcess,
+            ProxyAProcess,
+            ProxyBProcess,
             ScenarioGuardProcess,
             SharedActionConversationProcess,
             Widget,
@@ -36,6 +38,8 @@ class BackgroundTestsConfig(AppConfig):
             WidgetParentProcess,
             WidgetProcess,
             WidgetProcGuardProcess,
+            WidgetProxyA,
+            WidgetProxyB,
             WidgetSyncProcess,
         )
 
@@ -64,3 +68,7 @@ class BackgroundTestsConfig(AppConfig):
         ProcessManager.bind_model_process(Widget, WidgetProcGuardProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, CascadeOuterProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, CascadeInnerProcess, state_field='status')
+        # One table, several workflows, each behind its own proxy — the
+        # proxy's accessor shadows the one Widget inherits down to it.
+        ProcessManager.bind_model_process(WidgetProxyA, ProxyAProcess, state_field='status')
+        ProcessManager.bind_model_process(WidgetProxyB, ProxyBProcess, state_field='status')

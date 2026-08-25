@@ -17,13 +17,18 @@ def set_sentry_context(transition_message) -> None:
     try:
         import sentry_sdk
 
+        # Tag the class the caller drove, not the concrete key: two
+        # workflows behind two proxies of one model must stay two Sentry
+        # issues.
+        app_label, _, model_name = (
+            transition_message.driving_model_label.partition('.'))
         scope = sentry_sdk.get_current_scope()
         scope.set_transaction_name(
-            f'django_logic.{transition_message.app_label}.'
+            f'django_logic.{app_label}.'
             f'{transition_message.transition_name}',
             source='custom')
-        scope.set_tag('dl.app', transition_message.app_label)
-        scope.set_tag('dl.model', transition_message.model_name)
+        scope.set_tag('dl.app', app_label)
+        scope.set_tag('dl.model', model_name)
         scope.set_tag('dl.transition', transition_message.transition_name)
         scope.set_tag('dl.instance_id', transition_message.instance_id)
         scope.set_tag('dl.queue', transition_message.queue_name)
