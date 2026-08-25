@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-08-25
+
+The two defects the consumer's adoption review of 0.17.0 found (#259,
+#260). Both sit in code 0.17.0 added, so the fix ships before any
+consumer runs it.
+
+### Fixed
+
+- **A database blip while the worker records a crash or timeout no
+  longer kills the loop or loses the accounting** (#259). The claim and
+  fork were guarded; the harvest's accounting write was not, and it
+  writes to the same database whose outage crashes attempts in the
+  first place. The write now cannot raise out of the worker loop: a
+  reaped attempt leaves the worker's books only when its write lands,
+  and every later pass retries a failed one. An unaccounted attempt
+  keeps occupying its slot, so a worker that cannot record outcomes
+  stops claiming new work until the database answers again. Two tests
+  pin the retry, one per verdict: a crash stays a crash and a kill
+  stays a timeout.
+- **`dl_transitions` stops promising a worker that may not exist**
+  (#260). The finalizer it points at runs inside the worker loop, so
+  the MAX_ERRORS line now says the pass comes when a worker serves the
+  row's queue, and `--send` says the next worker serving that queue
+  claims the row.
+
 ## [0.17.0] — 2026-08-24
 
 The cleanup after the pull cut (#221): the words now match the engine,
