@@ -13,7 +13,10 @@
   not see them collide, and side-effects could run twice on one row.
   The key columns now name the concrete model, the way the state lock
   has since 0.17.0. `in_flight`, `in_flight_for` and `retry_status` see
-  the row no matter which class the caller passes.
+  a row written under the new key no matter which class the caller
+  passes. The guard is now per physical row and process name: two state
+  machines on one row need distinct process names, the same rule one
+  class already has.
 - The class the caller drove is recorded on the new `proxy_model_label`
   column, and the worker restores that class — side-effects and
   callbacks receive the proxy instance, exactly as before. Rows written
@@ -25,6 +28,13 @@
   release fixes — the extra row keeps its proxy key, and the worker
   still claims and completes it; the same holds for a row an old-code
   process enqueues after the migration and before the deploy flips.
+  Such a proxy-keyed row stays outside the guard and invisible to the
+  probes until it completes, so run the migration and restart every
+  process in one deploy.
+- Operator-facing identity is unchanged: the Sentry tags, the
+  `dl_transitions` listing, the stuck-transition warning and
+  `TransitionMessage.__str__` name the class the caller drove, exactly
+  as before.
 
 ### Changed
 

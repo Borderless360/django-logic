@@ -50,6 +50,34 @@ def normalize_uncompleted_proxy_rows(apps_registry, schema_editor):
         )
 
 
+def restore_proxy_keys(apps_registry, schema_editor):
+    """Put the driving class back into the key columns, so code from
+    before this release reads its rows again after an unapply. Runs
+    before the column drops. The same clash rule as the forward pass:
+    an uncompleted row whose old key another uncompleted row now holds
+    keeps its concrete key."""
+    TransitionMessage = apps_registry.get_model(
+        'django_logic_background', 'TransitionMessage')
+    labeled = TransitionMessage.objects.exclude(proxy_model_label='')
+    for row in labeled.iterator():
+        app_label, _, model_name = row.proxy_model_label.partition('.')
+        if not row.is_completed:
+            clash = TransitionMessage.objects.filter(
+                app_label=app_label,
+                model_name=model_name,
+                instance_id=row.instance_id,
+                process_name=row.process_name,
+                is_completed=False,
+            ).exclude(pk=row.pk).exists()
+            if clash:
+                continue
+        TransitionMessage.objects.filter(pk=row.pk).update(
+            app_label=app_label,
+            model_name=model_name,
+            proxy_model_label='',
+        )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -69,7 +97,7 @@ class Migration(migrations.Migration):
         # Elidable: a fresh install has no rows to rewrite.
         migrations.RunPython(
             normalize_uncompleted_proxy_rows,
-            migrations.RunPython.noop,
+            restore_proxy_keys,
             elidable=True,
         ),
     ]

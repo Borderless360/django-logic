@@ -14,9 +14,11 @@ from django.test import TestCase, override_settings
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 
-normalize_uncompleted_proxy_rows = importlib.import_module(
+_migration_0010 = importlib.import_module(
     'django_logic.background.migrations.0010_proxy_model_label'
-).normalize_uncompleted_proxy_rows
+)
+normalize_uncompleted_proxy_rows = _migration_0010.normalize_uncompleted_proxy_rows
+restore_proxy_keys = _migration_0010.restore_proxy_keys
 from django_logic.background.runner import run_background_transition
 from django_logic.exceptions import TransitionTemporarilyUnavailable
 from django_logic.testing import open_transition_message
@@ -159,3 +161,66 @@ class NormalizeUncompletedProxyRowsTests(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.model_name, 'widgetproxya')
         self.assertEqual(row.proxy_model_label, '')
+
+    def test_the_reverse_puts_the_proxy_key_back(self):
+        row = self._proxy_keyed_row()
+        self._run()
+        from django.apps import apps
+        restore_proxy_keys(apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.model_name, 'widgetproxya')
+        self.assertEqual(row.proxy_model_label, '')
+
+    def test_the_reverse_skips_a_clash_on_the_old_key(self):
+        """An uncompleted row already holds the proxy key — the labeled
+        row keeps its concrete key instead of violating the constraint."""
+        self._proxy_keyed_row()
+        labeled = TransitionMessage.objects.create(
+            **TransitionMessage.instance_key(self.proxy_a, 'process'),
+            proxy_model_label='bg_tests.widgetproxya',
+            transition_name='fulfil_via_proxy',
+            queue_name='django_logic',
+            kwargs={},
+        )
+        from django.apps import apps
+        restore_proxy_keys(apps, None)
+        labeled.refresh_from_db()
+        self.assertEqual(labeled.model_name, 'widget')
+        self.assertEqual(labeled.proxy_model_label, 'bg_tests.widgetproxya')
+
+
+class SnapshotProxyRoundTripTests(TestCase):
+    """A snapshot replays the class production drove, no matter which
+    class the snapshot was taken through."""
+
+    def test_a_snapshot_through_the_concrete_class_keeps_the_proxy(self):
+        from django_logic.testing.snapshot import from_snapshot, snapshot
+
+        widget = Widget.objects.create(status='draft')
+        proxy_a = WidgetProxyA.objects.get(pk=widget.pk)
+        open_transition_message(
+            proxy_a, transition_name='audit_via_proxy', field_name='status')
+        data = snapshot(widget)
+        TransitionMessage.objects.all().delete()
+        widget.delete()
+
+        from_snapshot(data, model=Widget)
+        row = TransitionMessage.objects.get()
+        self.assertEqual(row.model_name, 'widget')
+        self.assertEqual(row.proxy_model_label, 'bg_tests.widgetproxya')
+
+    def test_a_legacy_snapshot_derives_the_label_from_the_instance(self):
+        from django_logic.testing.snapshot import from_snapshot, snapshot
+
+        widget = Widget.objects.create(status='draft')
+        proxy_a = WidgetProxyA.objects.get(pk=widget.pk)
+        open_transition_message(
+            proxy_a, transition_name='audit_via_proxy', field_name='status')
+        data = snapshot(proxy_a)
+        del data['transition_message']['proxy_model_label']
+        TransitionMessage.objects.all().delete()
+        widget.delete()
+
+        from_snapshot(data, model=WidgetProxyA)
+        row = TransitionMessage.objects.get()
+        self.assertEqual(row.proxy_model_label, 'bg_tests.widgetproxya')

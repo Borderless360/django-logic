@@ -73,6 +73,12 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
             data['transition_message'] = {
                 'transition_name': transition_message.transition_name,
                 'process_name': transition_message.process_name,
+                # The class the caller drove. Captured from the row, not
+                # derived from the snapshot instance: the row lookup keys
+                # on the concrete model, so a snapshot taken through
+                # another class of the same table must still replay the
+                # class production ran.
+                'proxy_model_label': transition_message.proxy_model_label,
                 'field_name': transition_message.field_name,
                 'owning_process_class': transition_message.owning_process_class,
                 'queue_name': transition_message.queue_name,
@@ -168,7 +174,11 @@ def from_snapshot(data_or_path, *, model=None):
         TransitionMessage.for_instance(instance, tm_process_name).delete()
         TransitionMessage.objects.create(
             **TransitionMessage.instance_key(instance, tm_process_name),
-            proxy_model_label=TransitionMessage.proxy_label_for(instance),
+            # The captured value wins; deriving from the snapshot instance
+            # is only for snapshots taken before the column existed.
+            proxy_model_label=tm_data.get(
+                'proxy_model_label',
+                TransitionMessage.proxy_label_for(instance)),
             # Restore the recorded field so the worker takes the same
             # recorded-field path the production row would have used
             # ('' = legacy pre-0.4 row, inference fallback).

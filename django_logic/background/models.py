@@ -9,9 +9,9 @@ a successful execution.
 The partial unique constraint ``(app_label, model_name, instance_id,
 process_name)`` where ``is_completed=False`` is the concurrency guard —
 only one uncompleted message can exist per instance *per process* at a
-time. Two processes bound to different state fields of the same model
-are independent state machines and may both have background work in
-progress.
+time. Two processes bound to different state fields of the same model,
+under distinct process names, are independent state machines and may
+both have background work in progress.
 
 The key columns name the concrete model. A proxy and the model it
 proxies are one physical row, so they must collide in the constraint
@@ -153,10 +153,18 @@ class TransitionMessage(TimeStampedModel):
             ),
         ]
 
+    @property
+    def driving_model_label(self) -> str:
+        """'app_label.modelname' of the class the caller drove: the
+        recorded proxy when there is one, else the concrete key. Restore
+        and every operator-facing line read this, so a proxy-driven row
+        keeps naming the workflow the operator knows."""
+        return self.proxy_model_label or f'{self.app_label}.{self.model_name}'
+
     def __str__(self) -> str:
         return (
             f'TransitionMessage#{self.pk} '
-            f'{self.app_label}.{self.model_name}#{self.instance_id} '
+            f'{self.driving_model_label}#{self.instance_id} '
             f'{self.transition_name} on {self.queue_name}'
         )
 
