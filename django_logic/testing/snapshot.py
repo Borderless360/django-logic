@@ -168,6 +168,7 @@ def from_snapshot(data_or_path, *, model=None):
         TransitionMessage.for_instance(instance, tm_process_name).delete()
         TransitionMessage.objects.create(
             **TransitionMessage.instance_key(instance, tm_process_name),
+            proxy_model_label=TransitionMessage.proxy_label_for(instance),
             # Restore the recorded field so the worker takes the same
             # recorded-field path the production row would have used
             # ('' = legacy pre-0.4 row, inference fallback).

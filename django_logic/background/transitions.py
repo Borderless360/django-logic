@@ -218,13 +218,6 @@ class BackgroundTransition(Transition):
         constraint fires (another uncompleted TransitionMessage exists
         for the same instance + process).
         """
-        instance_lookup = {
-            'app_label': state.instance._meta.app_label,
-            'model_name': state.instance._meta.model_name,
-            # Models use different primary-key types (int, UUID, string).
-            # Store the key as text; _restore looks it up with get(pk=...).
-            'instance_id': str(state.instance.pk),
-        }
         try:
             serialized = serialize_kwargs(kwargs)
         except KwargsSerializationError:
@@ -249,7 +242,13 @@ class BackgroundTransition(Transition):
             # misleading "another transition is already in progress".
             try:
                 transition_message = TransitionMessage.objects.create(
-                    process_name=state.process_name,
+                    # The key columns name the concrete model; the class
+                    # the caller drove is recorded on proxy_model_label
+                    # so the worker restores that class.
+                    **TransitionMessage.instance_key(
+                        state.instance, state.process_name),
+                    proxy_model_label=TransitionMessage.proxy_label_for(
+                        state.instance),
                     # Recorded so the worker can reconstruct the process
                     # from the stored process_class even when the model
                     # property was renamed or rebound in between.
@@ -267,7 +266,6 @@ class BackgroundTransition(Transition):
                     queue_name=queue_name,
                     timeout_seconds=self.timeout,
                     kwargs=serialized,
-                    **instance_lookup,
                 )
             except IntegrityError as exc:
                 raise AlreadyInProgress(

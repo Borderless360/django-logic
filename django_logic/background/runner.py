@@ -778,13 +778,18 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
 
 def _restore(transition_message: TransitionMessage):
     """Resolve ``(instance, process, transition)`` from a TransitionMessage row."""
+    # The key columns name the concrete model; proxy_model_label names the
+    # class the caller drove. Restore that class, so proxy methods and
+    # overrides stay visible to side-effects and callbacks. Rows written
+    # before the column existed record the driving class in model_name.
+    recorded_model = (
+        transition_message.proxy_model_label
+        or f'{transition_message.app_label}.{transition_message.model_name}'
+    )
     try:
-        app = apps.get_app_config(transition_message.app_label)
-        model = app.get_model(transition_message.model_name)
+        model = apps.get_model(recorded_model)
     except LookupError as exc:
-        raise _RestoreError(
-            f'model {transition_message.app_label}.{transition_message.model_name} not installed'
-        ) from exc
+        raise _RestoreError(f'model {recorded_model} not installed') from exc
 
     try:
         # _base_manager, not objects. A filtered default manager, such as one

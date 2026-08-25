@@ -1094,3 +1094,67 @@ class CascadeOuterProcess(Process):
                    callbacks=[cascade_outer_cb],
                    failure_callbacks=[cascade_outer_fcb]),
     ]
+
+
+# Several processes bound to one table through proxy models — the shape a
+# consumer uses to run distinct workflows over one physical row. The row
+# key must name the concrete model, so two enqueues on one row collide in
+# the uncompleted-row constraint no matter which class the caller drove.
+
+
+class WidgetProxyA(Widget):
+    class Meta:
+        proxy = True
+        app_label = 'bg_tests'
+
+    def proxy_marker(self) -> str:
+        return 'a'
+
+
+class WidgetProxyB(Widget):
+    class Meta:
+        proxy = True
+        app_label = 'bg_tests'
+
+
+def bg_record_class(instance, **kwargs):
+    """Record the class the worker handed to the side-effect."""
+    instance.se_log = (instance.se_log or '') + type(instance).__name__ + ','
+    instance.save(update_fields=['se_log'])
+
+
+class ProxyAProcess(Process):
+    process_name = 'process'
+    transitions = [
+        BackgroundAction(
+            action_name='audit_via_proxy',
+            sources=['draft'],
+            failed_state='proxy_audit_failed',
+            side_effects=[bg_record_class],
+        ),
+        BackgroundTransition(
+            action_name='fulfil_via_proxy',
+            sources=['draft'],
+            target='proxy_fulfilled',
+            in_progress_state='proxy_fulfilling',
+            failed_state='proxy_fulfilment_failed',
+            side_effects=[bg_record_class],
+        ),
+    ]
+
+
+class ProxyBProcess(Process):
+    process_name = 'process'
+    transitions = [
+        BackgroundAction(
+            action_name='audit_via_proxy',
+            sources=['draft'],
+            failed_state='proxy_audit_failed',
+            side_effects=[bg_record_class],
+        ),
+        Transition(
+            action_name='touch',
+            sources=['draft'],
+            target='touched',
+        ),
+    ]

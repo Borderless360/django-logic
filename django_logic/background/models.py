@@ -12,6 +12,12 @@ only one uncompleted message can exist per instance *per process* at a
 time. Two processes bound to different state fields of the same model
 are independent state machines and may both have background work in
 progress.
+
+The key columns name the concrete model. A proxy and the model it
+proxies are one physical row, so they must collide in the constraint
+the way they already share one state lock. The class the caller drove
+the transition through is recorded separately, on
+``proxy_model_label``, and restore instantiates that class.
 """
 from __future__ import annotations
 
@@ -88,6 +94,12 @@ class TransitionMessage(TimeStampedModel):
     # default managers), which coerces the string back to the model's
     # real pk type.
     instance_id = models.CharField(max_length=255)
+    # 'app_label.modelname' of the proxy class the caller drove the
+    # transition through. Blank when the caller drove the concrete model.
+    # The key columns above always name the concrete model, so this is
+    # what lets the worker restore the class the caller used — proxy
+    # methods and overrides stay visible to side-effects and callbacks.
+    proxy_model_label = models.CharField(max_length=201, blank=True, default='')
     process_name = models.CharField(max_length=100)
     # The model field the process is bound to. Lets the worker reconstruct
     # the process from the recorded ``process_class`` without guessing
@@ -151,13 +163,26 @@ class TransitionMessage(TimeStampedModel):
     @classmethod
     def instance_key(cls, instance, process_name: str) -> dict:
         """The instance + process keying, written in one place so a future
-        change to it changes once."""
+        change to it changes once.
+
+        Keyed on the concrete model: a proxy and the model it proxies
+        write and read one row here, so two enqueues on one physical row
+        collide in the uncompleted-row constraint no matter which class
+        the caller drove.
+        """
+        concrete = instance._meta.concrete_model._meta
         return {
-            'app_label': instance._meta.app_label,
-            'model_name': instance._meta.model_name,
+            'app_label': concrete.app_label,
+            'model_name': concrete.model_name,
             'instance_id': str(instance.pk),
             'process_name': process_name,
         }
+
+    @classmethod
+    def proxy_label_for(cls, instance) -> str:
+        """Value for ``proxy_model_label``: the driving class's
+        'app_label.modelname' when it is a proxy, else blank."""
+        return instance._meta.label_lower if instance._meta.proxy else ''
 
     @classmethod
     def for_instance(cls, instance, process_name: str):
