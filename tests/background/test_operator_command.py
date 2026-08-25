@@ -54,7 +54,9 @@ class ListUncompletedTests(TestCase):
 
     def test_a_row_at_max_errors_names_the_finalizer(self):
         self._row(errors_count=3, last_error_dt=timezone.now())
-        self.assertIn('at MAX_ERRORS (3)', self._listing())
+        listing = self._listing()
+        self.assertIn('at MAX_ERRORS (3)', listing)
+        self.assertIn("once a worker serves 'django_logic.critical'", listing)
 
     def test_a_row_inside_its_retry_pause_says_so(self):
         self._row(errors_count=1, last_error_dt=timezone.now(),
@@ -100,11 +102,14 @@ class SendOneRowTests(TestCase):
 
     def test_send_clears_the_retry_wait(self):
         row = self._row(errors_count=1, last_error_dt=timezone.now())
-        call_command('dl_transitions', send=row.pk, stdout=StringIO())
+        out = StringIO()
+        call_command('dl_transitions', send=row.pk, stdout=out)
         row.refresh_from_db()
         self.assertIsNone(row.last_error_dt)
         # The attempt count is untouched: MAX_ERRORS still bounds it.
         self.assertEqual(row.errors_count, 1)
+        # The claim is promised only once a worker serves the queue.
+        self.assertIn("once one serves 'django_logic'", out.getvalue())
 
     def test_send_refuses_a_completed_row(self):
         row = self._row(is_completed=True)

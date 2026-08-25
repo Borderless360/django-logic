@@ -77,7 +77,8 @@ class Command(BaseCommand):
         if row.errors_count >= max_errors:
             return (
                 f'at MAX_ERRORS ({max_errors}) — the stuck finalizer ends it '
-                f'in its failed_state on its next pass'
+                f'in its failed_state on its next pass, once a worker serves '
+                f'{row.queue_name!r}'
             )
         if row.pk not in claimable:
             return (
@@ -117,5 +118,6 @@ class Command(BaseCommand):
         notify_workers()
         self.stdout.write(
             f'TransitionMessage#{pk}: the retry wait is cleared and the '
-            f'workers are notified. A worker claims it next.'
+            f'workers are notified. A worker claims it next, once one '
+            f'serves {row.queue_name!r}.'
         )
