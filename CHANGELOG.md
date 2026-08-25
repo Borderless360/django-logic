@@ -11,8 +11,8 @@
   instance-first parameter fails at bind time. A caller-passed
   `request` or `user_id`, and non-string dict keys, fail at enqueue
   with `KwargsSerializationError`. The engine's own chain hop still
-  strips `request` before a background follow-up — `request` stays
-  legal on the synchronous transition that chains. The
+  strips `request` and `user_id` before a background follow-up — both
+  stay legal on the synchronous transition that chains. The
   `django_logic.W001` check is retired with the lenient mode: a machine
   with a bad hook never binds, so there is nothing left to report.
 - **`LEGACY_EXCEPTION_BASE`.** The fork-migration bridge that mixed a
@@ -70,12 +70,15 @@
   so two enqueues on one physical row through two proxy classes wrote
   two uncompleted rows, the one-uncompleted-per-process constraint did
   not see them collide, and side-effects could run twice on one row.
-  The key columns now name the concrete model, the way the state lock
-  has since 0.17.0. `in_flight`, `in_flight_for` and `retry_status` see
-  a row written under the new key no matter which class the caller
-  passes. The guard is now per physical row and process name: two state
-  machines on one row need distinct process names, the same rule one
-  class already has.
+  The key columns now name the concrete model: every proxy of one model
+  shares one key. A child in multi-table inheritance is its own
+  concrete model and keeps its own key, so the guard still splits there;
+  the state lock keys on the table that declares the field and does not
+  (#268 records the gap). `in_flight`, `in_flight_for` and
+  `retry_status` see a row written under the new key no matter which
+  proxy the caller passes. The guard is per concrete-model row and
+  process name: two state machines on one row need distinct process
+  names, the same rule one class already has.
 - The class the caller drove is recorded on the new `proxy_model_label`
   column, and the worker restores that class — side-effects and
   callbacks receive the proxy instance, exactly as before. Rows written
