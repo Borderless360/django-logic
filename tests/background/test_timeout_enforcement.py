@@ -199,6 +199,8 @@ class HarvestTests(TransactionTestCase):
 
         self.assertEqual(len(self.recorded()), 1)
         self.assertIn('[timeout]', self.recorded()[0])
+        # The timeout is charged to the hanging attempt's own row.
+        self.assertEqual(self.record.call_args_list[0].args[0], 1)
 
     def test_a_failed_write_retries_while_a_sibling_still_runs(self):
         """A sibling with no budget must not defer the retry of a failed
