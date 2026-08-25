@@ -1,11 +1,11 @@
-"""kwargs serialization: typed round-trip, loud request drop, user_id swap."""
+"""kwargs serialization: typed round-trip, request refusal, user_id swap."""
 import json
 from datetime import date, datetime, time, timezone as tz
 from decimal import Decimal
 from unittest.mock import Mock
 from uuid import UUID
 
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase
 
 from django_logic.background.serializers import (
     decode_value, deserialize_kwargs, restore_user, serialize_kwargs,

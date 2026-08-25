@@ -411,7 +411,7 @@ class EnqueuePostInsertRecheckTests(TransactionTestCase):
                 with self.assertRaises(TransitionTemporarilyUnavailable) as ctx:
                     self.widget.process.fulfil()
 
-        self.assertIsInstance(ctx.exception, TransitionTemporarilyUnavailable)
+        self.assertIn('no longer one of the source states', str(ctx.exception))
 
     def test_retry_from_in_progress_still_admitted(self):
         # The recovery path must keep working: an instance stranded in the

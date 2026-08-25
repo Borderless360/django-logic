@@ -444,8 +444,7 @@ def _validate_hook_signatures(process_cls) -> None:
 def collect_hook_signature_offenders(process_cls) -> list:
     """Every hook across ``process_cls``'s tree whose first parameter is not
     a named positional, as ``module.qualname (on Owner[.action])`` strings.
-    Pure collection — enforcement lives in bind-time validation and the
-    ``django_logic`` system check.
+    Pure collection — bind-time validation enforces.
     """
     offenders = []
 

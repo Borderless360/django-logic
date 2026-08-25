@@ -182,8 +182,6 @@ class Transition:
             )
         # Only SideEffects dereferences its transition (to drive
         # complete/fail); the other command bundles never read it.
-        # Built through class attributes like the other four, so all five
-        # bundles are swappable.
         self.failure_callbacks = Callbacks(
             kwargs.get('failure_callbacks', [])
         )

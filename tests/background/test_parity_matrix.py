@@ -283,7 +283,13 @@ class ParityMatrixTests(TestCase):
         for parent in CHAIN_PARENTS:
             HOP_SEEN.clear()
             widget = self._fresh()
-            _drive(widget, parent, user=self.user, **dict(TYPED_KWARGS))
+            kwargs = dict(TYPED_KWARGS)
+            if parent.startswith('sync'):
+                # request is legal on a synchronous parent; the engine
+                # strips it before the background hop. A background
+                # parent refuses it at its own enqueue, so it gets none.
+                kwargs['request'] = object()
+            _drive(widget, parent, user=self.user, **kwargs)
             widget.refresh_from_db()
             self.assertEqual(widget.status, 'chained', parent)
             hop_kwargs = {k: v for k, v in HOP_SEEN.items()

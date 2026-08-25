@@ -44,7 +44,6 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
-from django_logic import conf
 from django_logic.logger import transition_logger
 
 
@@ -215,7 +214,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
     # be silently consumed: restore_user popped it and replaced it with a
     # live ``user``, so the hook never saw the value — and the same call ran
     # correctly in sync mode, a parity break that only showed up in
-    # production. Treated like ``request``: reserved, dropped loudly.
+    # production. Treated like ``request``: reserved, refused.
     if 'user_id' in out:
         raise KwargsSerializationError(
             f"{out.get('tr_id')} 'user_id' cannot be passed to a background "

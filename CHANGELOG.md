@@ -62,9 +62,6 @@
     no-target transition holds the lock through its side-effects, so a
     foreign lock refuses it up front and its `failed_state` write runs
     under its own lock.
-- The `STRICT_HOOK_SIGNATURES` and `STRICT_KWARGS_SERIALIZATION`
-  defaults do **not** flip in this release. Their gate is unchanged:
-  the consumer's suite must run against the new behavior first.
 
 ### Fixed
 

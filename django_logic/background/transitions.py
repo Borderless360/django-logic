@@ -228,7 +228,7 @@ class BackgroundTransition(Transition):
         try:
             serialized = serialize_kwargs(kwargs)
         except KwargsSerializationError:
-            # Re-raise so the precise strict-mode message is not wrapped
+            # Re-raise so the precise refusal message is not wrapped
             # as "not JSON-serializable".
             raise
         except TypeError as e:

@@ -67,4 +67,6 @@ class BindingsRegistryTests(SimpleTestCase):
 
     def test_no_findings_for_clean_bindings(self):
         ProcessManager.bind_model_process(Invoice, _CleanProcess, state_field='status')
-        self.assertEqual([f for f in run_checks() if f.id == 'django_logic.W001'], [])
+        self.assertEqual(
+            [f for f in run_checks()
+             if str(f.id).startswith('django_logic.')], [])

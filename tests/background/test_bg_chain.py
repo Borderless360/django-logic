@@ -246,6 +246,16 @@ class SyncToBackgroundRequestChainTests(TestCase):
         self.assertEqual(self.widget.status, 'done')
         self.assertNotIn('request', _CHAIN_SEEN)
 
+    def test_background_follow_up_runs_despite_user_id(self):
+        # user_id is refused at a direct enqueue (it is the engine's wire
+        # form for user), but it is ordinary data on the synchronous
+        # transition that chains — so the hop strips it the same way it
+        # strips request, instead of silently killing the chain.
+        self.widget.request_chain_process.kick(user_id=42)
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'done')
+        self.assertNotIn('user_id', _CHAIN_SEEN)
+
     def test_sync_follow_up_still_receives_request(self):
         sentinel = object()
         self.widget.request_chain_process.kick_sync(request=sentinel)

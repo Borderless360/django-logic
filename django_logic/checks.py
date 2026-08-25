@@ -1,8 +1,7 @@
 """Django system checks for django-logic.
 
 Hook-signature validation raises at bind time since 1.0.0, so the old
-``django_logic.W001`` re-report is retired: a machine with a bad hook
-never binds.
+re-report check is retired: a machine with a bad hook never binds.
 """
 from django.core import checks
 
