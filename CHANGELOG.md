@@ -2,8 +2,40 @@
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-25
+
+### Fixed
+
+- **A proxy and the model it proxies now share one durable row key**
+  (#258). `TransitionMessage` keyed rows on the class the caller drove,
+  so two enqueues on one physical row through two proxy classes wrote
+  two uncompleted rows, the one-uncompleted-per-process constraint did
+  not see them collide, and side-effects could run twice on one row.
+  The key columns now name the concrete model, the way the state lock
+  has since 0.17.0. `in_flight`, `in_flight_for` and `retry_status` see
+  the row no matter which class the caller passes.
+- The class the caller drove is recorded on the new `proxy_model_label`
+  column, and the worker restores that class — side-effects and
+  callbacks receive the proxy instance, exactly as before. Rows written
+  before this release carry the driving class in `model_name`, and the
+  worker reads them exactly as before.
+- Migration `0010` adds the column and rewrites uncompleted rows keyed
+  on a proxy name. Completed rows keep their historical key. Where two
+  uncompleted rows already exist for one physical row — the defect this
+  release fixes — the extra row keeps its proxy key, and the worker
+  still claims and completes it; the same holds for a row an old-code
+  process enqueues after the migration and before the deploy flips.
+
 ### Changed
 
+- **Fresh installs run one migration, not ten** (#233).
+  `0001_squashed_0010_proxy_model_label` replaces the ten migration
+  files on a new database. An existing install keeps using the
+  originals — Django applies the ones it is missing and records the
+  squash as applied, with no schema change. Rehearsed both ways on
+  PostgreSQL: the two paths produce byte-identical schemas. The
+  original files stay in the package until every install has applied
+  the squash.
 - **One `INSTALLED_APPS` entry** (#242). The documented install is
   `'django_logic.background'` alone. That entry always owned the
   `TransitionMessage` table and its migrations, the `dl_worker` and
