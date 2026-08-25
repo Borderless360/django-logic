@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **One `INSTALLED_APPS` entry** (#242). The documented install is
+  `'django_logic.background'` alone. That entry always owned the
+  `TransitionMessage` table and its migrations, the `dl_worker` and
+  `dl_transitions` commands, and every system check, and its boot gate
+  is a strict superset of the base app's — the second entry was never
+  load-bearing. The consumer has run this shape in production for
+  months.
+- No code changed, no migration ran, and no app label or table name
+  moved. An install that keeps `'django_logic'` boots and behaves
+  identically, so delete that line whenever you like.
+- `'django_logic'` alone stays the sync-only shape — also one entry, and
+  the one to keep if you run no background transitions. It has no table,
+  no worker, and no boot check on the database or the cache.
+- The test suite now runs the documented shape. It installed both
+  entries, so 596 tests exercised a configuration no consumer had.
+- This does **not** fold `TransitionMessage` into the `django_logic` app
+  and does **not** squash the nine migrations (#233). Folding would move
+  the app label, which is the address of the live table and of every
+  row in `django_migrations`, to make one settings line prettier.
+
 ## [0.17.2] — 2026-08-25
 
 ### Fixed

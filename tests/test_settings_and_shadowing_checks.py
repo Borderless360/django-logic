@@ -127,6 +127,7 @@ class NonDictSettingsBlockTests(SimpleTestCase):
                 bg_settings.background_execution()
         self.assertIn('DJANGO_LOGIC must be a dict', str(ctx.exception))
 
+    @modify_settings(INSTALLED_APPS={'append': 'django_logic'})
     def test_both_ready_hooks_fail_with_the_setting_named(self):
         for label in ('django_logic', 'django_logic_background'):
             with self.subTest(app=label):
