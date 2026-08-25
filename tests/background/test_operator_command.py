@@ -56,7 +56,8 @@ class ListUncompletedTests(TestCase):
         self._row(errors_count=3, last_error_dt=timezone.now())
         listing = self._listing()
         self.assertIn('at MAX_ERRORS (3)', listing)
-        self.assertIn("once a worker serves 'django_logic.critical'", listing)
+        # The finalizer runs in every worker loop, whatever its queues.
+        self.assertIn('on the next pass of any running worker', listing)
 
     def test_a_row_inside_its_retry_pause_says_so(self):
         self._row(errors_count=1, last_error_dt=timezone.now(),

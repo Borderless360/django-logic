@@ -77,8 +77,7 @@ class Command(BaseCommand):
         if row.errors_count >= max_errors:
             return (
                 f'at MAX_ERRORS ({max_errors}) — the stuck finalizer ends it '
-                f'in its failed_state on its next pass, once a worker serves '
-                f'{row.queue_name!r}'
+                f'in its failed_state on the next pass of any running worker'
             )
         if row.pk not in claimable:
             return (
