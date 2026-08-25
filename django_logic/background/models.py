@@ -1,8 +1,7 @@
 """TransitionMessage — the durable record of an in-progress transition.
 
-Every ``BackgroundTransition`` / ``BackgroundAction`` creates one row
-when it enqueues, atomically with the ``in_progress_state`` write on the
-target instance. The worker reads the row under
+Every ``BackgroundTransition`` creates one row when it enqueues,
+atomically with the ``in_progress_state`` write on the target instance. The worker reads the row under
 ``select_for_update(nowait=True)`` and marks it completed at the end of
 a successful execution.
 
@@ -200,8 +199,7 @@ class TransitionMessage(TimeStampedModel):
     @classmethod
     def in_flight_for(cls, instance, process_name: str):
         """The uncompleted rows for ``instance`` + ``process_name``. The
-        sync gate, the Action failure path, and the public ``in_flight()``
-        probe all read through it."""
+        sync gate and the public ``in_flight()`` probe read through it."""
         return cls.for_instance(instance, process_name).filter(is_completed=False)
 
     RETRYING = 'retrying'

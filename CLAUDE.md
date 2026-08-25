@@ -90,8 +90,13 @@ import the model at the top level. Then drive it via
 module top or in another app's `ready()`).
 
 Use `BackgroundTransition` (durable, runs side-effects on a worker process,
-writes target/`failed_state`) or `BackgroundAction` (same durability, no state
-change on success) for anything slow, external, or retriable.
+writes target/`failed_state`) for anything slow, external, or retriable.
+Declared with `target=None`, it changes no state on success — same
+durability, same rules. Since 0.18.0 there is one transition contract:
+every declaration takes the state lock, waits while a background
+transition is uncompleted, and runs `next_transition`; the old `Action`
+and `BackgroundAction` classes are gone. A side-effect that must not
+wait for that contract belongs in a plain method, never in the process.
 
 **Declarations are specifications.** Write every process and its transitions
 out in full — explicit `sources`, `target`, `conditions`, `side_effects`,
@@ -126,7 +131,8 @@ never `getattr(process, action_name)` with the name held in a variable.
 4. **Set a `failed_state`** so failures are contained. `in_progress_state`
    is **background-only** (0.12.0): on a `BackgroundTransition` it is written
    in the same transaction as the `TransitionMessage` row; declaring it on a
-   synchronous `Transition`/`Action` raises at class creation. It may be shared
+   synchronous `Transition`, or on any transition with no target, raises at
+   class creation. It may be shared
    freely — every marked instance carries its exact transition on the row, so
    recovery never guesses which transition it belongs to (the old
    `django_logic.E001` check is retired). A synchronous "busy" step is a real
@@ -144,9 +150,7 @@ never `getattr(process, action_name)` with the name held in a variable.
    instance+process raises `TransitionTemporarilyUnavailable` (both subclass
    `TransitionNotAllowed`; catch the transient type first to answer
    "retry shortly") — design flows so follow-up work chains from terminal
-   hooks, not while another transition is still running. A failing `Action`'s
-   `failed_state` write is skipped while the row is uncompleted: the worker
-   owns the state field.
+   hooks, not while another transition is still running.
 7. **Manual state fixes win.** If an instance is moved externally while a
    background row is pending, the worker completes the row as *superseded*
    (`'[superseded]'` in `last_error_message`) and skips side-effects. This is

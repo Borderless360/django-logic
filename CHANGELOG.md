@@ -4,6 +4,33 @@
 
 ## [0.18.0] — 2026-08-25
 
+### Removed
+
+- **`Action` and `BackgroundAction`** (#243). One transition contract
+  remains: every declaration takes the state lock, waits while a
+  background transition is uncompleted on the same instance and
+  process, and runs `next_transition`. `target=None` (the default)
+  declares a transition that writes no state on success. Importing the
+  removed names raises `ImportError` with this migration:
+  - `BackgroundAction(...)` → `BackgroundTransition(...)` with no
+    `target`. The behavior is identical.
+  - `Action(...)` → `Transition(...)` with no `target`. Behavior
+    changes: the old `Action` took no lock, ran while a background
+    transition was uncompleted, and ignored `next_transition`. Review
+    each declaration — a side-effect that must not wait for the
+    contract belongs in a plain method on the model, not in the
+    process.
+  - A transition with no target rejects `in_progress_state` at class
+    creation: success writes no state, so nothing would move the
+    instance out of it.
+  - The old `Action` failure path's special cases are gone with it: a
+    no-target transition holds the lock through its side-effects, so a
+    foreign lock refuses it up front and its `failed_state` write runs
+    under its own lock.
+- The `STRICT_HOOK_SIGNATURES` and `STRICT_KWARGS_SERIALIZATION`
+  defaults do **not** flip in this release. Their gate is unchanged:
+  the consumer's suite must run against the new behavior first.
+
 ### Fixed
 
 - **A proxy and the model it proxies now share one durable row key**

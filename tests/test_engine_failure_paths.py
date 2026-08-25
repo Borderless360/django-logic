@@ -12,7 +12,7 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from django_logic import Action, Process, ProcessManager, Transition
+from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage, db_safe_text
@@ -207,7 +207,7 @@ class ReservedKwargProcess(Process):
             failed_state='rk_failed',
             side_effects=[_boom],
         ),
-        Action('act', sources=['draft'], side_effects=[_boom]),
+        Transition('act', sources=['draft'], side_effects=[_boom]),
         BackgroundTransition(
             'bg', sources=['draft'], target='done',
             in_progress_state='rk_bg_running', failed_state='rk_bg_failed',

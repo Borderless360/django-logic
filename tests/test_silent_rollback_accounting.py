@@ -7,7 +7,7 @@ nothing, so an attempt that lost all its writes looks like a success.
 
 A ``BackgroundTransition`` escapes this by luck: its target ``set_state`` is
 the last statement in the attempt, so it hits the flagged connection and
-raises ``TransactionManagementError``. A ``BackgroundAction`` writes no state,
+raises ``TransactionManagementError``. A ``BackgroundTransition`` writes no state,
 so nothing runs after the caught error and the row completed with
 ``errors_count=0`` and success callbacks over discarded work.
 """
@@ -16,8 +16,8 @@ from django.db import IntegrityError, transaction
 from django.db.models.signals import post_init
 from django.test import TestCase, override_settings
 
-from django_logic import Action, Process, ProcessManager, Transition
-from django_logic.background import BackgroundAction, BackgroundTransition
+from django_logic import Process, ProcessManager, Transition
+from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
 from django_logic.commands import _SilentRollback
 from tests.models import Invoice
@@ -57,7 +57,7 @@ def _record_callback(instance, **kwargs):
 class SuppressedErrorProcess(Process):
     process_name = 'suppressed_error_proc'
     transitions = [
-        BackgroundAction(
+        BackgroundTransition(
             'sync_out', sources=['draft'], failed_state='failed',
             side_effects=[_work_then_suppress_db_error],
             callbacks=[_record_callback],
@@ -68,7 +68,7 @@ class SuppressedErrorProcess(Process):
 class CorrectlyNestedProcess(Process):
     process_name = 'correctly_nested_proc'
     transitions = [
-        BackgroundAction(
+        BackgroundTransition(
             'sync_out', sources=['draft'], failed_state='failed',
             side_effects=[_work_then_suppress_db_error_correctly],
             callbacks=[_record_callback],
@@ -256,7 +256,7 @@ class SyncFailDiscardProcess(Process):
 class ActionWriteDiscardProcess(Process):
     process_name = 'action_write_discard_proc'
     transitions = [
-        Action('go', sources=['draft'], failed_state='failed',
+        Transition('go', sources=['draft'], failed_state='failed',
                side_effects=[_fail_attempt]),
     ]
 

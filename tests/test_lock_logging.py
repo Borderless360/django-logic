@@ -11,7 +11,7 @@ instance findable with a per-instance log filter.
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 
-from django_logic import Action, Process, ProcessManager, Transition
+from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import TransitionEventType
@@ -32,7 +32,7 @@ class LockLoggingProcess(Process):
     process_name = 'lock_logging_proc'
     transitions = [
         Transition('go', sources=['draft'], target='done'),
-        Action('act_fail', sources=['draft'], failed_state='ll_act_failed',
+        Transition('act_fail', sources=['draft'], failed_state='ll_act_failed',
                side_effects=[_boom]),
         BackgroundTransition(
             'bg', sources=['draft'], target='done',
@@ -124,7 +124,7 @@ class LifecycleLinesCarryInstanceKeyTests(TestCase):
                 for line in per_instance), logs.output)
 
     def test_action_failed_state_write_lock_and_unlock_name_the_instance(self):
-        # The Action's write-scoped lock (#185) is the engine's newest
+        # The Transition's write-scoped lock (#185) is the engine's newest
         # acquisition — without these lines a crash inside the write window
         # would be unattributable, the exact #188 blind spot.
         inv = Invoice.objects.create(status='draft')

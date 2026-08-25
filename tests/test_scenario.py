@@ -1,7 +1,7 @@
 """Covers the scenario testing framework (`django_logic.testing`).
 
 Every surface runs here with no broker: synchronous transitions, the background
-success, failure, retry and terminal paths, BackgroundAction, availability under
+success, failure, retry and terminal paths, BackgroundTransition, availability under
 conditions and permissions, hook tracking, snapshot and replay, and the failure
 timeline. ScenarioGuardProcess is bound under the name `guard` in
 tests/background/apps.py, so this module adds no migration.

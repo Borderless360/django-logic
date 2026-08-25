@@ -10,7 +10,7 @@ The mutex is scoped to one instance plus one process:
   ``TransitionNotAllowed("State is locked")`` and creates no row.
 * ``BackgroundTransition.change_state`` releases the lock in a finally, on
   rejection and on success alike.
-* A plain ``Action`` is not gated on its success path: it changes no state,
+* A plain ``Transition`` is not gated on its success path: it changes no state,
   takes no lock, and ignores background work in progress. Its failure path is
   the exception — while an uncompleted row exists the worker owns the state
   field, so the ``failed_state`` write is skipped.
@@ -26,7 +26,7 @@ from django.test import (
 )
 from django.utils import timezone
 
-from django_logic import Action
+from django_logic import Transition
 from django_logic.background import in_flight, sync_execution
 from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
 from django_logic.background.models import TransitionMessage
@@ -103,21 +103,24 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'cancelled')
 
-    def test_sync_action_is_not_gated_by_uncompleted_row(self):
-        # A plain Action changes no state and takes no lock, so it runs even
-        # while background work is in progress on the same instance + process.
+    def test_a_no_target_transition_is_gated_by_an_uncompleted_row(self):
+        # A transition with no target runs under the same contract as
+        # every other transition: while background work is uncompleted on
+        # the same instance + process, it refuses before its side-effects
+        # run.
         _make_row(self.widget)
         ran = []
 
         def poke_side_effect(instance, **kwargs):
             ran.append(instance.pk)
 
-        action = Action('poke', sources=['draft'], side_effects=[poke_side_effect])
-        action.change_state(State(self.widget, 'status', 'process'))
+        action = Transition('poke', sources=['draft'], side_effects=[poke_side_effect])
+        with self.assertRaises(TransitionTemporarilyUnavailable):
+            action.change_state(State(self.widget, 'status', 'process'))
 
-        self.assertEqual(ran, [self.widget.pk])
+        self.assertEqual(ran, [])
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'draft')  # Actions never move state
+        self.assertEqual(self.widget.status, 'draft')
         self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
     def test_gate_raises_the_transient_type(self):
@@ -218,7 +221,7 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
     def test_public_in_flight_probe_reads_the_row(self):
         # in_flight() is the documented probe for consumer API seams. One
-        # shared queryset backs it, the synchronous gate, and the Action
+        # shared queryset backs it, the synchronous gate, and the Transition
         # failure path.
         self.assertFalse(in_flight(self.widget, 'process'))
 
@@ -241,11 +244,12 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
         self.assertFalse(in_flight(self.widget, 'process'))
 
-    def test_probe_failure_keeps_the_original_exception_and_runs_hooks(self):
-        # The side-effect that failed may have left the connection needing a
-        # rollback, so the probe itself raises TransactionManagementError. That
-        # error must not replace the original one, and both failure hook
-        # bundles must still run.
+    def test_a_poisoned_connection_keeps_the_original_exception_and_runs_hooks(self):
+        # The side-effect that failed may leave the connection needing a
+        # rollback, so the savepointed failed_state write fails too. That
+        # must not replace the original exception, the failure hooks must
+        # still run, and the lock must not leak — for a no-target
+        # transition exactly as for any other.
         widget = Widget.objects.create()
         hooks = []
 
@@ -257,51 +261,20 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         def record_fcb(instance, exception, **kwargs):
             hooks.append('failure_callbacks')
 
-        action = Action(
+        action = Transition(
             'poke_fail', sources=['draft'], failed_state='poke_failed',
             side_effects=[insert_duplicate_then_fail],
             failure_callbacks=[record_fcb],
         )
         state = State(widget, 'status', 'process')
 
-        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
-            with self.assertRaises(IntegrityError):
-                # SideEffects.execute routes the failure into fail_transition
-                # itself before it re-raises.
-                action.change_state(state)
+        with self.assertRaises(IntegrityError):
+            # SideEffects.execute routes the failure into fail_transition
+            # itself before it re-raises.
+            action.change_state(state)
 
         self.assertEqual(hooks, ['failure_callbacks'])
         self.assertFalse(state.is_locked())
-        self.assertIn('could not probe', '\n'.join(logs.output))
-
-    def test_failing_action_skips_failed_state_write_while_row_uncompleted(self):
-        # The cache lock is free while the row waits for the worker, so the
-        # Action acquires it. The uncompleted row still owns the state field:
-        # writing failed_state over the in_progress_state would supersede the
-        # background work, or be overwritten by its target write. The write is
-        # skipped and the failure stays visible.
-        _make_row(self.widget)
-
-        def boom(instance, **kwargs):
-            raise ValueError('boom')
-
-        action = Action('poke_fail', sources=['draft'],
-                        failed_state='poke_failed', side_effects=[boom])
-        state = State(self.widget, 'status', 'process')
-
-        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
-            with self.assertRaises(ValueError):
-                # SideEffects.execute routes the failure into fail_transition
-                # itself before it re-raises.
-                action.change_state(state)
-
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'draft')  # write skipped
-        self.assertFalse(state.is_locked())            # no lock leaked
-        self.assertIn(
-            'uncompleted TransitionMessage owns the state field',
-            '\n'.join(logs.output),
-        )
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

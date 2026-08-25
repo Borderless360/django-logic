@@ -1,11 +1,11 @@
-"""BackgroundTransition / BackgroundAction — durable, queue-routed background work.
+"""BackgroundTransition — durable, queue-routed background work.
 
 ``change_state`` enqueues the work (same steps in Pull and Sync mode):
 
 * validate conditions + permissions,
 * acquire the state lock for the critical section and revalidate the
   persisted state under it,
-* atomically write ``in_progress_state`` (for ``BackgroundTransition``)
+* atomically write ``in_progress_state`` (when declared)
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
   row is what gates concurrent transitions,
@@ -39,7 +39,11 @@ from django_logic.transition import Transition, _refuse_engine_param_kwargs
 
 
 class BackgroundTransition(Transition):
-    """State-changing transition that runs its side-effects on a worker process.
+    """Transition that runs its side-effects on a worker process.
+
+    ``target=None`` declares a background transition that writes no
+    state on success — same durability, same lock, same one-uncompleted-
+    row gate, same chaining; the worker just skips the target write.
 
     Optional:
         - ``queue`` — the queue name this transition's row carries.
@@ -72,7 +76,7 @@ class BackgroundTransition(Transition):
         self,
         action_name: str,
         sources: list,
-        target: str,
+        target: str | None = None,
         *,
         queue: str | None = None,
         timeout: int | None = None,
@@ -309,39 +313,3 @@ class BackgroundTransition(Transition):
             f'created (queue={queue_name})'
         )
         return transition_message
-
-
-class BackgroundAction(BackgroundTransition):
-    """Background-executed action — runs side-effects with no state change.
-
-    Same durability contract as :class:`BackgroundTransition`. The only
-    differences:
-
-    * ``target`` is always empty (no state write on success),
-    * ``in_progress_state`` is not meaningful and is rejected at
-      construction time,
-    * failure at ``MAX_ERRORS`` optionally writes ``failed_state``.
-    """
-
-    def __init__(
-        self, action_name: str, sources: list, *, queue: str | None = None, **kwargs
-    ):
-        if kwargs.get('in_progress_state'):
-            raise ImproperlyConfigured(
-                f"BackgroundAction '{action_name}' cannot declare "
-                f"in_progress_state — actions do not change state on "
-                f"success. Use BackgroundTransition if you need to mark "
-                f"in-progress."
-            )
-        # target='' is the sentinel for "no state change".
-        super().__init__(
-            action_name=action_name,
-            sources=sources,
-            target='',
-            queue=queue,
-            **kwargs,
-        )
-
-    def __str__(self) -> str:
-        return f"BackgroundAction: {self.action_name}"
-

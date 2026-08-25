@@ -5,8 +5,11 @@ target state, running side-effects on success and either callbacks or
 failure callbacks on completion. Everything happens synchronously, in
 the caller's call frame — validate, lock, run, write the target state.
 
-``Action`` is a transition that does not change state on success but
-still runs side-effects and can set a ``failed_state`` on failure.
+``target=None`` declares a transition that writes no state on success.
+It runs under the same contract as every other transition: it takes the
+state lock, it is blocked while a background transition is uncompleted,
+and it runs ``next_transition``. A side-effect that must not wait for
+that contract is not a transition — write it as a plain method.
 
 For background-executed transitions, see
 ``django_logic.background.BackgroundTransition``. That path has two
@@ -98,9 +101,15 @@ class Transition:
     #: consumers introspect it the same way.
     is_background: bool = False
 
-    def __init__(self, action_name: str, sources: list, target: str, **kwargs):
+    def __init__(
+        self, action_name: str, sources: list, target: str | None = None,
+        **kwargs,
+    ):
         self.action_name = action_name
-        self.target = target
+        # None (or '') means: write no state on success. Everything else
+        # about the contract — lock, gate, chaining, failed_state — is
+        # identical to a state-writing transition.
+        self.target = target or None
         # Removed in 0.14.0; unknown kwargs are otherwise ignored, so a
         # declaration carrying one would silently lose behavior on upgrade.
         for removed, hint in (
@@ -136,6 +145,15 @@ class Transition:
                 f"end. Model the busy step as a real state with an "
                 f"explicit transition into it, or make this transition a "
                 f"BackgroundTransition."
+            )
+        if self.in_progress_state and not self.target:
+            # Success writes no state, so nothing would ever move the
+            # instance out of the in-progress state.
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: in_progress_state needs a "
+                f"target. With target=None success writes no state, so the "
+                f"instance would stay parked in "
+                f"{self.in_progress_state!r} after the work is done."
             )
         if self.in_progress_state and self.in_progress_state not in self.sources:
             # Treat the in-progress state as a valid source of the same
@@ -183,6 +201,8 @@ class Transition:
         self.next_transition = NextTransition(kwargs.get('next_transition'))
 
     def __str__(self):
+        if self.target is None:
+            return f"Transition: {self.action_name} (no state write)"
         return f"Transition: {self.action_name} to {self.target}"
 
     def __repr__(self):
@@ -255,7 +275,8 @@ class Transition:
         return kwargs.get('tr_id')
 
     def complete_transition(self, state: State, **kwargs):
-        """Write target state, release the lock, then run callbacks.
+        """Write the target state (when one is declared), release the
+        lock, then run callbacks.
 
         The lock is released **before** callbacks run, so a callback can
         safely trigger another transition on the same instance. If the
@@ -267,19 +288,20 @@ class Transition:
         loudly either way, but a leaked lock turns one failed request into
         hours of rejected transitions.
         """
-        try:
-            state.set_state(self.target)
-        except Exception:
-            transition_logger.error(
-                f'{kwargs.get("tr_id")} target-state write failed for '
-                f'{state.instance_key}; releasing the lock before re-raising.'
+        if self.target is not None:
+            try:
+                state.set_state(self.target)
+            except Exception:
+                transition_logger.error(
+                    f'{kwargs.get("tr_id")} target-state write failed for '
+                    f'{state.instance_key}; releasing the lock before re-raising.'
+                )
+                self._release_lock(state, **kwargs)
+                raise
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                f'{self.target}'
             )
-            self._release_lock(state, **kwargs)
-            raise
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-            f'{self.target}'
-        )
 
         self._release_lock(state, **kwargs)
 
@@ -336,29 +358,6 @@ class Transition:
                 f"source states (a concurrent transition won the race)."
             )
 
-    @staticmethod
-    def _background_in_flight(state: State) -> bool:
-        """Whether an uncompleted ``TransitionMessage`` exists for this
-        instance + process (the cache lock only guards short critical
-        sections). Only meaningful while holding the lock: enqueue needs
-        the lock to create a new row, so the answer cannot flip
-        underneath the holder.
-
-        Bare existence, deliberately stricter than the public
-        ``in_flight()`` probe: the Action's write-skip must never clobber
-        an uncompleted row's instance, stranded or not — force-failing a
-        stranded row's instance is what the retired sweep used to do.
-        """
-        from django.apps import apps
-
-        if not apps.is_installed('django_logic.background'):
-            return False
-        from django_logic.background.models import TransitionMessage
-
-        return TransitionMessage.in_flight_for(
-            state.instance, state.process_name,
-        ).exists()
-
     def _ensure_no_background_in_flight(self, state: State) -> None:
         """Reject a state-changing transition while a background transition
         is in progress on the same instance + process.
@@ -401,123 +400,3 @@ class Transition:
             f"a background transition is in progress for "
             f"{state.instance_key} (uncompleted TransitionMessage)."
         )
-
-
-class Action(Transition):
-    """Transition that does not change state on success.
-
-    Still runs side-effects and callbacks. ``failed_state`` (if set)
-    is applied on failure — but only when the state is not locked by an
-    in-progress transition (see ``fail_transition``).
-
-    Deliberate asymmetries vs :class:`Transition` — an Action does not
-    change state, so it skips the state-change machinery entirely:
-
-    * no cache lock around the side-effects, no under-the-lock source
-      revalidation, and no background-in-progress gate (Actions may run
-      while a background transition is in progress); the one lock an
-      Action takes is short-lived, scoped to the ``failed_state`` write
-      in ``fail_transition`` — and that write is skipped while an
-      uncompleted ``TransitionMessage`` exists, because the worker owns
-      the state field until the row completes;
-    * ``next_transition`` is NOT executed on success (note the
-      divergence: a *BackgroundAction*'s worker path does run
-      ``next_transition``);
-    * ``in_progress_state`` is rejected like any synchronous transition's
-      (background-only since 0.12.0); ``BackgroundAction`` rejects it too.
-    """
-
-    def __init__(self, action_name: str, sources: list, **kwargs):
-        super().__init__(action_name=action_name, sources=sources, target='', **kwargs)
-
-    def __str__(self):
-        return f"Action: {self.action_name}"
-
-    def change_state(self, state: State, **kwargs) -> UUID | None:
-        # An Action takes no lock on the success path, so there is none to
-        # leak — but the failure path still loses failed_state and the
-        # original exception.
-        _refuse_engine_param_kwargs(self.action_name, kwargs)
-        self._init_transition_context(kwargs)
-        self.side_effects.execute(state, **kwargs)
-        return kwargs.get('tr_id')
-
-    def complete_transition(self, state: State, **kwargs):
-        self.callbacks.execute(state, **kwargs)
-
-    def fail_transition(self, state: State, exception: Exception, **kwargs):
-        """Run the failure path, taking the lock only around the write.
-
-        An Action runs its side-effects without the state lock, so it
-        must not unlock unconditionally — that would delete a lock a
-        concurrent ``Transition`` on the same instance/field holds.
-        ``failed_state`` is written only under an atomically-acquired
-        lock, and under that lock the uncompleted ``TransitionMessage``
-        is consulted too: while one exists, the worker owns the state
-        field and the write is skipped. Whenever the write is skipped,
-        the failure is still fully visible — the exception propagates
-        and the failure hooks run.
-        """
-        if self.failed_state:
-            if not state.lock():
-                transition_logger.error(
-                    f'{kwargs.get("tr_id")} Action {self.action_name!r}: '
-                    f'skipping failed_state={self.failed_state!r} write — '
-                    f'{state.instance_key} is locked by an in-progress '
-                    f'transition and an Action must not overwrite its state.'
-                )
-            else:
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-                    f'{state.instance_key}'
-                )
-                try:
-                    # Probe guarded: the side-effect that brought us here
-                    # may have rollback-poisoned the connection (or the
-                    # database may be down), in which case the probe itself
-                    # raises. Escaping here replaced the original exception
-                    # with the probe's and skipped both failure hook bundles
-                    # — breaking this method's own contract. Unknown means
-                    # do not write.
-                    try:
-                        in_flight = self._background_in_flight(state)
-                    except Exception as probe_error:
-                        in_flight = None
-                        transition_logger.error(
-                            f'{kwargs.get("tr_id")} Action '
-                            f'{self.action_name!r}: could not probe for an '
-                            f'in-progress background transition on '
-                            f'{state.instance_key}: '
-                            f'{type(probe_error).__name__}: {probe_error}. '
-                            f'Skipping the failed_state write; the original '
-                            f'failure is re-raised unchanged.',
-                            exc_info=True,
-                        )
-                    if in_flight:
-                        transition_logger.error(
-                            f'{kwargs.get("tr_id")} Action '
-                            f'{self.action_name!r}: skipping failed_state='
-                            f'{self.failed_state!r} write — an uncompleted '
-                            f'TransitionMessage owns the state field of '
-                            f'{state.instance_key} until the worker '
-                            f'completes it.'
-                        )
-                    elif in_flight is not None:
-                        # Savepointed like Transition.fail_transition: a
-                        # rejected write must not replace the original
-                        # side-effect exception on its way out, and must not
-                        # log a SET_STATE line for a write that never landed.
-                        write_failed_state(
-                            state, self.failed_state,
-                            prefix=(
-                                f'{kwargs.get("tr_id")} Action '
-                                f'{self.action_name!r}:'
-                            ),
-                            consequence=(
-                                'The original failure is re-raised unchanged.'
-                            ),
-                        )
-                finally:
-                    # The shared release path emits the Unlock lifecycle line.
-                    self._release_lock(state, **kwargs)
-        self.failure_callbacks.execute(state, exception=exception, **kwargs)

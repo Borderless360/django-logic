@@ -5,9 +5,8 @@ the persisted state after they take the lock, and refuse when another
 transition has already moved the row. On refusal the lock is released, no
 side-effect runs, and no ``TransitionMessage`` row is left behind.
 
-``Action.fail_transition`` skips its ``failed_state`` write while another
-transition holds the lock. An Action takes no lock, so the write would
-overwrite the state the lock holder is about to set.
+A transition with no target follows the same rules: it takes the lock up
+front, so a foreign holder refuses it before any side-effect runs.
 """
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -16,7 +15,7 @@ from django_logic.background import BackgroundTransition, sync_execution
 from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
-from django_logic.transition import Action, Transition
+from django_logic.transition import Transition
 from tests.models import Invoice
 from tests import dl_settings
 
@@ -98,14 +97,14 @@ class TransitionLockRevalidationTests(TestCase):
         self.assertFalse(self.state.is_locked())
 
 
-class ActionFailedStateLockGuardTests(TestCase):
-    """An Action skips its failed_state write while another holder has the lock."""
+class NoTargetTransitionLockTests(TestCase):
+    """A transition with no target holds the lock like any other."""
 
     def setUp(self):
         cache.clear()
         self.invoice = Invoice.objects.create(status='draft')
         self.state = State(self.invoice, 'status', 'process')
-        self.action = Action(
+        self.action = Transition(
             'a', sources=['draft'], failed_state='failed',
             side_effects=[raise_boom],
         )
@@ -113,7 +112,7 @@ class ActionFailedStateLockGuardTests(TestCase):
     def tearDown(self):
         cache.clear()
 
-    def test_failed_state_write_skipped_while_foreign_lock_held(self):
+    def test_a_foreign_lock_refuses_it_before_side_effects_run(self):
         # The lock key derives from the instance and the field only, so a
         # second State object for the same row takes the same lock.
         foreign_state = State(
@@ -121,18 +120,14 @@ class ActionFailedStateLockGuardTests(TestCase):
         )
         self.assertTrue(foreign_state.lock())
 
-        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
-            with self.assertRaises(ValueError):
-                self.action.change_state(self.state)
+        with self.assertRaises(TransitionNotAllowed):
+            self.action.change_state(self.state)
 
-        self.assertTrue(
-            any('skipping failed_state' in message for message in logs.output),
-            f"expected 'skipping failed_state' error log, got: {logs.output}",
-        )
-        # The lock holder's state survives.
+        # Nothing ran and nothing was written: the raise came from the
+        # lock, not from the side-effect.
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'draft')
-        # The Action must not release a lock it does not hold.
+        # The foreign holder keeps its lock.
         self.assertTrue(foreign_state.is_locked())
 
     def test_failed_state_written_when_unlocked(self):

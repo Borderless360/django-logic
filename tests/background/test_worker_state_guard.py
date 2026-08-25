@@ -88,7 +88,7 @@ class SupersededTests(TestCase):
         self.assertEqual(widget.cb_log, '')
 
     def test_background_action_out_of_sources_is_superseded(self):
-        # A BackgroundAction has no in_progress_state, so the guard checks the
+        # A BackgroundTransition has no in_progress_state, so the guard checks the
         # declared sources instead. Here the widget left sync_inventory's
         # sources ('fulfilled'/'exported').
         widget = Widget.objects.create(status='fulfilled')
@@ -131,7 +131,7 @@ class SupersededTests(TestCase):
         self.assertIsNotNone(transition_message.started_at)
 
         widget.refresh_from_db()
-        # BackgroundAction does not change state on success.
+        # BackgroundTransition does not change state on success.
         self.assertEqual(widget.status, 'fulfilled')
         self.assertIn('ok,', widget.se_log)  # side-effects ran
         self.assertIn('cb,', widget.cb_log)  # success callbacks ran

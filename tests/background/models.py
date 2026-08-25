@@ -7,8 +7,8 @@ every app's models are loaded, so it is the only supported binding site.
 """
 from django.db import models
 
-from django_logic import Action, Process, Transition
-from django_logic.background import BackgroundAction, BackgroundTransition
+from django_logic import Process, Transition
+from django_logic.background import BackgroundTransition
 
 
 def bg_ok(instance, **kwargs):
@@ -180,14 +180,14 @@ class WidgetProcess(Process):
             failure_callbacks=[bg_failure_callback],
             no_retry_on=(ValueError,),
         ),
-        BackgroundAction(
+        BackgroundTransition(
             action_name='sync_inventory',
             sources=['fulfilled', 'exported'],
             queue='django_logic.fast',
             side_effects=[bg_ok],
             callbacks=[bg_callback],
         ),
-        BackgroundAction(
+        BackgroundTransition(
             action_name='crash_action',
             sources=['fulfilled'],
             queue='django_logic.fast',
@@ -321,7 +321,7 @@ class NestedBgChildProcess(Process):
             callbacks=[bg_callback],
             failure_callbacks=[bg_failure_callback],
         ),
-        BackgroundAction(
+        BackgroundTransition(
             action_name='nested_sync_inventory',
             sources=['nested_fulfilled'],
             queue='django_logic.fast',
@@ -518,7 +518,7 @@ def conv_act_b(instance, **kwargs):
 class SharedActionAProcess(Process):
     process_name = 'shared_act_a'
     transitions = [
-        BackgroundAction(
+        BackgroundTransition(
             action_name='shared_sync',
             sources=['open'],
             conditions=[conv_is_gmail],
@@ -531,7 +531,7 @@ class SharedActionAProcess(Process):
 class SharedActionBProcess(Process):
     process_name = 'shared_act_b'
     transitions = [
-        BackgroundAction(
+        BackgroundTransition(
             action_name='shared_sync',
             sources=['open'],
             conditions=[conv_is_dummy],
@@ -647,7 +647,7 @@ class WidgetChainProcess(Process):
 
 
 # --- Fixtures for ProcessScenario behaviour tests ---------------------------
-# These processes cover the synchronous Transition and Action matrix and the
+# These processes cover the synchronous Transition and Transition matrix and the
 # background-to-background next_transition chain. Every side-effect appends a
 # marker to se_log or cb_log, so a test asserts on how the object changed
 # rather than on a return value.
@@ -748,11 +748,11 @@ def _is_staff_user(instance, user=None, **kwargs):
 
 
 class WidgetSyncProcess(Process):
-    """The synchronous Transition and Action matrix on Widget.status, bound as
+    """The synchronous Transition and Transition matrix on Widget.status, bound as
     ``sync_proc``.
 
     It covers ordered side-effects, next_transition chaining, the failure path,
-    a synchronous Action, a swallowed callback exception, two transitions with
+    a synchronous Transition, a swallowed callback exception, two transitions with
     one action_name split by a condition, a permission gate, and kwargs
     forwarding into the failure hooks.
     """
@@ -773,10 +773,10 @@ class WidgetSyncProcess(Process):
         # cannot undo it.
         Transition('boom_callback', sources=['draft'], target='boom_done',
                    callbacks=[sync_cb_boom]),
-        Action('poke', sources=['draft'],
+        Transition('poke', sources=['draft'],
                side_effects=[_se('poke')],
                callbacks=[_cb('after_poke')]),
-        Action('poke_fail', sources=['draft'], failed_state='poked_failed',
+        Transition('poke_fail', sources=['draft'], failed_state='poked_failed',
                side_effects=[_se('poke_attempt')],
                failure_callbacks=[_fcb('on_poke_fail')]),
         Transition('cancel', sources=['draft'], target='cancelled',
@@ -1126,7 +1126,7 @@ def bg_record_class(instance, **kwargs):
 class ProxyAProcess(Process):
     process_name = 'process'
     transitions = [
-        BackgroundAction(
+        BackgroundTransition(
             action_name='audit_via_proxy',
             sources=['draft'],
             failed_state='proxy_audit_failed',
@@ -1146,7 +1146,7 @@ class ProxyAProcess(Process):
 class ProxyBProcess(Process):
     process_name = 'process'
     transitions = [
-        BackgroundAction(
+        BackgroundTransition(
             action_name='audit_via_proxy',
             sources=['draft'],
             failed_state='proxy_audit_failed',

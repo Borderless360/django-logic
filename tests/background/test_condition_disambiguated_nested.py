@@ -387,7 +387,7 @@ class SafetyNetDisambiguationTests(TestCase):
 class OwnerlessAmbiguousContainmentTests(TestCase):
     """The worst case the deeper review flagged: a row that has LOST its owner
     (blank — legacy/pre-discriminator, or in flight across the deploy that first
-    shared the name) for an ambiguous BackgroundAction. Both nested actions
+    shared the name) for an ambiguous BackgroundTransition. Both nested actions
     share sources and have no in_progress_state, so the worker's state guard
     CANNOT tell them apart — first-match would silently run the wrong
     integration's external side-effects. Execute must instead refuse and contain
@@ -425,7 +425,7 @@ class OwnerlessAmbiguousContainmentTests(TestCase):
             model_name='widget',
             instance_id=str(widget.pk),
             process_name='process',
-            transition_name='sync_inventory',   # unique BackgroundAction
+            transition_name='sync_inventory',   # unique BackgroundTransition
             owning_process_class='',
             queue_name='django_logic.fast',
         )

@@ -151,7 +151,7 @@ class OrderProcess(Process):
             side_effects=[reserve_stock, call_courier],
             callbacks=[send_confirmation_email],
         ),
-        BackgroundAction(
+        BackgroundTransition(
             action_name='sync_inventory', sources=['fulfilled'],
             side_effects=[push_to_erp],
         ),
@@ -298,7 +298,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 |---|---|
 | `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg). Override for factories. |
 | `transition(obj, action, **kwargs)` | Run a synchronous transition through the normal entrypoint. |
-| `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition`/`BackgroundAction` enqueue **and** execute inline. |
+| `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition` enqueue **and** execute inline. |
 | `retry_transition(obj)` | Re-run the instance's uncompleted `TransitionMessage` — simulates a worker's next claim. |
 | `snapshot(obj)` / `from_snapshot(data_or_path)` | Capture / rebuild instance + `TransitionMessage` state. |
 
