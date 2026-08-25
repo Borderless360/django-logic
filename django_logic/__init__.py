@@ -19,7 +19,7 @@ __all__ = [
 def __getattr__(name):
     if name == 'Action':
         raise ImportError(
-            "Action was removed in 0.18.0. Declare "
+            "Action was removed in 1.0.0. Declare "
             "Transition(action_name=..., sources=[...]) with no target — "
             "it writes no state on success, and unlike Action it takes "
             "the state lock, is refused while a background transition is "

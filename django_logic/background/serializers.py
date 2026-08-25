@@ -8,10 +8,10 @@ its transition is synchronous or background.
 
 Deliberate handling:
 
-* ``request`` — dropped, loudly: a warning is logged, and
-  ``DJANGO_LOGIC['STRICT_KWARGS_SERIALIZATION'] = True`` raises instead.
-  A live request cannot cross the queue; extract ``user`` (which
-  is rehydrated) or pass plain values.
+* ``request`` — refused: a live request cannot cross the queue.
+  Extract ``user`` (which is rehydrated) or pass plain values. The
+  engine's chain hop strips it before a background follow-up, so it
+  stays legal on the synchronous transition that chains.
 * ``user`` — replaced with ``user_id`` (restored on the worker side).
 * ``datetime`` / ``date`` / ``time`` / ``Decimal`` / ``UUID`` / ``tuple``
   / ``set`` / ``frozenset`` — tag-encoded, restored in the worker with the
@@ -26,8 +26,8 @@ Deliberate handling:
   the worker may run much later and must see fresh rows, not a stale
   snapshot.
 * Non-string dict keys — JSON objects only have string keys, so these are
-  stringified in storage and do **not** round-trip. Flagged loudly at
-  enqueue (warning, or ``TypeError`` under the strict setting).
+  stringified in storage and do **not** round-trip. Refused at enqueue
+  (``KwargsSerializationError``).
 
 .. note::
 
@@ -49,8 +49,8 @@ from django_logic.logger import transition_logger
 
 
 class KwargsSerializationError(TypeError):
-    """Strict-mode rejection of kwargs that enqueue would otherwise mutate
-    silently (a dropped ``request``, stringified non-string dict keys).
+    """Rejection of kwargs that enqueue would otherwise mutate silently
+    (a caller-passed ``request``, stringified non-string dict keys).
 
     A ``TypeError`` subclass, so the documented "raises ``TypeError``"
     contract holds — but distinct, so the enqueue dispatcher re-raises it
@@ -190,13 +190,13 @@ def _unstorable_text_paths(value, path='kwargs'):
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
-    Drops ``request`` and a caller-supplied ``user_id`` (warning, or
-    ``KwargsSerializationError`` under ``STRICT_KWARGS_SERIALIZATION``) —
-    both are reserved. Replaces ``user`` with ``user_id``.
+    Refuses ``request`` and a caller-supplied ``user_id``
+    (``KwargsSerializationError``) — both are reserved. Replaces ``user``
+    with ``user_id``.
     Tag-encodes non-JSON-native values so the worker restores real types.
     Non-string dict keys are stringified by JSON persistence and cannot
-    round-trip — flagged with a warning (or ``TypeError`` under the strict
-    setting). Non-finite floats (``float('nan')`` / ``float('inf')``) are
+    round-trip — refused the same way.
+    Non-finite floats (``float('nan')`` / ``float('inf')``) are
     not valid JSON despite passing ``json.dumps`` — rejected with a
     ``TypeError`` naming the offending value. Raises ``TypeError`` via
     ``json.dumps`` if something unexpected slips through — the caller
@@ -205,15 +205,11 @@ def serialize_kwargs(kwargs: dict) -> dict:
     """
     out = dict(kwargs)
     if 'request' in out:
-        out.pop('request')
-        message = (
-            f"{out.get('tr_id')} 'request' dropped at kwargs serialization "
-            f"— worker hooks must not read it (the engine rehydrates "
-            f"'user'; pass anything else as plain values)"
+        raise KwargsSerializationError(
+            f"{out.get('tr_id')} 'request' cannot be passed to a background "
+            f"transition — worker hooks must not read it (the engine "
+            f"rehydrates 'user'; pass anything else as plain values)."
         )
-        if conf.strict_kwargs_serialization():
-            raise KwargsSerializationError(message)
-        transition_logger.warning(message)
     # ``user_id`` is the engine's own wire form for ``user`` (restored in
     # the worker by restore_user). A caller passing it as ordinary data used to
     # be silently consumed: restore_user popped it and replaced it with a
@@ -221,16 +217,12 @@ def serialize_kwargs(kwargs: dict) -> dict:
     # correctly in sync mode, a parity break that only showed up in
     # production. Treated like ``request``: reserved, dropped loudly.
     if 'user_id' in out:
-        out.pop('user_id')
-        message = (
-            f"{out.get('tr_id')} 'user_id' dropped at kwargs serialization "
-            f"— it is the engine's wire form for 'user' and the worker replaces "
-            f"it with a live user object, so a caller-supplied value could "
-            f"never reach a hook. Pass it under a different name."
+        raise KwargsSerializationError(
+            f"{out.get('tr_id')} 'user_id' cannot be passed to a background "
+            f"transition — it is the engine's wire form for 'user' and the "
+            f"worker replaces it with a live user object, so a caller-supplied "
+            f"value could never reach a hook. Pass it under a different name."
         )
-        if conf.strict_kwargs_serialization():
-            raise KwargsSerializationError(message)
-        transition_logger.warning(message)
     out.pop('context', None)  # rebuilt in the worker
     # Persisted on its own TransitionMessage column, not in the kwargs JSON:
     # the worker reads it from the column, and it must not leak into the kwargs
@@ -266,16 +258,13 @@ def serialize_kwargs(kwargs: dict) -> dict:
 
     bad_keys = sorted(set(_non_string_key_paths(out)))
     if bad_keys:
-        message = (
+        raise KwargsSerializationError(
             f"{out.get('tr_id')} non-string dict keys in background "
             f"transition kwargs ({', '.join(bad_keys)}) are stringified by "
             f"JSON persistence — a worker hook sees '1' where the "
             f"synchronous path saw 1, and colliding keys ({{1: …, '1': …}}) "
             f"silently lose data. Use string keys, or a list of pairs."
         )
-        if conf.strict_kwargs_serialization():
-            raise KwargsSerializationError(message)
-        transition_logger.warning(message)
 
     out = encode_value(out)
 

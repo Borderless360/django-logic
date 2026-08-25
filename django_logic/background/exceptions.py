@@ -35,16 +35,3 @@ class AlreadyInProgress(TransitionTemporarilyUnavailable):
         clear it inside the side-effect, and dispatch again from a
         success callback when it is still set.
     """
-
-
-class SourceStateChanged(TransitionTemporarilyUnavailable):
-    """Raised when the persisted state left the transition's sources
-    while the insert waited on the unique constraint.
-
-    A named subclass because this is an expected concurrency outcome —
-    the guard doing its job, the same class of event as
-    ``AlreadyInProgress``; both share ``TransitionTemporarilyUnavailable``,
-    which is why the hook runner logs them at WARNING rather than ERROR.
-    Consumers that treat it distinctly can catch it by type; everything
-    catching ``TransitionNotAllowed`` keeps working.
-    """

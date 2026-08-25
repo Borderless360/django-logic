@@ -23,13 +23,16 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 
 from django_logic import conf
-from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
+from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
     KwargsSerializationError,
     serialize_kwargs,
 )
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import (
+    TransitionNotAllowed,
+    TransitionTemporarilyUnavailable,
+)
 from django_logic.logger import (
     transition_logger,
     TransitionEventType,
@@ -290,7 +293,10 @@ class BackgroundTransition(Transition):
             current = state.get_persisted_state()
             if current not in self.sources:
                 # The atomic block rolls the TransitionMessage row back.
-                raise SourceStateChanged(
+                # Transient: the guard doing its job, the same class of
+                # event as AlreadyInProgress — it resolves when the other
+                # work completes, so the hook runner logs it at WARNING.
+                raise TransitionTemporarilyUnavailable(
                     f"BackgroundTransition '{self.action_name}' is not "
                     f"allowed: the persisted state moved to {current!r} "
                     f"while the insert waited on the unique constraint — "

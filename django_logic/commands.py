@@ -274,8 +274,10 @@ class NextTransition:
         if getattr(transitions[0], 'is_background', False):
             # request is enqueue-only and unserializable; forwarding it
             # into a background follow-up would fail kwargs serialization
-            # under STRICT_KWARGS_SERIALIZATION — and that failure is
-            # swallowed below, silently killing the chain.
+            # — and that failure is swallowed below, silently killing the
+            # chain. The caller did nothing wrong: request is legal on the
+            # synchronous transition that chains, so the engine drops it
+            # at the boundary it created.
             kwargs = {k: v for k, v in kwargs.items() if k != 'request'}
 
         using, in_transaction = _in_open_transaction(state.instance)

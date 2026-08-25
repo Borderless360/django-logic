@@ -1,41 +1,12 @@
 """Django system checks for django-logic.
 
-Validation at bind time warns through the transition logger during
-``AppConfig.ready()``, which runs before test and development logging is
-configured, so a consumer can miss the warning. The checks framework runs
-after setup, and ``manage.py check``, every test run and deploy checks report
-it whatever the logging configuration is.
+Hook-signature validation raises at bind time since 1.0.0, so the old
+``django_logic.W001`` re-report is retired: a machine with a bad hook
+never binds.
 """
 from django.core import checks
 
-from django_logic.process import (
-    ProcessManager,
-    collect_hook_signature_offenders,
-)
-
-
-@checks.register('django_logic')
-def check_hook_signatures(app_configs, **kwargs):
-    """Re-run hook-signature validation over every bound machine
-    (``django_logic.W001``)."""
-    findings = []
-    seen = set()
-    for binding in ProcessManager.bindings:
-        for offender in collect_hook_signature_offenders(binding.process_class):
-            key = (binding.model, binding.process_class, offender)
-            if key in seen:
-                continue
-            seen.add(key)
-            findings.append(checks.Warning(
-                f'FSM hook without a named instance-first parameter: {offender}',
-                hint='The engine calls hooks as fn(instance, **kwargs) '
-                     '(permissions as fn(instance, user, **kwargs)); give the '
-                     'hook a named first parameter. Decorated hooks need '
-                     'functools.wraps to expose the real signature.',
-                obj=f'{binding.model._meta.label} ({binding.process_class.__name__})',
-                id='django_logic.W001',
-            ))
-    return findings
+from django_logic.process import ProcessManager
 
 
 def _process_tree_has_background_transition(process_class) -> bool:
@@ -189,6 +160,15 @@ _REMOVED_SETTINGS = {
         'locks always release when the transition finishes; drive a '
         'transition from transaction.on_commit if it must start after '
         'the surrounding write is visible',
+    'STRICT_HOOK_SIGNATURES':
+        'a hook without a named instance-first parameter always fails at '
+        'bind time now; there is no lenient mode',
+    'STRICT_KWARGS_SERIALIZATION':
+        "reserved kwargs ('request', 'user_id') and non-string dict keys "
+        'always fail at enqueue now; there is no lenient mode',
+    'LEGACY_EXCEPTION_BASE':
+        'the fork-migration bridge was removed in 1.0.0; catch '
+        "django_logic.exceptions.TransitionNotAllowed directly",
 }
 
 
@@ -197,10 +177,7 @@ _REMOVED_SETTINGS = {
 _KNOWN_SETTINGS = frozenset({
     'BACKGROUND_EXECUTION',
     'DEFAULT_QUEUE',
-    'LEGACY_EXCEPTION_BASE',
     'LOCK_TIMEOUT',
-    'STRICT_HOOK_SIGNATURES',
-    'STRICT_KWARGS_SERIALIZATION',
     'TRANSITION_MESSAGE_MAX_ERRORS',
     'TRANSITION_MESSAGE_RETRY_MINUTES',
     'TRANSITION_MESSAGE_CLEANUP_DAYS',

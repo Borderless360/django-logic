@@ -92,7 +92,7 @@ module top or in another app's `ready()`).
 Use `BackgroundTransition` (durable, runs side-effects on a worker process,
 writes target/`failed_state`) for anything slow, external, or retriable.
 Declared with `target=None`, it changes no state on success — same
-durability, same rules. Since 0.18.0 there is one transition contract:
+durability, same rules. Since 1.0.0 there is one transition contract:
 every declaration takes the state lock, is refused while a background
 transition is uncompleted, and runs `next_transition`; the old `Action`
 and `BackgroundAction` classes are gone. A side-effect that must not

@@ -27,7 +27,7 @@ from django.utils import timezone
 
 from django_logic import Transition
 from django_logic.background import in_flight, sync_execution
-from django_logic.background.exceptions import AlreadyInProgress, SourceStateChanged
+from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import (
     TransitionNotAllowed,
@@ -411,7 +411,7 @@ class EnqueuePostInsertRecheckTests(TransactionTestCase):
                 with self.assertRaises(TransitionTemporarilyUnavailable) as ctx:
                     self.widget.process.fulfil()
 
-        self.assertIsInstance(ctx.exception, SourceStateChanged)
+        self.assertIsInstance(ctx.exception, TransitionTemporarilyUnavailable)
 
     def test_retry_from_in_progress_still_admitted(self):
         # The recovery path must keep working: an instance stranded in the

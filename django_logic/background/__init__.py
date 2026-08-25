@@ -40,7 +40,7 @@ __all__ = list(_PUBLIC.keys())
 def __getattr__(name):
     if name == 'BackgroundAction':
         raise ImportError(
-            "BackgroundAction was removed in 0.18.0. Declare "
+            "BackgroundAction was removed in 1.0.0. Declare "
             "BackgroundTransition(action_name=..., sources=[...]) with no "
             "target — the behavior is identical: same durability, same "
             "lock and gate, no state write on success."

@@ -88,11 +88,11 @@ class Transition:
     explicit fast transition into it, chained via ``next_transition``.
     """
 
+    #: Swap points a consumer may subclass. Only these three — the
+    #: failure-callback and condition bundles are always the stock classes.
     side_effects_class = SideEffects
     callbacks_class = Callbacks
-    failure_callbacks_class = Callbacks
     permissions_class = Permissions
-    conditions_class = Conditions
 
     #: ``True`` on ``BackgroundTransition``. A public, stable attribute
     #: rather than an ``isinstance`` check: ``Process.__init_subclass__``
@@ -184,7 +184,7 @@ class Transition:
         # complete/fail); the other command bundles never read it.
         # Built through class attributes like the other four, so all five
         # bundles are swappable.
-        self.failure_callbacks = self.failure_callbacks_class(
+        self.failure_callbacks = Callbacks(
             kwargs.get('failure_callbacks', [])
         )
         self.side_effects = self.side_effects_class(
@@ -196,7 +196,7 @@ class Transition:
         self.permissions = self.permissions_class(
             kwargs.get('permissions', [])
         )
-        self.conditions = self.conditions_class(
+        self.conditions = Conditions(
             kwargs.get('conditions', [])
         )
         self.next_transition = NextTransition(kwargs.get('next_transition'))

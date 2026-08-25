@@ -56,7 +56,6 @@ class Process:
     transitions = []
     conditions = []
     permissions = []
-    conditions_class = Conditions
     permissions_class = Permissions
     state_class = State
     process_name = 'process'
@@ -182,7 +181,7 @@ class Process:
 
     def is_valid(self, user=None) -> bool:
         permissions = self.permissions_class(commands=self.permissions)
-        conditions = self.conditions_class(commands=self.conditions)
+        conditions = Conditions(commands=self.conditions)
         instance = self.state.instance
         return permissions.execute(instance, user) and conditions.execute(instance)
 
@@ -426,16 +425,13 @@ def _validate_hook_signatures(process_cls) -> None:
     Validating at bind time turns that latent failure into a boot-time
     signal. Covers transition-level hooks (side-effects, callbacks,
     failure hooks, conditions, permissions) and process-level
-    ``conditions``/``permissions``. Warns by default;
-    ``DJANGO_LOGIC['STRICT_HOOK_SIGNATURES'] = True`` raises
-    ``ImproperlyConfigured`` instead.
+    ``conditions``/``permissions``. Raises ``ImproperlyConfigured`` at
+    bind time.
     """
-    from django_logic.conf import strict_hook_signatures
-
     offenders = collect_hook_signature_offenders(process_cls)
     if not offenders:
         return
-    message = (
+    raise ImproperlyConfigured(
         'FSM hooks without a named instance-first parameter — the engine '
         'calls hooks as fn(instance, **kwargs) (permissions as '
         'fn(instance, user, **kwargs)), so give each hook a named first '
@@ -443,10 +439,6 @@ def _validate_hook_signatures(process_cls) -> None:
         'need functools.wraps to expose the real signature: '
         f'{"; ".join(sorted(set(offenders)))}'
     )
-    # Literal True only, same reasoning as STRICT_KWARGS_SERIALIZATION.
-    if strict_hook_signatures():
-        raise ImproperlyConfigured(message)
-    transition_logger.warning(message)
 
 
 def collect_hook_signature_offenders(process_cls) -> list:

@@ -11,10 +11,6 @@ from django.template.engine import Engine
 from django.test import TestCase, override_settings
 
 from django_logic import Process, ProcessManager, Transition
-from django_logic.conf import (
-    strict_kwargs_serialization,
-    validate_bool,
-)
 from django_logic.checks import check_no_unknown_settings
 from tests.models import Invoice
 
@@ -194,27 +190,6 @@ class ShadowedDefinitionTests(TestCase):
         self.assertIn('already names something', str(ctx.exception))
 
 
-class BooleanSettingTests(TestCase):
-    @override_settings(DJANGO_LOGIC={
-        'BACKGROUND_EXECUTION': 'sync',
-        'STRICT_KWARGS_SERIALIZATION': 'false',
-    })
-    def test_string_false_does_not_enable_strict_mode(self):
-        """The value went through bool(), so the string 'false' — an environment
-        variable read straight through — switched strict mode on."""
-        self.assertFalse(strict_kwargs_serialization())
-        with self.assertRaises(ImproperlyConfigured):
-            validate_bool('STRICT_KWARGS_SERIALIZATION')
-
-    @override_settings(DJANGO_LOGIC={
-        'BACKGROUND_EXECUTION': 'sync',
-        'STRICT_KWARGS_SERIALIZATION': True,
-    })
-    def test_literal_true_enables_strict_mode(self):
-        self.assertTrue(strict_kwargs_serialization())
-        validate_bool('STRICT_KWARGS_SERIALIZATION')   # must not raise
-
-
 class UnknownSettingsCheckTests(TestCase):
     @override_settings(DJANGO_LOGIC={
         'BACKGROUND_EXECUTION': 'sync',
@@ -241,6 +216,17 @@ class UnknownSettingsCheckTests(TestCase):
         self.assertIn('removed', findings[0].msg)
         self.assertNotIn('typo', findings[0].msg)
 
+    @override_settings(DJANGO_LOGIC={
+        'BACKGROUND_EXECUTION': 'sync',
+        'STRICT_HOOK_SIGNATURES': True,
+        'STRICT_KWARGS_SERIALIZATION': True,
+        'LEGACY_EXCEPTION_BASE': 'some.fork.TransitionNotAllowed',
+    })
+    def test_the_keys_removed_in_1_0_get_the_migration_advice(self):
+        findings = check_no_unknown_settings(None)
+        self.assertEqual(
+            [f.id for f in findings], ['django_logic.W003'] * 3)
+
 
 # --- Smaller fixes --------------------------------------------------------
 
@@ -259,29 +245,16 @@ class BareStringSourcesTests(TestCase):
 
 
 class ReservedUserIdKwargTests(TestCase):
-    def test_caller_supplied_user_id_is_dropped_loudly(self):
-        """The worker popped ``user_id`` and replaced it with a live user, so the
-        hook never saw the caller's value. Sync mode kept the value, so the
-        difference only showed up in production."""
-        from django_logic.background.serializers import serialize_kwargs
-
-        with self.assertLogs('django-logic', level='WARNING') as logs:
-            out = serialize_kwargs({'user_id': 'my-own-data', 'other': 1})
-        self.assertNotIn('user_id', out)
-        self.assertEqual(out['other'], 1)
-        self.assertTrue(any('user_id' in line for line in logs.output))
-
-    @override_settings(DJANGO_LOGIC={
-        'BACKGROUND_EXECUTION': 'sync',
-        'STRICT_KWARGS_SERIALIZATION': True,
-    })
-    def test_strict_mode_raises_instead(self):
+    def test_caller_supplied_user_id_is_refused(self):
+        """The worker pops ``user_id`` and replaces it with a live user, so a
+        caller's value could never reach a hook. Refused at enqueue."""
         from django_logic.background.serializers import (
             KwargsSerializationError, serialize_kwargs,
         )
 
-        with self.assertRaises(KwargsSerializationError):
-            serialize_kwargs({'user_id': 'my-own-data'})
+        with self.assertRaises(KwargsSerializationError) as ctx:
+            serialize_kwargs({'user_id': 'my-own-data', 'other': 1})
+        self.assertIn('user_id', str(ctx.exception))
 
 
 class PublicSurfaceTests(TestCase):
@@ -314,18 +287,31 @@ class PublicSurfaceTests(TestCase):
         )
 
 
-class FailureBundleSwapTests(TestCase):
-    def test_failure_bundle_is_swappable_like_the_other_four(self):
-        """It was hardcoded, with no way to substitute it."""
-        from django_logic.commands import Callbacks
+class BundleSwapTests(TestCase):
+    def test_the_three_kept_swap_points_still_swap(self):
+        """The consumer subclasses these three; the failure-callback and
+        condition bundles are always the stock classes since 1.0.0."""
+        from django_logic.commands import Callbacks, Permissions, SideEffects
 
-        class LoudFailureCallbacks(Callbacks):
+        class LoudCallbacks(Callbacks):
+            pass
+
+        class LoudPermissions(Permissions):
+            pass
+
+        class LoudSideEffects(SideEffects):
             pass
 
         class Custom(Transition):
-            failure_callbacks_class = LoudFailureCallbacks
+            callbacks_class = LoudCallbacks
+            permissions_class = LoudPermissions
+            side_effects_class = LoudSideEffects
 
         t = Custom('go', sources=['draft'], target='approved')
-        self.assertIsInstance(t.failure_callbacks, LoudFailureCallbacks)
+        self.assertIsInstance(t.callbacks, LoudCallbacks)
+        self.assertIsInstance(t.permissions, LoudPermissions)
+        self.assertIsInstance(t.side_effects, LoudSideEffects)
+        self.assertFalse(hasattr(t, 'failure_callbacks_class'))
+        self.assertFalse(hasattr(t, 'conditions_class'))
 
 

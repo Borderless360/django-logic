@@ -2,9 +2,43 @@
 
 ## [Unreleased]
 
-## [0.18.0] — 2026-08-25
+## [1.0.0] — 2026-08-25
 
 ### Removed
+
+- **`STRICT_HOOK_SIGNATURES` and `STRICT_KWARGS_SERIALIZATION`.** The
+  strict behavior is the only behavior now. A hook without a named
+  instance-first parameter fails at bind time. A caller-passed
+  `request` or `user_id`, and non-string dict keys, fail at enqueue
+  with `KwargsSerializationError`. The engine's own chain hop still
+  strips `request` before a background follow-up — `request` stays
+  legal on the synchronous transition that chains. The
+  `django_logic.W001` check is retired with the lenient mode: a machine
+  with a bad hook never binds, so there is nothing left to report.
+- **`LEGACY_EXCEPTION_BASE`.** The fork-migration bridge that mixed a
+  legacy base class into `TransitionNotAllowed` at boot is gone. Catch
+  `django_logic.exceptions.TransitionNotAllowed` directly. A settings
+  dict still carrying any of these three keys gets the
+  `django_logic.W003` warning with the same advice.
+- **`DjangoLogicException` and `SourceStateChanged`.** Nothing caught
+  them by name. `TransitionNotAllowed` subclasses `Exception` directly,
+  and the enqueue source-state recheck raises
+  `TransitionTemporarilyUnavailable` with the same message. The
+  exceptions that remain are the ones consumers catch:
+  `TransitionNotAllowed`, `TransitionTemporarilyUnavailable`,
+  `AlreadyInProgress`, and `PermanentFailure`.
+- **The `conditions_class` and `failure_callbacks_class` swap hooks.**
+  Nothing set them. `side_effects_class`, `callbacks_class` and
+  `permissions_class` stay — the consumer subclasses all three.
+- **The empty `[celery]` extra.** The engine has no broker; the alias
+  only kept an old pin resolving, and 1.0 is where old pins end.
+- `nested_processes` are frozen as they are: same action name,
+  mutually exclusive conditions, one bound accessor. Fan-out stays
+  separate machines, and no new restore fallbacks will be added.
+- Still in the package, on purpose: the ten replaced migration files
+  (they leave once every install has applied the squash) and the
+  `ImportError` guidance for the removed `Action` names (it is the
+  migration guide for the jump to 1.0).
 
 - **`Action` and `BackgroundAction`** (#243). One transition contract
   remains: every declaration takes the state lock, is refused with

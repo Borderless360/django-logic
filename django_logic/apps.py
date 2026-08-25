@@ -13,15 +13,11 @@ class DjangoLogicConfig(AppConfig):
 
     def ready(self) -> None:
         from django_logic import checks  # noqa: F401 — registers system checks
-        from django_logic.conf import (
-            install_legacy_exception_base,
-            validate_core_settings,
-        )
+        from django_logic.conf import validate_core_settings
 
-        # Core knobs (LOCK_TIMEOUT, STRICT_HOOK_SIGNATURES) are used by
-        # the engine with or without the background app installed — a
-        # sync-only install must fail fast on misconfiguration too. The
-        # background app's validate_on_ready() re-runs this as part of its
-        # full gate; both are idempotent.
+        # Core knobs (LOCK_TIMEOUT) are used by the engine with or without
+        # the background app installed — a sync-only install must fail
+        # fast on misconfiguration too. The background app's
+        # validate_on_ready() re-runs this as part of its full gate; both
+        # are idempotent.
         validate_core_settings()
-        install_legacy_exception_base()

@@ -1,7 +1,8 @@
-"""The bindings registry and the hook-signature system check.
+"""The bindings registry.
 
-Binding a process warns about a bad hook signature during ready(), before
-logging is configured, so `manage.py check` is the surface a developer sees.
+A process with a bad hook signature never binds — bind_model_process
+raises at bind time — so a machine in the registry always has clean
+hooks.
 """
 from django.core.checks import run_checks
 from django.test import SimpleTestCase
@@ -53,16 +54,17 @@ class BindingsRegistryTests(SimpleTestCase):
             ProcessManager.bindings,
         )
 
-    def test_check_reports_only_the_offending_hook(self):
-        ProcessManager.bind_model_process(Invoice, _CleanProcess, state_field='status')
-        with self.assertLogs('django-logic.transition', level='WARNING'):
-            ProcessManager.bind_model_process(Invoice, _OffendingProcess, state_field='status')
+    def test_an_offending_process_never_reaches_the_registry(self):
+        from django.core.exceptions import ImproperlyConfigured
 
-        findings = [f for f in run_checks() if f.id == 'django_logic.W001']
-        self.assertEqual(len(findings), 1)
-        self.assertIn('task_style_hook', findings[0].msg)
-        self.assertIn('_OffendingProcess', findings[0].obj)
+        with self.assertRaises(ImproperlyConfigured):
+            ProcessManager.bind_model_process(
+                Invoice, _OffendingProcess, state_field='status')
+        self.assertNotIn(
+            ModelProcessBinding(Invoice, _OffendingProcess, 'status'),
+            ProcessManager.bindings,
+        )
 
-    def test_no_findings_when_all_bound_hooks_are_clean(self):
+    def test_no_findings_for_clean_bindings(self):
         ProcessManager.bind_model_process(Invoice, _CleanProcess, state_field='status')
         self.assertEqual([f for f in run_checks() if f.id == 'django_logic.W001'], [])

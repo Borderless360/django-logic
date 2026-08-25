@@ -9,9 +9,8 @@ difference fails a test here.
 Pinned for every shape:
 
 * hook kwargs — the same values and the same Python types, plus a live ``user``;
-* ``request`` reaches synchronous hooks and never background hooks. Enqueue
-  drops it when it serializes the kwargs, and that is the one deliberate
-  difference;
+* ``request`` reaches synchronous hooks; a direct background drive
+  refuses it at enqueue, and that is the one deliberate difference;
 * every background drive serializes kwargs, so an unserializable kwarg fails at
   enqueue — inline sync-mode execution included;
 * failure routing — a synchronous transition raises to the caller and writes
@@ -177,16 +176,22 @@ class ParityMatrixTests(TestCase):
             for key, value in TYPED_KWARGS.items():
                 self.assertIs(type(results[action][key]), type(value), f'{action}.{key}')
 
-    def test_request_reaches_sync_hooks_and_never_background_hooks(self):
-        # A live request cannot be serialized into the row, so a background
-        # hook never receives one.
+    def test_request_reaches_sync_hooks_and_is_refused_at_enqueue(self):
+        # A live request cannot be serialized into the row. A synchronous
+        # hook receives it; a direct background drive refuses it at
+        # enqueue. The engine's own chain hop is the exception: it strips
+        # request before a background follow-up (see test_bg_chain).
+        from django_logic.background.serializers import (
+            KwargsSerializationError,
+        )
+
         sentinel = object()
         for action in SYNC_ACTIONS:
             _drive(self._fresh(), action, request=sentinel)
             self.assertIs(SEEN.get('request'), sentinel, action)
         for action in BACKGROUND_ACTIONS:
-            _drive(self._fresh(), action, request=sentinel)
-            self.assertNotIn('request', SEEN, action)
+            with self.assertRaises(KwargsSerializationError):
+                _drive(self._fresh(), action, request=sentinel)
 
     def test_unserializable_kwarg_fails_at_enqueue_for_background_only(self):
         # Every background drive serializes kwargs, inline sync-mode execution
@@ -278,8 +283,7 @@ class ParityMatrixTests(TestCase):
         for parent in CHAIN_PARENTS:
             HOP_SEEN.clear()
             widget = self._fresh()
-            _drive(widget, parent, user=self.user, request=object(),
-                   **dict(TYPED_KWARGS))
+            _drive(widget, parent, user=self.user, **dict(TYPED_KWARGS))
             widget.refresh_from_db()
             self.assertEqual(widget.status, 'chained', parent)
             hop_kwargs = {k: v for k, v in HOP_SEEN.items()

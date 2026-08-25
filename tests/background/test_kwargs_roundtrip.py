@@ -34,7 +34,6 @@ class KwargsRoundTripTests(TestCase):
     def test_side_effect_receives_restored_user_and_context(self):
         self.widget.process.fulfil(
             user=self.user,
-            request=object(),
             when=_WHEN,
             some_uuid=_UUID,
         )
@@ -45,9 +44,6 @@ class KwargsRoundTripTests(TestCase):
         self.assertIsInstance(seen['user'], get_user_model())
         self.assertEqual(seen['user'].pk, self.user.pk)
         self.assertNotIn('user_id', seen)
-
-        # A request object cannot be serialized, so enqueue drops it.
-        self.assertNotIn('request', seen)
 
         # The worker rebuilds context, so a side-effect declared as
         # fn(instance, context, **kwargs) works in both modes.
@@ -66,13 +62,11 @@ class KwargsRoundTripTests(TestCase):
             'tests.background.models.WidgetProcess',
         )
 
-    @override_settings(
-        DJANGO_LOGIC={**_SYNC_SETTINGS, 'STRICT_KWARGS_SERIALIZATION': True})
-    def test_strict_request_drop_reaches_the_caller_as_its_own_error(self):
-        # In strict mode the caller sees KwargsSerializationError, not the
-        # dispatcher's generic "not JSON-serializable" error.
+    def test_request_refusal_reaches_the_caller_as_its_own_error(self):
+        # The caller sees KwargsSerializationError, not the dispatcher's
+        # generic "not JSON-serializable" error.
         with self.assertRaisesMessage(
-                KwargsSerializationError, "'request' dropped"):
+                KwargsSerializationError, "'request' cannot be passed"):
             self.widget.process.fulfil(request=object())
         # Enqueue failed before it saved anything.
         self.assertFalse(TransitionMessage.objects.exists())
