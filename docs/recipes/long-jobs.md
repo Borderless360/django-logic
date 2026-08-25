@@ -22,7 +22,7 @@ attempt would make that attempt's retries unsafe. Split the job instead.
 
 ## The shape
 
-Give each chunk its own background action. Each chunk is then its own
+Give each chunk its own background transition. Each chunk is then its own
 `TransitionMessage` row, its own attempt, its own savepoint, its own
 retries, and its own commit:
 

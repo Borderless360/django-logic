@@ -7,9 +7,10 @@ the caller's call frame — validate, lock, run, write the target state.
 
 ``target=None`` declares a transition that writes no state on success.
 It runs under the same contract as every other transition: it takes the
-state lock, it is blocked while a background transition is uncompleted,
-and it runs ``next_transition``. A side-effect that must not wait for
-that contract is not a transition — write it as a plain method.
+state lock, it is refused while a background transition is uncompleted
+(``TransitionTemporarilyUnavailable``), and it runs ``next_transition``.
+A side-effect that must not obey that contract is not a transition —
+write it as a plain method.
 
 For background-executed transitions, see
 ``django_logic.background.BackgroundTransition``. That path has two
@@ -359,11 +360,13 @@ class Transition:
             )
 
     def _ensure_no_background_in_flight(self, state: State) -> None:
-        """Reject a state-changing transition while a background transition
-        is in progress on the same instance + process.
+        """Reject any synchronous transition — with a target or without
+        one — while a background transition is in progress on the same
+        instance + process.
 
         Without this gate a synchronous transition could interleave with
-        the worker and the two would overwrite each other's state writes.
+        the worker: a target write would race the worker's state writes,
+        and side-effects would run against a row mid-change.
         Checked under the lock, like the source revalidation.
 
         A row that is still being retried raises the transient type: it

@@ -7,11 +7,12 @@
 ### Removed
 
 - **`Action` and `BackgroundAction`** (#243). One transition contract
-  remains: every declaration takes the state lock, waits while a
-  background transition is uncompleted on the same instance and
-  process, and runs `next_transition`. `target=None` (the default)
-  declares a transition that writes no state on success. Importing the
-  removed names raises `ImportError` with this migration:
+  remains: every declaration takes the state lock, is refused with
+  `TransitionTemporarilyUnavailable` while a background transition is
+  uncompleted on the same instance and process, and runs
+  `next_transition`. `target=None` (the default) declares a transition
+  that writes no state on success. Importing the removed names raises
+  `ImportError` with this migration:
   - `BackgroundAction(...)` → `BackgroundTransition(...)` with no
     `target`. The behavior is identical.
   - `Action(...)` → `Transition(...)` with no `target`. Behavior

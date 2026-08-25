@@ -141,10 +141,14 @@ class Process:
         )
 
         tr_id = uuid.uuid4()
+        target_note = (
+            f"to {transition.target}" if transition.target is not None
+            else "(no state write)"
+        )
         transition_logger.info(
             f"{tr_id} {self.state.instance_key}, process {self.process_name} "
             f"executes '{action_name}' transition from {self.state.get_state()} "
-            f"to {transition.target}  "
+            f"{target_note}  "
         )
         kwargs['root_id'] = kwargs.get('root_id', tr_id)
         kwargs['parent_id'] = kwargs.get('tr_id', tr_id)

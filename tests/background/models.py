@@ -647,7 +647,8 @@ class WidgetChainProcess(Process):
 
 
 # --- Fixtures for ProcessScenario behaviour tests ---------------------------
-# These processes cover the synchronous Transition and Transition matrix and the
+# These processes cover the synchronous transitions, with and without a
+# target, and the
 # background-to-background next_transition chain. Every side-effect appends a
 # marker to se_log or cb_log, so a test asserts on how the object changed
 # rather than on a return value.
@@ -748,8 +749,8 @@ def _is_staff_user(instance, user=None, **kwargs):
 
 
 class WidgetSyncProcess(Process):
-    """The synchronous Transition and Transition matrix on Widget.status, bound as
-    ``sync_proc``.
+    """The synchronous transitions on Widget.status, with and without a
+    target, bound as ``sync_proc``.
 
     It covers ordered side-effects, next_transition chaining, the failure path,
     a synchronous Transition, a swallowed callback exception, two transitions with

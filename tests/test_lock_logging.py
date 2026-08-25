@@ -123,10 +123,10 @@ class LifecycleLinesCarryInstanceKeyTests(TestCase):
             any(f'{TransitionEventType.UNLOCK.value} {key}' in line
                 for line in per_instance), logs.output)
 
-    def test_action_failed_state_write_lock_and_unlock_name_the_instance(self):
-        # The Transition's write-scoped lock (#185) is the engine's newest
-        # acquisition — without these lines a crash inside the write window
-        # would be unattributable, the exact #188 blind spot.
+    def test_no_target_failure_lock_and_unlock_name_the_instance(self):
+        # A failing no-target transition holds the main lock through its
+        # failed_state write — without these lines a crash inside the
+        # write window would be unattributable to the instance.
         inv = Invoice.objects.create(status='draft')
         key = inv.lock_logging_proc.state.instance_key
 

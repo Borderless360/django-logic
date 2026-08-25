@@ -155,9 +155,9 @@ Each declaration slot has one job:
 
 Declare a `Transition` with no `target` for work that needs conditions,
 permissions and side-effects but writes no state on success. It follows
-the same rules as every transition: it takes the state lock, it waits
-while a background transition is uncompleted, and it runs
-`next_transition`. A side-effect that must not wait for those rules is
+the same rules as every transition: it takes the state lock, it is
+refused while a background transition is uncompleted, and it runs
+`next_transition`. A side-effect that must not obey those rules is
 not a transition — write it as a plain method on the model.
 
 ## Bind the model to the process

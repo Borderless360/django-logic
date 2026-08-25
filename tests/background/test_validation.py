@@ -23,10 +23,6 @@ class QueueValidationTests(SimpleTestCase):
             )
         self.assertIn('non-empty string', str(ctx.exception))
 
-    def test_background_action_rejects_empty_queue_string(self):
-        with self.assertRaises(ImproperlyConfigured):
-            BackgroundTransition(action_name='x', sources=['a'], queue='')
-
     def test_queue_defaults_to_default_queue_setting(self):
         transition = BackgroundTransition(
             action_name='x', sources=['a'], target='b'
@@ -299,8 +295,8 @@ class NestedTreeBackgroundActionNameTests(SimpleTestCase):
         self.assertEqual(_Parent.nested_processes, [_ChildA, _ChildB])
 
     def test_background_action_duplication_across_nested_processes_allowed(self):
-        # Same with BackgroundTransition, which has no in_progress_state: the
-        # process class is the only thing that tells the two apart.
+        # Same for two no-target transitions: the process class is the only
+        # thing that tells the two apart.
         class _ChildA(Process):
             process_name = 'act_child_a'
             transitions = [

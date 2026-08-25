@@ -22,9 +22,9 @@ def __getattr__(name):
             "Action was removed in 0.18.0. Declare "
             "Transition(action_name=..., sources=[...]) with no target — "
             "it writes no state on success, and unlike Action it takes "
-            "the state lock, waits for an uncompleted background "
-            "transition, and runs next_transition. A side-effect that "
-            "must not wait for that contract belongs in a plain method, "
-            "not in the process."
+            "the state lock, is refused while a background transition is "
+            "uncompleted (TransitionTemporarilyUnavailable), and runs "
+            "next_transition. A side-effect that must not obey that "
+            "contract belongs in a plain method, not in the process."
         )
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

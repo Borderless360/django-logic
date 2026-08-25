@@ -1,4 +1,4 @@
-"""Behavior-focused Transition / Transition tests.
+"""Behavior-focused synchronous transition tests.
 
 These tests replaced an older suite that drove ``transition.change_state(state)``
 directly (bypassing the ``instance.process.<action>()`` entrypoint users
@@ -35,7 +35,7 @@ from tests import dl_settings
 
 # ProcessScenario runs in sync mode by default (BACKGROUND_EXECUTION='sync'
 # is set per-class via override_settings where background work is involved;
-# the sync Transition/Transition tests below don't touch the background engine,
+# the synchronous transition tests below don't touch the background engine,
 # so the default sync setting is fine).
 _SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 

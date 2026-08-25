@@ -5,10 +5,10 @@ connection when a database error is raised inside an atomic block, even if the
 caller catches that error. ``Atomic.__exit__`` then rolls back and raises
 nothing, so an attempt that lost all its writes looks like a success.
 
-A ``BackgroundTransition`` escapes this by luck: its target ``set_state`` is
-the last statement in the attempt, so it hits the flagged connection and
-raises ``TransactionManagementError``. A ``BackgroundTransition`` writes no state,
-so nothing runs after the caught error and the row completed with
+A state-writing ``BackgroundTransition`` escapes this by luck: its target
+``set_state`` is the last statement in the attempt, so it hits the flagged
+connection and raises ``TransactionManagementError``. One with no target
+writes no state, so nothing runs after the caught error and the row completed with
 ``errors_count=0`` and success callbacks over discarded work.
 """
 from django.core.cache import cache

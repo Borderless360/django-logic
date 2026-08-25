@@ -10,10 +10,9 @@ The mutex is scoped to one instance plus one process:
   ``TransitionNotAllowed("State is locked")`` and creates no row.
 * ``BackgroundTransition.change_state`` releases the lock in a finally, on
   rejection and on success alike.
-* A plain ``Transition`` is not gated on its success path: it changes no state,
-  takes no lock, and ignores background work in progress. Its failure path is
-  the exception — while an uncompleted row exists the worker owns the state
-  field, so the ``failed_state`` write is skipped.
+* A transition with no target follows the same rules: it takes the lock,
+  it is refused while an uncompleted row exists, and its failure writes
+  ``failed_state`` under its own lock.
 """
 from datetime import timedelta
 
@@ -221,8 +220,7 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
 
     def test_public_in_flight_probe_reads_the_row(self):
         # in_flight() is the documented probe for consumer API seams. One
-        # shared queryset backs it, the synchronous gate, and the Transition
-        # failure path.
+        # shared queryset backs it and the synchronous gate.
         self.assertFalse(in_flight(self.widget, 'process'))
 
         row = _make_row(self.widget)
