@@ -33,15 +33,29 @@ pip install django-logic
 Add `[redis]` if your settings name `django_redis.cache.RedisCache`. That
 extra installs the third-party backend for you.
 
-Add two entries to `INSTALLED_APPS` and create the table:
+Add one entry to `INSTALLED_APPS` and create the table:
 
 ```python
 INSTALLED_APPS = [
     ...,
-    'django_logic',
     'django_logic.background',
 ]
 ```
+
+That one entry is the whole library. It owns the `TransitionMessage`
+table and its migrations, the `dl_worker` and `dl_transitions` commands,
+and every system check. `import django_logic` works as normal — a Python
+package needs no `INSTALLED_APPS` entry to be importable.
+
+Upgrading from a release that asked for a second entry, `'django_logic'`?
+Delete that line whenever you like. Keeping it is supported and changes
+nothing: it is a real app and both boot hooks are idempotent.
+
+Running no background transitions at all? Install `'django_logic'` alone
+instead — also one entry. That shape has no table, no worker and no boot
+check on the database or the cache, so it runs on SQLite with Django's
+default cache. `manage.py check` names the missing app the moment you
+bind a `BackgroundTransition`.
 
 ```bash
 python manage.py migrate
