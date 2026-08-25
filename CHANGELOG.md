@@ -176,12 +176,13 @@ consumer API is unchanged except where noted.
   unchanged.
 - **`DEFER_UNLOCK_UNTIL_COMMIT` is removed** (#244). Nothing set it.
   The knob, its deferred-unlock registry, the `deferrable=` threading
-  through every release path, and its tests are gone — 651 net lines.
+  through every release path, and its tests are gone — 646 net lines,
+  counted with the re-export removal that shared the commit.
   Locks release when the transition finishes; drive follow-up work
   from `transaction.on_commit` when it must see the caller's commit.
   The key joins the removed-settings tombstones.
 - **The top-level re-export of the command classes is removed**
-  (#244). Import `Conditions`, `Permissions`, `SideEffects`,
+  (#244). **Upgrade step**: import `Conditions`, `Permissions`, `SideEffects`,
   `Callbacks` from `django_logic.commands`. Kept, against the issue's
   list: the `*_class` swap hooks — the consumer overrides
   `Process.permissions_class` on three processes, and its
