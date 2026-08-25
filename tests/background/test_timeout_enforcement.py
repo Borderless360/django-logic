@@ -206,6 +206,48 @@ class HarvestTests(TransactionTestCase):
         _harvest(attempts, block=True)
         self.assertEqual(self.recorded(), [])
 
+    def test_a_failed_accounting_write_is_retried_and_lands(self):
+        """The write can fail for the same reason the attempt crashed — a
+        database outage. It must not raise out of the worker loop, and it
+        must land once the database answers again."""
+        attempt_pid = os.fork()
+        if attempt_pid == 0:
+            os._exit(3)
+        self.record.side_effect = [
+            Exception('the connection went away'), None,
+        ]
+        attempts = self._attempt(attempt_pid)
+
+        _harvest(attempts, block=True)
+        # The write failed: the attempt stays, reaped, for the retry.
+        self.assertEqual(len(attempts), 1)
+        self.assertTrue(next(iter(attempts.values())).reaped)
+
+        _harvest(attempts, block=True)
+        self.assertEqual(attempts, {})
+        # Recorded exactly once for real; the first call raised.
+        self.assertEqual(self.record.call_count, 2)
+        self.assertIn('[crashed]', self.record.call_args.args[1])
+
+    def test_a_failed_timeout_write_keeps_its_timeout_verdict(self):
+        """A killed attempt whose write failed must still be charged a
+        timeout on the retry, not re-decided from a stale status."""
+        attempt_pid = os.fork()
+        if attempt_pid == 0:
+            time.sleep(30)
+            os._exit(0)
+        self.record.side_effect = [
+            Exception('the connection went away'), None,
+        ]
+        attempts = self._attempt(
+            attempt_pid, timeout_seconds=0.2, deadline=_PASSED)
+
+        _harvest(attempts, block=True)
+        self.assertEqual(len(attempts), 1)
+        _harvest(attempts, block=True)
+        self.assertEqual(attempts, {})
+        self.assertIn('[timeout]', self.record.call_args.args[1])
+
 
 @override_settings(DJANGO_LOGIC=_PULL_SETTINGS)
 @requires_postgres

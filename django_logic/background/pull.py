@@ -130,12 +130,19 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
 
 @dataclass
 class _Attempt:
-    """One forked attempt process the worker is responsible for."""
+    """One forked attempt process the worker is responsible for.
+
+    ``reaped`` means the process is gone and only the accounting write
+    remains; ``exit_code`` is what the reap reported, or ``None`` when
+    something else reaped it and no status arrived.
+    """
 
     pk: int
     timeout_seconds: float | None
     deadline: float | None
     killed: bool = False
+    reaped: bool = False
+    exit_code: int | None = None
 
 
 def _start_attempt(pk: int, attempts: dict[int, _Attempt]) -> None:
@@ -190,11 +197,22 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
     With ``block`` the call returns after one attempt ends. It blocks in
     ``waitpid`` when no attempt carries a budget, and polls when one
     does, because a budget has to be enforced while nothing exits.
+
+    An attempt leaves ``attempts`` only when its accounting write lands.
+    The write can fail for the same reason the attempt crashed — a
+    database outage — and losing it would give a crash loop unpaced,
+    unbounded retries, so a failed write keeps the attempt as ``reaped``
+    and every later pass retries it.
     """
     while attempts:
         now = time.monotonic()
+        for pid in [p for p, a in attempts.items() if a.reaped]:
+            if _try_account(attempts[pid]):
+                del attempts[pid]
+        if not attempts:
+            return
         for pid, attempt in attempts.items():
-            if attempt.killed or attempt.deadline is None:
+            if attempt.reaped or attempt.killed or attempt.deadline is None:
                 continue
             if now < attempt.deadline:
                 continue
@@ -206,10 +224,18 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
                 # reaps it, and the budget passed either way, so the
                 # attempt is still charged a timeout.
                 pass
+        if all(attempt.reaped for attempt in attempts.values()):
+            # Only failed accounting writes remain — no process to wait
+            # on. Pace the retry instead of hammering the database.
+            if not block:
+                return
+            time.sleep(1.0)
+            continue
         next_deadline = min(
             (
                 attempt.deadline for attempt in attempts.values()
-                if attempt.deadline is not None and not attempt.killed
+                if attempt.deadline is not None
+                and not attempt.killed and not attempt.reaped
             ),
             default=None,
         )
@@ -219,22 +245,50 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
         except ChildProcessError:
             # Something else reaped them, so no exit status is coming.
             for attempt in attempts.values():
-                _account(attempt, None)
-            attempts.clear()
-            return
+                if not attempt.reaped:
+                    attempt.reaped = True
+                    attempt.exit_code = None
+                    attempt.deadline = None
+            continue
         if pid == 0:
             if not block:
                 return
             time.sleep(min(1.0, max(0.01, next_deadline - now)))
             continue
-        attempt = attempts.pop(pid, None)
+        attempt = attempts.get(pid)
         if attempt is None:
             # Not an attempt process. The worker is the only supervisor
             # here, so this is a stray child left by consumer code.
             continue
-        _account(attempt, os.waitstatus_to_exitcode(raw_status))
+        attempt.reaped = True
+        attempt.exit_code = os.waitstatus_to_exitcode(raw_status)
+        attempt.deadline = None
+        if _try_account(attempt):
+            del attempts[pid]
         if block:
             return
+
+
+def _try_account(attempt: _Attempt) -> bool:
+    """Run the accounting write for a reaped attempt. Returns whether it
+    landed.
+
+    The write must not raise out of the worker loop: the database that
+    refuses it is often the same one whose outage crashed the attempt,
+    and a worker that dies here leaves its other attempts running with
+    nothing to enforce their ``timeout=``.
+    """
+    try:
+        _account(attempt, attempt.exit_code)
+    except Exception as exc:
+        logger.error(
+            'pull: could not record how the attempt for '
+            'TransitionMessage#%s ended (%s: %s); the worker keeps it and '
+            'retries the write.',
+            attempt.pk, type(exc).__name__, exc,
+        )
+        return False
+    return True
 
 
 def _account(attempt: _Attempt, exit_code: int | None) -> None:

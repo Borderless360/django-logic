@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-08-25
+
+The two defects the consumer's adoption review of 0.17.0 found (#259,
+#260). Both sit in code 0.17.0 added, so the fix ships before any
+consumer runs it. The wording fix came in through #261.
+
+### Fixed
+
+- **A database blip while the worker records a crash or timeout no
+  longer kills the loop or loses the accounting** (#259). The claim and
+  fork were guarded; the harvest's accounting write was not, and it
+  writes to the same database whose outage crashes attempts in the
+  first place. The write now cannot raise out of the worker loop: a
+  reaped attempt leaves the worker's books only when its write lands,
+  and every later pass retries a failed one. An unaccounted attempt
+  keeps occupying its slot, so a worker that cannot record outcomes
+  stops claiming new work until the database answers again. Two tests
+  pin the retry, one per verdict: a crash stays a crash and a kill
+  stays a timeout.
+- **`dl_transitions` stops promising a worker that may not exist**
+  (#260). Both lines pointed at work that only happens inside a worker
+  loop. The MAX_ERRORS line now says the finalizer's pass comes from
+  any running worker — that sweep reads every queue, not just the
+  worker's own — and `--send` says a worker claims the row once one
+  serves its queue, because the claim *is* queue-filtered.
+
 ## [0.17.0] — 2026-08-24
 
 The cleanup after the pull cut (#221): the words now match the engine,
@@ -151,12 +177,13 @@ consumer API is unchanged except where noted.
   unchanged.
 - **`DEFER_UNLOCK_UNTIL_COMMIT` is removed** (#244). Nothing set it.
   The knob, its deferred-unlock registry, the `deferrable=` threading
-  through every release path, and its tests are gone — 651 net lines.
+  through every release path, and its tests are gone — 646 net lines,
+  counted with the re-export removal that shared the commit.
   Locks release when the transition finishes; drive follow-up work
   from `transaction.on_commit` when it must see the caller's commit.
   The key joins the removed-settings tombstones.
 - **The top-level re-export of the command classes is removed**
-  (#244). Import `Conditions`, `Permissions`, `SideEffects`,
+  (#244). **Upgrade step**: import `Conditions`, `Permissions`, `SideEffects`,
   `Callbacks` from `django_logic.commands`. Kept, against the issue's
   list: the `*_class` swap hooks — the consumer overrides
   `Process.permissions_class` on three processes, and its

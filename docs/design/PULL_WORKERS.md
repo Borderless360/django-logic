@@ -151,9 +151,9 @@ python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 ```
 
 One process per SLA group, exactly like one broker worker per queue
-before. Celery is no longer a dependency: nothing imports it, and
-`'celery'` as a mode reports its removal with the migration steps at
-boot.
+before. Celery is no longer a dependency: nothing imports it, and an
+unknown `BACKGROUND_EXECUTION` value fails loudly at boot naming the
+valid modes.
 
 `--concurrency=N` says how many attempts one worker runs at a time
 (default 1). Each attempt still runs in its own forked process, and
@@ -207,8 +207,8 @@ process alert comes first.
 ## 8. Migration path
 
 1. 0.15.0 is the last push release; 0.16.0 ships pull as the default and
-   removes the push machinery. `'celery'` reports its removal, with the
-   migration steps, at boot.
+   removes the push machinery. An unknown mode fails loudly at boot
+   naming the valid ones.
 2. The Heroku harness runs the full matrix under pull next to the
    recorded push results before 0.16.0 publishes.
 3. A consumer moves by setting `'pull'`, replacing its Celery worker and
