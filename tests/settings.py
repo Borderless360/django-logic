@@ -26,9 +26,6 @@ MIDDLEWARE: list = []
 #   * Set ``POSTGRES_HOST`` (plus optional ``POSTGRES_{DB,USER,PASSWORD,PORT}``)
 #     to run against PostgreSQL. Use it for the stability suite, which starts
 #     real concurrent transactions and needs row locking.
-#
-# Celery mode rejects SQLite when it validates settings on startup, so a
-# production misconfiguration fails immediately.
 if os.environ.get('POSTGRES_HOST'):
     DATABASES = {
         'default': {

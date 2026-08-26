@@ -128,8 +128,9 @@ def check_background_database_routing(app_configs, **kwargs):
     """
     from django.apps import apps
 
-    # Nothing to route without the app. A bound background transition with the
-    # app missing is its own error, reported by the check above.
+    # Nothing to route without the app — and nothing here registers
+    # without it either. bind_model_process refuses a background binding
+    # when the app is missing, so that gap reports itself at bind time.
     if not apps.is_installed('django_logic'):
         return []
 

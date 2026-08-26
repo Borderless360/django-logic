@@ -3,12 +3,12 @@
 One module owns every key: one reader per key, one number validator,
 and one place where each default is written down.
 
-Validation runs from two boot gates. ``DjangoLogicConfig.ready`` calls
-:func:`validate_core_settings` — the keys the core engine reads with or
-without the background app installed. The background app's ready hook
-(``django_logic.background.apps``) validates the background keys and
-the pull-mode deployment requirements on top. Both paths are idempotent
-— pure reads, no state.
+Validation runs from one boot gate: ``DjangoLogicConfig.ready`` calls
+``validate_on_ready``, which validates every key in every mode. The
+pull-mode deployment requirements (database, cache) are the
+``django_logic.E004``/``E005`` system checks instead, because they
+depend on bindings that happen after ``ready()`` runs. All of it is
+idempotent — pure reads, no state.
 """
 import math
 from contextlib import contextmanager

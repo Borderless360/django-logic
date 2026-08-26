@@ -18,9 +18,8 @@ Public API:
 
 All symbols are importable after Django's app registry is ready
 (i.e. inside views, management commands, tests, signal handlers).
-Attribute access is lazy so this package can be declared in
-``INSTALLED_APPS`` without triggering model imports during
-``apps.populate()``.
+Attribute access is lazy so importing this package never triggers
+model imports before the app registry is ready.
 """
 from __future__ import annotations
 

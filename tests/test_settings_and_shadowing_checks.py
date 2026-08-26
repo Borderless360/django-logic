@@ -24,6 +24,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import (
     SimpleTestCase,
     TestCase,
+    modify_settings,
     override_settings,
 )
 
@@ -105,6 +106,20 @@ class OneEntryInstallTests(_BindingHelper, SimpleTestCase):
         message = str(ctx.exception)
         self.assertIn("'django_logic'", message)
         self.assertIn('alone', message)
+
+
+class MissingAppGuardTests(_BindingHelper, SimpleTestCase):
+    @modify_settings(INSTALLED_APPS={'remove': 'django_logic'})
+    def test_a_background_binding_without_the_app_is_refused(self):
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            self.bind(Invoice, _BackgroundBoundProcess)
+        message = str(ctx.exception)
+        self.assertIn('INSTALLED_APPS', message)
+        self.assertIn('migrate', message)
+
+    @modify_settings(INSTALLED_APPS={'remove': 'django_logic'})
+    def test_a_sync_only_binding_without_the_app_still_binds(self):
+        self.bind(Invoice, _SyncOnlyProcess)
 
 
 class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):

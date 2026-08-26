@@ -54,7 +54,9 @@ synchronous-only project runs on SQLite with Django's default cache.
 Upgrading from 1.0.x or earlier? Replace `'django_logic.background'`
 (and a second `'django_logic'` line, if present) with the one entry
 above. Nothing in the database moves: the app keeps the same label,
-table and migration history, so `migrate` is a no-op.
+table and migration history, so an install that had the background app
+applies no new migration. A 1.0.x install of `'django_logic'` alone had
+no table, so its next `migrate` creates it, empty.
 
 ```bash
 python manage.py migrate

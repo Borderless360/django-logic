@@ -212,8 +212,10 @@ class TransitionMessage(TimeStampedModel):
         Asks with ``select_for_update(nowait=True)`` inside its own
         savepoint and gives up at once, so the probe never blocks and never
         keeps a lock. On SQLite the clause is dropped, so the answer is
-        always False there — pull mode rejects SQLite at boot, and in
-        sync mode the attempt runs in the caller's own thread.
+        always False there — pull mode refuses SQLite (the
+        ``django_logic.E004`` check, run by migrate, runserver and the
+        worker), and in sync mode the attempt runs in the caller's own
+        thread.
         """
         try:
             with transaction.atomic():

@@ -23,6 +23,13 @@
   `dl_worker`. A project that declares no background transition runs
   on SQLite with the default cache — same entry, no gates. The settings
   block itself is still validated at boot in every shape.
+- **A background binding without the app is refused at bind time.**
+  `bind_model_process` raises `ImproperlyConfigured` when the process
+  declares a background transition and `'django_logic'` is not
+  installed — with no entry, no check ever registers, so the bind is
+  the first place that can say so. The checks run on `manage.py check`,
+  `migrate`, `runserver` and `dl_worker`; a process that skips checks
+  defers to the worker's own refusal.
 - **The old entries refuse to boot and name the fix.** A settings file
   still listing `'django_logic.background'` gets one
   `ImproperlyConfigured` line saying to install `'django_logic'` alone.
