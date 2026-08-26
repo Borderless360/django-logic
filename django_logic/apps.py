@@ -2,22 +2,24 @@ from django.apps import AppConfig
 
 
 class DjangoLogicConfig(AppConfig):
-    """App-level bootstrap for the base ``django_logic`` app.
+    """The one installed app: ``INSTALLED_APPS = ['django_logic']``.
 
-    The background app (``django_logic.background``) performs the same
-    bootstrap in its own ``ready()`` — both are idempotent — but a
-    sync-only consumer that installs just ``django_logic`` must still get
-    the system checks, so they live here too.
+    The label stays ``django_logic_background``: the label is the address
+    of the live ``TransitionMessage`` table, of its rows in
+    ``django_migrations`` and of its content types, so an install that
+    upgrades from the two-entry era keeps its data without a migration.
+
+    A consumer that never declares a background transition needs nothing
+    beyond this entry: the pull-mode database and cache rules are system
+    checks that fire only when a background transition is bound.
     """
     name = 'django_logic'
+    label = 'django_logic_background'
+    verbose_name = 'Django Logic'
+    default_auto_field = 'django.db.models.BigAutoField'
 
     def ready(self) -> None:
         from django_logic import checks  # noqa: F401 — registers system checks
-        from django_logic.conf import validate_core_settings
+        from django_logic.background.apps import validate_on_ready
 
-        # Core knobs (LOCK_TIMEOUT) are used by the engine with or without
-        # the background app installed — a sync-only install must fail
-        # fast on misconfiguration too. The background app's
-        # validate_on_ready() re-runs this as part of its full gate; both
-        # are idempotent.
-        validate_core_settings()
+        validate_on_ready()

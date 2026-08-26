@@ -21,8 +21,8 @@ runs it.
 - A cross-process `default` cache. The web processes and the worker processes
   share the state lock through it. django-logic locks through Django's cache
   API and imports no backend, so `django.core.cache.backends.redis.RedisCache`
-  is enough. Boot refuses a per-process cache (locmem, dummy) when
-  `DEBUG=False`.
+  is enough. `manage.py check` refuses a per-process cache (locmem,
+  dummy) when `DEBUG=False` and a background transition is bound.
 
 ## Install
 
@@ -38,24 +38,25 @@ Add one entry to `INSTALLED_APPS` and create the table:
 ```python
 INSTALLED_APPS = [
     ...,
-    'django_logic.background',
+    'django_logic',
 ]
 ```
 
-That one entry is the whole library. It owns the `TransitionMessage`
-table and its migrations, the `dl_worker` and `dl_transitions` commands,
-and every system check. `import django_logic` works as normal — a Python
-package needs no `INSTALLED_APPS` entry to be importable.
+That one entry is the whole library: the `TransitionMessage` table and
+its migrations, the `dl_worker` and `dl_transitions` commands, and every
+system check. There is nothing else to install or configure.
 
-Upgrading from a release that asked for a second entry, `'django_logic'`?
-Delete that line whenever you like. Keeping it is supported and changes
-nothing: it is a real app and both boot hooks are idempotent.
+Running no background transitions? The same entry. The PostgreSQL and
+shared-cache rules below apply only when a background transition is
+bound — `manage.py check` tells you the moment one is — so a
+synchronous-only project runs on SQLite with Django's default cache.
 
-Running no background transitions at all? Install `'django_logic'` alone
-instead — also one entry. That shape has no table, no worker and no boot
-check on the database or the cache, so it runs on SQLite with Django's
-default cache. `manage.py check` names the missing app the moment you
-bind a `BackgroundTransition`.
+Upgrading from 1.0.x or earlier? Replace `'django_logic.background'`
+(and a second `'django_logic'` line, if present) with the one entry
+above. Nothing in the database moves: the app keeps the same label,
+table and migration history, so an install that had the background app
+applies no new migration. A 1.0.x install of `'django_logic'` alone had
+no table, so its next `migrate` creates it, empty.
 
 ```bash
 python manage.py migrate

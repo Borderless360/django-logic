@@ -200,9 +200,12 @@ same release's own fixes. Therefore:
 ## Deployment the durability contract depends on
 
 - PostgreSQL for `TransitionMessage` — the worker's claim is
-  `SELECT FOR UPDATE SKIP LOCKED`; boot refuses SQLite in pull mode.
-- A cross-process `default` cache for the state lock — pull mode refuses
-  to boot with a locmem/dummy cache when `DEBUG=False`. The engine locks
+  `SELECT FOR UPDATE SKIP LOCKED`; `manage.py check` (and so `migrate`,
+  `runserver` and `dl_worker`) refuses SQLite in pull mode once a
+  background transition is bound (`django_logic.E004`).
+- A cross-process `default` cache for the state lock — the same check
+  refuses a locmem/dummy cache when `DEBUG=False` (`django_logic.E005`).
+  The engine locks
   through Django's cache API and imports no backend, so Django's built-in
   `django.core.cache.backends.redis.RedisCache` is enough; django-redis is
   the `[redis]` extra, not a core dependency (0.11.0).

@@ -30,36 +30,80 @@ def _models_bound_to_background_transitions() -> list:
     })
 
 
-@checks.register('django_logic')
-def check_background_app_is_installed(app_configs, **kwargs):
-    """A bound ``BackgroundTransition`` needs ``django_logic.background`` in
-    ``INSTALLED_APPS`` (``django_logic.E003``).
+_LOCAL_CACHE_BACKENDS = (
+    'django.core.cache.backends.locmem',
+    'django.core.cache.backends.dummy',
+)
 
-    The app owns the ``TransitionMessage`` table and its migrations. Without it,
-    enqueue has nowhere to write the row, so the first background transition
-    fails with ``OperationalError: no such table`` from deep inside the engine.
-    The other background checks also skip an install without the app, so
-    ``manage.py check`` used to report nothing at all.
+
+def _pull_mode_with_background_bindings():
+    """The condition the two pull-mode infrastructure checks share.
+
+    Bindings happen in consumer apps' ``ready()`` hooks, so this can only
+    be asked after the registry is ready — which is why these rules are
+    system checks and not part of the app's own ``ready()``.
     """
-    from django.apps import apps
+    from django_logic import conf
 
-    if apps.is_installed('django_logic.background'):
+    if conf.background_execution() != conf.EXECUTION_PULL:
+        return False
+    return bool(_models_bound_to_background_transitions())
+
+
+@checks.register('django_logic')
+def check_pull_mode_database(app_configs, **kwargs):
+    """Pull mode claims rows with SELECT FOR UPDATE SKIP LOCKED, so the
+    alias that stores ``TransitionMessage`` must not be SQLite
+    (``django_logic.E004``). An install with no background transition
+    bound never stores a row, so the rule does not apply to it."""
+    from django.conf import settings
+    from django.db import router
+
+    from django_logic.background.models import TransitionMessage
+
+    if not _pull_mode_with_background_bindings():
         return []
-    offenders = _models_bound_to_background_transitions()
-    if not offenders:
+    databases = getattr(settings, 'DATABASES', {}) or {}
+    alias = router.db_for_write(TransitionMessage) or 'default'
+    engine = (databases.get(alias) or {}).get('ENGINE', '')
+    if 'sqlite' not in engine.lower():
         return []
     return [checks.Error(
-        "Background transitions are bound on %s, but "
-        "'django_logic.background' is not in INSTALLED_APPS. The app owns "
-        "the TransitionMessage table those transitions write in enqueue, so "
-        "the first background transition fails with a missing-table "
-        "database error." % ', '.join(offenders),
-        hint="Add 'django_logic.background' to INSTALLED_APPS and run "
-             "manage.py migrate. There is no table-less mode: use plain "
-             "synchronous Transitions where the durable outbox is not "
-             "wanted.",
-        id='django_logic.E003',
+        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' requires a database "
+        f"that supports SELECT FOR UPDATE with SKIP LOCKED and partial "
+        f"unique indexes. TransitionMessage is routed to alias '{alias}', "
+        f"which uses {engine!r} (SQLite).",
+        hint="Point that alias at PostgreSQL.",
+        id='django_logic.E004',
     )]
+
+
+@checks.register('django_logic')
+def check_pull_mode_lock_cache(app_configs, **kwargs):
+    """The state lock lives in the ``default`` cache. In pull mode the web
+    processes and the worker processes are different OS processes, so a
+    per-process cache means the lock silently does not lock anything
+    across them (``django_logic.E005``; a warning under ``DEBUG=True`` so
+    local pull-mode experiments stay possible)."""
+    from django.conf import settings
+
+    if not _pull_mode_with_background_bindings():
+        return []
+    caches = getattr(settings, 'CACHES', {}) or {}
+    backend = (caches.get('default') or {}).get('BACKEND', '')
+    if not backend.startswith(_LOCAL_CACHE_BACKENDS):
+        return []
+    message = (
+        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' but the 'default' "
+        f"cache backend is {backend!r}, which is per-process. The state "
+        f"lock will not be shared between the web processes and the "
+        f"worker processes."
+    )
+    hint = ("Use a cross-process cache for 'default' — e.g. "
+            "'django.core.cache.backends.redis.RedisCache', or "
+            "django-redis via `pip install django-logic[redis]`.")
+    finding = checks.Warning if getattr(settings, 'DEBUG', False) else checks.Error
+    return [finding(message, hint=hint, id='django_logic.E005')]
 
 
 @checks.register('django_logic')
@@ -84,9 +128,10 @@ def check_background_database_routing(app_configs, **kwargs):
     """
     from django.apps import apps
 
-    # Nothing to route without the app. A bound background transition with the
-    # app missing is its own error, reported by the check above.
-    if not apps.is_installed('django_logic.background'):
+    # Nothing to route without the app — and nothing here registers
+    # without it either. bind_model_process refuses a background binding
+    # when the app is missing, so that gap reports itself at bind time.
+    if not apps.is_installed('django_logic'):
         return []
 
     from django.db import DEFAULT_DB_ALIAS, router

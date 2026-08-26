@@ -509,6 +509,22 @@ class ProcessManager:
             # and registry entry are already in place.
             return
 
+        # A background transition writes a TransitionMessage row, and the
+        # 'django_logic' app owns that table, its migrations and every
+        # system check. Without the app nothing would report the gap, so
+        # the first background transition would die on a missing table.
+        from django.apps import apps as django_apps
+
+        from django_logic.checks import _process_tree_has_background_transition
+
+        if (_process_tree_has_background_transition(process_class)
+                and not django_apps.is_installed('django_logic')):
+            raise ImproperlyConfigured(
+                f"{model._meta.label} binds {process_class.__name__}, which "
+                f"declares a background transition, but 'django_logic' is "
+                f"not in INSTALLED_APPS. Add it and run manage.py migrate."
+            )
+
         # The state field must be a concrete column: a typo, a property,
         # or a relation silently accepted here only fails much later —
         # deep inside a transition's state write or the stranded sweep.

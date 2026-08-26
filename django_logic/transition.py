@@ -377,7 +377,7 @@ class Transition:
         """
         from django.apps import apps
 
-        if not apps.is_installed('django_logic.background'):
+        if not apps.is_installed('django_logic'):
             return
         from django_logic.background.models import TransitionMessage
 
