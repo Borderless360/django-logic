@@ -196,10 +196,10 @@ def _record_chain_kwargs(instance, **kwargs):
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class SyncToBackgroundRequestChainTests(TestCase):
-    """A sync transition's next_transition into a BACKGROUND follow-up
-    must not forward ``request`` — the follow-up's refusal at enqueue is
-    swallowed by NextTransition, silently killing the chain. Sync
-    follow-ups keep receiving request."""
+    """Every transition refuses ``request`` at the call. ``user_id`` is
+    ordinary data on a synchronous transition, so the hop into a
+    BACKGROUND follow-up strips it — the follow-up's refusal at enqueue
+    is swallowed by NextTransition, silently killing the chain."""
 
     @classmethod
     def setUpClass(cls):
@@ -240,25 +240,26 @@ class SyncToBackgroundRequestChainTests(TestCase):
         _CHAIN_SEEN.clear()
         self.widget = Widget.objects.create(status='draft')
 
-    def test_background_follow_up_runs_despite_request(self):
-        self.widget.request_chain_process.kick(request=object())
+    def test_a_request_kwarg_is_refused_before_anything_runs(self):
+        with self.assertRaises(TypeError) as ctx:
+            self.widget.request_chain_process.kick(request=object())
+        self.assertIn('never takes the request', str(ctx.exception))
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'done')
-        self.assertNotIn('request', _CHAIN_SEEN)
+        self.assertEqual(self.widget.status, 'draft')
+        self.assertEqual(_CHAIN_SEEN, {})
 
     def test_background_follow_up_runs_despite_user_id(self):
         # user_id is refused at a direct enqueue (it is the engine's wire
         # form for user), but it is ordinary data on the synchronous
-        # transition that chains — so the hop strips it the same way it
-        # strips request, instead of silently killing the chain.
+        # transition that chains — so the hop strips it instead of
+        # silently killing the chain.
         self.widget.request_chain_process.kick(user_id=42)
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'done')
         self.assertNotIn('user_id', _CHAIN_SEEN)
 
-    def test_sync_follow_up_still_receives_request(self):
-        sentinel = object()
-        self.widget.request_chain_process.kick_sync(request=sentinel)
+    def test_a_sync_follow_up_refuses_request_the_same_way(self):
+        with self.assertRaises(TypeError):
+            self.widget.request_chain_process.kick_sync(request=object())
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'done')
-        self.assertIs(_CHAIN_SEEN.get('request'), sentinel)
+        self.assertEqual(self.widget.status, 'draft')

@@ -272,14 +272,14 @@ class NextTransition:
             return None
 
         if getattr(transitions[0], 'is_background', False):
-            # request and user_id are refused at enqueue; forwarding
-            # either into a background follow-up would fail kwargs
-            # serialization — and that failure is swallowed below,
-            # silently killing the chain. The caller did nothing wrong:
-            # both are legal on the synchronous transition that chains,
-            # so the engine drops them at the boundary it created.
-            kwargs = {k: v for k, v in kwargs.items()
-                      if k not in ('request', 'user_id')}
+            # user_id is refused at enqueue; forwarding it into a
+            # background follow-up would fail kwargs serialization — and
+            # that failure is swallowed below, silently killing the
+            # chain. The caller did nothing wrong: it is legal on the
+            # synchronous transition that chains, so the engine drops it
+            # at the boundary it created. (request cannot arrive here:
+            # every transition refuses it at the call.)
+            kwargs = {k: v for k, v in kwargs.items() if k != 'user_id'}
 
         using, in_transaction = _in_open_transaction(state.instance)
         try:

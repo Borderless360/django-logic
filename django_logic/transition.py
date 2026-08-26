@@ -55,6 +55,15 @@ _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception'})
 
 
 def _refuse_engine_param_kwargs(action_name: str, kwargs: dict) -> None:
+    if 'request' in kwargs:
+        raise TypeError(
+            f"{action_name}() received 'request'. A transition never takes "
+            f"the request: hooks are fn(instance, **kwargs) and run on a "
+            f"worker for a background transition, where no request exists. "
+            f"Resolve what you need at the call site and pass plain values "
+            f"— the engine already carries user= and restores it on the "
+            f"worker."
+        )
     clashing = sorted(_ENGINE_PARAM_KWARGS & kwargs.keys())
     if clashing:
         raise TypeError(

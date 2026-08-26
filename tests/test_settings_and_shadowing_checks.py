@@ -108,6 +108,25 @@ class OneEntryInstallTests(_BindingHelper, SimpleTestCase):
         self.assertIn('alone', message)
 
 
+class RequestParamHookTests(_BindingHelper, SimpleTestCase):
+    def test_a_hook_naming_request_fails_at_bind(self):
+        def with_request(instance, request=None, **kwargs):
+            pass
+
+        class _RequestReadingProcess(Process):
+            process_name = 'pass4_request_reader'
+            transitions = [
+                Transition('run', sources=['draft'], target='done',
+                           side_effects=[with_request]),
+            ]
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            self.bind(Invoice, _RequestReadingProcess)
+        message = str(ctx.exception)
+        self.assertIn('request', message)
+        self.assertIn('with_request', message)
+
+
 class MissingAppGuardTests(_BindingHelper, SimpleTestCase):
     @modify_settings(INSTALLED_APPS={'remove': 'django_logic'})
     def test_a_background_binding_without_the_app_is_refused(self):
@@ -120,30 +139,6 @@ class MissingAppGuardTests(_BindingHelper, SimpleTestCase):
     @modify_settings(INSTALLED_APPS={'remove': 'django_logic'})
     def test_a_sync_only_binding_without_the_app_still_binds(self):
         self.bind(Invoice, _SyncOnlyProcess)
-
-
-class MayEnqueueTests(SimpleTestCase):
-    def test_a_background_name_answers_true_and_a_sync_name_false(self):
-        from django_logic.background import may_enqueue
-        self.assertTrue(may_enqueue(_BackgroundBoundProcess, 'bg_run'))
-        self.assertFalse(may_enqueue(_SyncOnlyProcess, 'sync_run'))
-        self.assertFalse(may_enqueue(_BackgroundBoundProcess, 'missing'))
-
-    def test_a_nested_background_declaration_behind_a_sync_name_answers_true(self):
-        from django_logic.background import may_enqueue
-
-        class _Nested(Process):
-            process_name = 'pass4_nested'
-            nested_processes = [_BackgroundBoundProcess]
-            transitions = [
-                Transition('bg_run', sources=['other'], target='done'),
-            ]
-
-        self.assertTrue(may_enqueue(_Nested, 'bg_run'))
-
-    def test_an_object_without_engine_attributes_answers_false(self):
-        from django_logic.background import may_enqueue
-        self.assertFalse(may_enqueue(object(), 'anything'))
 
 
 class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):

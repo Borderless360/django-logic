@@ -200,6 +200,10 @@ order.process.approve(user=request.user)
   default.
 - Pass `user=` in a request handler. A call without `user=` is a system call,
   and it skips every permission check.
+- Never pass the request. A transition refuses `request=` at the call:
+  hooks are `fn(instance, **kwargs)` and run on a worker for a background
+  transition, where no request exists. Resolve what a hook needs in the
+  view and pass plain values.
 - `order.process.get_available_actions(user=request.user)` lists what this user
   may run right now.
 - A refused transition raises `TransitionNotAllowed` from
