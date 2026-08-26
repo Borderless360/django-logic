@@ -15,7 +15,7 @@ from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 
 _migration_0010 = importlib.import_module(
-    'django_logic.background.migrations.0010_proxy_model_label'
+    'django_logic.migrations.0010_proxy_model_label'
 )
 normalize_uncompleted_proxy_rows = _migration_0010.normalize_uncompleted_proxy_rows
 restore_proxy_keys = _migration_0010.restore_proxy_keys

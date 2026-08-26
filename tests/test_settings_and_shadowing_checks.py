@@ -3,10 +3,13 @@ working topologies.
 
 Each test pins one confirmed finding:
 
-* A bound ``BackgroundTransition`` without ``django_logic.background`` in
-  ``INSTALLED_APPS`` was reported by nothing — every check early-returns on
-  the missing app and the first ``.go()`` died with a raw missing-table
-  error (``django_logic.E003``).
+* The install is one ``INSTALLED_APPS`` entry, ``'django_logic'``, and the
+  app keeps the label ``django_logic_background`` — the address of the live
+  table, its migration records and its content types. The retired second
+  entry refuses to boot and names the fix. The pull-mode database and cache
+  rules (``django_logic.E004``, ``E005``) fire only when a background
+  transition is bound, so a sync-only install runs on SQLite with the
+  default cache.
 * ``DJANGO_LOGIC`` set to a non-dict raised a bare ``AttributeError`` out of
   ``ready()``, naming no setting.
 * The #182 shadow validator checked every class in the nested tree, so a
@@ -21,14 +24,14 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import (
     SimpleTestCase,
     TestCase,
-    modify_settings,
     override_settings,
 )
 
 from django_logic.background.transitions import BackgroundTransition
 from django_logic.checks import (
-    check_background_app_is_installed,
     check_background_database_routing,
+    check_pull_mode_database,
+    check_pull_mode_lock_cache,
 )
 from django_logic.conf import validate_core_settings
 from django_logic.process import (
@@ -76,33 +79,75 @@ class _SyncOnlyProcess(Process):
     ]
 
 
-class BackgroundAppInstalledCheckTests(_BindingHelper, SimpleTestCase):
-    def test_no_finding_while_the_app_is_installed(self):
+class OneEntryInstallTests(_BindingHelper, SimpleTestCase):
+    def test_the_app_keeps_the_label_of_the_live_table(self):
+        config = apps.get_app_config('django_logic_background')
+        self.assertEqual(config.name, 'django_logic')
+        from django_logic.background.models import TransitionMessage
+        self.assertEqual(TransitionMessage._meta.app_label,
+                         'django_logic_background')
+        self.assertEqual(TransitionMessage._meta.db_table,
+                         'django_logic_background_transitionmessage')
+
+    def test_the_migrations_live_under_the_installed_app(self):
+        from django.db.migrations.loader import MigrationLoader
+        loader = MigrationLoader(None, load=False)
+        loader.load_disk()
+        names = {name for app_label, name in loader.disk_migrations
+                 if app_label == 'django_logic_background'}
+        self.assertIn('0001_initial', names)
+        self.assertIn('0010_proxy_model_label', names)
+
+    def test_the_retired_second_entry_refuses_to_boot(self):
+        from django.apps.config import AppConfig as DjangoAppConfig
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            DjangoAppConfig.create('django_logic.background')
+        message = str(ctx.exception)
+        self.assertIn("'django_logic'", message)
+        self.assertIn('alone', message)
+
+
+class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):
+    _PULL = dict(dl_settings(), BACKGROUND_EXECUTION='pull')
+    _SQLITE = {'default': {'ENGINE': 'django.db.backends.sqlite3',
+                           'NAME': ':memory:'}}
+    _LOCMEM = {'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+
+    def test_e004_names_sqlite_when_pull_mode_has_background_bindings(self):
         self.bind(Invoice, _BackgroundBoundProcess)
-        self.assertEqual(check_background_app_is_installed(None), [])
+        with override_settings(DJANGO_LOGIC=self._PULL,
+                               DATABASES=self._SQLITE):
+            findings = check_pull_mode_database(None)
+        self.assertEqual([f.id for f in findings], ['django_logic.E004'])
+        self.assertIn('SQLite', findings[0].msg)
+        self.assertIn('PostgreSQL', findings[0].hint)
 
-    @modify_settings(INSTALLED_APPS={'remove': 'django_logic.background'})
-    def test_e003_when_a_background_transition_is_bound_without_the_app(self):
-        self.bind(Invoice, _BackgroundBoundProcess)
-
-        findings = check_background_app_is_installed(None)
-
-        self.assertEqual([f.id for f in findings], ['django_logic.E003'])
-        self.assertIn('tests.Invoice', findings[0].msg)
-        self.assertIn('INSTALLED_APPS', findings[0].msg)
-        self.assertIn('migrate', findings[0].hint)
-
-    @modify_settings(INSTALLED_APPS={'remove': 'django_logic.background'})
-    def test_silent_without_the_app_when_nothing_background_is_bound(self):
-        # A sync-only install must not be told to add an app it has no use
-        # for. Only this binding is visible for the duration.
+    def test_sqlite_is_fine_while_nothing_background_is_bound(self):
         saved = ProcessManager.bindings
         ProcessManager.bindings = [
             ModelProcessBinding(Invoice, _SyncOnlyProcess, 'status')]
         try:
-            self.assertEqual(check_background_app_is_installed(None), [])
+            with override_settings(DJANGO_LOGIC=self._PULL,
+                                   DATABASES=self._SQLITE):
+                self.assertEqual(check_pull_mode_database(None), [])
         finally:
             ProcessManager.bindings = saved
+
+    def test_e005_is_an_error_in_production_and_a_warning_with_debug(self):
+        from django.core import checks as django_checks
+        self.bind(Invoice, _BackgroundBoundProcess)
+        with override_settings(DJANGO_LOGIC=self._PULL, CACHES=self._LOCMEM,
+                               DEBUG=False):
+            findings = check_pull_mode_lock_cache(None)
+        self.assertEqual([f.id for f in findings], ['django_logic.E005'])
+        self.assertIsInstance(findings[0], django_checks.Error)
+        self.assertIn('per-process', findings[0].msg)
+        with override_settings(DJANGO_LOGIC=self._PULL, CACHES=self._LOCMEM,
+                               DEBUG=True):
+            findings = check_pull_mode_lock_cache(None)
+        self.assertEqual([f.id for f in findings], ['django_logic.E005'])
+        self.assertIsInstance(findings[0], django_checks.Warning)
 
 
 # --- A3: DJANGO_LOGIC is not a dict --------------------------------------
@@ -127,17 +172,14 @@ class NonDictSettingsBlockTests(SimpleTestCase):
                 bg_settings.background_execution()
         self.assertIn('DJANGO_LOGIC must be a dict', str(ctx.exception))
 
-    @modify_settings(INSTALLED_APPS={'append': 'django_logic'})
-    def test_both_ready_hooks_fail_with_the_setting_named(self):
-        for label in ('django_logic', 'django_logic_background'):
-            with self.subTest(app=label):
-                config = apps.get_app_config(label)
-                with override_settings(DJANGO_LOGIC='not-a-dict'):
-                    with self.assertRaises(ImproperlyConfigured) as ctx:
-                        config.ready()
-                self.assertIn('DJANGO_LOGIC must be a dict', str(ctx.exception))
-                # A healthy configuration keeps ready() a no-op re-run.
+    def test_ready_fails_with_the_setting_named(self):
+        config = apps.get_app_config('django_logic_background')
+        with override_settings(DJANGO_LOGIC='not-a-dict'):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
                 config.ready()
+        self.assertIn('DJANGO_LOGIC must be a dict', str(ctx.exception))
+        # A healthy configuration keeps ready() a no-op re-run.
+        config.ready()
 
     def test_unset_and_empty_are_still_the_documented_default(self):
         for value in (None, {}):

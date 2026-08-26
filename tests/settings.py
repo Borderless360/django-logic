@@ -7,7 +7,7 @@ SECRET_KEY = 'django_logic'
 INSTALLED_APPS = [
     'django.contrib.auth',
     'django.contrib.contenttypes',
-    'django_logic.background',
+    'django_logic',
     'tests',
     'tests.stability',
     'tests.background',

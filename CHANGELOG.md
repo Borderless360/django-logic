@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-26
+
+### Changed
+
+- **One `INSTALLED_APPS` entry: `'django_logic'`.** The consumer no
+  longer names an internal package. The one app config keeps the label
+  `django_logic_background` — the label is the address of the live
+  `TransitionMessage` table, of its rows in `django_migrations` and of
+  its content types — so upgrading is one settings line and `migrate`
+  is a no-op. The migrations and the `dl_worker` / `dl_transitions`
+  commands moved to the package root with the config that owns them.
+- **Background works out of the box, and sync-only needs nothing
+  special.** The pull-mode infrastructure rules left `ready()` and
+  became system checks that fire only when a background transition is
+  bound: `django_logic.E004` refuses SQLite on the alias that stores
+  `TransitionMessage`, and `django_logic.E005` refuses a per-process
+  `default` cache when `DEBUG=False` (a warning with `DEBUG=True`).
+  They run on `manage.py check`, `migrate`, `runserver` and
+  `dl_worker`. A project that declares no background transition runs
+  on SQLite with the default cache — same entry, no gates. The settings
+  block itself is still validated at boot in every shape.
+- **The old entries refuse to boot and name the fix.** A settings file
+  still listing `'django_logic.background'` gets one
+  `ImproperlyConfigured` line saying to install `'django_logic'` alone.
+  `django_logic.E003` is retired with the two-entry era: the app is
+  always installed in the only shape that boots.
+
+### Fixed
+
+- The stranded-row classification in the synchronous gate keyed its
+  "is the background app installed" guard on the removed entry name.
+  It now keys on `'django_logic'`, so the guard cannot silently skip.
+
 ## [1.0.0] — 2026-08-25
 
 ### Removed

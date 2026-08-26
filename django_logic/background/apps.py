@@ -1,10 +1,9 @@
 from django.apps import AppConfig
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 
 def validate_on_ready() -> None:
-    """The background app's boot gate — fail fast on misconfig."""
+    """The app's boot gate — fail fast on a misconfigured settings block."""
     from django_logic import conf
 
     mode = conf.background_execution()
@@ -17,16 +16,13 @@ def validate_on_ready() -> None:
     conf.max_errors()
     conf.retry_minutes()
     conf.cleanup_days()
-    # Core knobs (LOCK_TIMEOUT) — shared with DjangoLogicConfig.ready so
-    # sync-only installs validate them too.
     conf.validate_core_settings()
     if mode == conf.EXECUTION_SYNC:
         _reject_sync_without_opt_in()
-    if mode == conf.EXECUTION_PULL:
-        # The claim needs real row locks (SKIP LOCKED), and the state lock
-        # must span the web process and the worker processes.
-        _reject_sqlite_in_pull_mode()
-        _check_lock_cache_in_pull_mode()
+    # The pull-mode database and cache rules are system checks
+    # (django_logic.E004, E005): they apply only when a background
+    # transition is bound, and bindings happen in consumer apps'
+    # ready() hooks, after this one runs.
 
 
 def _reject_sync_without_opt_in() -> None:
@@ -51,66 +47,15 @@ def _reject_sync_without_opt_in() -> None:
     )
 
 
-def _reject_sqlite_in_pull_mode() -> None:
-    """Pull mode claims rows with SELECT FOR UPDATE SKIP LOCKED, so refuse
-    SQLite on the alias that stores ``TransitionMessage``."""
-    from django.db import router
-
-    from django_logic.background.models import TransitionMessage
-
-    databases = getattr(settings, 'DATABASES', {}) or {}
-    alias = router.db_for_write(TransitionMessage) or 'default'
-    engine = (databases.get(alias) or {}).get('ENGINE', '')
-    if 'sqlite' in engine.lower():
-        raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' requires "
-            f"a database that supports SELECT FOR UPDATE with SKIP LOCKED "
-            f"and partial unique indexes. TransitionMessage is routed to "
-            f"alias '{alias}', which uses {engine!r} (SQLite). Point that "
-            f"alias at PostgreSQL."
-        )
-
-
-_LOCAL_CACHE_BACKENDS = (
-    'django.core.cache.backends.locmem',
-    'django.core.cache.backends.dummy',
-)
-
-
-def _check_lock_cache_in_pull_mode() -> None:
-    """The state lock lives in the ``default`` cache. In Pull mode the
-    web process and the workers are different OS processes (usually
-    different hosts), so a local-memory or dummy cache means the lock
-    silently does not lock anything across them.
-
-    Production (``DEBUG=False``) fails fast; with ``DEBUG=True`` we only
-    warn so local pull-mode experiments stay possible.
-    """
-    caches = getattr(settings, 'CACHES', {}) or {}
-    backend = (caches.get('default') or {}).get('BACKEND', '')
-    if not backend.startswith(_LOCAL_CACHE_BACKENDS):
-        return
-    message = (
-        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' but the 'default' "
-        f"cache backend is {backend!r}, which is per-process. The state "
-        f"lock will not be shared between the web processes and the "
-        f"worker processes. Use a cross-process cache for 'default' — "
-        f"e.g. 'django.core.cache.backends.redis.RedisCache', or "
-        f"django-redis via `pip install django-logic[redis]`."
-    )
-    if getattr(settings, 'DEBUG', False):
-        from django_logic.logger import logger
-        logger.warning(message)
-    else:
-        raise ImproperlyConfigured(message)
-
-
 class BackgroundConfig(AppConfig):
+    """The retired second entry. It refuses to boot and names the fix."""
     name = 'django_logic.background'
-    label = 'django_logic_background'
-    verbose_name = 'Django Logic — Background Transitions'
-    default_auto_field = 'django.db.models.BigAutoField'
 
-    def ready(self) -> None:
-        validate_on_ready()
-        from django_logic import checks  # noqa: F401 — registers system checks
+    def __init__(self, *args, **kwargs):
+        raise ImproperlyConfigured(
+            "'django_logic.background' left INSTALLED_APPS in 1.1.0. "
+            "Install 'django_logic' alone. It keeps the same app label, "
+            "table and migration history, so nothing else changes: "
+            "replace this entry (and a 'django_logic' duplicate, if "
+            "present) with one 'django_logic' line."
+        )

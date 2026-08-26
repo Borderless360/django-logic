@@ -11,7 +11,6 @@ from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
 from django.test import (
     SimpleTestCase,
-    modify_settings,
     override_settings,
 )
 
@@ -47,11 +46,9 @@ class CoreSettingsValidationTests(SimpleTestCase):
             validate_core_settings()
             self.assertEqual(lock_timeout(), 7200)
 
-    @modify_settings(INSTALLED_APPS={'append': 'django_logic'})
-    def test_core_app_ready_runs_the_gate(self):
-        """The gate fires from the CORE AppConfig — a sync-only install
-        (no django_logic.background) fails fast at boot too."""
-        config = apps.get_app_config('django_logic')
+    def test_app_ready_runs_the_gate(self):
+        """The gate fires from the one installed app config."""
+        config = apps.get_app_config('django_logic_background')
         with override_settings(DJANGO_LOGIC=_conf(LOCK_TIMEOUT='bad')):
             with self.assertRaises(ImproperlyConfigured):
                 config.ready()
