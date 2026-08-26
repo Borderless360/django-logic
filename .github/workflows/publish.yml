@@ -14,6 +14,8 @@ jobs:
       # PyPI trusted publishing signs the upload with this token, so the
       # repo holds no PyPI credential.
       id-token: write
+      # The release step writes the GitHub release for the tag.
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -44,3 +46,23 @@ jobs:
         with:
           # A re-run of a tag must not fail on files PyPI already has.
           skip-existing: true
+
+      - name: Create the GitHub release from the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The release notes are the tag's CHANGELOG section, verbatim.
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' CHANGELOG.md > /tmp/notes.md
+          if ! [ -s /tmp/notes.md ]; then
+            echo "no CHANGELOG section for $version" >&2
+            exit 1
+          fi
+          # A re-run of a tag must not fail on a release that exists.
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "django-logic $version" --notes-file /tmp/notes.md --verify-tag
+          fi
