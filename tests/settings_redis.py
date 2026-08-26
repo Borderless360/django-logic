@@ -7,7 +7,7 @@ for the full Postgres+Redis environment.
 """
 import os
 
-from tests.settings import *  # noqa: F401, F403
+from tests.settings import *
 
 CACHES = {
     'default': {

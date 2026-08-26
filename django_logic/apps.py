@@ -19,7 +19,8 @@ class DjangoLogicConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
 
     def ready(self) -> None:
-        from django_logic import checks  # noqa: F401 — registers system checks
+        # Imported for its side effect: the module registers the system checks.
+        from django_logic import checks
         from django_logic.background.apps import validate_on_ready
 
         validate_on_ready()
