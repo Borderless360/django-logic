@@ -202,7 +202,7 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
 
         transition_logger.warning(
             f'Stuck transition: TransitionMessage#{transition_message.pk} '
-            f'{transition_message.driving_model_label}#{transition_message.instance_id} '
+            f'{transition_message.recorded_model_label}#{transition_message.instance_id} '
             f'{transition_message.transition_name} queue={transition_message.queue_name} '
             f'errors={transition_message.errors_count} '
             f'last_error={transition_message.last_error_message!r}; forcing terminal state'
@@ -778,12 +778,12 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
 
 def _restore(transition_message: TransitionMessage):
     """Resolve ``(instance, process, transition)`` from a TransitionMessage row."""
-    # The key columns name the concrete model; driving_model_label names
-    # the class the caller drove. Restore that class, so proxy methods and
-    # overrides stay visible to side-effects and callbacks. Rows written
-    # before proxy_model_label existed record the driving class in
+    # The key columns name the concrete model; recorded_model_label names
+    # the class that recorded the row. Restore that class, so proxy
+    # methods and overrides stay visible to side-effects and callbacks.
+    # Rows written before proxy_model_label existed record that class in
     # model_name, so the same read restores them unchanged.
-    recorded_model = transition_message.driving_model_label
+    recorded_model = transition_message.recorded_model_label
     try:
         model = apps.get_model(recorded_model)
     except LookupError as exc:

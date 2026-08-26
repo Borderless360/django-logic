@@ -73,7 +73,7 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
             data['transition_message'] = {
                 'transition_name': transition_message.transition_name,
                 'process_name': transition_message.process_name,
-                # The class the caller drove. Captured from the row, not
+                # The class that recorded the row. Captured from it, not
                 # derived from the snapshot instance: the row lookup keys
                 # on the concrete model, so a snapshot taken through
                 # another class of the same table must still replay the

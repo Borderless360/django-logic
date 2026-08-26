@@ -41,6 +41,38 @@ from django_logic.state import State
 from django_logic.transition import Transition, _refuse_engine_param_kwargs
 
 
+
+def may_enqueue(process, action_name: str) -> bool:
+    """Whether driving ``action_name`` on this process can enqueue a
+    background transition.
+
+    A generic caller — an API layer that holds a ``request`` and calls an
+    action by name — must not pass ``request`` to a declaration that
+    enqueues: enqueue refuses it. The caller cannot know which declaration
+    a name resolves to (a nested process can put a background declaration
+    behind a name that is synchronous on the base process), so it asks
+    here and keeps ``request`` off the call when the answer is True.
+
+    A static walk over the class-level declarations, nested processes
+    included: no conditions run, no queries. A process from another
+    engine, with no ``is_background`` on its transitions, answers False.
+    """
+    seen = set()
+
+    def walk(node) -> bool:
+        if id(node) in seen:
+            return False
+        seen.add(id(node))
+        for transition in getattr(node, 'transitions', None) or []:
+            if (getattr(transition, 'action_name', None) == action_name
+                    and getattr(transition, 'is_background', False)):
+                return True
+        return any(walk(nested)
+                   for nested in getattr(node, 'nested_processes', None) or [])
+
+    return walk(process)
+
+
 class BackgroundTransition(Transition):
     """Transition that runs its side-effects on a worker process.
 
@@ -249,9 +281,9 @@ class BackgroundTransition(Transition):
             # misleading "another transition is already in progress".
             try:
                 transition_message = TransitionMessage.objects.create(
-                    # The key columns name the concrete model; the class
-                    # the caller drove is recorded on proxy_model_label
-                    # so the worker restores that class.
+                    # The key columns name the concrete model; the
+                    # recording class goes on proxy_model_label so the
+                    # worker restores that class.
                     **TransitionMessage.instance_key(
                         state.instance, state.process_name),
                     proxy_model_label=TransitionMessage.proxy_label_for(

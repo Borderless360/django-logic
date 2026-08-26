@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-26
+
+### Added
+
+- **`django_logic.background.may_enqueue(process, action_name)`.** A
+  generic caller — an API layer that holds a ``request`` and calls an
+  action by name — must not pass ``request`` to a declaration that
+  enqueues, and it cannot know which declaration a name resolves to (a
+  nested process can put a background declaration behind a name that is
+  synchronous on the base process). This answers that question: a
+  static walk over the declarations, nested processes included. Raised
+  from the consumer's port review, where the walk had been written
+  consumer-side.
+
+### Changed
+
+- **`TransitionMessage.driving_model_label` is now
+  `recorded_model_label`**, and the prose says "the class that recorded
+  the row" instead of "the class the caller drove". The review of the
+  1.0.0 consumer port called the old name confusing: at every read site
+  the value is simply what the row recorded. The column
+  (`proxy_model_label`) and the schema are unchanged.
+- The retired-entry error says "is not a valid INSTALLED_APPS entry"
+  instead of "left INSTALLED_APPS", which read two ways.
+
 ## [1.1.0] — 2026-08-26
 
 ### Changed

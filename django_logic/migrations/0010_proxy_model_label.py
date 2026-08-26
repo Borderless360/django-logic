@@ -4,7 +4,7 @@ from django.db import migrations, models
 def normalize_uncompleted_proxy_rows(apps_registry, schema_editor):
     """Rewrite uncompleted rows keyed on a proxy's name to the concrete key.
 
-    The key columns now name the concrete model, and the driving proxy
+    The key columns now name the concrete model, and the recording proxy
     class moves to ``proxy_model_label``. Rows written before this release
     carry the proxy's own name in ``model_name``, so the uncompleted-row
     guard and the ``in_flight`` probes would stop seeing them.
@@ -51,7 +51,7 @@ def normalize_uncompleted_proxy_rows(apps_registry, schema_editor):
 
 
 def restore_proxy_keys(apps_registry, schema_editor):
-    """Put the driving class back into the key columns, so code from
+    """Put the recording class back into the key columns, so code from
     before this release reads its rows again after an unapply. Runs
     before the column drops. The same clash rule as the forward pass:
     an uncompleted row whose old key another uncompleted row now holds
@@ -88,7 +88,7 @@ class Migration(migrations.Migration):
         # The key columns (app_label, model_name, instance_id) now name the
         # concrete model, so a proxy and the model it proxies collide in
         # the uncompleted-row constraint. This column records the proxy
-        # class the caller drove, so the worker restores that class.
+        # class that recorded the row, so the worker restores that class.
         migrations.AddField(
             model_name='transitionmessage',
             name='proxy_model_label',

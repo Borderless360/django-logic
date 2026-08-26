@@ -122,6 +122,30 @@ class MissingAppGuardTests(_BindingHelper, SimpleTestCase):
         self.bind(Invoice, _SyncOnlyProcess)
 
 
+class MayEnqueueTests(SimpleTestCase):
+    def test_a_background_name_answers_true_and_a_sync_name_false(self):
+        from django_logic.background import may_enqueue
+        self.assertTrue(may_enqueue(_BackgroundBoundProcess, 'bg_run'))
+        self.assertFalse(may_enqueue(_SyncOnlyProcess, 'sync_run'))
+        self.assertFalse(may_enqueue(_BackgroundBoundProcess, 'missing'))
+
+    def test_a_nested_background_declaration_behind_a_sync_name_answers_true(self):
+        from django_logic.background import may_enqueue
+
+        class _Nested(Process):
+            process_name = 'pass4_nested'
+            nested_processes = [_BackgroundBoundProcess]
+            transitions = [
+                Transition('bg_run', sources=['other'], target='done'),
+            ]
+
+        self.assertTrue(may_enqueue(_Nested, 'bg_run'))
+
+    def test_an_object_without_engine_attributes_answers_false(self):
+        from django_logic.background import may_enqueue
+        self.assertFalse(may_enqueue(object(), 'anything'))
+
+
 class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):
     _PULL = dict(dl_settings(), BACKGROUND_EXECUTION='pull')
     _SQLITE = {'default': {'ENGINE': 'django.db.backends.sqlite3',
