@@ -252,7 +252,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         try:
             fn()
             return None
-        except Exception as exc:  # noqa: BLE001 — re-raised below unless injected
+        # Broad on purpose: re-raised below unless the test injected it.
+        except Exception as exc:
             return exc
 
     def _finish(self, label, instance, tracker, raised, before, *, action=None,

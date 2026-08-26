@@ -282,7 +282,8 @@ class PublicSurfaceTests(TestCase):
         self.assertIn('BackgroundTransition', str(ctx.exception))
         # The command classes are not advertised, but a direct import from
         # django_logic.commands keeps working for existing consumers.
-        from django_logic.commands import (  # noqa: F401
+        # The import itself is the assertion: it must not raise.
+        from django_logic.commands import (
             Callbacks, Conditions, Permissions, SideEffects,
         )
 
