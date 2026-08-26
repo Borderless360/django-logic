@@ -17,11 +17,11 @@ def set_sentry_context(transition_message) -> None:
     try:
         import sentry_sdk
 
-        # Tag the class the caller drove, not the concrete key: two
+        # Tag the class that recorded the row, not the concrete key: two
         # workflows behind two proxies of one model must stay two Sentry
         # issues.
         app_label, _, model_name = (
-            transition_message.driving_model_label.partition('.'))
+            transition_message.recorded_model_label.partition('.'))
         scope = sentry_sdk.get_current_scope()
         scope.set_transaction_name(
             f'django_logic.{app_label}.'

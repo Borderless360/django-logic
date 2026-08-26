@@ -14,9 +14,9 @@ both have background work in progress.
 
 The key columns name the concrete model. A proxy and the model it
 proxies are one physical row, so they must collide in the constraint
-the way they already share one state lock. The class the caller drove
-the transition through is recorded separately, on
-``proxy_model_label``, and restore instantiates that class.
+the way they already share one state lock. The class that recorded the
+row is kept separately, on ``proxy_model_label``, and restore
+instantiates that class.
 """
 from __future__ import annotations
 
@@ -93,8 +93,8 @@ class TransitionMessage(TimeStampedModel):
     # default managers), which coerces the string back to the model's
     # real pk type.
     instance_id = models.CharField(max_length=255)
-    # 'app_label.modelname' of the proxy class the caller drove the
-    # transition through. Blank when the caller drove the concrete model.
+    # 'app_label.modelname' of the proxy class that recorded the row.
+    # Blank when the concrete model recorded it.
     # The key columns above always name the concrete model, so this is
     # what lets the worker restore the class the caller used — proxy
     # methods and overrides stay visible to side-effects and callbacks.
@@ -153,17 +153,17 @@ class TransitionMessage(TimeStampedModel):
         ]
 
     @property
-    def driving_model_label(self) -> str:
-        """'app_label.modelname' of the class the caller drove: the
+    def recorded_model_label(self) -> str:
+        """'app_label.modelname' of the class that recorded the row: the
         recorded proxy when there is one, else the concrete key. Restore
-        and every operator-facing line read this, so a proxy-driven row
+        and every operator-facing line read this, so a proxy-recorded row
         keeps naming the workflow the operator knows."""
         return self.proxy_model_label or f'{self.app_label}.{self.model_name}'
 
     def __str__(self) -> str:
         return (
             f'TransitionMessage#{self.pk} '
-            f'{self.driving_model_label}#{self.instance_id} '
+            f'{self.recorded_model_label}#{self.instance_id} '
             f'{self.transition_name} on {self.queue_name}'
         )
 
@@ -175,7 +175,7 @@ class TransitionMessage(TimeStampedModel):
         Keyed on the concrete model: a proxy and the model it proxies
         write and read one row here, so two enqueues on one physical row
         collide in the uncompleted-row constraint no matter which class
-        the caller drove.
+        recorded them.
         """
         concrete = instance._meta.concrete_model._meta
         return {
@@ -187,7 +187,7 @@ class TransitionMessage(TimeStampedModel):
 
     @classmethod
     def proxy_label_for(cls, instance) -> str:
-        """Value for ``proxy_model_label``: the driving class's
+        """Value for ``proxy_model_label``: the recording class's
         'app_label.modelname' when it is a proxy, else blank."""
         return instance._meta.label_lower if instance._meta.proxy else ''
 

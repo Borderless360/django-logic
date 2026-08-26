@@ -53,9 +53,9 @@ class BackgroundConfig(AppConfig):
 
     def __init__(self, *args, **kwargs):
         raise ImproperlyConfigured(
-            "'django_logic.background' left INSTALLED_APPS in 1.1.0. "
-            "Install 'django_logic' alone. It keeps the same app label, "
-            "table and migration history, so nothing else changes: "
-            "replace this entry (and a 'django_logic' duplicate, if "
-            "present) with one 'django_logic' line."
+            "Since 1.1.0 'django_logic.background' is not a valid "
+            "INSTALLED_APPS entry. Install 'django_logic' alone. It keeps "
+            "the same app label, table and migration history, so nothing "
+            "else changes: replace this entry (and a 'django_logic' "
+            "duplicate, if present) with one 'django_logic' line."
         )
