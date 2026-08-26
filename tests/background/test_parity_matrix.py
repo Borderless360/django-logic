@@ -9,8 +9,7 @@ difference fails a test here.
 Pinned for every shape:
 
 * hook kwargs — the same values and the same Python types, plus a live ``user``;
-* ``request`` reaches synchronous hooks; a direct background drive
-  refuses it at enqueue, and that is the one deliberate difference;
+* ``request`` is refused at the call, identically in all four shapes;
 * every background drive serializes kwargs, so an unserializable kwarg fails at
   enqueue — inline sync-mode execution included;
 * failure routing — a synchronous transition raises to the caller and writes
@@ -176,22 +175,16 @@ class ParityMatrixTests(TestCase):
             for key, value in TYPED_KWARGS.items():
                 self.assertIs(type(results[action][key]), type(value), f'{action}.{key}')
 
-    def test_request_reaches_sync_hooks_and_is_refused_at_enqueue(self):
-        # A live request cannot be serialized into the row. A synchronous
-        # hook receives it; a direct background drive refuses it at
-        # enqueue. The engine's own chain hop is the exception: it strips
-        # request before a background follow-up (see test_bg_chain).
-        from django_logic.background.serializers import (
-            KwargsSerializationError,
-        )
-
+    def test_request_is_refused_at_the_call_in_all_four_shapes(self):
+        # A transition never takes the request: hooks run on a worker for
+        # a background transition, where no request exists, and the sync
+        # shapes follow the same rule so a declaration can change shape
+        # without changing its callers.
         sentinel = object()
-        for action in SYNC_ACTIONS:
-            _drive(self._fresh(), action, request=sentinel)
-            self.assertIs(SEEN.get('request'), sentinel, action)
-        for action in BACKGROUND_ACTIONS:
-            with self.assertRaises(KwargsSerializationError):
+        for action in SYNC_ACTIONS + BACKGROUND_ACTIONS:
+            with self.assertRaisesMessage(TypeError, 'never takes the request'):
                 _drive(self._fresh(), action, request=sentinel)
+            self.assertNotIn('request', SEEN)
 
     def test_unserializable_kwarg_fails_at_enqueue_for_background_only(self):
         # Every background drive serializes kwargs, inline sync-mode execution
@@ -278,17 +271,12 @@ class ParityMatrixTests(TestCase):
 
     def test_next_transition_chains_equivalently_across_all_four_shapes(self):
         # The parent's shape must not change what the follow-up receives:
-        # the same typed kwargs, a live user, and never a request. Every
-        # shape chains — a transition with no target included.
+        # the same typed kwargs and a live user. Every shape chains — a
+        # transition with no target included.
         for parent in CHAIN_PARENTS:
             HOP_SEEN.clear()
             widget = self._fresh()
             kwargs = dict(TYPED_KWARGS)
-            if parent.startswith('sync'):
-                # request is legal on a synchronous parent; the engine
-                # strips it before the background hop. A background
-                # parent refuses it at its own enqueue, so it gets none.
-                kwargs['request'] = object()
             _drive(widget, parent, user=self.user, **kwargs)
             widget.refresh_from_db()
             self.assertEqual(widget.status, 'chained', parent)

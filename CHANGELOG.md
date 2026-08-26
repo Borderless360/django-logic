@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-08-26
+
+### Removed
+
+- **A transition never takes the request.** Every transition —
+  synchronous or background — refuses a caller-passed `request=` at the
+  call with a `TypeError` that says what to do instead: resolve what the
+  hook needs at the call site and pass plain values (the engine already
+  carries `user=` and restores it on the worker). Until now `request`
+  was legal on synchronous transitions and refused only at a background
+  enqueue, so a declaration could not change shape without changing its
+  callers — and a nested process could hide a background declaration
+  behind a synchronous name, turning a legal call into a refusal.
+- **A hook that names a `request` parameter fails at bind time.** It
+  waits for a value that can never arrive. Same machinery as the
+  instance-first signature validation.
+- **`may_enqueue` is removed.** It shipped in 1.2.0 for one purpose:
+  telling a request-holding caller which calls to keep `request` off.
+  With `request` refused everywhere, the question is gone, and so is
+  the API.
+- The chain hop stops stripping `request` (nothing can carry one);
+  it still strips `user_id`, the engine's wire form for `user`, which
+  stays ordinary data on a synchronous transition.
+
 ## [1.2.0] — 2026-08-26
 
 ### Added

@@ -429,16 +429,24 @@ def _validate_hook_signatures(process_cls) -> None:
     bind time.
     """
     offenders = collect_hook_signature_offenders(process_cls)
-    if not offenders:
-        return
-    raise ImproperlyConfigured(
-        'FSM hooks without a named instance-first parameter — the engine '
-        'calls hooks as fn(instance, **kwargs) (permissions as '
-        'fn(instance, user, **kwargs)), so give each hook a named first '
-        'parameter, e.g. def hook(instance, **kwargs); decorated hooks '
-        'need functools.wraps to expose the real signature: '
-        f'{"; ".join(sorted(set(offenders)))}'
-    )
+    if offenders:
+        raise ImproperlyConfigured(
+            'FSM hooks without a named instance-first parameter — the engine '
+            'calls hooks as fn(instance, **kwargs) (permissions as '
+            'fn(instance, user, **kwargs)), so give each hook a named first '
+            'parameter, e.g. def hook(instance, **kwargs); decorated hooks '
+            'need functools.wraps to expose the real signature: '
+            f'{"; ".join(sorted(set(offenders)))}'
+        )
+    request_readers = collect_request_param_offenders(process_cls)
+    if request_readers:
+        raise ImproperlyConfigured(
+            'FSM hooks that name a request parameter — a transition never '
+            'takes the request (it is refused at the call, and a worker has '
+            'none), so a hook can never receive one. Resolve what the hook '
+            'needs at the call site and pass plain values: '
+            f'{"; ".join(sorted(set(request_readers)))}'
+        )
 
 
 def collect_hook_signature_offenders(process_cls) -> list:
@@ -481,6 +489,44 @@ def collect_hook_signature_offenders(process_cls) -> list:
         for transition in proc_cls.transitions or []:
             # getattr-guarded: a duck-typed custom transition that the
             # engine never asks for one of these must not fail to bind.
+            for attr in _HOOK_ATTRS:
+                wrapper = getattr(transition, attr, None)
+                for fn in getattr(wrapper, 'commands', None) or []:
+                    check(fn, f'{owner}.{getattr(transition, "action_name", "?")}')
+    return offenders
+
+
+def collect_request_param_offenders(process_cls) -> list:
+    """Every hook across ``process_cls``'s tree that names a ``request``
+    parameter, as ``module.qualname (on Owner[.action])`` strings. A
+    transition never takes the request, so such a hook waits for a value
+    that can never arrive. Pure collection — bind-time validation enforces.
+    """
+    offenders = []
+
+    def check(fn, owner):
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return
+        if 'request' in params:
+            offenders.append(
+                f'{getattr(fn, "__module__", "?")}.'
+                f'{getattr(fn, "__qualname__", fn)} (on {owner})'
+            )
+
+    _HOOK_ATTRS = (
+        'side_effects', 'callbacks', 'failure_callbacks',
+        'conditions', 'permissions',
+    )
+    for proc_cls in _iter_process_tree(process_cls):
+        owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
+        for attr in ('conditions', 'permissions'):
+            hooks = getattr(proc_cls, attr, None)
+            if isinstance(hooks, (list, tuple)):
+                for fn in hooks:
+                    check(fn, owner)
+        for transition in proc_cls.transitions or []:
             for attr in _HOOK_ATTRS:
                 wrapper = getattr(transition, attr, None)
                 for fn in getattr(wrapper, 'commands', None) or []:

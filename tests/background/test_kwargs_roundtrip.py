@@ -63,12 +63,11 @@ class KwargsRoundTripTests(TestCase):
         )
 
     def test_request_refusal_reaches_the_caller_as_its_own_error(self):
-        # The caller sees KwargsSerializationError, not the dispatcher's
-        # generic "not JSON-serializable" error.
+        # Refused at the call, before the lock and before any write. The
+        # serializer keeps its own refusal as defense for internal paths.
         with self.assertRaisesMessage(
-                KwargsSerializationError, "'request' cannot be passed"):
+                TypeError, 'never takes the request'):
             self.widget.process.fulfil(request=object())
-        # Enqueue failed before it saved anything.
         self.assertFalse(TransitionMessage.objects.exists())
 
     def test_owning_process_class_kept_out_of_nested_side_effect_kwargs(self):

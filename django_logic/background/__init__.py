@@ -8,9 +8,6 @@ Public API:
 * :func:`sync_execution` — context manager that forces the current block
   to run the worker path inline (for tests, management commands, the shell).
 * :func:`retry_pending` — run every claimable row inline, once.
-* :func:`may_enqueue` — whether driving an action name on a process can
-  enqueue a background transition. API seams that hold a ``request`` ask
-  this and keep ``request`` off the calls that answer True.
 * :func:`in_flight` — racy read of whether an uncompleted row is still
   being retried, for shaping "busy, try again shortly" answers at API
   seams.
@@ -32,7 +29,6 @@ _PUBLIC = {
     'sync_execution': ('django_logic.conf', 'sync_execution'),
     'retry_pending': ('django_logic.background.safety_nets', 'retry_pending'),
     'in_flight': ('django_logic.background.models', 'in_flight'),
-    'may_enqueue': ('django_logic.background.transitions', 'may_enqueue'),
     'PermanentFailure': ('django_logic.background.exceptions', 'PermanentFailure'),
     'run_worker': ('django_logic.background.pull', 'run_worker'),
 }
