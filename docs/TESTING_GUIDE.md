@@ -320,7 +320,6 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | Assertion | Checks |
 |---|---|
 | `assert_state(obj, expected)` | The persisted state field. |
-| `assert_state_trace(states)` | The ordered states the object passed through in the last drive (in-progress → target, `next_transition` follow-ups, `failed_state`). |
 | `assert_available(obj, actions, user=None)` / `assert_not_available(...)` | Actions offered / not offered by `get_available_actions` — test availability *behaviour*, not the definition. |
 
 *Domain outcome (assert what the object became)*
@@ -349,12 +348,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_error_recorded(obj, contains)` | Substring of `last_error_message` on the latest `TransitionMessage`. |
 | `assert_error_count(obj, expected)` | `errors_count` on the latest `TransitionMessage`. |
 | `assert_transition_owner(obj, cls, transition_name=None)` | The `owning_process_class` recorded on a `TransitionMessage` (for chained / condition-disambiguated background transitions). |
-
-*The whole journey*
-
-| Assertion | Checks |
-|---|---|
-| `assert_journey([JourneyStep(...)])` | Each drive's full observable transformation — action, before → after, side-effects, callbacks, and `failed` (an exception reached the caller). Import `JourneyStep` from `django_logic.testing`. |
+| `assert_state_trace(states)` | The ordered states the object passed through in the last drive (in-progress → target, `next_transition` follow-ups, `failed_state`). |
 
 On failure, every assertion raises with a numbered timeline of each step the
 test took and the relevant `TransitionMessage` — built
@@ -422,25 +416,6 @@ with self.assertRaises(TransitionTemporarilyUnavailable):
 # An attempt that started an hour ago, for the retry-window branches:
 row = open_transition_message(order, 'process', 'fulfil', started_minutes_ago=60)
 ```
-
-### Which transitions did the suite never drive?
-
-Wrap a block of drives and diff against the declarations:
-
-```python
-from django_logic.testing import record_driven_transitions
-
-with record_driven_transitions() as record:
-    order.process.fulfil()
-    order.process.generate_export()
-
-self.assertEqual(record.undriven(OrderProcess), ['cancel'])
-```
-
-A drive counts when the transition ran, including one whose side-effect
-failed. A refusal (`TransitionNotAllowed`) does not count. Names are
-compared across the whole nested tree, so when nested processes share an
-action name, one drive covers the name.
 
 ---
 

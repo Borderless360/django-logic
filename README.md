@@ -30,9 +30,6 @@ runs it.
 pip install django-logic
 ```
 
-Add `[redis]` if your settings name `django_redis.cache.RedisCache`. That
-extra installs the third-party backend for you.
-
 Add one entry to `INSTALLED_APPS` and create the table:
 
 ```python

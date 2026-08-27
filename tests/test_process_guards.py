@@ -4,7 +4,7 @@ Distinct from *transition-level* guards: a class-level ``conditions`` /
 ``permissions`` list gates the WHOLE process at once — its own transitions and
 every nested process's transitions — because ``_iter_available_with_owner``
 short-circuits the entire subtree when ``is_valid(user)`` is False
-(``process.py``). The migration to journey tests dropped this coverage
+(``process.py``). An earlier test rewrite dropped this coverage
 entirely; disabling ``is_valid`` used to pass the whole suite. These tests
 restore it in both directions (allowed / blocked) and include the
 nested-inheritance case, on a real persisted instance.

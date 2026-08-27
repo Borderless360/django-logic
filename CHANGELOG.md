@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-08-27
+
+### Removed
+
+- **The `[redis]` extra.** Nobody installs it: the engine locks through
+  Django's cache API and imports no backend, so Django's own
+  `RedisCache` is enough, and both known consumers pin django-redis
+  themselves where they use it. Pip warns on an unknown extra and
+  installs the base package, so an old pin does not break at install
+  time. The E005 hint now names "any shared backend" instead of the
+  extra.
+- **The journey recap: `JourneyStep` and `assert_journey`.** The
+  framework shipped two ways to pin the same behavior, and the recap
+  way expressed nothing the plain asserts cannot — while hiding what
+  they can express (exception type at the caller, a chain's
+  intermediate states, field deltas). Every recap test was a
+  restatement of a sibling; they leave with the API.
+  `assert_state_trace` stays — it is the one way to pin the states a
+  chained drive passes through.
+- **`record_driven_transitions` and `DrivenTransitions`.** No consumer
+  ever adopted them.
+- **`django_logic.W003`.** A key a past release removed reports as
+  `W004` like any other key the engine does not read — the value has
+  no effect either way, and the changelog owns each removal's advice.
+  The eleven-key advice table leaves with the id.
+
 ## [2.0.0] — 2026-08-26
 
 ### Removed

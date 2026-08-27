@@ -207,8 +207,8 @@ same release's own fixes. Therefore:
   refuses a locmem/dummy cache when `DEBUG=False` (`django_logic.E005`).
   The engine locks
   through Django's cache API and imports no backend, so Django's built-in
-  `django.core.cache.backends.redis.RedisCache` is enough; django-redis is
-  the `[redis]` extra, not a core dependency (0.11.0).
+  `django.core.cache.backends.redis.RedisCache` is enough; the engine
+  depends on no cache backend package.
 - One `manage.py dl_worker --queues <names>` process per queue group.
   The loop runs the safety nets once a minute, so nothing is scheduled
   anywhere else. Crash recovery is the database's own: a dead worker's

@@ -20,7 +20,7 @@ from django.test import override_settings
 
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
-from django_logic.testing import JourneyStep, ProcessScenario
+from django_logic.testing import ProcessScenario
 from tests.background.models import (
     CALLBACK_SEEN_STATE,
     SYNC_LAST_KWARGS,
@@ -294,20 +294,6 @@ class NextTransitionScenario(ProcessScenario):
         self.assertNotEqual(captured.get('tr_id'), captured.get('parent_id'))
         # parent_id is the parent's tr_id, not the root.
         self.assertNotEqual(captured.get('parent_id'), 'ROOT')
-
-    def test_journey_pins_the_chain(self):
-        widget = self.create_instance(status='draft')
-        self.transition(widget, 'parent_act', root_id='ROOT')
-        self.assert_journey([
-            JourneyStep(
-                action='parent_act',
-                before='draft',
-                after='child_done',
-                side_effects=['se_parent', 'sync_capture'],
-                callbacks=[],
-                failed=False,
-            ),
-        ])
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

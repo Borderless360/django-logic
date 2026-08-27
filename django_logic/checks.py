@@ -99,9 +99,9 @@ def check_pull_mode_lock_cache(app_configs, **kwargs):
         f"lock will not be shared between the web processes and the "
         f"worker processes."
     )
-    hint = ("Use a cross-process cache for 'default' — e.g. "
-            "'django.core.cache.backends.redis.RedisCache', or "
-            "django-redis via `pip install django-logic[redis]`.")
+    hint = ("Use a cross-process cache for 'default' — e.g. Django's own "
+            "'django.core.cache.backends.redis.RedisCache', or any shared "
+            "backend (memcached, django-redis).")
     finding = checks.Warning if getattr(settings, 'DEBUG', False) else checks.Error
     return [finding(message, hint=hint, id='django_logic.E005')]
 
@@ -182,42 +182,9 @@ def check_background_database_routing(app_configs, **kwargs):
     return findings
 
 
-_REMOVED_SETTINGS = {
-    'LOG_KWARGS':
-        'kwargs are always attached to log records now; scrub them with a '
-        'logging.Filter on the "django-logic.transition" logger',
-    'LOG_KWARGS_REDACTOR':
-        'kwargs are always attached to log records now; scrub them with a '
-        'logging.Filter on the "django-logic.transition" logger',
-    'PHASE2_STATE_GUARD':
-        'the worker state guard always enforces; there are no modes',
-    'SENTRY_TRANSACTION_NAMING':
-        'Sentry transactions are always named per transition',
-    'PROCESS_CLASS_ALIASES':
-        'let pending rows complete before renaming a Process class',
-    'TRANSITION_COVERAGE_LOG':
-        'transition-coverage recording was removed in 0.14.0',
-    'STARTER_QUEUE':
-        'the safety nets run inside the pull worker loop; nothing is '
-        'scheduled on a queue anymore',
-    'DEFER_UNLOCK_UNTIL_COMMIT':
-        'locks always release when the transition finishes; drive a '
-        'transition from transaction.on_commit if it must start after '
-        'the surrounding write is visible',
-    'STRICT_HOOK_SIGNATURES':
-        'a hook without a named instance-first parameter always fails at '
-        'bind time now; there is no lenient mode',
-    'STRICT_KWARGS_SERIALIZATION':
-        "reserved kwargs ('request', 'user_id') and non-string dict keys "
-        'always fail at enqueue now; there is no lenient mode',
-    'LEGACY_EXCEPTION_BASE':
-        'the fork-migration bridge was removed in 1.0.0; catch '
-        "django_logic.exceptions.TransitionNotAllowed directly",
-}
-
-
-#: Every key the engine reads. The set is closed, so anything outside it (and
-#: outside ``_REMOVED_SETTINGS``) is a typo.
+#: Every key the engine reads. The set is closed, so anything outside it is
+#: unread — a typo, or a key a past release removed (the changelog carries
+#: the upgrade advice for those).
 _KNOWN_SETTINGS = frozenset({
     'BACKGROUND_EXECUTION',
     'DEFAULT_QUEUE',
@@ -230,48 +197,33 @@ _KNOWN_SETTINGS = frozenset({
 
 @checks.register('django_logic')
 def check_no_unknown_settings(app_configs, **kwargs):
-    """Report ``DJANGO_LOGIC`` keys the engine never reads — a key a past
-    release removed (``django_logic.W003``) or a typo
+    """Report ``DJANGO_LOGIC`` keys the engine never reads
     (``django_logic.W004``).
 
     ``DJANGO_LOGIC`` is a plain dict with no schema. A typo such as
     ``TRANSITION_MESSAGE_MAX_ERROR`` or ``LOCK_TIMOUT`` is ignored and the
     default applies, which is the cause behind every "I set the retry limit and
     it did nothing" report. The known set is closed and small, so listing
-    everything outside it is cheap and precise.
-
-    A key a past release removed gets its own warning, carrying the upgrade
-    advice from ``_REMOVED_SETTINGS`` instead of the typo hint. One function
-    reports both, and the two ids stay separate on purpose. The typo hint tells
-    you how to silence it when you keep extra keys deliberately, and that must
-    not silence the upgrade advice as well.
+    everything outside it is cheap and precise. A key a past release removed
+    reports the same way — the value has no effect — and the changelog carries
+    that release's upgrade advice.
     """
     from django.conf import settings
 
     conf = getattr(settings, 'DJANGO_LOGIC', None) or {}
     if not isinstance(conf, dict):
         return []
-    messages = [
-        checks.Warning(
-            f"DJANGO_LOGIC['{key}'] was removed and is now ignored: "
-            f"{advice}.",
-            hint='Delete the key from DJANGO_LOGIC.',
-            id='django_logic.W003',
-        )
-        for key, advice in _REMOVED_SETTINGS.items() if key in conf
-    ]
-    unknown = sorted(
-        set(conf) - _KNOWN_SETTINGS - set(_REMOVED_SETTINGS)
-    )
-    if unknown:
-        messages.append(checks.Warning(
-            f"DJANGO_LOGIC contains {'a key' if len(unknown) == 1 else 'keys'} "
-            f"django-logic does not read: {', '.join(repr(k) for k in unknown)}. "
-            f"The value has no effect and the documented default applies.",
-            hint=f"Check for a typo against the documented settings: "
-                 f"{', '.join(sorted(_KNOWN_SETTINGS))}. If you keep unrelated "
-                 f"keys in DJANGO_LOGIC on purpose, silence this with "
-                 f"SILENCED_SYSTEM_CHECKS = ['django_logic.W004'].",
-            id='django_logic.W004',
-        ))
-    return messages
+    unknown = sorted(set(conf) - _KNOWN_SETTINGS)
+    if not unknown:
+        return []
+    return [checks.Warning(
+        f"DJANGO_LOGIC contains {'a key' if len(unknown) == 1 else 'keys'} "
+        f"django-logic does not read: {', '.join(repr(k) for k in unknown)}. "
+        f"The value has no effect and the documented default applies.",
+        hint=f"Check for a typo against the documented settings: "
+             f"{', '.join(sorted(_KNOWN_SETTINGS))}. A key a past release "
+             f"removed should be deleted; the changelog says what replaced "
+             f"it. If you keep unrelated keys in DJANGO_LOGIC on purpose, "
+             f"silence this with SILENCED_SYSTEM_CHECKS = ['django_logic.W004'].",
+        id='django_logic.W004',
+    )]
