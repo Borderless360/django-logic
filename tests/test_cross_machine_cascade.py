@@ -18,7 +18,7 @@ ONE journey, so an engine change of that magnitude fails here first:
 to model parent→children work; this test does not endorse the anti-pattern, it
 locks its real behaviour so a regression can't move it unnoticed.)
 """
-from django_logic.testing import JourneyStep, ProcessScenario
+from django_logic.testing import ProcessScenario
 from tests.background import models
 from tests.background.models import (
     CascadeOuterProcess,
@@ -78,24 +78,4 @@ class CrossMachineCascadeContract(ProcessScenario):
             'inner:side_effect',
             'inner:failure_callback',
             'outer:failure_callback',
-        ])
-
-    def test_journey_pins_the_whole_cascade(self):
-        outer = self.create_instance(status='draft')
-        inner = self.create_instance(status='draft')
-        self.transition(
-            outer, 'outer_fulfil', inner_pk=inner.pk, expect_raises=ValueError,
-        )
-        # One assertion locks the outer machine's observable transformation:
-        # draft -> outer_failed, only the pre-nested side-effect ran, no
-        # success callback, and the failure DID reach the caller (failed=True).
-        self.assert_journey([
-            JourneyStep(
-                action='outer_fulfil',
-                before='draft',
-                after='outer_failed',
-                side_effects=['cascade_outer_before'],
-                callbacks=[],
-                failed=True,
-            ),
         ])

@@ -318,7 +318,7 @@ class ScenarioAssertions:
                 f'{raised}.')
         self._record_assert('assert_not_raised', ok=True)
 
-    # --- object journey --------------------------------------------------
+    # --- the state trace --------------------------------------------------
 
     def assert_state_trace(self, expected):
         """Assert the ordered sequence of states the object passed through
@@ -341,36 +341,6 @@ class ScenarioAssertions:
             )
         self._record_assert(f'assert_state_trace({expected})', ok=True,
                             detail=f'got {trace}')
-
-    def assert_journey(self, expected_steps):
-        """Assert the full ordered journey the object took across all drives
-        in this test. Each ``JourneyStep`` pins one drive's observable
-        transformation (action, before -> after, side-effects, callbacks,
-        failed). One assertion locks the whole end-to-end behaviour."""
-        from django_logic.testing.scenario import JourneyStep
-        actual = self._journey
-        if len(actual) != len(expected_steps):
-            self._record_assert(f'assert_journey({len(expected_steps)} steps)',
-                                ok=False, detail=f'got {len(actual)} steps')
-            self._fail(
-                f'Expected a journey of {len(expected_steps)} steps, but '
-                f'the recorded journey has {len(actual)} steps.',
-                instance=None,
-            )
-        for i, (exp, got) in enumerate(zip(expected_steps, actual), 1):
-            # Allow a plain dict for ergonomics.
-            exp = exp if isinstance(exp, JourneyStep) else JourneyStep(**exp)
-            if exp != got:
-                self._record_assert(f'assert_journey(step {i})', ok=False,
-                                    detail=f'expected {exp}, got {got}')
-                self._fail(
-                    f'Journey step {i} did not match.\n'
-                    f'  expected: {exp}\n'
-                    f'  got:      {got}',
-                    instance=None,
-                )
-        self._record_assert(f'assert_journey({len(expected_steps)} steps)',
-                            ok=True)
 
     # --- background owner (worker restore discriminator) ---------------
 

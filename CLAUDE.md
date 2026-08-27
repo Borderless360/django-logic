@@ -135,15 +135,17 @@ never `getattr(process, action_name)` with the name held in a variable.
    class creation. It may be shared
    freely — every marked instance carries its exact transition on the row, so
    recovery never guesses which transition it belongs to (the old
-   `django_logic.E001` check is retired). A synchronous "busy" step is a real
+   ambiguous-recovery check is retired). A synchronous "busy" step is a real
    state: a fast transition into it chained via `next_transition` to a
-   `BackgroundTransition` that does the work, plus a small periodic retry
-   for the crash window (see the README migration note).
+   `BackgroundTransition` that does the work, plus a small periodic task
+   that re-runs the background transition for instances parked in the busy
+   state — a caller can die between the busy-state commit and the
+   background call, and only the busy state records that it did.
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
    `sync_execution()` context manager) runs the worker path inline with no
-   broker and propagates exceptions; `retry_pending()` simulates the periodic
-   starter. The global default is `'pull'`, so test settings must opt into
-   sync. See `docs/TESTING_GUIDE.md` for the full scenario catalog.
+   broker and propagates exceptions; `retry_pending()` runs every claimable
+   row inline, once. The global default is `'pull'`, so test settings must
+   opt into sync. See `docs/TESTING_GUIDE.md` for the full scenario catalog.
 6. **One uncompleted background transition per instance per process.** While an
    uncompleted `TransitionMessage` exists, a second background transition
    raises `AlreadyInProgress` and a *synchronous* transition on the same
@@ -202,13 +204,13 @@ same release's own fixes. Therefore:
 - PostgreSQL for `TransitionMessage` — the worker's claim is
   `SELECT FOR UPDATE SKIP LOCKED`; `manage.py check` (and so `migrate`,
   `runserver` and `dl_worker`) refuses SQLite in pull mode once a
-  background transition is bound (`django_logic.E004`).
+  background transition is bound (`django_logic.pull_mode_needs_postgresql`).
 - A cross-process `default` cache for the state lock — the same check
-  refuses a locmem/dummy cache when `DEBUG=False` (`django_logic.E005`).
+  refuses a locmem/dummy cache when `DEBUG=False` (`django_logic.pull_mode_needs_a_shared_cache`).
   The engine locks
   through Django's cache API and imports no backend, so Django's built-in
-  `django.core.cache.backends.redis.RedisCache` is enough; django-redis is
-  the `[redis]` extra, not a core dependency (0.11.0).
+  `django.core.cache.backends.redis.RedisCache` is enough; the engine
+  depends on no cache backend package.
 - One `manage.py dl_worker --queues <names>` process per queue group.
   The loop runs the safety nets once a minute, so nothing is scheduled
   anywhere else. Crash recovery is the database's own: a dead worker's

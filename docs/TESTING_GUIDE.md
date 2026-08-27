@@ -213,8 +213,8 @@ are swallowed (best-effort).
 ### 3. Background failure → in-progress + recorded error
 
 A failed background attempt leaves the instance in `in_progress_state`, the
-error recorded on the durable row, and the row uncompleted (the periodic
-starter would retry it in production).
+error recorded on the durable row, and the row uncompleted (in production
+a worker claims it again after the retry wait).
 
 ```python
 def test_courier_failure_is_recorded(self):
@@ -320,7 +320,6 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | Assertion | Checks |
 |---|---|
 | `assert_state(obj, expected)` | The persisted state field. |
-| `assert_state_trace(states)` | The ordered states the object passed through in the last drive (in-progress → target, `next_transition` follow-ups, `failed_state`). |
 | `assert_available(obj, actions, user=None)` / `assert_not_available(...)` | Actions offered / not offered by `get_available_actions` — test availability *behaviour*, not the definition. |
 
 *Domain outcome (assert what the object became)*
@@ -349,12 +348,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_error_recorded(obj, contains)` | Substring of `last_error_message` on the latest `TransitionMessage`. |
 | `assert_error_count(obj, expected)` | `errors_count` on the latest `TransitionMessage`. |
 | `assert_transition_owner(obj, cls, transition_name=None)` | The `owning_process_class` recorded on a `TransitionMessage` (for chained / condition-disambiguated background transitions). |
-
-*The whole journey*
-
-| Assertion | Checks |
-|---|---|
-| `assert_journey([JourneyStep(...)])` | Each drive's full observable transformation — action, before → after, side-effects, callbacks, and `failed` (an exception reached the caller). Import `JourneyStep` from `django_logic.testing`. |
+| `assert_state_trace(states)` | The ordered states the object passed through in the last drive (in-progress → target, `next_transition` follow-ups, `failed_state`). |
 
 On failure, every assertion raises with a numbered timeline of each step the
 test took and the relevant `TransitionMessage` — built
@@ -423,25 +417,6 @@ with self.assertRaises(TransitionTemporarilyUnavailable):
 row = open_transition_message(order, 'process', 'fulfil', started_minutes_ago=60)
 ```
 
-### Which transitions did the suite never drive?
-
-Wrap a block of drives and diff against the declarations:
-
-```python
-from django_logic.testing import record_driven_transitions
-
-with record_driven_transitions() as record:
-    order.process.fulfil()
-    order.process.generate_export()
-
-self.assertEqual(record.undriven(OrderProcess), ['cancel'])
-```
-
-A drive counts when the transition ran, including one whose side-effect
-failed. A refusal (`TransitionNotAllowed`) does not count. Names are
-compared across the whole nested tree, so when nested processes share an
-action name, one drive covers the name.
-
 ---
 
 ## How the library itself is tested
@@ -450,7 +425,7 @@ You don't have to take the durability contract on faith — this is the test
 pyramid backing it:
 
 1. **Unit + regression suite** (`python tests/manage.py test`, SQLite,
-   ~340 tests): every reproduced defect from the 0.3 stability review has a
+   ~580 tests): every reproduced defect from the 0.3 stability review has a
    permanent regression test — savepoint isolation of side-effects
    (`tests/background/test_savepoint_isolation.py`), the worker's state guard
    (`test_worker_state_guard.py`), the per-process in-flight constraint
@@ -468,9 +443,9 @@ pyramid backing it:
    nightly): real row locking, real concurrent transactions, deadlock and
    crash scenarios under `tests/stability/`.
 3. **The Heroku validation matrix** ([django-logic-test](https://github.com/Borderless360/django-logic-test)):
-   a deployed harness (RabbitMQ + PostgreSQL + Redis + separate worker/beat
-   dynos) running an 18-row matrix on real infrastructure — worker SIGKILL
-   mid-task, deploys mid-flight, queue isolation, pgbouncer transaction
-   pooling, stuck-row finalization, the timeout kill.
+   a deployed harness (PostgreSQL + Redis + separate worker dynos) running
+   the harness matrix on real infrastructure — worker SIGKILL mid-attempt,
+   deploys mid-flight, queue isolation, pgbouncer transaction pooling,
+   stuck-row finalization, the timeout kill.
 
 That layering is exactly why your own tests can stop at the process level.

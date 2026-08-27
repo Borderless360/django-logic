@@ -87,6 +87,26 @@ class BareStringNameArgumentTests(ProcessScenario):
 # --- from_snapshot ----------------------------------------------------------
 
 
+class ExpectRaisesMismatchTests(ProcessScenario):
+    """A drive whose raise does not match expect_raises must fail with the
+    real mismatch in the message — naming both exception types."""
+
+    process_class = WidgetSyncProcess
+    model = Widget
+    state_field = 'status'
+    process_name = 'sync_proc'
+
+    def test_a_mismatched_raise_names_both_types(self):
+        widget = self.create_instance(status='draft')
+        with self.assertRaises(AssertionError) as ctx:
+            self.transition(widget, 'reject', expect_raises=KeyError,
+                            fail_side_effect='se_reject_attempt',
+                            fail_with=ValueError('wrong type'))
+        message = str(ctx.exception)
+        self.assertIn('ValueError', message)
+        self.assertIn('KeyError', message)
+
+
 class SnapshotRestoreGuardTests(ProcessScenario):
     process_class = WidgetProcess
     model = Widget

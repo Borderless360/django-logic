@@ -17,7 +17,7 @@ reaches the caller via ``expect_raises`` / ``assert_raised`` /
 change reverts ``SideEffects.execute`` to swallow — before it reaches
 production, not during it.
 """
-from django_logic.testing import JourneyStep, ProcessScenario
+from django_logic.testing import ProcessScenario
 from tests.background.models import (
     SYNC_ORDER,
     Widget,
@@ -56,27 +56,6 @@ class SideEffectReRaiseContract(ProcessScenario):
         self.transition(widget, 'capture_fail', expect_raises=ValueError)
         self.assert_raised(ValueError, match='sync boom')
         self.assert_state(widget, 'capture_failed')
-
-    def test_journey_marks_the_failure_as_reaching_the_caller(self):
-        # The journey step's ``failed`` flag records that an exception reached
-        # the caller. This one assertion detects a swallow-vs-reraise flip:
-        # under a swallow regression, failed would be False and this fails.
-        widget = self.create_instance(status='draft')
-        self.transition(
-            widget, 'reject',
-            fail_side_effect='se_reject_attempt', fail_with=ValueError('boom'),
-            expect_raises=ValueError,
-        )
-        self.assert_journey([
-            JourneyStep(
-                action='reject',
-                before='draft',
-                after='rejection_failed',
-                side_effects=[],          # the attempt raised, so it never "ran"
-                callbacks=[],
-                failed=True,              # <- the re-raise pin
-            ),
-        ])
 
 
 class SwallowContract(ProcessScenario):

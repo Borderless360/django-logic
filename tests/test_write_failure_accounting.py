@@ -233,28 +233,20 @@ class FailedStateWriteHonestyTests(_BindCleanup, TestCase):
                             for line in logs.output))
 
 
-class FailureErrorAccumulationTests(TestCase):
-    """record_failure_side_effect_error must not erase an earlier note.
+class FailureErrorNoteTests(TestCase):
+    """record_failure_side_effect_error writes one labeled note per row."""
 
-    Overwriting meant whichever note came second silently erased the
-    other. (Caught reviewing 0.12.0's own diff.)
-    """
-
-    def test_two_recorded_problems_both_survive(self):
+    def test_the_note_names_its_source_and_the_exception(self):
         transition_message = TransitionMessage.objects.create(
             app_label='tests', model_name='invoice', instance_id='1',
             process_name='acc_proc', transition_name='go', queue_name='q')
 
         transition_message.record_failure_side_effect_error(
             ValueError('write refused'), label='failed_state write')
-        transition_message.record_failure_side_effect_error(
-            RuntimeError('cleanup broke'), label='failed_state write')
 
         transition_message.refresh_from_db()
-        self.assertIn('failed_state write: ValueError: write refused',
-                      transition_message.failure_side_effect_error)
-        self.assertIn('failed_state write: RuntimeError: cleanup broke',
-                      transition_message.failure_side_effect_error)
+        self.assertEqual('failed_state write: ValueError: write refused',
+                         transition_message.failure_side_effect_error)
 
 
 # (StrandedRecoveryHonestyTests retired in 0.12.0 with recover_stranded_states

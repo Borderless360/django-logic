@@ -20,7 +20,6 @@ reproducible snapshot).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from django.test import TransactionTestCase
 
 from django_logic.testing.assertions import ScenarioAssertions
@@ -36,32 +35,6 @@ from django_logic.testing.runner import (
 from django_logic.testing.snapshot import from_snapshot as _from_snapshot
 from django_logic.testing.snapshot import snapshot as _snapshot
 from django_logic.testing.tracking import track
-
-
-@dataclass
-class JourneyStep:
-    """One observable step of an object's journey through a workflow.
-
-    A *journey* is the ordered sequence of drives a test applied to one
-    instance and what each drive did to it — the action taken, the state
-    before and after, which side-effects/callbacks ran, and whether it
-    failed. ``assert_journey`` pins the whole end-to-end behaviour in one
-    assertion, so a test reads like a business story instead of mirroring
-    framework return values.
-    """
-
-    action: str
-    before: str
-    after: str
-    side_effects: list[str] = field(default_factory=list)
-    callbacks: list[str] = field(default_factory=list)
-    # ``failed`` means an exception PROPAGATED TO THE CALLER of this drive —
-    # not merely that something went wrong internally. SideEffects re-raise
-    # (failed=True); Callbacks / NextTransition swallow
-    # (failed=False even though a hook failed). That distinction is the
-    # re-raise/swallow contract, so pinning ``failed`` in assert_journey
-    # detects a swallow-vs-reraise flip.
-    failed: bool = False
 
 
 def _exc_names(exc) -> str:
@@ -92,10 +65,6 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # assert_raised / assert_not_raised so a failure test can pin the
         # re-raise/swallow contract at the caller boundary.
         self._last_raised: BaseException | None = None
-        # The accumulated object journey across all drives in this test —
-        # each transition()/background_transition()/retry_transition() call
-        # appends one JourneyStep (built in _finish). assert_journey pins it.
-        self._journey: list[JourneyStep] = []
 
     # --- internals -------------------------------------------------------
 
@@ -313,16 +282,3 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                 f'failure scenario this test intends.{elsewhere}',
                 instance=instance)
         self._record(label, 'OK' if raised is None else 'FAILED(injected)', detail)
-        # Record the journey step: the observable transformation this drive
-        # applied to the object. For a background chain the follow-up runs
-        # inside this same drive (one tracker), so its side-effects appear
-        # in the same step and assert_state_trace captures the intermediate
-        # states.
-        self._journey.append(JourneyStep(
-            action=action or label,
-            before=before,
-            after=after,
-            side_effects=list(tracker.side_effects_ran),
-            callbacks=list(tracker.callbacks_ran),
-            failed=raised is not None,
-        ))

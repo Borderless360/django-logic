@@ -8,10 +8,6 @@ its transition is synchronous or background.
 
 Deliberate handling:
 
-* ``request`` — refused: a live request cannot cross the queue.
-  Extract ``user`` (which is rehydrated) or pass plain values. The
-  engine's chain hop strips it before a background follow-up, so it
-  stays legal on the synchronous transition that chains.
 * ``user`` — replaced with ``user_id`` (restored on the worker side).
 * ``datetime`` / ``date`` / ``time`` / ``Decimal`` / ``UUID`` / ``tuple``
   / ``set`` / ``frozenset`` — tag-encoded, restored in the worker with the
@@ -189,8 +185,8 @@ def _unstorable_text_paths(value, path='kwargs'):
 def serialize_kwargs(kwargs: dict) -> dict:
     """Return a JSON-serializable copy of ``kwargs`` fit for storage.
 
-    Refuses ``request`` and a caller-supplied ``user_id``
-    (``KwargsSerializationError``) — both are reserved. Replaces ``user``
+    Refuses a caller-supplied ``user_id``
+    (``KwargsSerializationError``) — it is reserved. Replaces ``user``
     with ``user_id``.
     Tag-encodes non-JSON-native values so the worker restores real types.
     Non-string dict keys are stringified by JSON persistence and cannot
@@ -203,18 +199,12 @@ def serialize_kwargs(kwargs: dict) -> dict:
     than at the worker.
     """
     out = dict(kwargs)
-    if 'request' in out:
-        raise KwargsSerializationError(
-            f"{out.get('tr_id')} 'request' cannot be passed to a background "
-            f"transition — worker hooks must not read it (the engine "
-            f"rehydrates 'user'; pass anything else as plain values)."
-        )
     # ``user_id`` is the engine's own wire form for ``user`` (restored in
     # the worker by restore_user). A caller passing it as ordinary data used to
     # be silently consumed: restore_user popped it and replaced it with a
     # live ``user``, so the hook never saw the value — and the same call ran
     # correctly in sync mode, a parity break that only showed up in
-    # production. Treated like ``request``: reserved, refused.
+    # production. Reserved, refused.
     if 'user_id' in out:
         raise KwargsSerializationError(
             f"{out.get('tr_id')} 'user_id' cannot be passed to a background "

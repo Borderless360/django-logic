@@ -20,7 +20,8 @@ def validate_on_ready() -> None:
     if mode == conf.EXECUTION_SYNC:
         _reject_sync_without_opt_in()
     # The pull-mode database and cache rules are system checks
-    # (django_logic.E004, E005): they apply only when a background
+    # (pull_mode_needs_postgresql, pull_mode_needs_a_shared_cache):
+    # they apply only when a background
     # transition is bound, and bindings happen in consumer apps'
     # ready() hooks, after this one runs.
 

@@ -44,38 +44,28 @@ to check and upload it. You need no global installs.
    public validation rig (`django-logic-test`): it exercises the release
    candidate on real worker dynos against PostgreSQL and Redis, with induced
    crashes, timeouts and deploys. Its matrix is the release gate.
-7. **Build the artifacts** — the workflow builds its own to upload; these
-   are the copies attached to the GitHub release:
-   ```bash
-   make dist          # rm -rf dist/ build/ *.egg-info && uv build && twine check dist/*
-   ```
-8. **Tag and push. The tag publishes.**
+7. **Tag and push. The tag publishes.**
    ```bash
    git tag -a vX.Y.Z -m "django-logic X.Y.Z"
    git push origin master vX.Y.Z
    ```
    `.github/workflows/publish.yml` refuses a tag whose name disagrees with
-   the packaged version, runs the suite, builds, and uploads through PyPI
-   trusted publishing. Watch it: `gh run watch`.
+   the packaged version, runs the suite, builds, uploads through PyPI
+   trusted publishing, and creates the GitHub release with the tag's
+   changelog section as the notes. Watch it: `gh run watch`.
 
    `make publish` still works and stays as the fallback for the day the
    workflow cannot run. It needs the token in `.pypirc`; the workflow needs
    no credential at all.
-9. **Create the GitHub release** with the changelog section as notes and the
-    built artifacts attached:
-    ```bash
-    gh release create vX.Y.Z --title "django-logic X.Y.Z" \
-      --notes-file <notes.md> --latest \
-      dist/django_logic-X.Y.Z-py3-none-any.whl dist/django_logic-X.Y.Z.tar.gz
-    ```
-10. **Check the published package**: `pip install django-logic==X.Y.Z` in a
-    clean virtualenv, then import it.
+8. **Check the published package**: `pip install django-logic==X.Y.Z` in a
+   clean virtualenv, then import it.
 
 ## Publishing from the tag
 
-`.github/workflows/publish.yml` builds and uploads on a `v*` tag. It refuses
-a tag whose name disagrees with the packaged version, runs the test suite
-first, and skips files PyPI already holds, so re-running a tag is safe.
+`.github/workflows/publish.yml` builds, uploads, and creates the GitHub
+release on a `v*` tag. It refuses a tag whose name disagrees with the
+packaged version, runs the test suite first, and skips files PyPI already
+holds and a GitHub release that exists, so re-running a tag is safe.
 
 It holds no PyPI credential. GitHub mints a short-lived token for the job
 and PyPI verifies it against a publisher record naming this repository, so

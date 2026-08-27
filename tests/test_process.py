@@ -15,7 +15,7 @@ tests/background/apps.py (the single binding site, per issue #100).
 from django.contrib.auth import get_user_model
 
 from django_logic.exceptions import TransitionNotAllowed
-from django_logic.testing import JourneyStep, ProcessScenario
+from django_logic.testing import ProcessScenario
 from tests.background.models import (
     Widget,
     WidgetAmbiguousConditionProcess,
@@ -206,20 +206,6 @@ class SyncProcessDrivingScenario(ProcessScenario):
         with self.assertRaises(TypeError):
             # Pass a positional argument to the action method.
             self._process(widget).approve('not-a-kwarg')
-
-    def test_journey_pins_the_whole_approve_workflow(self):
-        widget = self.create_instance(status='draft')
-        self.transition(widget, 'approve')
-        self.assert_journey([
-            JourneyStep(
-                action='approve',
-                before='draft',
-                after='notified',
-                side_effects=['se_a', 'se_b', 'se_c'],
-                callbacks=['cb_after_approve'],
-                failed=False,
-            ),
-        ])
 
 
 class NestedSyncDelegationScenario(ProcessScenario):

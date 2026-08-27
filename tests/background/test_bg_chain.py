@@ -6,8 +6,8 @@ follow-up's own declaring process. An inherited owner would make the worker
 restore the wrong transition from the row.
 
 Both scenarios drive the real object through the whole chain from the process
-entrypoint, with no mocks. They assert on what is observable: the full state
-trace, the side-effects that ran, and the ``owning_process_class`` recorded on
+entrypoint, with no mocks. They assert on what is observable: the final
+state, the side-effects that ran, and the ``owning_process_class`` recorded on
 each ``TransitionMessage``.
 
 The flat case chains ``bg_fulfil`` into ``bg_export``. The nested case picks a
@@ -17,7 +17,7 @@ the follow-up row must record the nested class and not the bound parent.
 from django.test import TestCase, override_settings
 
 from django_logic.background.models import TransitionMessage
-from django_logic.testing import JourneyStep, ProcessScenario
+from django_logic.testing import ProcessScenario
 from tests.background.models import (
     ChainConversationProcess,
     Conversation,
@@ -73,22 +73,6 @@ class BgToBgChainScenario(ProcessScenario):
         self.assert_transition_owner(
             widget, _BG_CHAIN, transition_name='bg_export'
         )
-
-    def test_journey_pins_the_whole_transformation(self):
-        # One statement pins the whole transformation: draft to exported, both
-        # side-effects, the export callback, and no failure.
-        widget = self.create_instance(status='draft')
-        self.background_transition(widget, 'bg_fulfil')
-        self.assert_journey([
-            JourneyStep(
-                action='bg_fulfil',
-                before='draft',
-                after='exported',
-                side_effects=['se_bg_fulfil_se', 'se_bg_export_se'],
-                callbacks=['cb_bg_export_cb'],
-                failed=False,
-            ),
-        ])
 
     def test_failure_of_first_step_does_not_chain(self):
         # A failed first step stops the chain. The follow-up never runs and no

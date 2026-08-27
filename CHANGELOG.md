@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-08-27
+
+### Changed
+
+- **The check ids are plain words.** A reader without a lookup table
+  cannot decode `W004`. The ids are now
+  `django_logic.transition_message_routing` (was `E002`),
+  `django_logic.pull_mode_needs_postgresql` (was `E004`),
+  `django_logic.pull_mode_needs_a_shared_cache` (was `E005`) and
+  `django_logic.unread_setting` (was `W004`). No known install silences
+  the old ids; a `SILENCED_SYSTEM_CHECKS` entry naming one must move to
+  the new name.
+
+### Removed
+
+- **The `[redis]` extra.** Nobody installs it: the engine locks through
+  Django's cache API and imports no backend, so Django's own
+  `RedisCache` is enough, and both known consumers pin django-redis
+  themselves where they use it. Pip warns on an unknown extra and
+  installs the base package, so an old pin does not break at install
+  time. The E005 hint now names "any shared backend" instead of the
+  extra.
+- **The journey recap: `JourneyStep` and `assert_journey`.** The
+  framework shipped two ways to pin the same behavior, and the recap
+  way expressed nothing the plain asserts cannot — while hiding what
+  they can express (exception type at the caller, a chain's
+  intermediate states, field deltas). Every recap test was a
+  restatement of a sibling; they leave with the API.
+  `assert_state_trace` stays — it is the one way to pin the states a
+  chained drive passes through.
+- **`record_driven_transitions` and `DrivenTransitions`.** No consumer
+  ever adopted them.
+- **`django_logic.W003`.** A key a past release removed reports as
+  `W004` like any other key the engine does not read — the value has
+  no effect either way, and the changelog owns each removal's advice.
+  The eleven-key advice table leaves with the id.
+- **`dl_worker --once`.** Nothing runs it: deployments run the loop,
+  and the tests that need one pass call `run_worker(forever=False)`
+  directly.
+- **The `run_worker` package export.** The command and the tests import
+  it from `django_logic.background.pull`; nothing imported it from
+  `django_logic.background`.
+- **The serializer's own `request` refusal.** Since 2.0.0 every
+  transition refuses `request` at the call, so the branch could not be
+  reached. The `user_id` refusal stays — it is the engine's wire form
+  for `user`.
+- **The blank-`field_name` restore guard.** Enqueue has recorded the
+  bound field since 0.4, and a hand-made row without one still fails
+  closed: the process constructor refuses a blank field name, and the
+  restore path completes the row as unrestorable.
+- **The failure-note append.** The engine records at most one
+  finalization note per row, so `record_failure_side_effect_error`
+  assigns the note instead of appending and re-budgeting. An oversized
+  note still truncates to the column limit.
+- **The 0.14.0 removed-kwargs tripwires.** `failure_side_effects=` and
+  `lock_timeout=` raised a named error for two releases; unknown
+  kwargs are otherwise ignored, as before.
+
 ## [2.0.0] — 2026-08-26
 
 ### Removed

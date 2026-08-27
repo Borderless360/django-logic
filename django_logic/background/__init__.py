@@ -13,8 +13,6 @@ Public API:
   seams.
 * :class:`PermanentFailure` — raise from a side-effect to say the failure
   is permanent: the worker takes the terminal path instead of retrying.
-* :func:`run_worker` — the pull worker loop (also exposed as the
-  ``dl_worker`` management command).
 
 All symbols are importable after Django's app registry is ready
 (i.e. inside views, management commands, tests, signal handlers).
@@ -30,7 +28,6 @@ _PUBLIC = {
     'retry_pending': ('django_logic.background.safety_nets', 'retry_pending'),
     'in_flight': ('django_logic.background.models', 'in_flight'),
     'PermanentFailure': ('django_logic.background.exceptions', 'PermanentFailure'),
-    'run_worker': ('django_logic.background.pull', 'run_worker'),
 }
 
 __all__ = list(_PUBLIC.keys())
