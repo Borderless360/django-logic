@@ -121,7 +121,7 @@ class SharedMarkerIsLegalTests(_BindingCleanupMixin, TestCase):
 
         findings = django_checks.run_checks(tags=['django_logic'])
         self.assertEqual(
-            [f for f in findings if f.id == 'django_logic.E001'], [],
+            findings, [],
             'the ambiguous-recovery check was retired in 0.12.0; '
-            'nothing may reintroduce its id silently',
+            'two declarations may share an in-progress state freely',
         )

@@ -1,4 +1,4 @@
-"""django_logic.transition_message_routing (#148): database routers must not split the atomic
+"""django_logic.transition_message_routing: database routers must not split the atomic
 outbox across databases.
 
 Enqueue commits the instance's state write and the TransitionMessage row

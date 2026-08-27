@@ -20,7 +20,6 @@ reproducible snapshot).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from django.test import TransactionTestCase
 
 from django_logic.testing.assertions import ScenarioAssertions
