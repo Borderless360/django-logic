@@ -7,7 +7,8 @@ Each test pins one confirmed finding:
   app keeps the label ``django_logic_background`` — the address of the live
   table, its migration records and its content types. The retired second
   entry refuses to boot and names the fix. The pull-mode database and cache
-  rules (``django_logic.E004``, ``E005``) fire only when a background
+  rules (``pull_mode_needs_postgresql``, ``pull_mode_needs_a_shared_cache``)
+  fire only when a background
   transition is bound, so a sync-only install runs on SQLite with the
   default cache.
 * ``DJANGO_LOGIC`` set to a non-dict raised a bare ``AttributeError`` out of
@@ -153,7 +154,7 @@ class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):
         with override_settings(DJANGO_LOGIC=self._PULL,
                                DATABASES=self._SQLITE):
             findings = check_pull_mode_database(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.E004'])
+        self.assertEqual([f.id for f in findings], ['django_logic.pull_mode_needs_postgresql'])
         self.assertIn('SQLite', findings[0].msg)
         self.assertIn('PostgreSQL', findings[0].hint)
 
@@ -174,13 +175,13 @@ class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):
         with override_settings(DJANGO_LOGIC=self._PULL, CACHES=self._LOCMEM,
                                DEBUG=False):
             findings = check_pull_mode_lock_cache(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.E005'])
+        self.assertEqual([f.id for f in findings], ['django_logic.pull_mode_needs_a_shared_cache'])
         self.assertIsInstance(findings[0], django_checks.Error)
         self.assertIn('per-process', findings[0].msg)
         with override_settings(DJANGO_LOGIC=self._PULL, CACHES=self._LOCMEM,
                                DEBUG=True):
             findings = check_pull_mode_lock_cache(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.E005'])
+        self.assertEqual([f.id for f in findings], ['django_logic.pull_mode_needs_a_shared_cache'])
         self.assertIsInstance(findings[0], django_checks.Warning)
 
 

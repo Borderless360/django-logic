@@ -1,4 +1,4 @@
-"""Every DJANGO_LOGIC key the engine never reads is reported as W004.
+"""Every DJANGO_LOGIC key the engine never reads is reported as unread.
 
 DJANGO_LOGIC has no unknown-key rejection, so a typo and a key a past
 release removed both fail *open* and silently — the value has no effect
@@ -24,7 +24,7 @@ class UnreadSettingsCheckTests(SimpleTestCase):
         findings = self._run()
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].id, 'django_logic.W004')
+        self.assertEqual(findings[0].id, 'django_logic.unread_setting')
         self.assertIn('LOG_KWARGS_REDACTOR', findings[0].msg)
         self.assertIn('MY_OWN_KEY', findings[0].msg)
         self.assertIn('no effect', findings[0].msg)

@@ -204,9 +204,9 @@ same release's own fixes. Therefore:
 - PostgreSQL for `TransitionMessage` — the worker's claim is
   `SELECT FOR UPDATE SKIP LOCKED`; `manage.py check` (and so `migrate`,
   `runserver` and `dl_worker`) refuses SQLite in pull mode once a
-  background transition is bound (`django_logic.E004`).
+  background transition is bound (`django_logic.pull_mode_needs_postgresql`).
 - A cross-process `default` cache for the state lock — the same check
-  refuses a locmem/dummy cache when `DEBUG=False` (`django_logic.E005`).
+  refuses a locmem/dummy cache when `DEBUG=False` (`django_logic.pull_mode_needs_a_shared_cache`).
   The engine locks
   through Django's cache API and imports no backend, so Django's built-in
   `django.core.cache.backends.redis.RedisCache` is enough; the engine

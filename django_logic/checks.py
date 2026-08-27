@@ -54,7 +54,7 @@ def _pull_mode_with_background_bindings():
 def check_pull_mode_database(app_configs, **kwargs):
     """Pull mode claims rows with SELECT FOR UPDATE SKIP LOCKED, so the
     alias that stores ``TransitionMessage`` must not be SQLite
-    (``django_logic.E004``). An install with no background transition
+    (``django_logic.pull_mode_needs_postgresql``). An install with no background transition
     bound never stores a row, so the rule does not apply to it."""
     from django.conf import settings
     from django.db import router
@@ -74,7 +74,7 @@ def check_pull_mode_database(app_configs, **kwargs):
         f"unique indexes. TransitionMessage is routed to alias '{alias}', "
         f"which uses {engine!r} (SQLite).",
         hint="Point that alias at PostgreSQL.",
-        id='django_logic.E004',
+        id='django_logic.pull_mode_needs_postgresql',
     )]
 
 
@@ -83,7 +83,7 @@ def check_pull_mode_lock_cache(app_configs, **kwargs):
     """The state lock lives in the ``default`` cache. In pull mode the web
     processes and the worker processes are different OS processes, so a
     per-process cache means the lock silently does not lock anything
-    across them (``django_logic.E005``; a warning under ``DEBUG=True`` so
+    across them (``django_logic.pull_mode_needs_a_shared_cache``; a warning under ``DEBUG=True`` so
     local pull-mode experiments stay possible)."""
     from django.conf import settings
 
@@ -103,13 +103,13 @@ def check_pull_mode_lock_cache(app_configs, **kwargs):
             "'django.core.cache.backends.redis.RedisCache', or any shared "
             "backend (memcached, django-redis).")
     finding = checks.Warning if getattr(settings, 'DEBUG', False) else checks.Error
-    return [finding(message, hint=hint, id='django_logic.E005')]
+    return [finding(message, hint=hint, id='django_logic.pull_mode_needs_a_shared_cache')]
 
 
 @checks.register('django_logic')
 def check_background_database_routing(app_configs, **kwargs):
     """Database routers must not split the background engine across
-    databases (``django_logic.E002``).
+    databases (``django_logic.transition_message_routing``).
 
     Enqueue writes the instance's ``in_progress_state`` and the
     ``TransitionMessage`` row in ONE transaction. The engine uses plain managers
@@ -154,7 +154,7 @@ def check_background_database_routing(app_configs, **kwargs):
                  "supported topology is TransitionMessage and every "
                  "background-bound model on the shared 'default' alias.",
             obj='django_logic.background.models.TransitionMessage',
-            id='django_logic.E002',
+            id='django_logic.transition_message_routing',
         ))
 
     seen_models = set()
@@ -177,7 +177,7 @@ def check_background_database_routing(app_configs, **kwargs):
                      "'default' alias as TransitionMessage. Split databases "
                      "are not supported.",
                 obj=binding.model._meta.label,
-                id='django_logic.E002',
+                id='django_logic.transition_message_routing',
             ))
     return findings
 
@@ -198,7 +198,7 @@ _KNOWN_SETTINGS = frozenset({
 @checks.register('django_logic')
 def check_no_unknown_settings(app_configs, **kwargs):
     """Report ``DJANGO_LOGIC`` keys the engine never reads
-    (``django_logic.W004``).
+    (``django_logic.unread_setting``).
 
     ``DJANGO_LOGIC`` is a plain dict with no schema. A typo such as
     ``TRANSITION_MESSAGE_MAX_ERROR`` or ``LOCK_TIMOUT`` is ignored and the
@@ -224,6 +224,6 @@ def check_no_unknown_settings(app_configs, **kwargs):
              f"{', '.join(sorted(_KNOWN_SETTINGS))}. A key a past release "
              f"removed should be deleted; the changelog says what replaced "
              f"it. If you keep unrelated keys in DJANGO_LOGIC on purpose, "
-             f"silence this with SILENCED_SYSTEM_CHECKS = ['django_logic.W004'].",
-        id='django_logic.W004',
+             f"silence this with SILENCED_SYSTEM_CHECKS = ['django_logic.unread_setting'].",
+        id='django_logic.unread_setting',
     )]

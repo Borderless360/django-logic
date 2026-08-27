@@ -199,7 +199,7 @@ class UnknownSettingsCheckTests(TestCase):
         """A misspelled key used to be ignored, and the default applied without
         a word."""
         findings = check_no_unknown_settings(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.W004'])
+        self.assertEqual([f.id for f in findings], ['django_logic.unread_setting'])
         self.assertIn('TRANSITION_MESSAGE_MAX_ERROR', findings[0].msg)
 
     @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'sync'})
@@ -214,7 +214,7 @@ class UnknownSettingsCheckTests(TestCase):
     def test_keys_a_past_release_removed_are_reported_as_unread(self):
         findings = check_no_unknown_settings(None)
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].id, 'django_logic.W004')
+        self.assertEqual(findings[0].id, 'django_logic.unread_setting')
         self.assertIn('STRICT_HOOK_SIGNATURES', findings[0].msg)
         self.assertIn('LEGACY_EXCEPTION_BASE', findings[0].msg)
 

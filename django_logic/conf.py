@@ -6,7 +6,8 @@ and one place where each default is written down.
 Validation runs from one boot gate: ``DjangoLogicConfig.ready`` calls
 ``validate_on_ready``, which validates every key in every mode. The
 pull-mode deployment requirements (database, cache) are the
-``django_logic.E004``/``E005`` system checks instead, because they
+``pull_mode_needs_postgresql`` and ``pull_mode_needs_a_shared_cache``
+system checks instead, because they
 depend on bindings that happen after ``ready()`` runs. All of it is
 idempotent — pure reads, no state.
 """

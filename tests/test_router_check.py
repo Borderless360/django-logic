@@ -1,4 +1,4 @@
-"""django_logic.E002 (#148): database routers must not split the atomic
+"""django_logic.transition_message_routing (#148): database routers must not split the atomic
 outbox across databases.
 
 Enqueue commits the instance's state write and the TransitionMessage row
@@ -57,7 +57,7 @@ class _BackgroundModelElsewhereRouter:
 class RouterCheckTests(SimpleTestCase):
     def _findings(self):
         return [f for f in check_background_database_routing(None)
-                if f.id == 'django_logic.E002']
+                if f.id == 'django_logic.transition_message_routing']
 
     def test_default_no_router_setup_has_no_findings(self):
         self.assertEqual(self._findings(), [])

@@ -4,6 +4,17 @@
 
 ## [2.1.0] — 2026-08-27
 
+### Changed
+
+- **The check ids are plain words.** A reader without a lookup table
+  cannot decode `W004`. The ids are now
+  `django_logic.transition_message_routing` (was `E002`),
+  `django_logic.pull_mode_needs_postgresql` (was `E004`),
+  `django_logic.pull_mode_needs_a_shared_cache` (was `E005`) and
+  `django_logic.unread_setting` (was `W004`). No known install silences
+  the old ids; a `SILENCED_SYSTEM_CHECKS` entry naming one must move to
+  the new name.
+
 ### Removed
 
 - **The `[redis]` extra.** Nobody installs it: the engine locks through
