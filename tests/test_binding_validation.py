@@ -5,7 +5,7 @@ entries, a (model, process_name) collision silently overwrote the model
 property while the registry kept both claims, and a typo'd state_field
 only failed deep inside a transition.
 
-The ambiguous-recovery guardrails (#143 / django_logic.E001) that used to
+The ambiguous-recovery guardrails (retired in 0.12.0) that used to
 live here were retired in 0.12.0 with ``recover_stranded_states``:
 ``in_progress_state`` is background-only now, written atomically with the
 ``TransitionMessage`` row, so recovery works from that row and marker sharing is
@@ -101,8 +101,9 @@ class BindValidationTests(_BindingCleanupMixin, TestCase):
 
 
 class SharedMarkerIsLegalTests(_BindingCleanupMixin, TestCase):
-    """E001 retirement pin (0.12.0): two bound processes sharing a background
-    ``in_progress_state`` with *divergent* recovery — the exact topology E001
+    """The ambiguous-recovery check stays retired (0.12.0): two bound
+    processes sharing a background ``in_progress_state`` with *divergent*
+    recovery — the exact topology the retired check
     used to reject — now bind cleanly and pass ``manage.py check``. Every
     marked instance carries its transition on the ``TransitionMessage`` row,
     so there is no record-less recovery for claimants to disagree about.
@@ -121,5 +122,6 @@ class SharedMarkerIsLegalTests(_BindingCleanupMixin, TestCase):
         findings = django_checks.run_checks(tags=['django_logic'])
         self.assertEqual(
             [f for f in findings if f.id == 'django_logic.E001'], [],
-            'E001 was retired in 0.12.0; nothing may reintroduce it silently',
+            'the ambiguous-recovery check was retired in 0.12.0; '
+            'nothing may reintroduce its id silently',
         )

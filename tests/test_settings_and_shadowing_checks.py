@@ -60,7 +60,7 @@ class _BindingHelper:
 
 # --- A1: duck-typed transitions in the recovery signature -----------------
 
-# (The duck-typed-transition E001/sweep pins were retired with E001 and
+# (The duck-typed-transition pins were retired with the ambiguous-recovery check and
 # recover_stranded_states in 0.12.0 — nothing left reads failure attributes
 # off arbitrary transition objects outside bind-time hook validation.)
 

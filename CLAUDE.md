@@ -135,7 +135,7 @@ never `getattr(process, action_name)` with the name held in a variable.
    class creation. It may be shared
    freely — every marked instance carries its exact transition on the row, so
    recovery never guesses which transition it belongs to (the old
-   `django_logic.E001` check is retired). A synchronous "busy" step is a real
+   ambiguous-recovery check is retired). A synchronous "busy" step is a real
    state: a fast transition into it chained via `next_transition` to a
    `BackgroundTransition` that does the work, plus a small periodic task
    that re-runs the background transition for instances parked in the busy
