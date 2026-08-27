@@ -38,6 +38,13 @@ from django_logic.testing.snapshot import snapshot as _snapshot
 from django_logic.testing.tracking import track
 
 
+def _exc_names(exc) -> str:
+    """Human-readable name(s) for an expected-exception type or tuple."""
+    if isinstance(exc, tuple):
+        return ' or '.join(getattr(e, '__name__', repr(e)) for e in exc)
+    return getattr(exc, '__name__', repr(exc))
+
+
 class ProcessScenario(ScenarioAssertions, TransactionTestCase):
     """Base class for scenario-based Process tests (no Celery required)."""
 
