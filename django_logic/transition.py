@@ -120,17 +120,6 @@ class Transition:
         # about the contract — lock, gate, chaining, failed_state — is
         # identical to a state-writing transition.
         self.target = target or None
-        # Removed in 0.14.0; unknown kwargs are otherwise ignored, so a
-        # declaration carrying one would silently lose behavior on upgrade.
-        for removed, hint in (
-            ('failure_side_effects', 'use failure_callbacks'),
-            ('lock_timeout', "use the global DJANGO_LOGIC['LOCK_TIMEOUT']"),
-        ):
-            if removed in kwargs:
-                raise ImproperlyConfigured(
-                    f"Transition {action_name!r}: {removed}= was removed in "
-                    f"0.14.0 — {hint}."
-                )
         if isinstance(sources, str):
             # list('draft') is ['d','r','a','f','t'], which matches no state:
             # the transition becomes invisible to get_available_actions() and

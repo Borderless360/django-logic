@@ -151,20 +151,19 @@ class DbSafeTextTests(TestCase):
         transition_message.refresh_from_db()
         self.assertEqual(transition_message.last_error_message, 'a\\x00b')
 
-    def test_appended_failure_note_keeps_the_newest_entry(self):
-        """Truncation keeps the start of the text, so an append near the limit
-        used to drop the note it had just added."""
+    def test_failure_note_fits_the_column(self):
+        """An oversized note truncates to the column budget; its start (the
+        label and the exception type) survives."""
         transition_message = TransitionMessage.objects.create(
             app_label='tests', model_name='invoice', instance_id='1',
             process_name='p', transition_name='go', queue_name='q',
-            failure_side_effect_error='x' * 9_990,
         )
         transition_message.record_failure_side_effect_error(
-            ValueError('the newest problem'), label='failed_state write')
+            ValueError('x' * 20_000), label='failed_state write')
         transition_message.refresh_from_db()
-        self.assertIn(
-            'the newest problem',
-            transition_message.failure_side_effect_error)
+        self.assertTrue(
+            transition_message.failure_side_effect_error.startswith(
+                'failed_state write: ValueError:'))
         self.assertLessEqual(
             len(transition_message.failure_side_effect_error), 10_000)
 

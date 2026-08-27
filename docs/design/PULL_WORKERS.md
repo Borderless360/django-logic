@@ -63,7 +63,7 @@ at once. A row whose attempt just failed becomes claimable again after
 again. A row whose attempt is running right now is row-locked by that
 attempt, so `SKIP LOCKED` passes over it. A worker that dies releases its
 lock with its connection, so its row is claimable immediately — faster
-than today's starter, which waits out the retry interval.
+than the push starter, which waited out the retry interval.
 
 ## 3. What each mechanism becomes
 

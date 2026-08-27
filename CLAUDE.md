@@ -137,13 +137,15 @@ never `getattr(process, action_name)` with the name held in a variable.
    recovery never guesses which transition it belongs to (the old
    `django_logic.E001` check is retired). A synchronous "busy" step is a real
    state: a fast transition into it chained via `next_transition` to a
-   `BackgroundTransition` that does the work, plus a small periodic retry
-   for the crash window (see the README migration note).
+   `BackgroundTransition` that does the work, plus a small periodic task
+   that re-runs the background transition for instances parked in the busy
+   state — a caller can die between the busy-state commit and the
+   background call, and only the busy state records that it did.
 5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
    `sync_execution()` context manager) runs the worker path inline with no
-   broker and propagates exceptions; `retry_pending()` simulates the periodic
-   starter. The global default is `'pull'`, so test settings must opt into
-   sync. See `docs/TESTING_GUIDE.md` for the full scenario catalog.
+   broker and propagates exceptions; `retry_pending()` runs every claimable
+   row inline, once. The global default is `'pull'`, so test settings must
+   opt into sync. See `docs/TESTING_GUIDE.md` for the full scenario catalog.
 6. **One uncompleted background transition per instance per process.** While an
    uncompleted `TransitionMessage` exists, a second background transition
    raises `AlreadyInProgress` and a *synchronous* transition on the same

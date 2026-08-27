@@ -7,8 +7,8 @@ would for any library.
 
 ## Loggers
 
-- **`django-logic`** — general library activity (safety-net tasks, dispatch
-  warnings, etc.). Available in code as `from django_logic.logger import logger`.
+- **`django-logic`** — general library activity (the worker loop, the
+  safety nets). Available in code as `from django_logic.logger import logger`.
 - **`django-logic.transition`** — the per-transition lifecycle event log.
   Available as `from django_logic.logger import transition_logger`.
 
@@ -30,8 +30,8 @@ LOGGING = {
 
 The `Start` lifecycle line attaches the transition's kwargs to the log
 record's `extra` (`extra={'kwargs': ...}`), and the callback-failure log
-does too. Those kwargs can include a `user` object, the `request`, and
-arbitrary business data (amounts, emails, tokens), so scrub them in your
+does too. Those kwargs can include a `user` object and arbitrary business
+data (amounts, emails, tokens), so scrub them in your
 logging configuration (a `logging.Filter` on the `django-logic.transition`
 logger) if the deployment is privacy-sensitive.
 

@@ -213,8 +213,8 @@ are swallowed (best-effort).
 ### 3. Background failure → in-progress + recorded error
 
 A failed background attempt leaves the instance in `in_progress_state`, the
-error recorded on the durable row, and the row uncompleted (the periodic
-starter would retry it in production).
+error recorded on the durable row, and the row uncompleted (in production
+a worker claims it again after the retry wait).
 
 ```python
 def test_courier_failure_is_recorded(self):
@@ -425,7 +425,7 @@ You don't have to take the durability contract on faith — this is the test
 pyramid backing it:
 
 1. **Unit + regression suite** (`python tests/manage.py test`, SQLite,
-   ~340 tests): every reproduced defect from the 0.3 stability review has a
+   ~580 tests): every reproduced defect from the 0.3 stability review has a
    permanent regression test — savepoint isolation of side-effects
    (`tests/background/test_savepoint_isolation.py`), the worker's state guard
    (`test_worker_state_guard.py`), the per-process in-flight constraint
@@ -443,9 +443,9 @@ pyramid backing it:
    nightly): real row locking, real concurrent transactions, deadlock and
    crash scenarios under `tests/stability/`.
 3. **The Heroku validation matrix** ([django-logic-test](https://github.com/Borderless360/django-logic-test)):
-   a deployed harness (RabbitMQ + PostgreSQL + Redis + separate worker/beat
-   dynos) running an 18-row matrix on real infrastructure — worker SIGKILL
-   mid-task, deploys mid-flight, queue isolation, pgbouncer transaction
-   pooling, stuck-row finalization, the timeout kill.
+   a deployed harness (PostgreSQL + Redis + separate worker dynos) running
+   the harness matrix on real infrastructure — worker SIGKILL mid-attempt,
+   deploys mid-flight, queue isolation, pgbouncer transaction pooling,
+   stuck-row finalization, the timeout kill.
 
 That layering is exactly why your own tests can stop at the process level.

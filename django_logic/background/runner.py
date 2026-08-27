@@ -856,14 +856,6 @@ def _load_process_from_path(instance, dotted: str, transition_message: Transitio
     module_path, class_name = dotted.rsplit('.', 1)
     module = importlib.import_module(module_path)
     process_class = getattr(module, class_name)
-    if not transition_message.field_name:
-        # Enqueue has recorded the bound field since 0.4; a row without one
-        # cannot be restored to a known field, and guessing 'state' could
-        # drive the wrong machine on a multi-process model.
-        raise _RestoreError(
-            f'TransitionMessage {transition_message.pk} has no field_name; it predates 0.4 '
-            f'or was created by hand'
-        )
     return process_class(field_name=transition_message.field_name, instance=instance)
 
 

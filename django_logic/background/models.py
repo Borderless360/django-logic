@@ -408,24 +408,13 @@ class TransitionMessage(TimeStampedModel):
         Separate from ``record_error`` because the original side-effect
         error (which triggered the failure branch) must stay visible in
         ``last_error_message`` — we just annotate that the finalization
-        also broke.
-
-        **Appends** rather than replaces, so a second problem on the same
-        row cannot silently erase the first. ``label`` names the source.
+        also broke. ``label`` names the source. The engine writes at most
+        one note per row, so the write replaces any earlier text.
         """
-        note = db_safe_text(f'{type(exception).__name__}: {exception}')
+        note = f'{type(exception).__name__}: {exception}'
         if label:
             note = f'{label}: {note}'
-        existing = self.failure_side_effect_error
-        if existing:
-            # Budget for the new note FIRST: appending then re-truncating
-            # would drop the newest (most relevant) note near the limit —
-            # trim the older text instead.
-            room = _TEXT_LIMIT - len(note) - 2
-            existing = existing[:room] if room > 0 else ''
-        self.failure_side_effect_error = db_safe_text(
-            f'{existing}; {note}' if existing else note
-        )
+        self.failure_side_effect_error = db_safe_text(note)
         self.save(update_fields=['failure_side_effect_error', 'modified'])
 
 

@@ -27,6 +27,27 @@
   `W004` like any other key the engine does not read — the value has
   no effect either way, and the changelog owns each removal's advice.
   The eleven-key advice table leaves with the id.
+- **`dl_worker --once`.** Nothing runs it: deployments run the loop,
+  and the tests that need one pass call `run_worker(forever=False)`
+  directly.
+- **The `run_worker` package export.** The command and the tests import
+  it from `django_logic.background.pull`; nothing imported it from
+  `django_logic.background`.
+- **The serializer's own `request` refusal.** Since 2.0.0 every
+  transition refuses `request` at the call, so the branch could not be
+  reached. The `user_id` refusal stays — it is the engine's wire form
+  for `user`.
+- **The blank-`field_name` restore guard.** Enqueue has recorded the
+  bound field since 0.4, and a hand-made row without one still fails
+  closed: the process constructor refuses a blank field name, and the
+  restore path completes the row as unrestorable.
+- **The failure-note append.** The engine records at most one
+  finalization note per row, so `record_failure_side_effect_error`
+  assigns the note instead of appending and re-budgeting. An oversized
+  note still truncates to the column limit.
+- **The 0.14.0 removed-kwargs tripwires.** `failure_side_effects=` and
+  `lock_timeout=` raised a named error for two releases; unknown
+  kwargs are otherwise ignored, as before.
 
 ## [2.0.0] — 2026-08-26
 

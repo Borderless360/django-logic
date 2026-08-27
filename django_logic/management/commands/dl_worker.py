@@ -22,10 +22,6 @@ class Command(BaseCommand):
             help='comma-separated queue names this worker serves',
         )
         parser.add_argument(
-            '--once', action='store_true',
-            help='drain what is claimable now, run the safety nets, exit',
-        )
-        parser.add_argument(
             '--concurrency', type=int, default=1,
             help=(
                 'how many attempts this worker runs at a time (default 1). '
@@ -44,8 +40,4 @@ class Command(BaseCommand):
         concurrency = options['concurrency']
         if concurrency < 1:
             raise CommandError('--concurrency must be 1 or more.')
-        run_worker(
-            queues,
-            forever=not options['once'],
-            concurrency=concurrency,
-        )
+        run_worker(queues, forever=True, concurrency=concurrency)

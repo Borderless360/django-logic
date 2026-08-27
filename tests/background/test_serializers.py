@@ -1,4 +1,4 @@
-"""kwargs serialization: typed round-trip, request refusal, user_id swap."""
+"""kwargs serialization: typed round-trip, user_id swap."""
 import json
 from datetime import date, datetime, time, timezone as tz
 from decimal import Decimal
@@ -20,10 +20,6 @@ def _roundtrip(kwargs):
 
 
 class SerializeKwargsTests(SimpleTestCase):
-    def test_request_is_refused(self):
-        with self.assertRaisesMessage(TypeError, "'request' cannot be passed"):
-            serialize_kwargs({'request': Mock(), 'x': 1})
-
     def test_clean_kwargs_pass_through(self):
         self.assertEqual(serialize_kwargs({'x': 1}), {'x': 1})
 
@@ -162,7 +158,7 @@ class SerializeKwargsTests(SimpleTestCase):
         # ImproperlyConfigured ("not JSON-serializable") — the strict-mode
         # rejection must stay distinguishable so it propagates verbatim.
         with self.assertRaises(KwargsSerializationError):
-            serialize_kwargs({'request': Mock()})
+            serialize_kwargs({'user_id': 42})
 
     def test_non_string_dict_keys_are_refused(self):
         # JSON stringifies int keys silently ({1: 'a'} -> {"1": "a"}), which

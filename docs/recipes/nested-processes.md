@@ -73,7 +73,7 @@ class OrderProcess(Process):                         # the parent (synchronous)
 def fan_out(order, **kw):
     for child in order.fulfillments.all():
         try:
-            child.process.fulfill()        # enqueue only — dispatches the child's task
+            child.process.fulfill()        # enqueue only — a worker claims the child's row
         except Exception as exc:           # contain: one child that can't START ≠ failed fan-out
             log.warning('could not start fulfillment %s: %s', child.pk, exc)
 
