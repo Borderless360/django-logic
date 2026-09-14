@@ -8,7 +8,7 @@ committed row for a worker instead of running inline.
 import threading
 from datetime import timedelta
 
-from django.db import connections, transaction
+from django.db import OperationalError, connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -278,21 +278,156 @@ class PullClaimTests(TransactionTestCase):
         )
 
 
+class _DriverError(Exception):
+    """Stands in for the driver's own error class, ``psycopg2.Error``."""
+
+
+class _Driver:
+    """Stands in for the driver module a Django wrapper exposes."""
+
+    Error = _DriverError
+
+
+class _Cursor:
+    def __init__(self, statements, refusal=None):
+        self._statements = statements
+        self._refusal = refusal
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def execute(self, sql):
+        if self._refusal is not None:
+            raise self._refusal
+        self._statements.append(sql)
+
+
+class _RawConnection:
+    """Stands in for psycopg2's connection: a C type with no ``__dict__``.
+
+    ``__slots__`` refuses a new attribute the same way. It has no
+    ``poll``, so the wait takes the psycopg 3 branch and returns at once
+    instead of sleeping on a socket.
+    """
+
+    __slots__ = ('statements', 'refusal')
+
+    def __init__(self, refusal=None):
+        self.statements = []
+        self.refusal = refusal
+
+    def cursor(self):
+        return _Cursor(self.statements, self.refusal)
+
+    def notifies(self, timeout=None, stop_after=None):
+        return iter(())
+
+
+class _Wrapper:
+    """Stands in for Django's connection wrapper, which takes attributes."""
+
+    Database = _Driver
+
+    def __init__(self, raw, refusal=None):
+        self.connection = raw
+        self._refusal = refusal
+
+    def ensure_connection(self):
+        if self._refusal is not None:
+            raise self._refusal
+
+
+class _WrapperThatRefusesTheFlag:
+    """A wrapper with nowhere to keep the flag, to pin that the wait
+    raises a bookkeeping error instead of hiding it."""
+
+    __slots__ = ('connection',)
+
+    Database = _Driver
+
+    def __init__(self, raw):
+        self.connection = raw
+
+    def ensure_connection(self):
+        pass
+
+
+def _wait_with(wrapper, timeout=0.01, times=1):
+    from unittest.mock import MagicMock, patch
+
+    from django_logic.background.pull import _wait_for_work
+
+    fake_connections = MagicMock()
+    fake_connections.__getitem__.return_value = wrapper
+    with patch('django_logic.background.pull.connections', fake_connections), \
+            patch('django_logic.background.pull.time.sleep') as fake_sleep:
+        for _ in range(times):
+            _wait_for_work(timeout)
+    return fake_sleep
+
+
+class WaitListenTests(TestCase):
+    """``LISTEN`` lasts for the session, so the worker issues it once per
+    connection and remembers that it did."""
+
+    def test_listen_is_issued_once_for_the_connection(self):
+        from django_logic.background.pull import NOTIFY_CHANNEL
+
+        raw = _RawConnection()
+        _wait_with(_Wrapper(raw), times=3)
+
+        self.assertEqual(raw.statements, [f'LISTEN {NOTIFY_CHANNEL}'])
+
+    def test_a_new_connection_listens_again(self):
+        from django_logic.background.pull import NOTIFY_CHANNEL
+
+        wrapper = _Wrapper(_RawConnection())
+        _wait_with(wrapper)
+        # Django replaced the connection, so the session that listened is gone.
+        wrapper.connection = _RawConnection()
+        _wait_with(wrapper)
+
+        self.assertEqual(
+            wrapper.connection.statements, [f'LISTEN {NOTIFY_CHANNEL}'],
+        )
+
+    def test_a_wait_that_listens_logs_nothing(self):
+        with self.assertNoLogs('django-logic'):
+            _wait_with(_Wrapper(_RawConnection()), times=2)
+
+    def test_a_wait_that_listens_does_not_sleep(self):
+        fake_sleep = _wait_with(_Wrapper(_RawConnection()), times=2)
+
+        fake_sleep.assert_not_called()
+
+
 class WaitDegradeTests(TestCase):
     """When the connection cannot listen, the wait sleeps the poll
     interval instead of raising — the poll floor carries the loop."""
 
-    def test_wait_degrades_to_a_plain_sleep(self):
-        from unittest.mock import MagicMock, patch
+    def test_it_sleeps_when_the_database_is_unreachable(self):
+        wrapper = _Wrapper(
+            _RawConnection(), refusal=OperationalError('no connection'),
+        )
+        fake_sleep = _wait_with(wrapper, timeout=3.5)
 
-        from django_logic.background.pull import _wait_for_work
-
-        fake_connections = MagicMock()
-        fake_connections.__getitem__.side_effect = RuntimeError('no connection')
-        with patch('django_logic.background.pull.connections', fake_connections), \
-                patch('django_logic.background.pull.time.sleep') as fake_sleep:
-            _wait_for_work(3.5)
         fake_sleep.assert_called_once_with(3.5)
+
+    def test_it_sleeps_when_the_pooler_refuses_listen(self):
+        raw = _RawConnection(refusal=_DriverError('LISTEN is not supported'))
+        fake_sleep = _wait_with(_Wrapper(raw), timeout=3.5)
+
+        fake_sleep.assert_called_once_with(3.5)
+
+    def test_it_raises_a_bookkeeping_error_instead_of_hiding_it(self):
+        # The degraded path is for a connection that cannot listen. A
+        # failure to store the flag is a defect in this function, and a
+        # caught one ran unnoticed in production for weeks.
+        with self.assertRaises(AttributeError):
+            _wait_with(_WrapperThatRefusesTheFlag(_RawConnection()))
 
 
 @override_settings(DJANGO_LOGIC=_PULL_SETTINGS)
