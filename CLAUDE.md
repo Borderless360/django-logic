@@ -95,8 +95,10 @@ Declared with `target=None`, it changes no state on success — same
 durability, same rules. Since 1.0.0 there is one transition contract:
 every declaration takes the state lock, is refused while a background
 transition is uncompleted, and runs `next_transition`; the old `Action`
-and `BackgroundAction` classes are gone. A side-effect that must not
-obey that contract belongs in a plain method, never in the process.
+and `BackgroundAction` classes are gone. A side-effect whose unit of work
+is not the bound row — a store posting one parcel's tracking — declares
+`lock=False` (2.2.0): no state lock, no background gate, no `target`, no
+`failed_state`, and never on a `BackgroundTransition`.
 
 **Declarations are specifications.** Write every process and its transitions
 out in full — explicit `sources`, `target`, `conditions`, `side_effects`,

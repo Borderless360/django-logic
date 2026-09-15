@@ -155,8 +155,24 @@ Declare a `Transition` with no `target` for work that needs conditions,
 permissions and side-effects but writes no state on success. It follows
 the same rules as every transition: it takes the state lock, it is
 refused while a background transition is uncompleted, and it runs
-`next_transition`. A side-effect that must not obey those rules is
-not a transition — write it as a plain method on the model.
+`next_transition`.
+
+Add `lock=False` when the unit of work is not the bound row. A store
+process that posts one parcel's tracking is the example: the row is the
+store, the work is the parcel, and two parcels must not wait for each
+other. A `lock=False` transition takes no state lock and is not refused
+while a background transition is uncompleted. It keeps `conditions`,
+`permissions`, `side_effects`, `callbacks` and `failure_callbacks`. It
+cannot declare a `target` or a `failed_state` — a state write must
+serialise on that state — and `BackgroundTransition` refuses it.
+
+```python
+Transition(
+    'post_tracking', sources=all_states, lock=False,
+    side_effects=[post_tracking],
+    callbacks=[record_success], failure_callbacks=[record_failure],
+)
+```
 
 ## Bind the model to the process
 
