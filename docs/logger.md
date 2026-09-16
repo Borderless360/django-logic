@@ -82,6 +82,17 @@ outcome (#154) — the *pattern* of repeated `Lock failed` lines with no
 interleaved `Unlock` for that instance is the leak signal. A revalidation
 failure releases with `Unlock instance_key after revalidation failure`.
 
+A `lock=False` transition (2.2.0) takes no lock and releases none, so its
+lifecycle has no `Lock` / `Unlock` pair. One line says why, so a per-instance
+filter does not read a `Start` with no `Lock` as a frozen instance:
+
+```
+tr_id Start ProcessName action_name instance_key root_id parent_id
+tr_id Lock skipped instance_key — lock=False
+tr_id SideEffect post_tracking
+tr_id Callback record_success
+```
+
 (`Complete` is a background-only event — the synchronous path ends with the
 `Unlock` + `Callback` lines.)
 

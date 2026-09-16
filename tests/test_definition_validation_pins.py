@@ -307,3 +307,26 @@ class BundleSwapTests(TestCase):
         self.assertFalse(hasattr(t, 'conditions_class'))
 
 
+
+
+# --- failed_state on a transition that cannot fail -------------------------
+
+class FailedStateWithoutSideEffectsTests(TestCase):
+    """A synchronous transition with no side effects has nothing that can
+    raise between the lock and the target write, so a ``failed_state`` on it
+    is never written. It reads as if a failure path exists; refuse it at
+    declaration time (#279)."""
+
+    def test_a_synchronous_transition_with_no_side_effects_refuses_it(self):
+        with self.assertRaisesRegex(ImproperlyConfigured, 'no side effects'):
+            Transition('start', sources=['pending'], target='in_progress', failed_state='pending')
+
+    def test_with_a_side_effect_it_is_accepted(self):
+        Transition('start', sources=['pending'], target='in_progress',
+                   failed_state='pending', side_effects=[_noop])
+
+    def test_a_background_transition_keeps_it(self):
+        # The worker can fail before the target write — restoring the
+        # instance, or the write itself — so the state is reachable there.
+        from django_logic.background import BackgroundTransition
+        BackgroundTransition('start', sources=['pending'], target='done', failed_state='failed')

@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-09-16
+
+### Added
+
+- **`Transition(..., lock=False)`: a side-effect transition that takes
+  no state lock.** 1.0.0 folded `Action` into `Transition(target=None)`,
+  and the fold gave every former `Action` the per-instance lock. The
+  lock is keyed on the bound row, not on what the side effect works on,
+  so a step declared on a parent and run once per child serialised the
+  children on one non-blocking lock. In the consumer that reported it
+  (#281, #282), a store's tracking post ran once per parcel; a dispatch
+  batch lost the lock and the parcels' tracking never reached the store.
+  `lock=False` is the declaration for that shape: no state lock, and no
+  refusal while a background transition on the instance is uncompleted.
+  It keeps `conditions`, `permissions`, `side_effects`, `callbacks` and
+  `failure_callbacks`. It refuses a `target` and a `failed_state` — a
+  state write must serialise on that state — and `BackgroundTransition`
+  refuses it, because enqueue writes the busy state and the durable row
+  under the lock. It releases nothing on completion: `State.unlock()`
+  with no token of its own deletes the key, which would free a lock a
+  concurrent transition holds. `get_available_actions()` lists it while
+  the row is locked, because it can be called.
+- **`StrictPermissions` and `NoUserPermissions` in
+  `django_logic.commands`.** `Permissions` reads `user=None` as "no user
+  context" and permits. When one action name is split across nested
+  processes by who is asking, the person's branch must refuse a call with
+  no user and the automation branch must refuse a call with one, or a
+  caller matches both and the action is refused as ambiguous. Two
+  consumer apps wrote the same pair; the engine ships it. (#276)
+
+### Changed
+
+- **A synchronous transition with no side effects refuses a
+  `failed_state`.** Nothing can raise between the lock and the target
+  write on such a transition, so the state was never written and the
+  declaration read as if a failure path existed. A `BackgroundTransition`
+  keeps it: the worker can fail before the target write. (#279)
+- **The testing guide says what `expect_raises` pins on a background
+  drive.** In sync mode the runner re-raises the hook's exception to the
+  inline caller; a production caller in pull mode returns once the row is
+  committed and sees only an enqueue-time refusal. The guide now says to
+  pin the work's outcome with the row-level assertions. (#278)
+- **The testing guide says the caller's object keeps the enqueue-time
+  state after a background drive.** The worker writes the outcome on its
+  own copy, so `event.process.in_transit()` followed by `event.status`
+  reads the `in_progress_state` (or the source) in every mode — and that
+  is what a production caller sees. Refreshing the caller's object in
+  sync mode was tried and rejected: it made a consumer's API tests report
+  the follow-up's final state where production reports `validating`. A
+  test that wants the outcome uses `assert_state` or calls
+  `refresh_from_db()` first. (#277)
+- **`Transition` refuses a keyword it does not read.** Before,
+  `Transition('go', sources=[...], lock=False)` on 2.1.0 was accepted and
+  did nothing — the lock was still taken. Now an unknown keyword raises
+  `ImproperlyConfigured` at declaration time and names the keywords a
+  declaration takes. `BackgroundTransition` keeps `queue`, `timeout` and
+  `no_retry_on`.
+
 ### Fixed
 
 - **The LISTEN/NOTIFY wake-up never ran on psycopg2.** `_wait_for_work`

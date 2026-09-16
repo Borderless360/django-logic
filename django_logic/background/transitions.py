@@ -47,6 +47,8 @@ class BackgroundTransition(Transition):
     ``target=None`` declares a background transition that writes no
     state on success — same durability, same lock, same one-uncompleted-
     row gate, same chaining; the worker just skips the target write.
+    ``lock=False`` is refused: enqueue writes the busy state and the
+    durable row under the state lock.
 
     Optional:
         - ``queue`` — the queue name this transition's row carries.

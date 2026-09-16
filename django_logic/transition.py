@@ -9,8 +9,16 @@ the caller's call frame — validate, lock, run, write the target state.
 It runs under the same contract as every other transition: it takes the
 state lock, it is refused while a background transition is uncompleted
 (``TransitionTemporarilyUnavailable``), and it runs ``next_transition``.
-A side-effect that must not obey that contract is not a transition —
-write it as a plain method.
+
+``lock=False`` declares a transition that also takes no state lock. It
+is for a side effect whose unit of work is not the bound row — a store
+posting one parcel's tracking, where the row is the store and the work
+is the parcel. Several may run at once on one instance, and one runs
+while a background transition on that instance is uncompleted. It keeps
+conditions, permissions, side effects, callbacks and failure callbacks.
+It may not declare a ``target`` or a ``failed_state``: a state write must
+serialise on that state. It is refused on ``BackgroundTransition``, whose
+enqueue writes a row and a busy state under that lock.
 
 For background-executed transitions, see
 ``django_logic.background.BackgroundTransition``. That path has two
@@ -52,6 +60,15 @@ from django_logic.state import State
 #: ``process_class``, ``owning_process_class``) — the README documents
 #: those as reserved instead of refusing them.
 _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception'})
+
+#: Every keyword a ``Transition`` declaration reads. Anything else raises at
+#: declaration time; before that check a misspelt or unsupported option was
+#: accepted and silently did nothing.
+_DECLARATION_KWARGS = frozenset({
+    'conditions', 'permissions', 'side_effects', 'callbacks',
+    'failure_callbacks', 'failed_state', 'in_progress_state',
+    'next_transition',
+})
 
 
 def _refuse_engine_param_kwargs(action_name: str, kwargs: dict) -> None:
@@ -113,13 +130,40 @@ class Transition:
 
     def __init__(
         self, action_name: str, sources: list, target: str | None = None,
-        **kwargs,
+        *, lock: bool = True, **kwargs,
     ):
         self.action_name = action_name
         # None (or '') means: write no state on success. Everything else
         # about the contract — lock, gate, chaining, failed_state — is
-        # identical to a state-writing transition.
+        # identical to a state-writing transition, unless lock=False.
         self.target = target or None
+        self.lock = bool(lock)
+        if not self.lock and self.is_background:
+            raise ImproperlyConfigured(
+                f"BackgroundTransition {action_name!r}: lock=False is not "
+                f"supported. Enqueue writes the in_progress_state and the "
+                f"TransitionMessage row under the state lock; without it two "
+                f"callers could enqueue the same work. Declare the lock-free "
+                f"step as a Transition."
+            )
+        if not self.lock and self.target:
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: lock=False needs target=None. "
+                f"A transition that writes {self.target!r} must serialise on "
+                f"that state, or two callers race the write."
+            )
+        unknown = set(kwargs) - _DECLARATION_KWARGS
+        if unknown:
+            # A keyword the engine does not read was accepted and ignored,
+            # so a misspelt or not-yet-supported option looked like it
+            # worked. Name it at declaration time instead.
+            takes = sorted(_DECLARATION_KWARGS | {'lock'})
+            if self.is_background:
+                takes += ['queue', 'timeout', 'no_retry_on']
+            raise ImproperlyConfigured(
+                f"{type(self).__name__} {action_name!r} does not take "
+                f"{', '.join(sorted(unknown))}. It takes: {', '.join(takes)}."
+            )
         if isinstance(sources, str):
             # list('draft') is ['d','r','a','f','t'], which matches no state:
             # the transition becomes invisible to get_available_actions() and
@@ -166,6 +210,25 @@ class Transition:
             # listing time.
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
+        if self.failed_state and not self.lock:
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: lock=False cannot declare a "
+                f"failed_state. Writing {self.failed_state!r} on failure is a "
+                f"state write, and a state write must serialise on the lock. "
+                f"Record the failure in a failure_callback instead."
+            )
+        if self.failed_state and not self.is_background and not kwargs.get('side_effects'):
+            # Nothing can raise between the lock and the target write, so
+            # the state is never written and the declaration reads as if a
+            # failure path existed. A background transition keeps it: the
+            # worker can fail before the target write.
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: failed_state names where the "
+                f"instance lands when a side effect raises, and this "
+                f"transition has no side effects, so {self.failed_state!r} "
+                f"can never be written. Remove failed_state or add the side "
+                f"effect."
+            )
         if self.failed_state and self.failed_state == self.in_progress_state:
             # The state field is what operators, UIs and the worker's
             # state guard read to tell "failed" from "still running";
@@ -198,6 +261,8 @@ class Transition:
         self.next_transition = NextTransition(kwargs.get('next_transition'))
 
     def __str__(self):
+        if not self.lock:
+            return f"Transition: {self.action_name} (no state write, no lock)"
         if self.target is None:
             return f"Transition: {self.action_name} (no state write)"
         return f"Transition: {self.action_name} to {self.target}"
@@ -224,6 +289,20 @@ class Transition:
             # the log call, and records are formatted lazily.
             extra={'kwargs': dict(kwargs), 'state_hash': state._get_hash()},
         )
+
+        if not self.lock:
+            # No lock, so none of the checks the lock makes meaningful: the
+            # source re-read closes a race that only matters before a state
+            # write, and the background gate protects the state field this
+            # transition never touches. One lifecycle line, so a per-instance
+            # log filter does not read a Start with no Lock as a frozen row.
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+                f'skipped {state.instance_key} — lock=False'
+            )
+            self._init_transition_context(kwargs)
+            self.side_effects.execute(state, **kwargs)
+            return kwargs.get('tr_id')
 
         # lock() is atomic (cache.add / Redis SET NX) and returns False if
         # the state is already locked, so the acquire alone is sufficient.
@@ -284,6 +363,10 @@ class Transition:
         instance's FSM freezes until the lock TTL): the transition fails
         loudly either way, but a leaked lock turns one failed request into
         hours of rejected transitions.
+
+        A ``lock=False`` transition releases nothing: it took no lock, and
+        ``State.unlock()`` with no token of its own deletes the key
+        outright — which would free a lock another transition holds.
         """
         if self.target is not None:
             try:
@@ -300,7 +383,8 @@ class Transition:
                 f'{self.target}'
             )
 
-        self._release_lock(state, **kwargs)
+        if self.lock:
+            self._release_lock(state, **kwargs)
 
         self.callbacks.execute(state, **kwargs)
         self.next_transition.execute(state, **kwargs)
@@ -322,7 +406,8 @@ class Transition:
                     consequence='The original failure is re-raised unchanged.',
                 )
         finally:
-            self._release_lock(state, **kwargs)
+            if self.lock:
+                self._release_lock(state, **kwargs)
 
         self.failure_callbacks.execute(state, exception=exception, **kwargs)
 
@@ -356,9 +441,10 @@ class Transition:
             )
 
     def _ensure_no_background_in_flight(self, state: State) -> None:
-        """Reject any synchronous transition — with a target or without
-        one — while a background transition is in progress on the same
-        instance + process.
+        """Reject any lock-taking synchronous transition — with a target or
+        without one — while a background transition is in progress on the
+        same instance + process. A ``lock=False`` transition is not checked:
+        it touches no state, so it has nothing to interleave with.
 
         Without this gate a synchronous transition could interleave with
         the worker: a target write would race the worker's state writes,

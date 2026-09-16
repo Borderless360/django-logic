@@ -24,7 +24,8 @@ def __getattr__(name):
             "it writes no state on success, and unlike Action it takes "
             "the state lock, is refused while a background transition is "
             "uncompleted (TransitionTemporarilyUnavailable), and runs "
-            "next_transition. A side-effect that must not obey that "
-            "contract belongs in a plain method, not in the process."
+            "next_transition. A side-effect that must not take the lock — "
+            "one whose unit of work is not the bound row — declares "
+            "lock=False (2.2.0)."
         )
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
