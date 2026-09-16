@@ -42,7 +42,8 @@ import signal
 import time
 from dataclasses import dataclass
 
-from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
+from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
+                       transaction)
 
 from django_logic.logger import logger
 
@@ -405,19 +406,30 @@ def _wait_for_work(timeout: float) -> None:
     caller drains after ``select``; psycopg 3 waits inside the
     ``notifies()`` generator. When the connection cannot listen (a
     pooler that rejects LISTEN, a broken socket), the wait degrades to
-    a plain sleep and the poll floor carries the loop.
+    a plain sleep and the poll floor carries the loop. Only a database,
+    driver or socket error degrades. Anything else is raised, so a
+    defect in this function cannot run unseen.
     """
     from django_logic.background.models import TransitionMessage
 
     alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+    connection = connections[alias]
+    # The LISTEN and the wait run on the raw connection, so they raise
+    # the driver's own errors, not the ones Django wraps. The degraded
+    # path names both, and OSError for a socket select cannot wait on.
+    cannot_listen = (Error, connection.Database.Error, OSError)
     try:
-        connection = connections[alias]
         connection.ensure_connection()
         raw = connection.connection
-        if not getattr(raw, '_django_logic_listening', False):
+        # The flag lives on the Django wrapper. psycopg2's connection is
+        # a C type that takes no new attribute, so a flag kept there is
+        # lost and the worker listens again on every wait. The flag holds
+        # the connection it listened on: a reconnect gives a new object,
+        # which listens again on its own session.
+        if getattr(connection, '_django_logic_listening', None) is not raw:
             with raw.cursor() as cursor:
                 cursor.execute(f'LISTEN {NOTIFY_CHANNEL}')
-            raw._django_logic_listening = True
+            connection._django_logic_listening = raw
         if hasattr(raw, 'poll'):
             # psycopg 2. A notification that arrived during earlier
             # statements already sits in the list, so check it before
@@ -435,7 +447,7 @@ def _wait_for_work(timeout: float) -> None:
             # consumes what it yields, so nothing accumulates.
             for _ in raw.notifies(timeout=timeout, stop_after=1):
                 pass
-    except Exception as exc:
+    except cannot_listen as exc:
         logger.warning(
             'pull: the notification wait failed (%s); sleeping the poll '
             'interval instead.', exc,

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The LISTEN/NOTIFY wake-up never ran on psycopg2.** `_wait_for_work`
+  kept its "already listening" flag on the raw driver connection.
+  psycopg2's connection is a C type with no `__dict__`, so the
+  assignment raised `AttributeError`. The broad `except Exception`
+  caught it and every wait fell back to `time.sleep()`. The flag now
+  lives on the Django connection wrapper and holds the connection it
+  listened on, so a reconnect listens again on its new session. The
+  suite missed this because the `dev` extra installs psycopg 3, whose
+  connection takes the attribute; the new pins use a stand-in that
+  refuses it, so they run on any driver. A consumer logged the warning
+  about 20,000 times a day for three weeks. (#284)
+- **The notification wait no longer hides a defect in its own
+  bookkeeping.** It catches the database, driver and socket errors that
+  mean a connection cannot listen, and raises anything else. Note that
+  `run_worker` calls it outside the loop's own `except`, so a raised
+  error ends the worker process. (#284)
+
 ## [2.1.0] — 2026-08-27
 
 ### Changed

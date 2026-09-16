@@ -57,12 +57,15 @@ jobs:
           pip install -e ".[dev]"
           pip install psycopg2-binary
 
-      # tests/background/test_concurrency_pg.py needs real PostgreSQL, so no
-      # other job and no make target runs it. It pins the row lock the worker
-      # takes to execute a row: select_for_update(nowait) makes a second worker
-      # skip a locked row. A past release broke that rule while the SQLite
-      # suite and the stability suite both stayed green.
-      - name: Run PostgreSQL concurrency tests
+      # tests/background needs real PostgreSQL in places, and this job is the
+      # only one that gives it. The tests pin the row lock the worker takes to
+      # execute a row (select_for_update(nowait) makes a second worker skip a
+      # locked row) and the LISTEN/NOTIFY wake-up. A past release broke the
+      # lock rule, and a later one shipped a wake-up that never ran, while the
+      # SQLite suite and the stability suite both stayed green. This job
+      # installs psycopg2, so it also covers the driver the SQLite suite and
+      # the dev extra do not.
+      - name: Run PostgreSQL background tests
         env:
           DJANGO_SETTINGS_MODULE: tests.settings_stability
           POSTGRES_HOST: localhost
@@ -72,7 +75,7 @@ jobs:
           POSTGRES_PASSWORD: django_logic
           REDIS_URL: redis://localhost:6380/0
         run: |
-          python tests/manage.py test tests.background.test_concurrency_pg --verbosity=2
+          python tests/manage.py test tests.background --verbosity=2
 
       - name: Run stability tests
         env:
