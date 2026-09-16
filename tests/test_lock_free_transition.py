@@ -121,6 +121,12 @@ class RunTests(TestCase):
         with self.assertRaisesRegex(TransitionNotAllowed, 'State is locked'):
             self.invoice.lockfree.go()
 
+    def test_it_stays_listed_while_the_row_is_locked(self):
+        self._someone_else_holds_the_lock()
+        actions = list(self.invoice.lockfree.get_available_actions())
+        self.assertIn('post', actions)
+        self.assertNotIn('go', actions)
+
     def test_it_never_releases_a_lock_it_did_not_take(self):
         other = self._someone_else_holds_the_lock()
         self.invoice.lockfree.post(parcel=1)

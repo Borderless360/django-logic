@@ -162,17 +162,32 @@ process that posts one parcel's tracking is the example: the row is the
 store, the work is the parcel, and two parcels must not wait for each
 other. A `lock=False` transition takes no state lock and is not refused
 while a background transition is uncompleted. It keeps `conditions`,
-`permissions`, `side_effects`, `callbacks` and `failure_callbacks`. It
-cannot declare a `target` or a `failed_state` — a state write must
-serialise on that state — and `BackgroundTransition` refuses it.
+`permissions`, `side_effects`, `callbacks`, `failure_callbacks` and
+`next_transition` — a follow-up is best-effort, so one that takes the lock
+is skipped while the row is locked. It cannot declare a `target` or a
+`failed_state` — a state write must serialise on that state — and
+`BackgroundTransition` refuses it. `get_available_actions()` lists it
+while the row is locked, because it can be called.
 
 ```python
+def post_tracking(instance, **kwargs):
+    ...  # tell the store about the parcel in kwargs['parcel']
+
+
 Transition(
-    'post_tracking', sources=all_states, lock=False,
+    action_name='post_tracking',
+    sources=['approved', 'fulfilled'],
+    lock=False,
     side_effects=[post_tracking],
-    callbacks=[record_success], failure_callbacks=[record_failure],
 )
 ```
+
+`permissions` treat a call with no user as permitted. When one action name
+is split across nested processes by who is asking, give the person's
+branch `permissions_class = StrictPermissions` (refuses a call with no
+user) and the automation branch `permissions_class = NoUserPermissions`
+(refuses a call with one), both from `django_logic.commands`, so no
+caller matches two branches.
 
 ## Bind the model to the process
 

@@ -157,10 +157,12 @@ class Transition:
             # A keyword the engine does not read was accepted and ignored,
             # so a misspelt or not-yet-supported option looked like it
             # worked. Name it at declaration time instead.
+            takes = sorted(_DECLARATION_KWARGS | {'lock'})
+            if self.is_background:
+                takes += ['queue', 'timeout', 'no_retry_on']
             raise ImproperlyConfigured(
-                f"Transition {action_name!r} does not take "
-                f"{', '.join(sorted(unknown))}. It takes: "
-                f"{', '.join(sorted(_DECLARATION_KWARGS))}."
+                f"{type(self).__name__} {action_name!r} does not take "
+                f"{', '.join(sorted(unknown))}. It takes: {', '.join(takes)}."
             )
         if isinstance(sources, str):
             # list('draft') is ['d','r','a','f','t'], which matches no state:
@@ -214,6 +216,18 @@ class Transition:
                 f"failed_state. Writing {self.failed_state!r} on failure is a "
                 f"state write, and a state write must serialise on the lock. "
                 f"Record the failure in a failure_callback instead."
+            )
+        if self.failed_state and not self.is_background and not kwargs.get('side_effects'):
+            # Nothing can raise between the lock and the target write, so
+            # the state is never written and the declaration reads as if a
+            # failure path existed. A background transition keeps it: the
+            # worker can fail before the target write.
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: failed_state names where the "
+                f"instance lands when a side effect raises, and this "
+                f"transition has no side effects, so {self.failed_state!r} "
+                f"can never be written. Remove failed_state or add the side "
+                f"effect."
             )
         if self.failed_state and self.failed_state == self.in_progress_state:
             # The state field is what operators, UIs and the worker's

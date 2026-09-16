@@ -312,6 +312,20 @@ Class attributes: `process_class`, `model`, `state_field` (default
   **`False`** asserts nothing propagated (the swallow contract). Omitted (the
   legacy default), an injected failure is absorbed so you can assert on the
   *recorded* error instead.
+  On a `background_transition` drive the caller boundary is a sync-mode
+  artefact: the runner re-raises the hook's exception to the inline caller,
+  but a production caller in pull mode returns once the row is committed and
+  sees only an enqueue-time refusal (`TransitionNotAllowed`). Use
+  `expect_raises` there for the refusal, and pin the work's own outcome with
+  the row-level assertions — `assert_error_recorded`, `assert_error_count`,
+  `assert_state`.
+  The caller's object keeps the state the enqueue wrote — the
+  `in_progress_state`, or the source — in every mode, because the worker
+  writes the outcome on its own copy of the instance. That is what a
+  production caller holds, so an API test that reads the response after a
+  background drive rightly sees `validating`, not the follow-up's final
+  state. To read the outcome, use `assert_state` or call
+  `refresh_from_db()` on the object first.
 
 **Assertions**
 

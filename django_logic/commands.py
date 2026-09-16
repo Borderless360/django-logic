@@ -158,6 +158,35 @@ class Permissions(BaseCommand):
         )
 
 
+class StrictPermissions(Permissions):
+    """Permissions that refuse a call with no user.
+
+    For a branch a person owns, when one action name is split across nested
+    processes by who is asking. With the default, a call with no user would
+    match the person's branch and the automation branch at once, and the
+    engine would refuse the action as ambiguous.
+    """
+
+    def execute(self, instance, user, **kwargs):
+        if not user:
+            return False
+        return super().execute(instance, user, **kwargs)
+
+
+class NoUserPermissions(Permissions):
+    """Permissions that refuse a call with a user.
+
+    The mirror of ``StrictPermissions``, for the branch that only code
+    runs — a scheduled task, a follow-up from an API view. A person must
+    not reach it, or it competes with the branch that person belongs to.
+    """
+
+    def execute(self, instance, user, **kwargs):
+        if user:
+            return False
+        return super().execute(instance, user, **kwargs)
+
+
 class SideEffects(BaseCommand):
     """Essential work for a transition.
 

@@ -142,6 +142,7 @@ class Process:
         tr_id = uuid.uuid4()
         target_note = (
             f"to {transition.target}" if transition.target is not None
+            else "(no state write, no lock)" if not transition.lock
             else "(no state write)"
         )
         transition_logger.info(
@@ -234,11 +235,14 @@ class Process:
         if not self.is_valid(user):
             return
 
-        if not ignore_state and self.state.is_locked():
-            return
+        # A held lock hides the transitions that would take it. A lock=False
+        # transition runs regardless, so it stays listed.
+        locked = not ignore_state and self.state.is_locked()
 
         for transition in self.transitions:
             if action_name is not None and transition.action_name != action_name:
+                continue
+            if locked and transition.lock:
                 continue
 
             if (

@@ -93,8 +93,9 @@ Use `BackgroundTransition` (durable, runs side-effects on a worker process,
 writes target/`failed_state`) for anything slow, external, or retriable.
 Declared with `target=None`, it changes no state on success — same
 durability, same rules. Since 1.0.0 there is one transition contract:
-every declaration takes the state lock, is refused while a background
-transition is uncompleted, and runs `next_transition`; the old `Action`
+every declaration takes the state lock unless it says `lock=False`, is
+refused while a background transition is uncompleted, and runs
+`next_transition`; the old `Action`
 and `BackgroundAction` classes are gone. A side-effect whose unit of work
 is not the bound row — a store posting one parcel's tracking — declares
 `lock=False` (2.2.0): no state lock, no background gate, no `target`, no

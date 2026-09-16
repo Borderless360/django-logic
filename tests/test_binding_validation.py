@@ -23,16 +23,14 @@ from tests.models import Invoice
 class _MachineA(Process):
     process_name = 'machine_a'
     transitions = [
-        Transition('run_a', sources=['draft'], target='done',
-                   failed_state='a_failed'),
+        Transition('run_a', sources=['draft'], target='done'),
     ]
 
 
 class _MachineB(Process):
     process_name = 'machine_b'
     transitions = [
-        Transition('run_b', sources=['draft'], target='ready',
-                   failed_state='b_failed'),
+        Transition('run_b', sources=['draft'], target='ready'),
     ]
 
 
