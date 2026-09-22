@@ -10,13 +10,14 @@
 
 ### Fixed
 
-- A reaped child frees its worker slot even when its crash accounting
-  must wait for a row lock (#292). Pending writes retain message identity
-  separately from reusable process IDs and remain excluded from local claims.
-  The worker stops claiming at 1,000 pending writes until that queue shrinks.
-- Persistent accounting row-lock waits log the message and elapsed time
-  after five seconds, then at most once a minute per entry (#293).
-  Short waits remain quiet.
+- When a job process finishes, the worker can start another job while
+  it waits to record the previous failure (#292). The worker keeps the
+  job's message ID separately from the process ID and does not retry
+  that job until its failure is recorded. It pauses new jobs when
+  1,000 failure records are waiting to be saved.
+- If recording a failure waits for a database row lock for five seconds,
+  the worker logs the message ID and wait time (#293). It repeats the
+  warning at most once a minute. Short waits remain quiet.
 - Completed-message cleanup commits batches of up to 1,000 rows (#294).
   Earlier deletions survive a later maintenance timeout. Age and newest
   terminal-failure retention rules still apply to each delete.

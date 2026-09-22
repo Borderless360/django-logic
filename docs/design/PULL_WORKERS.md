@@ -161,21 +161,22 @@ next safety-net pass. A finished attempt can therefore free its slot
 without a new enqueue notification. When a slot is free, the worker
 waits for PostgreSQL notifications so newly queued work can wake it.
 
-A child frees its slot when the worker reaps it. If its error write
-cannot take the message row lock, the worker retains that write separately.
-The pending entry keeps the message ID, not the child's reusable PID.
-The worker excludes those messages from its own claims until accounting ends.
+Once the worker detects that a job process has finished, it can start
+another job. If a database lock prevents it from recording the failure,
+it saves that information separately and tries again later. It keeps the
+message ID separately from the process ID, which the operating system may
+reuse. It does not claim that message again until the failure is recorded.
 
-Each pending write retries at most once a second. One harvest retries at
-most 16 writes and checks child deadlines between them. At 1,000 pending
-writes, the worker stops claiming more work until the queue shrinks.
-Already running children remain supervised, so they can add at most the
-configured concurrency to that bound. Other workers keep using normal claims.
+The worker retries each failure record at most once a second. Each check
+retries at most 16 records and checks running jobs' deadlines between writes.
+At 1,000 unsaved records, it stops starting jobs until that count falls.
+Already running jobs can still finish, adding at most the configured
+concurrency to that bound. Other workers continue to claim work normally.
 
-A row-lock wait stays quiet for five seconds. The worker then logs the
-message ID and elapsed wait, repeating at most once a minute per entry.
-Inspect the PostgreSQL row holder if the wait continues. A warning does
-not establish that the replacement attempt has failed.
+A database row-lock wait stays quiet for five seconds. The worker then logs
+its message ID and elapsed wait, repeating at most once a minute per record.
+Inspect the PostgreSQL row holder if the wait continues. This warning does
+not mean that the job currently running against that row has failed.
 
 `--concurrency=N` says how many attempts one worker runs at a time
 (default 1). Each attempt still runs in its own forked process, and

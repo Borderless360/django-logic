@@ -125,8 +125,8 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     segmentation fault, the platform's memory killer — kills the attempt,
     not the worker. The worker records the crash as an error on the row,
     so a crashing attempt gets the same paced, bounded retries as a
-    failing one. The call returns only after the accounting write lands,
-    so a caller never drops a failed write.
+    failing one. The call returns only after the failure is recorded,
+    so a caller never loses that record.
     """
     from django_logic.background.runner import run_background_transition
 
@@ -208,7 +208,7 @@ def _poll_delay(attempts: dict[int, _Attempt], maximum: float) -> float:
         if attempt.reaped:
             continue
         if attempt.killed:
-            # A stopped child should be reaped before another long wait.
+            # Collect a stopped process's exit status before another long wait.
             maximum = min(maximum, 0.01)
         elif attempt.deadline is not None:
             maximum = min(maximum, max(0.0, attempt.deadline - now))
@@ -256,14 +256,14 @@ def _harvest(
     attempts: dict[int, _Attempt], pending: deque[_Attempt], *,
     block: bool, max_wait: float | None = None,
 ) -> None:
-    """Reap children, enforce deadlines, and retry retained error writes.
+    """Collect process exit statuses, enforce deadlines, and record failures.
 
-    Active children use PID keys. A reaped attempt leaves that dictionary
-    immediately, even when its error write must wait for another row holder.
-    Pending writes retain the message identity and never occupy child slots.
+    Running job processes are tracked by process ID. Finished processes leave
+    that dictionary immediately, even when a database lock delays the record.
+    Unsaved failure records keep the message ID and do not count as running jobs.
 
-    A blocking call returns after a child exits or its wait limit passes.
-    A small retry budget keeps a large pending queue from delaying new work.
+    A blocking call returns after a process exits or its wait limit passes.
+    Each call limits retry work so other jobs can continue.
     """
     wait_until = None if max_wait is None else time.monotonic() + max_wait
     budget = ACCOUNTING_RETRIES_PER_PASS
@@ -291,7 +291,7 @@ def _harvest(
                 and not pending and wait_until is None else os.WNOHANG,
             )
         except ChildProcessError:
-            # Another handler reaped these children, so no status will arrive.
+            # Another handler collected these exit statuses; none will arrive here.
             ended = list(attempts.values())
             attempts.clear()
             for attempt in ended:
@@ -315,8 +315,7 @@ def _harvest(
 
 
 def _try_account(attempt: _Attempt) -> bool:
-    """Run the accounting write for a reaped attempt. Returns whether it
-    landed.
+    """Record how a finished job process ended. Return whether the write succeeded.
 
     The write must not raise out of the worker loop: the database that
     refuses it is often the same one whose outage crashed the attempt,
@@ -337,7 +336,7 @@ def _try_account(attempt: _Attempt) -> bool:
                     and (attempt.last_deferred_warning is None
                          or now - attempt.last_deferred_warning >= ACCOUNTING_WARNING_REPEAT_SECONDS)):
                 logger.warning(
-                    'pull: accounting for TransitionMessage#%s has waited %.1fs '
+                    'pull: recording the failure for TransitionMessage#%s has waited %.1fs '
                     'for a row lock. The worker retains the error and retries; '
                     'check the PostgreSQL row holder if the wait continues.',
                     attempt.pk, waited,
@@ -357,8 +356,8 @@ def _try_account(attempt: _Attempt) -> bool:
 
 def _account(attempt: _Attempt, exit_code: int | None) -> None:
     """Record one error on the row when the attempt did not end cleanly.
-    ``exit_code`` is ``None`` when something else reaped the attempt, so
-    no status reached the worker.
+    ``exit_code`` is ``None`` when another handler collected the exit status,
+    so no status reached this worker.
 
     An attempt process that dies without completing the row left no
     error on it, so the worker records one: the claim's retry wait then
@@ -367,11 +366,10 @@ def _account(attempt: _Attempt, exit_code: int | None) -> None:
     ``failed_state`` like one that fails every time, instead of looping
     forever.
 
-    An attempt the worker killed is a timeout even when its status never
-    arrives. It is not a timeout when the status shows it ended on its
-    own first: ``os.kill`` succeeds on a process that has exited and is
-    waiting to be reaped, so the kill alone does not prove the attempt
-    was still running.
+    A process stopped after its deadline counts as a timeout even when its
+    exit status is unavailable. If the status shows it finished on its own,
+    do not record a timeout. ``os.kill`` can succeed after a process exits,
+    so its result alone does not prove that the process was still running.
     """
     if attempt.pk is None:
         _report_safety_net_result(attempt, exit_code)
