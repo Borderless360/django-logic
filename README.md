@@ -334,8 +334,9 @@ next claim takes it. The command runs no side-effects itself.
 
 ### Two safety nets
 
-The worker loop runs two safety nets once a minute. Nothing else needs a
-schedule.
+The worker starts two safety nets once a minute in one separate process.
+Only one safety-net process runs per worker. Its time limit is 60 seconds.
+Nothing else needs a schedule.
 
 - `detect_stuck_transitions` finalizes a row that has spent every attempt: it
   writes `failed_state`, runs `failure_callbacks` and completes the row. It
@@ -347,6 +348,11 @@ schedule.
   instance parked in its `failed_state`.
 
 Alert when the worker processes stop. The safety nets stop with them.
+Reserve one extra database connection for the safety-net process, plus any
+connections your callbacks open. A slow or exiting callback cannot block
+the supervisor's attempt timeouts. If a pass stops, the next pass checks
+the remaining uncompleted rows. Callbacks for completed rows remain
+best-effort and are not retried.
 
 ## Test your process
 

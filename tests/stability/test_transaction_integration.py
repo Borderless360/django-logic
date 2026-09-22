@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock, call
 
 from django.db import transaction, connection, connections
 from django.core.cache import cache
-from django.test import tag
+from django.test import SimpleTestCase, tag
 
 from django_logic import Transition, Process
 from django_logic.state import State
@@ -20,6 +20,50 @@ from tests.stability.models import (
     Order, OrderProcess,
     side_effect_one, side_effect_two,
 )
+
+
+class _DatabaseThread(threading.Thread):
+    """Return a database helper's failure to the test that started it."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._error = None
+
+    def run(self):
+        try:
+            try:
+                super().run()
+            finally:
+                connections.close_all()
+        except BaseException as error:
+            self._error = error
+
+    def join_and_raise(self):
+        self.join(timeout=15)
+        if self.is_alive():
+            raise AssertionError('Database helper thread did not stop')
+        if self._error is not None:
+            raise self._error
+
+
+@tag('stability')
+class TestDatabaseThreadFailures(SimpleTestCase):
+    def test_helper_exception_fails_the_parent_test(self):
+        def fail_in_thread():
+            raise RuntimeError('Intentional database helper failure')
+
+        class FailingThreadCase(unittest.TestCase):
+            def runTest(self):
+                thread = _DatabaseThread(target=fail_in_thread)
+                thread.start()
+                thread.join_and_raise()
+
+        result = unittest.TestResult()
+        FailingThreadCase().run(result)
+
+        self.assertFalse(result.wasSuccessful())
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn('Intentional database helper failure', result.errors[0][1])
 
 
 @tag('stability')
@@ -216,46 +260,68 @@ class TestUnlockBeforeCommitWindow(StabilityTestCase):
     start the transition from ``transaction.on_commit``.
     """
 
-    def _run_t1_holding_transaction_open(self, order, t1_transitioned, t2_probed):
-        def t1():
-            try:
-                with transaction.atomic():
-                    OrderProcess(
-                        field_name='status',
-                        instance=Order.objects.get(pk=order.pk),
-                    ).approve()
-                    t1_transitioned.set()
-                    # Hold the outer transaction open while T2 probes.
-                    if not t2_probed.wait(10):
-                        raise RuntimeError('T2 never probed')
-            finally:
-                connections.close_all()
-
-        thread = threading.Thread(target=t1)
-        thread.start()
-        return thread
-
     @unittest.skipUnless(connection.vendor == 'postgresql',
                          'needs two concurrent writer connections')
     def test_second_transition_reads_stale_committed_state(self):
-        """The window is open by design. Pin that."""
+        """Both callers commit, although each accepts the same source state."""
         order = Order.objects.create(status='draft')
-        t1_transitioned, t2_probed = threading.Event(), threading.Event()
-        thread = self._run_t1_holding_transaction_open(
-            order, t1_transitioned, t2_probed)
-        try:
-            self.assertTrue(t1_transitioned.wait(10))
-            # T1 unlocked when it finished, but this connection cannot see its
-            # 'approved' write. The committed state is still 'draft', so the
-            # same transition validates and runs a second time.
-            OrderProcess(
-                field_name='status',
-                instance=Order.objects.get(pk=order.pk),
-            ).approve()
-        finally:
-            t2_probed.set()
-            thread.join(timeout=15)
-        self.assertFalse(thread.is_alive())
+        first_transitioned = threading.Event()
+        second_effect_started = threading.Event()
+        release_first_transaction = threading.Event()
+        effects = []
+        commits = []
+        evidence_lock = threading.Lock()
 
+        def record_effect(instance, **kwargs):
+            with evidence_lock:
+                effects.append(instance.status)
+            if first_transitioned.is_set():
+                # The target write waits for the first transaction's row lock.
+                # Signal before that write, so the first caller can commit.
+                second_effect_started.set()
+                release_first_transaction.set()
+
+        class ConcurrentApprovalProcess(Process):
+            process_name = 'process'
+            transitions = [
+                Transition(
+                    action_name='approve',
+                    sources=['draft'],
+                    target='approved',
+                    side_effects=[record_effect],
+                ),
+            ]
+
+        def first_transaction():
+            with transaction.atomic():
+                ConcurrentApprovalProcess(
+                    field_name='status',
+                    instance=Order.objects.get(pk=order.pk),
+                ).approve()
+                first_transitioned.set()
+                if not release_first_transaction.wait(10):
+                    raise RuntimeError('Second caller never reached its side effect')
+            with evidence_lock:
+                commits.append('first')
+
+        thread = _DatabaseThread(target=first_transaction)
+        thread.start()
+        try:
+            self.assertTrue(first_transitioned.wait(10))
+            with transaction.atomic():
+                stale_order = Order.objects.get(pk=order.pk)
+                self.assertEqual(stale_order.status, 'draft')
+                ConcurrentApprovalProcess(
+                    field_name='status', instance=stale_order,
+                ).approve()
+            with evidence_lock:
+                commits.append('second')
+        finally:
+            release_first_transaction.set()
+            thread.join_and_raise()
+
+        self.assertTrue(second_effect_started.is_set())
+        self.assertEqual(effects, ['draft', 'draft'])
+        self.assertCountEqual(commits, ['first', 'second'])
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')

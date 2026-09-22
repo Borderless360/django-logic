@@ -242,6 +242,34 @@ class HarvestTests(TransactionTestCase):
         _harvest(attempts, block=True)
         self.assertEqual(self.recorded(), [])
 
+    def test_a_bounded_child_wait_does_not_hammer_failed_accounting(self):
+        sibling_pid = os.fork()
+        if sibling_pid == 0:
+            time.sleep(30)
+            os._exit(0)
+        self.record.side_effect = RuntimeError('the database refused the write')
+        attempts = {
+            sibling_pid: _Attempt(pk=1, timeout_seconds=None, deadline=None),
+            999999: _Attempt(
+                pk=2, timeout_seconds=None, deadline=None,
+                reaped=True, exit_code=3,
+            ),
+        }
+        started = time.monotonic()
+        try:
+            with self.assertLogs('django-logic', level='ERROR'):
+                _harvest(attempts, block=True, max_wait=0.15)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(self.record.call_count, 1)
+            self.assertFalse(attempts[sibling_pid].reaped)
+            self.assertTrue(attempts[999999].reaped)
+        finally:
+            try:
+                os.kill(sibling_pid, signal.SIGKILL)
+                os.waitpid(sibling_pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+
     def test_a_failed_accounting_write_is_retried_and_lands(self):
         """The write can fail for the same reason the attempt crashed — a
         database outage. It must not raise out of the worker loop, and it
