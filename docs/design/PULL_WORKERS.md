@@ -155,6 +155,12 @@ before. Celery is no longer a dependency: nothing imports it, and an
 unknown `BACKGROUND_EXECUTION` value fails loudly at boot naming the
 valid modes.
 
+When all attempt slots are full, the worker checks child exits every
+10 milliseconds. Its bounded wait returns for timeout checks and the
+next safety-net pass. A finished attempt can therefore free its slot
+without a new enqueue notification. When a slot is free, the worker
+waits for PostgreSQL notifications so newly queued work can wake it.
+
 `--concurrency=N` says how many attempts one worker runs at a time
 (default 1). Each attempt still runs in its own forked process, and
 `SKIP LOCKED` already makes concurrent claims safe.

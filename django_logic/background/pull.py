@@ -61,6 +61,9 @@ POLL_SECONDS = 5.0
 #: and only the worker can record one.
 BUSY_POLL_SECONDS = 1.0
 
+#: Check child exits promptly while a full worker waits for a free slot.
+CHILD_POLL_SECONDS = 0.01
+
 #: How often the loop runs the safety nets (stuck report, cleanup).
 SAFETY_NET_SECONDS = 60.0
 SAFETY_NET_TIMEOUT_SECONDS = 60.0
@@ -205,7 +208,9 @@ def _poll_delay(attempts: dict[int, _Attempt], maximum: float) -> float:
     return maximum
 
 
-def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
+def _harvest(
+    attempts: dict[int, _Attempt], *, block: bool, max_wait: float | None = None,
+) -> None:
     """Account for the attempt processes that ended, and kill the ones
     that ran past their declared ``timeout=``.
 
@@ -215,9 +220,9 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
     gentler signals, and the kill releases the row lock with the
     attempt's connection.
 
-    With ``block`` the call returns after one attempt ends. It blocks in
-    ``waitpid`` when no attempt carries a budget, and polls when one
-    does, because a budget has to be enforced while nothing exits.
+    With ``block`` the call returns after one attempt ends or ``max_wait``
+    passes. Without a wait limit or attempt deadline, it blocks in
+    ``waitpid``. Otherwise it polls child exits and enforces deadlines.
 
     An attempt leaves ``attempts`` only when its accounting write lands.
     The write can fail for the same reason the attempt crashed — a
@@ -225,11 +230,16 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
     unbounded retries, so a failed write keeps the attempt as ``reaped``
     and every later pass retries it.
     """
+    wait_until = None if max_wait is None else time.monotonic() + max_wait
+    retry_at = 0.0
     while attempts:
         now = time.monotonic()
-        for pid in [p for p, a in attempts.items() if a.reaped]:
-            if _try_account(attempts[pid]):
-                del attempts[pid]
+        if now >= retry_at:
+            for pid in [p for p, a in attempts.items() if a.reaped]:
+                if _try_account(attempts[pid]):
+                    del attempts[pid]
+            # Keep database retries slower than child-exit checks.
+            retry_at = now + BUSY_POLL_SECONDS
         if not attempts:
             return
         for pid, attempt in attempts.items():
@@ -245,12 +255,14 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
                 # reaps it, and the budget passed either way, so the
                 # attempt is still charged a timeout.
                 pass
+        remaining = None if wait_until is None else max(0.0, wait_until - now)
         if all(attempt.reaped for attempt in attempts.values()):
             # Only failed accounting writes remain — no process to wait
             # on. Pace the retry instead of hammering the database.
-            if not block:
+            if not block or remaining == 0:
                 return
-            time.sleep(1.0)
+            delay = max(0.0, retry_at - time.monotonic())
+            time.sleep(delay if remaining is None else min(delay, remaining))
             continue
         next_deadline = min(
             (
@@ -268,7 +280,7 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
             pid, raw_status = os.waitpid(
                 -1,
                 0 if block and next_deadline is None
-                and not failed_write_waiting else os.WNOHANG)
+                and not failed_write_waiting and wait_until is None else os.WNOHANG)
         except ChildProcessError:
             # Something else reaped them, so no exit status is coming.
             for attempt in attempts.values():
@@ -278,9 +290,10 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
                     attempt.deadline = None
             continue
         if pid == 0:
-            if not block:
+            if not block or remaining == 0:
                 return
-            time.sleep(_poll_delay(attempts, 1.0))
+            delay = CHILD_POLL_SECONDS if remaining is None else min(CHILD_POLL_SECONDS, remaining)
+            time.sleep(_poll_delay(attempts, delay))
             continue
         attempt = attempts.get(pid)
         if attempt is None:
@@ -562,9 +575,18 @@ def run_worker(
             last_safety_net = now
         if claimed_any or harvested:
             continue
-        if attempts and not forever:
-            # One pass must finish what it started before it returns.
-            _harvest(attempts, block=True)
+        full = sum(attempt.pk is not None for attempt in attempts.values()) >= concurrency
+        if attempts and (full or not forever):
+            # Child exits do not notify PostgreSQL. A full worker waits for
+            # them directly, but returns in time to schedule maintenance.
+            max_wait = None
+            if forever:
+                max_wait = BUSY_POLL_SECONDS
+                if not safety_net_running:
+                    max_wait = min(max_wait, max(
+                        0.0, last_safety_net + SAFETY_NET_SECONDS - time.monotonic(),
+                    ))
+            _harvest(attempts, block=True, max_wait=max_wait)
             continue
         if not forever:
             return

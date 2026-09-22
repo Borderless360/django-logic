@@ -10,6 +10,8 @@
   limit. Slow or exiting failure callbacks cannot stop the supervisor
   from enforcing attempt timeouts (#288). Reserve one extra database
   connection for this process. Callbacks remain best-effort.
+- Full workers reuse finished attempt slots promptly. Their bounded child
+  wait keeps timeout checks and safety-net scheduling active.
 - The transaction concurrency test now fails on helper-thread errors
   and verifies that both callers commit (#289).
 - PostgreSQL CI tests psycopg2 and psycopg3 separately and verifies which
