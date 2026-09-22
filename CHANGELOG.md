@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-09-22
+
 ### Fixed
 
 - Crash accounting no longer waits for another worker's row lock. The
