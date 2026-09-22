@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Crash accounting no longer waits for another worker's row lock. The
+  supervisor retries the write without delaying sibling timeouts (#287).
+- Safety nets run in one separate process per worker, with a 60-second
+  limit. Slow or exiting failure callbacks cannot stop the supervisor
+  from enforcing attempt timeouts (#288). Reserve one extra database
+  connection for this process. Callbacks remain best-effort.
+- The transaction concurrency test now fails on helper-thread errors
+  and verifies that both callers commit (#289).
+- PostgreSQL CI tests psycopg2 and psycopg3 separately and verifies which
+  driver Django selects before running either suite (#290).
+
 ## [2.2.0] — 2026-09-16
 
 ### Added

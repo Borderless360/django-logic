@@ -149,20 +149,35 @@ class PullClaimTests(TransactionTestCase):
         self.assertEqual(row.last_error_message, '')
 
     def test_the_safety_nets_run_during_a_sustained_backlog(self):
+        from pathlib import Path
+        import tempfile
+        import time
         from unittest.mock import patch
+        from django_logic.background import pull
 
         first = Widget.objects.create(status='draft')
         second = Widget.objects.create(status='draft')
         first.process.fulfil()
         second.process.fulfil()
-        ran = []
-        with patch('django_logic.background.pull.SAFETY_NET_SECONDS', 0), \
-                patch('django_logic.background.pull._run_safety_nets',
-                      side_effect=lambda: ran.append(1)):
-            run_worker(_CRITICAL, forever=False)
-        # Nets due after every claim: they ran at least once per drained row,
-        # not only after the backlog emptied.
-        self.assertGreaterEqual(len(ran), 2)
+        with tempfile.TemporaryDirectory(prefix='dl_safety_pass_') as directory:
+            marker = Path(directory) / 'ran'
+            def record_pass():
+                marker.write_text(str(TransitionMessage.objects.filter(is_completed=False).count()))
+            start_attempt = pull._start_attempt
+            def start_and_wait_for_pass(pk, attempts):
+                start_attempt(pk, attempts)
+                if pk is None:
+                    limit = time.monotonic() + 5
+                    while not marker.exists():
+                        if time.monotonic() >= limit:
+                            self.fail('The safety-net child did not record its pass.')
+                        time.sleep(0.01)
+            with patch('django_logic.background.pull._run_safety_nets', record_pass), \
+                    patch('django_logic.background.pull._start_attempt', start_and_wait_for_pass):
+                run_worker(_CRITICAL, forever=False)
+            # The child records shared evidence before the one-slot worker
+            # can finish the second row. Parent-only lists cannot record it.
+            self.assertGreaterEqual(int(marker.read_text()), 1)
         first.refresh_from_db()
         second.refresh_from_db()
         self.assertEqual(first.status, 'fulfilled')
@@ -207,7 +222,9 @@ class PullClaimTests(TransactionTestCase):
         instead of waiting out the long attempt."""
         import shutil
         import tempfile
+        import time
         from unittest.mock import patch
+        from django_logic.background import pull
 
         class _Stop(Exception):
             """Ends the loop from inside the wait, since it runs forever."""
@@ -222,6 +239,13 @@ class PullClaimTests(TransactionTestCase):
         arrives_later = Widget.objects.create(status='draft')
 
         waits = []
+        tracked = {}
+        start_attempt = pull._start_attempt
+        limit = time.monotonic() + 10
+
+        def track(pk, attempts):
+            tracked['attempts'] = attempts
+            start_attempt(pk, attempts)
 
         def wait(timeout):
             waits.append(timeout)
@@ -231,14 +255,18 @@ class PullClaimTests(TransactionTestCase):
                     barrier_dir=barrier_dir, width=2)
                 return
             if (TransitionMessage.objects.filter(is_completed=False).exists()
-                    and len(waits) < 50):
+                    or tracked.get('attempts')):
                 # The worker still has an attempt to account for. Stopping
                 # here would leave its row uncompleted and blame the worker
                 # for the test's own timing.
+                if time.monotonic() >= limit:
+                    self.fail('The concurrent attempts did not finish.')
+                time.sleep(min(timeout, 0.02))
                 return
             raise _Stop
 
-        with patch('django_logic.background.pull._wait_for_work', wait):
+        with patch('django_logic.background.pull._wait_for_work', wait), \
+                patch('django_logic.background.pull._start_attempt', track):
             with self.assertRaises(_Stop):
                 run_worker(_CRITICAL, concurrency=2)
 

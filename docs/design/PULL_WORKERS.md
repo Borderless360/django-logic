@@ -178,15 +178,22 @@ of 119 rows draining at 2.6 rows a minute across two swapping workers.
 
 **Connections.** Each running attempt holds one database connection —
 two where the app opens a second one. Budget
-`workers × (concurrency + 1)` connections per queue group (the extra one
-is the worker's own LISTEN connection) and keep the total under the
+`workers × (concurrency + 2)` connections per queue group. The two extras
+are the worker's LISTEN connection and its separate safety-net process.
+Add any connections that consumer callbacks open. Keep the total under the
 database plan's cap, or under the pgbouncer pool size. A worker that
 cannot connect logs and retries; a database at its cap refuses the web
 processes too, so leave headroom for them.
 
 ## 7b. Knowing a worker stopped
 
-The safety nets run inside the worker loop. A dead `dl_worker` therefore
+The worker starts one safety-net process once a minute. It stops that
+process after 60 seconds. This keeps failure callbacks outside the
+supervisor that enforces attempt timeouts. A stopped pass leaves
+uncompleted rows for the next pass. Callbacks for completed rows remain
+best-effort and are not retried.
+
+A dead `dl_worker` therefore
 means no stuck finalizer and no cleanup sweep as well as no attempts —
 nothing else reports the backlog. Alert on the process, not on the rows:
 

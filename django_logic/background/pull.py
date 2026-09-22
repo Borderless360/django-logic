@@ -30,9 +30,9 @@ Each attempt runs in a forked attempt process, so a crash kills the
 attempt and not the worker. ``--concurrency`` says how many of them a
 worker runs at a time; the default of one keeps the worker sequential.
 
-The worker loop also runs the safety nets (the stuck finalizer and its
-no-worker report, the cleanup sweep), so nothing has to be scheduled
-anywhere else.
+The worker runs the safety nets in one separate process with a time limit.
+This keeps consumer callbacks out of the supervisor. Nothing needs an
+external schedule.
 """
 from __future__ import annotations
 
@@ -63,6 +63,7 @@ BUSY_POLL_SECONDS = 1.0
 
 #: How often the loop runs the safety nets (stuck report, cleanup).
 SAFETY_NET_SECONDS = 60.0
+SAFETY_NET_TIMEOUT_SECONDS = 60.0
 
 
 def notify_workers() -> None:
@@ -140,7 +141,8 @@ class _Attempt:
     something else reaped it and no status arrived.
     """
 
-    pk: int
+    # A safety-net pass has no message row.
+    pk: int | None
     timeout_seconds: float | None
     deadline: float | None
     killed: bool = False
@@ -148,8 +150,8 @@ class _Attempt:
     exit_code: int | None = None
 
 
-def _start_attempt(pk: int, attempts: dict[int, _Attempt]) -> None:
-    """Fork one attempt process for ``pk`` and record it in ``attempts``.
+def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
+    """Fork one attempt or safety-net pass and track its deadline.
 
     The worker and the attempt process must not share a database
     connection — a connection closed (or crashed) on one side poisons
@@ -159,7 +161,7 @@ def _start_attempt(pk: int, attempts: dict[int, _Attempt]) -> None:
     from django_logic.background.models import TransitionMessage
     from django_logic.background.runner import run_background_transition
 
-    timeout_seconds = (
+    timeout_seconds = SAFETY_NET_TIMEOUT_SECONDS if pk is None else (
         TransitionMessage.objects
         .filter(pk=pk)
         .values_list('timeout_seconds', flat=True)
@@ -171,7 +173,10 @@ def _start_attempt(pk: int, attempts: dict[int, _Attempt]) -> None:
         # fork() answers 0 inside the attempt process itself.
         status = 1
         try:
-            run_background_transition(pk)
+            if pk is None:
+                _run_safety_nets()
+            else:
+                run_background_transition(pk)
             status = 0
         finally:
             # _exit, so a crashing attempt cannot run the worker's cleanup
@@ -185,6 +190,19 @@ def _start_attempt(pk: int, attempts: dict[int, _Attempt]) -> None:
             else time.monotonic() + timeout_seconds
         ),
     )
+
+
+def _poll_delay(attempts: dict[int, _Attempt], maximum: float) -> float:
+    now = time.monotonic()
+    for attempt in attempts.values():
+        if attempt.reaped:
+            continue
+        if attempt.killed:
+            # A stopped child should be reaped before another long wait.
+            maximum = min(maximum, 0.01)
+        elif attempt.deadline is not None:
+            maximum = min(maximum, max(0.0, attempt.deadline - now))
+    return maximum
 
 
 def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
@@ -262,10 +280,7 @@ def _harvest(attempts: dict[int, _Attempt], *, block: bool) -> None:
         if pid == 0:
             if not block:
                 return
-            if next_deadline is None:
-                time.sleep(1.0)
-            else:
-                time.sleep(min(1.0, max(0.01, next_deadline - now)))
+            time.sleep(_poll_delay(attempts, 1.0))
             continue
         attempt = attempts.get(pid)
         if attempt is None:
@@ -293,6 +308,12 @@ def _try_account(attempt: _Attempt) -> bool:
     try:
         _account(attempt, attempt.exit_code)
     except Exception as exc:
+        cause = exc.__cause__
+        if (getattr(cause, 'sqlstate', None)
+                or getattr(cause, 'pgcode', None)) == '55P03':
+            # Another worker holds the row. Retry without delaying the
+            # deadlines of the attempts this worker still supervises.
+            return False
         logger.error(
             'pull: could not record how the attempt for '
             'TransitionMessage#%s ended (%s: %s); the worker keeps it and '
@@ -321,29 +342,32 @@ def _account(attempt: _Attempt, exit_code: int | None) -> None:
     waiting to be reaped, so the kill alone does not prove the attempt
     was still running.
     """
+    if attempt.pk is None:
+        _report_safety_net_result(attempt, exit_code)
+        return
     if attempt.killed and exit_code in (None, -signal.SIGKILL):
-        logger.warning(
-            f'pull: the attempt for TransitionMessage#{attempt.pk} ran past '
-            f'its declared timeout={attempt.timeout_seconds}s and was '
-            f'stopped. The error recorded here paces the next claim.'
-        )
         _record_attempt_error(
             attempt.pk,
             f'[timeout] the attempt ran past '
             f'timeout={attempt.timeout_seconds}s and was stopped',
         )
+        logger.warning(
+            f'pull: the attempt for TransitionMessage#{attempt.pk} ran past '
+            f'its declared timeout={attempt.timeout_seconds}s and was '
+            f'stopped. The error recorded here paces the next claim.'
+        )
         return
     if exit_code in (None, 0):
         return
-    logger.warning(
-        f'pull: the attempt process for TransitionMessage#{attempt.pk} died '
-        f'(exit {exit_code}). Its row lock died with it; the error recorded '
-        f'here paces the next claim.'
-    )
     _record_attempt_error(
         attempt.pk,
         f'[crashed] the attempt process died (exit {exit_code}) '
         f'before the attempt finished',
+    )
+    logger.warning(
+        f'pull: the attempt process for TransitionMessage#{attempt.pk} died '
+        f'(exit {exit_code}). Its row lock died with it; the error recorded '
+        f'here paces the next claim.'
     )
 
 
@@ -351,24 +375,26 @@ def _record_attempt_error(pk: int, message: str) -> None:
     """Record one error on the row — unless the row completed first.
 
     Another worker on the same queue can claim the row the moment the
-    dead attempt's lock is released and finish it before this write. One
-    conditional UPDATE keeps the guard and the write in the same
-    statement, so a completed row can never take the error.
+    dead attempt's lock is released. Do not wait for that worker: this
+    process must still enforce its other attempts' deadlines.
+    The conditional update protects a row that already completed.
     """
     from django.db.models import F
     from django.utils import timezone
 
     from django_logic.background.models import TransitionMessage, db_safe_text
 
-    now = timezone.now()
-    updated = TransitionMessage.objects.filter(
-        pk=pk, is_completed=False,
-    ).update(
-        errors_count=F('errors_count') + 1,
-        last_error_message=db_safe_text(message),
-        last_error_dt=now,
-        modified=now,
-    )
+    alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+    rows = TransitionMessage.objects.using(alias).filter(pk=pk)
+    with transaction.atomic(using=alias):
+        rows.select_for_update(nowait=True).values_list('pk', flat=True).first()
+        now = timezone.now()
+        updated = rows.filter(is_completed=False).update(
+            errors_count=F('errors_count') + 1,
+            last_error_message=db_safe_text(message),
+            last_error_dt=now,
+            modified=now,
+        )
     if not updated:
         logger.info(
             f'pull: TransitionMessage#{pk} completed on another worker '
@@ -394,6 +420,21 @@ def _run_safety_nets() -> None:
         except Exception as exc:
             logger.error('pull: safety net %s failed: %s',
                          getattr(step, '__name__', step), exc)
+
+
+def _report_safety_net_result(attempt: _Attempt, exit_code: int | None) -> None:
+    if attempt.killed and exit_code in (None, -signal.SIGKILL):
+        logger.warning(
+            'pull: safety nets exceeded their %ss limit and were stopped. '
+            'Uncompleted rows will be checked on the next pass.',
+            attempt.timeout_seconds,
+        )
+    elif exit_code not in (None, 0):
+        logger.warning(
+            'pull: safety nets stopped with exit code %s. '
+            'Uncompleted rows will be checked on the next pass.',
+            exit_code,
+        )
 
 
 def _wait_for_work(timeout: float) -> None:
@@ -469,6 +510,9 @@ def run_worker(
     connection while it runs, so size ``concurrency`` against the
     connection cap (see docs/design/PULL_WORKERS.md).
 
+    One additional process runs safety nets with a 60-second limit.
+    It does not use an attempt slot. Reserve a connection for it too.
+
     ``forever=False`` drains what is claimable now, waits for the
     attempts it started, runs the safety nets, and returns — for tests
     and for a one-off catch-up command.
@@ -478,14 +522,15 @@ def run_worker(
         ','.join(queues), concurrency,
     )
     attempts: dict[int, _Attempt] = {}
-    last_safety_net = 0.0
+    last_safety_net = None
     while True:
         claimed_any = False
         try:
-            while len(attempts) < concurrency:
+            while sum(attempt.pk is not None for attempt in attempts.values()) < concurrency:
                 pk = claim_next(
                     queues,
-                    exclude_pks=[attempt.pk for attempt in attempts.values()],
+                    exclude_pks=[attempt.pk for attempt in attempts.values()
+                                 if attempt.pk is not None],
                 )
                 if pk is None:
                     break
@@ -501,17 +546,21 @@ def run_worker(
                 'already running are still accounted for.',
                 type(exc).__name__, exc,
             )
-        # A full worker has nothing to do but wait for a slot, so it waits
-        # in waitpid. A worker with a free slot must stay reachable: work
-        # arrives while a long attempt runs, and the notification wait is
-        # what hears it. Blocking here instead would leave those slots idle
-        # for the whole life of the longest attempt.
-        full = len(attempts) >= concurrency
-        _harvest(attempts, block=full)
-        if time.monotonic() - last_safety_net >= SAFETY_NET_SECONDS:
-            _run_safety_nets()
-            last_safety_net = time.monotonic()
-        if claimed_any or full:
+        # A full worker still checks deadlines and schedules safety nets.
+        before_harvest = len(attempts)
+        _harvest(attempts, block=False)
+        harvested = len(attempts) < before_harvest
+        now = time.monotonic()
+        safety_net_running = any(attempt.pk is None for attempt in attempts.values())
+        if (not safety_net_running
+                and (last_safety_net is None or forever or claimed_any)
+                and (last_safety_net is None or now - last_safety_net >= SAFETY_NET_SECONDS)):
+            try:
+                _start_attempt(None, attempts)
+            except Exception as exc:
+                logger.error('pull: could not start safety nets: %s', exc)
+            last_safety_net = now
+        if claimed_any or harvested:
             continue
         if attempts and not forever:
             # One pass must finish what it started before it returns.
@@ -523,4 +572,5 @@ def run_worker(
         # no error on its row, and the row is claimable the moment its lock
         # dies, so the worker should not sit out a full poll interval
         # before recording it.
-        _wait_for_work(BUSY_POLL_SECONDS if attempts else POLL_SECONDS)
+        delay = BUSY_POLL_SECONDS if attempts else POLL_SECONDS
+        _wait_for_work(_poll_delay(attempts, delay))
