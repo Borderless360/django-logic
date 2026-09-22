@@ -266,16 +266,24 @@ your application's wording; exception classes and messages stay unchanged.
 
 Reasons describe the existing checks; they do not change retry behavior.
 In particular, `locked` still raises plain `TransitionNotAllowed`.
-If several declarations are refused, the reason describes the first checked
-matching branch, in declaration order. It does not list every failed check.
-Process guards run before their transitions and nested processes.
+When declarations share an action name, prefer a transition whose sources
+include the current state and whose process permissions and conditions pass.
+Its failed check supplies the reason. Otherwise, use a process guard that
+blocks a declaration for the current state. If all declarations require
+another source state, report `source_state`.
+
+Declaration order resolves ties within each group. A custom check that
+supplies no reason keeps `None`, even if a lower-priority refusal supplies
+a reason. This rule does not infer a unique intended branch or list every
+failed check. Process guards still run before their transitions and nested
+processes.
 
 The resolver captures reasons during the existing checks. It does not run
 permissions or conditions again to explain a refusal. The existing
 `available_actions` hint still evaluates the available actions separately.
 A failed hint cannot replace the reason.
 
-An opaque `is_valid` override can return `False` without explaining why.
+A custom `is_valid` override can return `False` without explaining why.
 Its reason is `None` unless a stock check on that same object recorded a
 failure. Caller-created exceptions also default to `None`. Continue to catch
 `TransitionNotAllowed` when handling these refusals.

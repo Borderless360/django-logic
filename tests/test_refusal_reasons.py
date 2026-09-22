@@ -239,6 +239,204 @@ class ResolverReasonTests(TestCase):
         self.refusal(lambda: self.process(Workflow).later(), RefusalReason.SOURCE_STATE)
 
 
+    def test_current_source_conditions_and_permissions_beat_wrong_source_siblings(self):
+        wrong_source_guard = Mock(return_value=False)
+        condition = Mock(return_value=False)
+        permission = Mock(return_value=False)
+
+        class ConditionWorkflow(Process):
+            transitions = [
+                Transition('go', sources=['approved'], conditions=[wrong_source_guard]),
+                Transition('go', sources=['draft'], conditions=[condition]),
+            ]
+
+        class PermissionWorkflow(Process):
+            transitions = [
+                Transition('go', sources=['approved'], conditions=[wrong_source_guard]),
+                Transition('go', sources=['draft'], permissions=[permission]),
+            ]
+
+        self.refusal(lambda: self.process(ConditionWorkflow).go(), RefusalReason.CONDITION)
+        self.refusal(lambda: self.process(PermissionWorkflow).go(user=object()), RefusalReason.PERMISSION)
+        self.assertEqual(condition.call_count, 2)
+        self.assertEqual(permission.call_count, 2)
+        wrong_source_guard.assert_not_called()
+
+    def test_custom_transition_without_reason_beats_wrong_source_sibling(self):
+        class CustomTransition(Transition):
+            def is_valid(self, instance, user=None):
+                return False
+
+        class Workflow(Process):
+            transitions = [Transition('go', sources=['approved']),
+                           CustomTransition('go', sources=['draft'])]
+
+        self.refusal(lambda: self.process(Workflow).go(), None)
+
+    def test_applicable_process_guard_beats_earlier_wrong_source_refusals(self):
+        irrelevant_permission = Mock(return_value=False)
+        condition = Mock(return_value=False)
+        unchecked = Mock(return_value=False)
+
+        class WrongSource(Process):
+            permissions = [irrelevant_permission]
+            transitions = [Transition('go', sources=['approved'], conditions=[unchecked])]
+
+        class CurrentSource(Process):
+            conditions = [condition]
+            transitions = [Transition('go', sources=['draft'], conditions=[unchecked])]
+
+        class Workflow(Process):
+            transitions = [Transition('go', sources=['approved'], conditions=[unchecked])]
+            nested_processes = [WrongSource, CurrentSource]
+
+        self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.CONDITION)
+        self.assertEqual(irrelevant_permission.call_count, 2)
+        self.assertEqual(condition.call_count, 2)
+        unchecked.assert_not_called()
+
+    def test_permitted_roles_transition_condition_beats_another_roles_permission(self):
+        denied_role = Mock(return_value=False)
+        permitted_role = Mock(return_value=True)
+        condition = Mock(return_value=False)
+        unchecked = Mock(return_value=False)
+
+        class OtherRole(Process):
+            permissions = [denied_role]
+            transitions = [Transition('go', sources=['draft'], conditions=[unchecked])]
+
+        class CallerRole(Process):
+            permissions = [permitted_role]
+            transitions = [Transition('go', sources=['draft'], conditions=[condition])]
+
+        class Workflow(Process):
+            nested_processes = [OtherRole, CallerRole]
+
+        self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.CONDITION)
+        self.assertEqual(denied_role.call_count, 2)
+        self.assertEqual(permitted_role.call_count, 2)
+        self.assertEqual(condition.call_count, 2)
+        unchecked.assert_not_called()
+
+    def test_permitted_roles_custom_transition_keeps_no_reason(self):
+        class CustomTransition(Transition):
+            def is_valid(self, instance, user=None):
+                return False
+
+        class OtherRole(Process):
+            permissions = [deny_permission]
+            transitions = [Transition('go', sources=['draft'])]
+
+        class CallerRole(Process):
+            transitions = [CustomTransition('go', sources=['draft'])]
+
+        class Workflow(Process):
+            nested_processes = [OtherRole, CallerRole]
+
+        self.refusal(lambda: self.process(Workflow).go(user=object()), None)
+
+    def test_applicable_process_guards_keep_order_without_ranking_reason_values(self):
+        class PermissionBranch(Process):
+            permissions = [deny_permission]
+            transitions = [Transition('go', sources=['draft'])]
+
+        class ConditionBranch(Process):
+            conditions = [deny]
+            transitions = [Transition('go', sources=['draft'])]
+
+        class PermissionFirst(Process):
+            nested_processes = [PermissionBranch, ConditionBranch]
+
+        class ConditionFirst(Process):
+            nested_processes = [ConditionBranch, PermissionBranch]
+
+        self.refusal(lambda: self.process(PermissionFirst).go(user=object()), RefusalReason.PERMISSION)
+        self.refusal(lambda: self.process(ConditionFirst).go(user=object()), RefusalReason.CONDITION)
+
+    def test_checked_transitions_keep_declaration_order_including_none(self):
+        class CustomTransition(Transition):
+            def is_valid(self, instance, user=None):
+                return False
+
+        class PermissionFirst(Process):
+            transitions = [Transition('go', sources=['draft'], permissions=[deny_permission]),
+                           Transition('go', sources=['draft'], conditions=[deny])]
+
+        class CustomFirst(Process):
+            transitions = [CustomTransition('go', sources=['draft']),
+                           Transition('go', sources=['draft'], conditions=[deny])]
+
+        self.refusal(lambda: self.process(PermissionFirst).go(user=object()), RefusalReason.PERMISSION)
+        self.refusal(lambda: self.process(CustomFirst).go(), None)
+
+    def test_process_guard_with_no_current_source_uses_source_fallback(self):
+        permission = Mock(return_value=False)
+        unchecked = Mock(return_value=False)
+
+        class Workflow(Process):
+            permissions = [permission]
+            conditions = [unchecked]
+            transitions = [Transition('go', sources=['approved'], conditions=[unchecked])]
+
+        self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.SOURCE_STATE)
+        self.assertEqual(permission.call_count, 2)
+        unchecked.assert_not_called()
+
+    def test_custom_process_guard_keeps_none_ahead_of_lower_or_equal_choices(self):
+        class CustomBranch(Process):
+            transitions = [Transition('go', sources=['draft'])]
+
+            def is_valid(self, user=None):
+                return False
+
+        class PermissionBranch(Process):
+            permissions = [deny_permission]
+            transitions = [Transition('go', sources=['draft'])]
+
+        class Workflow(Process):
+            transitions = [Transition('go', sources=['approved'])]
+            nested_processes = [CustomBranch, PermissionBranch]
+
+        self.refusal(lambda: self.process(Workflow).go(user=object()), None)
+
+    def test_process_guard_source_inspection_handles_a_cycle_without_extra_checks(self):
+        condition = Mock(return_value=False)
+        unchecked = Mock(return_value=False)
+
+        class Blocked(Process):
+            conditions = [condition]
+
+        class Workflow(Process):
+            nested_processes = [Blocked]
+
+        class CurrentSource(Process):
+            transitions = [Transition('go', sources=['draft'], conditions=[unchecked])]
+
+        Blocked.nested_processes = [Workflow, CurrentSource]
+        self.refusal(lambda: self.process(Workflow).go(), RefusalReason.CONDITION)
+        self.assertEqual(condition.call_count, 2)
+        unchecked.assert_not_called()
+
+    def test_blocked_cycle_does_not_claim_its_ancestors_other_branch(self):
+        denied_role = Mock(return_value=False)
+        condition = Mock(return_value=False)
+
+        class CycleBranch(Process):
+            permissions = [denied_role]
+
+        class ActualBranch(Process):
+            conditions = [condition]
+            transitions = [Transition('go', sources=['draft'])]
+
+        class Workflow(Process):
+            nested_processes = [CycleBranch, ActualBranch]
+
+        CycleBranch.nested_processes = [Workflow]
+        self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.CONDITION)
+        self.assertEqual(denied_role.call_count, 2)
+        self.assertEqual(condition.call_count, 2)
+
+
 class ConcurrentReasonTests(SimpleTestCase):
     def test_shared_transition_keeps_each_callers_reason(self):
         barrier = Barrier(2, timeout=5)

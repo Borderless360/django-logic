@@ -10,6 +10,11 @@
 
 ### Fixed
 
+- Refusals for a shared action prefer a transition checked after its
+  process permissions and conditions pass, when its source matches (#275).
+  An earlier unrelated state or role no longer hides that refusal.
+  Custom checks that supply no reason keep `None`; equal choices keep
+  declaration order. The resolver does not repeat predicates.
 - When a job process finishes, the worker can start another job while
   it waits to record the previous failure (#292). The worker keeps the
   job's message ID separately from the process ID and does not retry

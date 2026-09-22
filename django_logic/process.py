@@ -250,12 +250,22 @@ class Process:
         else:
             valid, reason = _check_validity(self, user)
         if not valid:
-            if _refusals is not None and any(
-                transition.action_name == action_name
-                for process_class in _iter_process_tree(type(self))
-                for transition in process_class.transitions
-            ):
-                _refusals.append(reason)
+            if _refusals is not None:
+                declarations = [
+                    transition
+                    for process_class in _iter_process_tree(
+                        type(self), _seen=_seen - {id(type(self))},
+                    )
+                    for transition in process_class.transitions
+                    if transition.action_name == action_name
+                ]
+                if any(
+                    self.state.get_state() in transition.sources
+                    for transition in declarations
+                ):
+                    _refusals['process'].append(reason)
+                elif declarations:
+                    _refusals['source'].append(RefusalReason.SOURCE_STATE)
             return
 
         # A held lock hides the transitions that would take it. A lock=False
@@ -270,7 +280,7 @@ class Process:
 
             if self.state.get_state() not in transition.sources:
                 if _refusals is not None:
-                    _refusals.append(RefusalReason.SOURCE_STATE)
+                    _refusals['source'].append(RefusalReason.SOURCE_STATE)
                 continue
             if _refusals is None:
                 valid, reason = transition.is_valid(self.state.instance, user), None
@@ -279,7 +289,7 @@ class Process:
             if valid:
                 yield transition, self
             elif _refusals is not None:
-                _refusals.append(reason)
+                _refusals['transition'].append(reason)
 
         for sub_process_class in self.nested_processes:
             sub_process = sub_process_class(state=self.state)
@@ -298,7 +308,8 @@ class Process:
         filtering with ``ignore_state=True``. Also returns the declaring
         process so the caller can record it for worker restore.
         """
-        refusals = []
+        # Prefer a checked transition over a different branch's process guard.
+        refusals = {'transition': [], 'process': [], 'source': []}
         matches = list(
             self._iter_available_with_owner(
                 action_name=action_name,
@@ -349,7 +360,10 @@ class Process:
         transition_logger.info(message)
         error = TransitionNotAllowed(
             message,
-            reason=refusals[0] if refusals else RefusalReason.UNKNOWN_ACTION,
+            reason=next(
+                (reasons[0] for reasons in refusals.values() if reasons),
+                RefusalReason.UNKNOWN_ACTION,
+            ),
         )
         error.current_state = current_state
         error.available_actions = available_actions
