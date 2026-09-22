@@ -217,6 +217,16 @@ and your action modules import the model at the top level like normal code.
 
 List the app in `INSTALLED_APPS`, or Django never runs `ready()`.
 
+One physical model and process name must identify one state field, including
+bindings through proxy models. Give independent fields distinct process names.
+Binding sibling proxies with the same process name to different fields is
+unsupported. The library does not validate that combination.
+
+For an inherited state field on a multi-table model, drive the process through
+the parent model that owns the field. Mixing parent and child process access
+is unsupported. Their background identities and pending-work probes do not
+share one gate. Use a separate concrete model for an independent workflow.
+
 ## Run a transition
 
 ```python
@@ -238,6 +248,37 @@ order.process.approve(user=request.user)
   `django_logic.exceptions`. Its subclass `TransitionTemporarilyUnavailable`
   means the instance is busy, so the caller may retry shortly. Catch the
   subclass first.
+
+The exception's `reason` is a `RefusalReason` from `django_logic.exceptions`.
+Its values are strings and can be included in JSON responses. Map them to
+your application's wording; exception classes and messages stay unchanged.
+
+| Reason value | What refused the call |
+| --- | --- |
+| `permission` | A process or transition permission check failed. |
+| `condition` | A process or transition condition check failed. |
+| `source_state` | The current or persisted state is outside the transition's sources. |
+| `unknown_action` | No process declaration has this action name. |
+| `locked` | The state lock could not be acquired. |
+| `background_in_flight` | An uncompleted background transition still has retry coverage. |
+| `background_stranded` | An uncompleted background transition is no longer being retried. |
+| `ambiguous` | More than one transition passed the checks for this action. |
+
+Reasons describe the existing checks; they do not change retry behavior.
+In particular, `locked` still raises plain `TransitionNotAllowed`.
+If several declarations are refused, the reason describes the first checked
+matching branch, in declaration order. It does not list every failed check.
+Process guards run before their transitions and nested processes.
+
+The resolver captures reasons during the existing checks. It does not run
+permissions or conditions again to explain a refusal. The existing
+`available_actions` hint still evaluates the available actions separately.
+A failed hint cannot replace the reason.
+
+An opaque `is_valid` override can return `False` without explaining why.
+Its reason is `None` unless a stock check on that same object recorded a
+failure. Caller-created exceptions also default to `None`. Continue to catch
+`TransitionNotAllowed` when handling these refusals.
 
 ## Background transitions
 

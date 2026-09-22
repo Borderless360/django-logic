@@ -13,7 +13,12 @@ from contextvars import ContextVar
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 
 from django_logic.commands import Conditions, Permissions
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import (
+    RefusalReason,
+    TransitionNotAllowed,
+    _check_validity,
+    _record_validity_refusal,
+)
 from django_logic.logger import transition_logger
 from django_logic.state import State
 
@@ -184,7 +189,14 @@ class Process:
         permissions = self.permissions_class(commands=self.permissions)
         conditions = Conditions(commands=self.conditions)
         instance = self.state.instance
-        return permissions.execute(instance, user) and conditions.execute(instance)
+        permitted = permissions.execute(instance, user)
+        if not permitted:
+            _record_validity_refusal(self, RefusalReason.PERMISSION)
+            return permitted
+        valid = conditions.execute(instance)
+        if not valid:
+            _record_validity_refusal(self, RefusalReason.CONDITION)
+        return valid
 
     def get_available_actions(self, user=None, action_name=None):
         """Return a sorted list of unique action names currently available."""
@@ -209,6 +221,7 @@ class Process:
         action_name=None,
         ignore_state=False,
         _seen=None,
+        _refusals=None,
     ):
         """Like :meth:`get_available_transitions`, but yield
         ``(transition, owning_process)`` pairs.
@@ -232,7 +245,17 @@ class Process:
             return
         _seen.add(id(type(self)))
 
-        if not self.is_valid(user):
+        if _refusals is None:
+            valid, reason = self.is_valid(user), None
+        else:
+            valid, reason = _check_validity(self, user)
+        if not valid:
+            if _refusals is not None and any(
+                transition.action_name == action_name
+                for process_class in _iter_process_tree(type(self))
+                for transition in process_class.transitions
+            ):
+                _refusals.append(reason)
             return
 
         # A held lock hides the transitions that would take it. A lock=False
@@ -245,11 +268,18 @@ class Process:
             if locked and transition.lock:
                 continue
 
-            if (
-                self.state.get_state() in transition.sources
-                and transition.is_valid(self.state.instance, user)
-            ):
+            if self.state.get_state() not in transition.sources:
+                if _refusals is not None:
+                    _refusals.append(RefusalReason.SOURCE_STATE)
+                continue
+            if _refusals is None:
+                valid, reason = transition.is_valid(self.state.instance, user), None
+            else:
+                valid, reason = _check_validity(transition, self.state.instance, user)
+            if valid:
                 yield transition, self
+            elif _refusals is not None:
+                _refusals.append(reason)
 
         for sub_process_class in self.nested_processes:
             sub_process = sub_process_class(state=self.state)
@@ -258,6 +288,7 @@ class Process:
                 action_name=action_name,
                 ignore_state=ignore_state,
                 _seen=_seen,
+                _refusals=_refusals,
             )
 
     def _resolve_transition_with_owner(self, action_name: str, user=None):
@@ -267,11 +298,13 @@ class Process:
         filtering with ``ignore_state=True``. Also returns the declaring
         process so the caller can record it for worker restore.
         """
+        refusals = []
         matches = list(
             self._iter_available_with_owner(
                 action_name=action_name,
                 user=user,
                 ignore_state=True,
+                _refusals=refusals,
             )
         )
         if len(matches) == 1:
@@ -283,7 +316,10 @@ class Process:
                 f"transitions with action name '{action_name}'. "
                 f"Specify conditions and permissions to disambiguate."
             )
-            raise TransitionNotAllowed("There are several transitions available")
+            raise TransitionNotAllowed(
+                "There are several transitions available",
+                reason=RefusalReason.AMBIGUOUS,
+            )
 
         current_state = self.state.get_state()
         try:
@@ -311,7 +347,10 @@ class Process:
             f"available actions: {known_actions}."
         )
         transition_logger.info(message)
-        error = TransitionNotAllowed(message)
+        error = TransitionNotAllowed(
+            message,
+            reason=refusals[0] if refusals else RefusalReason.UNKNOWN_ACTION,
+        )
         error.current_state = current_state
         error.available_actions = available_actions
         raise error

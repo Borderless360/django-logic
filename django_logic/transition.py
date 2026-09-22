@@ -41,8 +41,10 @@ from django_logic.commands import (
     write_failed_state,
 )
 from django_logic.exceptions import (
+    RefusalReason,
     TransitionNotAllowed,
     TransitionTemporarilyUnavailable,
+    _record_validity_refusal,
 )
 from django_logic.logger import (
     transition_logger,
@@ -271,10 +273,14 @@ class Transition:
         return self.__str__()
 
     def is_valid(self, instance, user=None) -> bool:
-        return (
-            self.permissions.execute(instance, user)
-            and self.conditions.execute(instance)
-        )
+        permitted = self.permissions.execute(instance, user)
+        if not permitted:
+            _record_validity_refusal(self, RefusalReason.PERMISSION)
+            return permitted
+        valid = self.conditions.execute(instance)
+        if not valid:
+            _record_validity_refusal(self, RefusalReason.CONDITION)
+        return valid
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
         # Before the lock: a clash here must not become a leaked lock.
@@ -320,7 +326,7 @@ class Transition:
                 f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
                 f'failed {state.instance_key} — state is locked'
             )
-            raise TransitionNotAllowed("State is locked")
+            raise TransitionNotAllowed("State is locked", reason=RefusalReason.LOCKED)
 
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
@@ -437,7 +443,8 @@ class Transition:
             raise TransitionNotAllowed(
                 f"Transition '{self.action_name}' is not allowed: the "
                 f"persisted state {db_state!r} is no longer one of its "
-                f"source states (a concurrent transition won the race)."
+                f"source states (a concurrent transition won the race).",
+                reason=RefusalReason.SOURCE_STATE,
             )
 
     def _ensure_no_background_in_flight(self, state: State) -> None:
@@ -478,10 +485,12 @@ class Transition:
                 f"its queue, or a worker outage longer than the retry "
                 f"window. Start a worker for that queue "
                 f"(dl_worker --queues ...) — it takes the row at once — "
-                f"or complete the row."
+                f"or complete the row.",
+                reason=RefusalReason.BACKGROUND_STRANDED,
             )
         raise TransitionTemporarilyUnavailable(
             f"Transition '{self.action_name}' is not allowed right now: "
             f"a background transition is in progress for "
-            f"{state.instance_key} (uncompleted TransitionMessage)."
+            f"{state.instance_key} (uncompleted TransitionMessage).",
+            reason=RefusalReason.BACKGROUND_IN_FLIGHT,
         )

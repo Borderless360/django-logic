@@ -161,6 +161,22 @@ next safety-net pass. A finished attempt can therefore free its slot
 without a new enqueue notification. When a slot is free, the worker
 waits for PostgreSQL notifications so newly queued work can wake it.
 
+A child frees its slot when the worker reaps it. If its error write
+cannot take the message row lock, the worker retains that write separately.
+The pending entry keeps the message ID, not the child's reusable PID.
+The worker excludes those messages from its own claims until accounting ends.
+
+Each pending write retries at most once a second. One harvest retries at
+most 16 writes and checks child deadlines between them. At 1,000 pending
+writes, the worker stops claiming more work until the queue shrinks.
+Already running children remain supervised, so they can add at most the
+configured concurrency to that bound. Other workers keep using normal claims.
+
+A row-lock wait stays quiet for five seconds. The worker then logs the
+message ID and elapsed wait, repeating at most once a minute per entry.
+Inspect the PostgreSQL row holder if the wait continues. A warning does
+not establish that the replacement attempt has failed.
+
 `--concurrency=N` says how many attempts one worker runs at a time
 (default 1). Each attempt still runs in its own forked process, and
 `SKIP LOCKED` already makes concurrent claims safe.
@@ -198,6 +214,13 @@ process after 60 seconds. This keeps failure callbacks outside the
 supervisor that enforces attempt timeouts. A stopped pass leaves
 uncompleted rows for the next pass. Callbacks for completed rows remain
 best-effort and are not retried.
+
+Completed-message cleanup commits groups of at most 1,000 rows. Earlier
+groups stay deleted if the safety-net process stops during a later group.
+Each delete keeps the age filter and newest terminal-failure retention rule.
+An enclosing caller transaction still controls when its batches commit.
+The row limit does not bound database time: a blocked group can still
+reach the process deadline and must be retried on the next pass.
 
 A dead `dl_worker` therefore
 means no stuck finalizer and no cleanup sweep as well as no attempts —

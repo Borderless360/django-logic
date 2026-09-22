@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+
+- Transition refusals expose a reason that callers can use without
+  rechecking permissions, conditions, or background rows (#275). Existing
+  exception classes, messages, and retry semantics remain unchanged.
+
+### Fixed
+
+- A reaped child frees its worker slot even when its crash accounting
+  must wait for a row lock (#292). Pending writes retain message identity
+  separately from reusable process IDs and remain excluded from local claims.
+  The worker stops claiming at 1,000 pending writes until that queue shrinks.
+- Persistent accounting row-lock waits log the message and elapsed time
+  after five seconds, then at most once a minute per entry (#293).
+  Short waits remain quiet.
+- Completed-message cleanup commits batches of up to 1,000 rows (#294).
+  Earlier deletions survive a later maintenance timeout. Age and newest
+  terminal-failure retention rules still apply to each delete.
+
+### Clarified
+
+- Independent state fields on sibling proxies need distinct process names
+  (#266). Cross-class coordination of inherited multi-table state is
+  unsupported; drive it consistently through the declaring parent (#268).
+  These are documented boundaries, not new identity or migration support.
+
 ## [2.2.1] — 2026-09-22
 
 ### Fixed
