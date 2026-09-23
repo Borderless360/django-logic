@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import DEFAULT_DB_ALIAS, router, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -35,6 +35,9 @@ from django_logic.background.runner import (
     run_background_transition,
 )
 from django_logic.logger import logger
+
+
+_CLEANUP_BATCH_SIZE = 1000
 
 
 def _claimable(queues: list[str] | None = None):
@@ -129,8 +132,10 @@ def cleanup_completed_transitions() -> int:
 
     A row that ended in terminal failure is the only explanation for an
     instance parked in its ``failed_state``, so the sweep keeps the newest
-    such row per instance and process and deletes the rest. One row per
-    parked instance stays, however late the investigation comes.
+    such row per instance and process and deletes the rest.
+
+    Each batch commits separately, so a stopped maintenance process keeps
+    earlier progress. A caller's outer transaction still controls its commit.
     """
     from django.db.models import OuterRef, Subquery
 
@@ -141,8 +146,10 @@ def cleanup_completed_transitions() -> int:
     # the flag; a superseded row does not — the external state change won
     # and the instance is not parked.
     failed = Q(ended_in_failure=True)
+    alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+    rows = TransitionMessage.objects.using(alias)
     newest_failed = (
-        TransitionMessage.objects
+        rows
         .filter(
             failed,
             is_completed=True,
@@ -154,13 +161,21 @@ def cleanup_completed_transitions() -> int:
         .order_by('-completed_at', '-pk')
         .values('pk')[:1]
     )
-    with transaction.atomic():
-        deleted, _ = (
-            TransitionMessage.objects
-            .filter(is_completed=True, modified__lt=cutoff)
-            .exclude(failed & Q(pk=Subquery(newest_failed)))
-            .delete()
-        )
+    eligible = (
+        rows.filter(is_completed=True, modified__lt=cutoff)
+        .exclude(failed & Q(pk=Subquery(newest_failed)))
+    )
+    deleted = 0
+    while True:
+        with transaction.atomic(using=alias):
+            message_ids = list(
+                eligible.order_by('pk').values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
+            )
+            if not message_ids:
+                break
+            # Recheck eligibility because a row can change after selection.
+            count, _ = eligible.filter(pk__in=message_ids).delete()
+        deleted += count
     if deleted:
         logger.info(f'cleanup_completed_transitions: deleted {deleted} rows')
     return deleted

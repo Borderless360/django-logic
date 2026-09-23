@@ -60,6 +60,14 @@ record, so it must keep naming the words and APIs that shipped at the time.
 
 ### Writing to people — no riddles
 
+Explain behavior in ordinary language. Do not use process lifecycle jargon
+in replies, PR text, issues, release notes, docs, or explanatory comments.
+Never write "a reaped child frees its worker," "harvest children," or
+"the accounting write lands." Say "When a job process finishes, the worker
+can start another job" or "The worker records the failure after the database
+lock is released." Keep exact code identifiers when needed, but explain
+their effect instead of using them as prose.
+
 A summary, a pull-request description, a review reply, or a chat message must
 stand on its own. The reader did not watch the work happen.
 

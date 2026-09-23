@@ -30,6 +30,7 @@ from django_logic.background.serializers import (
     serialize_kwargs,
 )
 from django_logic.exceptions import (
+    RefusalReason,
     TransitionNotAllowed,
     TransitionTemporarilyUnavailable,
 )
@@ -163,7 +164,7 @@ class BackgroundTransition(Transition):
                 f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
                 f'failed {state.instance_key} — state is locked'
             )
-            raise TransitionNotAllowed("State is locked")
+            raise TransitionNotAllowed("State is locked", reason=RefusalReason.LOCKED)
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
             f'{state.instance_key}'
@@ -193,7 +194,8 @@ class BackgroundTransition(Transition):
                         f"queue, or a worker outage longer than the retry "
                         f"window. Start a worker for that queue "
                         f"(dl_worker --queues ...) — it takes the row at "
-                        f"once — or complete the row."
+                        f"once — or complete the row.",
+                        reason=RefusalReason.BACKGROUND_STRANDED,
                     )
                 raise
         finally:
@@ -280,7 +282,8 @@ class BackgroundTransition(Transition):
                 raise AlreadyInProgress(
                     f"{state.instance_key}: another background transition "
                     f"is already in progress for this instance and process "
-                    f"'{state.process_name}'."
+                    f"'{state.process_name}'.",
+                    reason=RefusalReason.BACKGROUND_IN_FLIGHT,
                 ) from exc
 
             # Recheck the persisted state AFTER the create. On PostgreSQL
@@ -302,7 +305,8 @@ class BackgroundTransition(Transition):
                     f"BackgroundTransition '{self.action_name}' is not "
                     f"allowed: the persisted state moved to {current!r} "
                     f"while the insert waited on the unique constraint — "
-                    f"it is no longer one of the source states."
+                    f"it is no longer one of the source states.",
+                    reason=RefusalReason.SOURCE_STATE,
                 )
 
             if self.in_progress_state:

@@ -16,6 +16,7 @@ import os
 import signal
 import time
 import unittest
+from collections import deque
 from unittest.mock import patch
 
 from django.test import TransactionTestCase, override_settings
@@ -45,6 +46,7 @@ class HarvestTests(TransactionTestCase):
     """The bounded wait itself, without a database row."""
 
     def setUp(self):
+        self.pending = deque()
         patcher = patch('django_logic.background.pull._record_attempt_error')
         self.record = patcher.start()
         self.addCleanup(patcher.stop)
@@ -65,8 +67,9 @@ class HarvestTests(TransactionTestCase):
             attempt_pid, timeout_seconds=5,
             deadline=time.monotonic() + 5,
         )
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         self.assertEqual(attempts, {})
+        self.assertEqual(list(self.pending), [])
         self.assertEqual(self.recorded(), [])
 
     def test_an_attempt_process_past_its_budget_is_killed_and_charged(self):
@@ -77,7 +80,7 @@ class HarvestTests(TransactionTestCase):
         attempts = self._attempt(
             attempt_pid, timeout_seconds=0.2, deadline=_PASSED)
         started = time.monotonic()
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         waited = time.monotonic() - started
 
         self.assertLess(waited, 5.0, 'the kill did not bound the wait')
@@ -96,7 +99,7 @@ class HarvestTests(TransactionTestCase):
             deadline=time.monotonic() + 0.3,
         )
         started = time.monotonic()
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         waited = time.monotonic() - started
 
         self.assertGreaterEqual(waited, 0.3)
@@ -108,7 +111,7 @@ class HarvestTests(TransactionTestCase):
         if attempt_pid == 0:
             os._exit(0)
         attempts = self._attempt(attempt_pid)
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         self.assertEqual(self.recorded(), [])
 
     def test_an_attempt_process_that_dies_is_charged_a_crash(self):
@@ -116,7 +119,7 @@ class HarvestTests(TransactionTestCase):
         if attempt_pid == 0:
             os._exit(3)
         attempts = self._attempt(attempt_pid)
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         self.assertEqual(len(self.recorded()), 1)
         self.assertIn('[crashed]', self.recorded()[0])
         self.assertIn('exit 3', self.recorded()[0])
@@ -132,7 +135,7 @@ class HarvestTests(TransactionTestCase):
                       return_value=None), \
                 patch('django_logic.background.pull.os.waitstatus_to_exitcode',
                       return_value=0):
-            _harvest(attempts, block=True)
+            _harvest(attempts, self.pending, block=True)
         self.assertEqual(self.recorded(), [])
 
     def test_an_attempt_that_vanished_before_the_kill_does_not_stop_the_worker(self):
@@ -145,7 +148,7 @@ class HarvestTests(TransactionTestCase):
                       side_effect=ProcessLookupError), \
                 patch('django_logic.background.pull.os.waitstatus_to_exitcode',
                       return_value=0):
-            _harvest(attempts, block=True)
+            _harvest(attempts, self.pending, block=True)
         self.assertEqual(self.recorded(), [])
 
     def test_a_killed_attempt_reaped_elsewhere_is_still_a_timeout(self):
@@ -154,8 +157,9 @@ class HarvestTests(TransactionTestCase):
                    side_effect=ChildProcessError), \
                 patch('django_logic.background.pull.os.kill',
                       return_value=None):
-            _harvest(attempts, block=True)
+            _harvest(attempts, self.pending, block=True)
         self.assertEqual(attempts, {})
+        self.assertEqual(list(self.pending), [])
         self.assertIn('[timeout]', self.recorded()[0])
 
     def test_an_attempt_reaped_elsewhere_inside_its_budget_is_charged_nothing(self):
@@ -163,8 +167,9 @@ class HarvestTests(TransactionTestCase):
             12345, timeout_seconds=60, deadline=time.monotonic() + 60)
         with patch('django_logic.background.pull.os.waitpid',
                    side_effect=ChildProcessError):
-            _harvest(attempts, block=True)
+            _harvest(attempts, self.pending, block=True)
         self.assertEqual(attempts, {})
+        self.assertEqual(list(self.pending), [])
         self.assertEqual(self.recorded(), [])
 
     def test_a_kill_reported_as_a_signal_exit_is_a_timeout(self):
@@ -175,7 +180,7 @@ class HarvestTests(TransactionTestCase):
                       return_value=None), \
                 patch('django_logic.background.pull.os.waitstatus_to_exitcode',
                       return_value=-signal.SIGKILL):
-            _harvest(attempts, block=True)
+            _harvest(attempts, self.pending, block=True)
         self.assertIn('[timeout]', self.recorded()[0])
 
     def test_one_budget_does_not_bound_the_attempt_beside_it(self):
@@ -194,8 +199,8 @@ class HarvestTests(TransactionTestCase):
                 pk=1, timeout_seconds=0.2, deadline=_PASSED),
             clean_pid: _Attempt(pk=2, timeout_seconds=None, deadline=None),
         }
-        while attempts:
-            _harvest(attempts, block=True)
+        while attempts or self.pending:
+            _harvest(attempts, self.pending, block=True)
 
         self.assertEqual(len(self.recorded()), 1)
         self.assertIn('[timeout]', self.recorded()[0])
@@ -222,13 +227,15 @@ class HarvestTests(TransactionTestCase):
         self.record.side_effect = record
         attempts = {
             sibling_pid: _Attempt(pk=1, timeout_seconds=None, deadline=None),
-            999999: _Attempt(
-                pk=2, timeout_seconds=1, deadline=_PASSED,
-                killed=True, reaped=True),
         }
+        self.pending.append(_Attempt(
+            pk=2, timeout_seconds=1, deadline=_PASSED,
+            killed=True, reaped=True,
+        ))
         started = time.monotonic()
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         self.assertEqual(attempts, {})
+        self.assertEqual(list(self.pending), [])
         self.assertEqual(len(landed_at), 1)
         self.assertLess(
             landed_at[0] - started, 2.5,
@@ -239,7 +246,7 @@ class HarvestTests(TransactionTestCase):
 
     def test_harvesting_nothing_returns_at_once(self):
         attempts = {}
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         self.assertEqual(self.recorded(), [])
 
     def test_a_bounded_child_wait_does_not_hammer_failed_accounting(self):
@@ -250,19 +257,21 @@ class HarvestTests(TransactionTestCase):
         self.record.side_effect = RuntimeError('the database refused the write')
         attempts = {
             sibling_pid: _Attempt(pk=1, timeout_seconds=None, deadline=None),
-            999999: _Attempt(
-                pk=2, timeout_seconds=None, deadline=None,
-                reaped=True, exit_code=3,
-            ),
         }
+        self.pending.append(_Attempt(
+            pk=2, timeout_seconds=None, deadline=None,
+            reaped=True, exit_code=3,
+        ))
         started = time.monotonic()
         try:
             with self.assertLogs('django-logic', level='ERROR'):
-                _harvest(attempts, block=True, max_wait=0.15)
+                _harvest(attempts, self.pending, block=True, max_wait=0.15)
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(self.record.call_count, 1)
             self.assertFalse(attempts[sibling_pid].reaped)
-            self.assertTrue(attempts[999999].reaped)
+            self.assertEqual(len(self.pending), 1)
+            self.assertTrue(self.pending[0].reaped)
+            self.assertEqual(self.pending[0].pk, 2)
         finally:
             try:
                 os.kill(sibling_pid, signal.SIGKILL)
@@ -282,13 +291,15 @@ class HarvestTests(TransactionTestCase):
         ]
         attempts = self._attempt(attempt_pid)
 
-        _harvest(attempts, block=True)
-        # The write failed: the attempt stays, reaped, for the retry.
-        self.assertEqual(len(attempts), 1)
-        self.assertTrue(next(iter(attempts.values())).reaped)
-
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
+        # The process is gone. Its error write stays pending for a retry.
         self.assertEqual(attempts, {})
+        self.assertEqual(len(self.pending), 1)
+        self.assertTrue(self.pending[0].reaped)
+
+        _harvest(attempts, self.pending, block=True)
+        self.assertEqual(attempts, {})
+        self.assertEqual(list(self.pending), [])
         # Recorded exactly once for real; the first call raised.
         self.assertEqual(self.record.call_count, 2)
         self.assertIn('[crashed]', self.record.call_args.args[1])
@@ -306,10 +317,12 @@ class HarvestTests(TransactionTestCase):
         attempts = self._attempt(
             attempt_pid, timeout_seconds=0.2, deadline=_PASSED)
 
-        _harvest(attempts, block=True)
-        self.assertEqual(len(attempts), 1)
-        _harvest(attempts, block=True)
+        _harvest(attempts, self.pending, block=True)
         self.assertEqual(attempts, {})
+        self.assertEqual(len(self.pending), 1)
+        _harvest(attempts, self.pending, block=True)
+        self.assertEqual(attempts, {})
+        self.assertEqual(list(self.pending), [])
         self.assertIn('[timeout]', self.record.call_args.args[1])
 
 

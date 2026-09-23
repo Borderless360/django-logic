@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-09-23
+
+### Added
+
+- Transition refusals expose a reason that callers can use without
+  rechecking permissions, conditions, or background rows (#275). Existing
+  exception classes, messages, and retry semantics remain unchanged.
+- Process calls provide a display-ready `TransitionNotAllowed.user_message`.
+  Set `refusal_messages` on a process or transition to override generic
+  wording. Use `@refusal_message(text)` on a condition or permission for a
+  specific explanation. Message capture does not repeat checks or replace
+  existing exception diagnostics.
+
+### Fixed
+
+- Refusals for a shared action prefer a transition checked after its
+  process permissions and conditions pass, when its source matches (#275).
+  An earlier unrelated state or role no longer hides that refusal.
+  Custom checks that supply no reason keep `None`; equal choices keep
+  declaration order. The resolver does not repeat predicates.
+- When a job process finishes, the worker can start another job while
+  it waits to record the previous failure (#292). The worker keeps the
+  job's message ID separately from the process ID and does not retry
+  that job until its failure is recorded. It pauses new jobs when
+  1,000 failure records are waiting to be saved.
+- If recording a failure waits for a database row lock for five seconds,
+  the worker logs the message ID and wait time (#293). It repeats the
+  warning at most once a minute. Short waits remain quiet.
+- Completed-message cleanup commits batches of up to 1,000 rows (#294).
+  Earlier deletions survive a later maintenance timeout. Age and newest
+  terminal-failure retention rules still apply to each delete.
+
+### Clarified
+
+- Independent state fields on sibling proxies need distinct process names
+  (#266). Cross-class coordination of inherited multi-table state is
+  unsupported; drive it consistently through the declaring parent (#268).
+  These are documented boundaries, not new identity or migration support.
+
 ## [2.2.1] — 2026-09-22
 
 ### Fixed

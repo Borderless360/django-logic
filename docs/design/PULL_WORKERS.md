@@ -161,6 +161,23 @@ next safety-net pass. A finished attempt can therefore free its slot
 without a new enqueue notification. When a slot is free, the worker
 waits for PostgreSQL notifications so newly queued work can wake it.
 
+Once the worker detects that a job process has finished, it can start
+another job. If a database lock prevents it from recording the failure,
+it saves that information separately and tries again later. It keeps the
+message ID separately from the process ID, which the operating system may
+reuse. It does not claim that message again until the failure is recorded.
+
+The worker retries each failure record at most once a second. Each check
+retries at most 16 records and checks running jobs' deadlines between writes.
+At 1,000 unsaved records, it stops starting jobs until that count falls.
+Already running jobs can still finish, adding at most the configured
+concurrency to that bound. Other workers continue to claim work normally.
+
+A database row-lock wait stays quiet for five seconds. The worker then logs
+its message ID and elapsed wait, repeating at most once a minute per record.
+Inspect the PostgreSQL row holder if the wait continues. This warning does
+not mean that the job currently running against that row has failed.
+
 `--concurrency=N` says how many attempts one worker runs at a time
 (default 1). Each attempt still runs in its own forked process, and
 `SKIP LOCKED` already makes concurrent claims safe.
@@ -198,6 +215,13 @@ process after 60 seconds. This keeps failure callbacks outside the
 supervisor that enforces attempt timeouts. A stopped pass leaves
 uncompleted rows for the next pass. Callbacks for completed rows remain
 best-effort and are not retried.
+
+Completed-message cleanup commits groups of at most 1,000 rows. Earlier
+groups stay deleted if the safety-net process stops during a later group.
+Each delete keeps the age filter and newest terminal-failure retention rule.
+An enclosing caller transaction still controls when its batches commit.
+The row limit does not bound database time: a blocked group can still
+reach the process deadline and must be retried on the next pass.
 
 A dead `dl_worker` therefore
 means no stuck finalizer and no cleanup sweep as well as no attempts —

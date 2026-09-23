@@ -13,7 +13,13 @@ from contextvars import ContextVar
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 
 from django_logic.commands import Conditions, Permissions
-from django_logic.exceptions import TransitionNotAllowed
+from django_logic.exceptions import (
+    RefusalReason,
+    TransitionNotAllowed,
+    _check_validity,
+    _execute_validity_bundle,
+    _record_validity_refusal,
+)
 from django_logic.logger import transition_logger
 from django_logic.state import State
 
@@ -23,6 +29,19 @@ from django_logic.state import State
 _transition_context: ContextVar[dict | None] = ContextVar(
     '_transition_context', default=None
 )
+
+_DEFAULT_REFUSAL_MESSAGES = {
+    RefusalReason.PERMISSION: 'you do not have permission to perform this action.',
+    RefusalReason.CONDITION: 'this record does not meet the requirements for this action.',
+    RefusalReason.SOURCE_STATE: 'this action cannot run in the current state of this record.',
+    RefusalReason.UNKNOWN_ACTION: 'this action does not exist.',
+    RefusalReason.LOCKED: 'this record is locked.',
+    RefusalReason.BACKGROUND_IN_FLIGHT: 'a background transition is in progress. Try again shortly.',
+    RefusalReason.BACKGROUND_STRANDED: (
+        'a background transition for this record is stranded. Please contact support.'),
+    RefusalReason.AMBIGUOUS: 'the action could not be resolved. Please contact support.',
+}
+_Refusal = namedtuple('_Refusal', 'reason message process transition')
 
 class _ProcessAccessor(property):
     """The model property ``bind_model_process`` installs.
@@ -59,6 +78,7 @@ class Process:
     permissions_class = Permissions
     state_class = State
     process_name = 'process'
+    refusal_messages = {}
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -177,14 +197,43 @@ class Process:
         )
         try:
             return transition.change_state(self.state, **kwargs)
+        except TransitionNotAllowed as error:
+            self._set_refusal_message(error, action_name, owning_process, transition)
+            raise
         finally:
             _transition_context.reset(token)
+
+    def _set_refusal_message(
+        self, error, action_name, process=None, transition=None, message=None,
+    ):
+        if error.user_message is not None:
+            return
+        reason = error.reason
+        if message is None:
+            maps = [transition.refusal_messages] if transition is not None else []
+            if process is not None and process is not self:
+                maps.append(process.refusal_messages)
+            maps.extend([self.refusal_messages, _DEFAULT_REFUSAL_MESSAGES])
+            message = next((mapping[reason] for mapping in maps if reason in mapping), None)
+        outcome = (
+            'temporarily unavailable'
+            if reason == RefusalReason.BACKGROUND_IN_FLIGHT else 'not allowed'
+        )
+        prefix = f"Action '{action_name}' is {outcome}"
+        error.user_message = prefix if message is None else f'{prefix}: {message}'
 
     def is_valid(self, user=None) -> bool:
         permissions = self.permissions_class(commands=self.permissions)
         conditions = Conditions(commands=self.conditions)
         instance = self.state.instance
-        return permissions.execute(instance, user) and conditions.execute(instance)
+        permitted = _execute_validity_bundle(self, permissions, instance, user)
+        if not permitted:
+            _record_validity_refusal(self, RefusalReason.PERMISSION)
+            return permitted
+        valid = _execute_validity_bundle(self, conditions, instance)
+        if not valid:
+            _record_validity_refusal(self, RefusalReason.CONDITION)
+        return valid
 
     def get_available_actions(self, user=None, action_name=None):
         """Return a sorted list of unique action names currently available."""
@@ -209,6 +258,7 @@ class Process:
         action_name=None,
         ignore_state=False,
         _seen=None,
+        _refusals=None,
     ):
         """Like :meth:`get_available_transitions`, but yield
         ``(transition, owning_process)`` pairs.
@@ -232,7 +282,27 @@ class Process:
             return
         _seen.add(id(type(self)))
 
-        if not self.is_valid(user):
+        if _refusals is None:
+            valid, reason, message = self.is_valid(user), None, None
+        else:
+            valid, reason, message = _check_validity(self, user)
+        if not valid:
+            if _refusals is not None:
+                declarations = [
+                    transition
+                    for process_class in _iter_process_tree(
+                        type(self), _seen=_seen - {id(type(self))},
+                    )
+                    for transition in process_class.transitions
+                    if transition.action_name == action_name
+                ]
+                if any(
+                    self.state.get_state() in transition.sources
+                    for transition in declarations
+                ):
+                    _refusals['process'].append(_Refusal(reason, message, self, None))
+                elif declarations:
+                    _refusals['source'].append(_Refusal(RefusalReason.SOURCE_STATE, None, self, None))
             return
 
         # A held lock hides the transitions that would take it. A lock=False
@@ -245,11 +315,18 @@ class Process:
             if locked and transition.lock:
                 continue
 
-            if (
-                self.state.get_state() in transition.sources
-                and transition.is_valid(self.state.instance, user)
-            ):
+            if self.state.get_state() not in transition.sources:
+                if _refusals is not None:
+                    _refusals['source'].append(_Refusal(RefusalReason.SOURCE_STATE, None, self, transition))
+                continue
+            if _refusals is None:
+                valid, reason, message = transition.is_valid(self.state.instance, user), None, None
+            else:
+                valid, reason, message = _check_validity(transition, self.state.instance, user)
+            if valid:
                 yield transition, self
+            elif _refusals is not None:
+                _refusals['transition'].append(_Refusal(reason, message, self, transition))
 
         for sub_process_class in self.nested_processes:
             sub_process = sub_process_class(state=self.state)
@@ -258,6 +335,7 @@ class Process:
                 action_name=action_name,
                 ignore_state=ignore_state,
                 _seen=_seen,
+                _refusals=_refusals,
             )
 
     def _resolve_transition_with_owner(self, action_name: str, user=None):
@@ -267,11 +345,14 @@ class Process:
         filtering with ``ignore_state=True``. Also returns the declaring
         process so the caller can record it for worker restore.
         """
+        # Prefer a checked transition over a different branch's process guard.
+        refusals = {'transition': [], 'process': [], 'source': []}
         matches = list(
             self._iter_available_with_owner(
                 action_name=action_name,
                 user=user,
                 ignore_state=True,
+                _refusals=refusals,
             )
         )
         if len(matches) == 1:
@@ -283,7 +364,12 @@ class Process:
                 f"transitions with action name '{action_name}'. "
                 f"Specify conditions and permissions to disambiguate."
             )
-            raise TransitionNotAllowed("There are several transitions available")
+            error = TransitionNotAllowed(
+                "There are several transitions available",
+                reason=RefusalReason.AMBIGUOUS,
+            )
+            self._set_refusal_message(error, action_name)
+            raise error
 
         current_state = self.state.get_state()
         try:
@@ -311,7 +397,12 @@ class Process:
             f"available actions: {known_actions}."
         )
         transition_logger.info(message)
-        error = TransitionNotAllowed(message)
+        refusal = next(
+            (reasons[0] for reasons in refusals.values() if reasons),
+            _Refusal(RefusalReason.UNKNOWN_ACTION, None, self, None),
+        )
+        error = TransitionNotAllowed(message, reason=refusal.reason)
+        self._set_refusal_message(error, action_name, refusal.process, refusal.transition, refusal.message)
         error.current_state = current_state
         error.available_actions = available_actions
         raise error
