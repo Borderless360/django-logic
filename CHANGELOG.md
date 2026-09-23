@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-09-23
+
 ### Added
 
 - Transition refusals expose a reason that callers can use without
