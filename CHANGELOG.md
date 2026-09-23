@@ -7,6 +7,11 @@
 - Transition refusals expose a reason that callers can use without
   rechecking permissions, conditions, or background rows (#275). Existing
   exception classes, messages, and retry semantics remain unchanged.
+- Process calls provide a display-ready `TransitionNotAllowed.user_message`.
+  Set `refusal_messages` on a process or transition to override generic
+  wording. Use `@refusal_message(text)` on a condition or permission for a
+  specific explanation. Message capture does not repeat checks or replace
+  existing exception diagnostics.
 
 ### Fixed
 

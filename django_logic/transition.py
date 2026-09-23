@@ -44,6 +44,7 @@ from django_logic.exceptions import (
     RefusalReason,
     TransitionNotAllowed,
     TransitionTemporarilyUnavailable,
+    _execute_validity_bundle,
     _record_validity_refusal,
 )
 from django_logic.logger import (
@@ -69,7 +70,7 @@ _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception'})
 _DECLARATION_KWARGS = frozenset({
     'conditions', 'permissions', 'side_effects', 'callbacks',
     'failure_callbacks', 'failed_state', 'in_progress_state',
-    'next_transition',
+    'next_transition', 'refusal_messages',
 })
 
 
@@ -135,6 +136,7 @@ class Transition:
         *, lock: bool = True, **kwargs,
     ):
         self.action_name = action_name
+        self.refusal_messages = kwargs.get('refusal_messages', {})
         # None (or '') means: write no state on success. Everything else
         # about the contract — lock, gate, chaining, failed_state — is
         # identical to a state-writing transition, unless lock=False.
@@ -273,11 +275,11 @@ class Transition:
         return self.__str__()
 
     def is_valid(self, instance, user=None) -> bool:
-        permitted = self.permissions.execute(instance, user)
+        permitted = _execute_validity_bundle(self, self.permissions, instance, user)
         if not permitted:
             _record_validity_refusal(self, RefusalReason.PERMISSION)
             return permitted
-        valid = self.conditions.execute(instance)
+        valid = _execute_validity_bundle(self, self.conditions, instance)
         if not valid:
             _record_validity_refusal(self, RefusalReason.CONDITION)
         return valid

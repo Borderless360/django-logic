@@ -9,7 +9,7 @@ import logging
 
 from django.db import DEFAULT_DB_ALIAS, transaction
 
-from django_logic.exceptions import TransitionTemporarilyUnavailable
+from django_logic.exceptions import TransitionTemporarilyUnavailable, _record_failed_check
 from django_logic.logger import (
     transition_logger,
     TransitionEventType,
@@ -143,9 +143,21 @@ class BaseCommand:
         raise NotImplementedError
 
 
+def refusal_message(text):
+    """Attach a literal refusal detail to a condition or permission callable."""
+    def annotate(command):
+        command._django_logic_refusal_message = text
+        return command
+    return annotate
+
+
 class Conditions(BaseCommand):
     def execute(self, instance, **kwargs):
-        return all(command(instance, **kwargs) for command in self.commands)
+        for command in self.commands:
+            if not command(instance, **kwargs):
+                _record_failed_check(self, command)
+                return False
+        return True
 
 
 class Permissions(BaseCommand):
@@ -153,9 +165,13 @@ class Permissions(BaseCommand):
         # user=None means "no user context" — treated as permitted.
         # Callers that need authenticated-only transitions must enforce that
         # at the caller site.
-        return user is None or all(
-            command(instance, user, **kwargs) for command in self.commands
-        )
+        if user is None:
+            return True
+        for command in self.commands:
+            if not command(instance, user, **kwargs):
+                _record_failed_check(self, command)
+                return False
+        return True
 
 
 class StrictPermissions(Permissions):
