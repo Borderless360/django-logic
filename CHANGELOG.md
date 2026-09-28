@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Applications can send buffered reports before a job process exits (#296).
+  Set `DJANGO_LOGIC['JOB_PROCESS_FINISH']` to a no-argument function's dotted path.
+  The function has a separate two-second limit for jobs and periodic maintenance.
+  A blocked or failing sender does not change the job outcome or delay other jobs' timeouts.
+  Applications must provide process-local buffers, locks, and sender state.
+  Delivery remains best effort; crashes and forced exits during work can lose reports.
+
 ## [2.3.0] — 2026-09-23
 
 ### Added

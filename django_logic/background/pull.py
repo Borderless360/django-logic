@@ -47,6 +47,7 @@ from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
                        transaction)
 
 from django_logic.logger import logger
+from django_logic.background import reporting
 
 #: One channel for every queue. The notification carries no payload and
 #: means only "ask the database now"; the claim's queue filter does the
@@ -146,7 +147,7 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
 
 @dataclass
 class _Attempt:
-    """One attempt, kept until its child exits and its error is recorded."""
+    """One job process and any failure the worker still needs to record."""
 
     # A safety-net pass has no message row.
     pk: int | None
@@ -158,6 +159,8 @@ class _Attempt:
     next_retry_at: float = 0.0
     deferred_since: float | None = None
     last_deferred_warning: float | None = None
+    result_fd: int | None = None
+    work_exit_code: int | None = None
 
 
 def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
@@ -170,7 +173,9 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
     """
     from django_logic.background.models import TransitionMessage
     from django_logic.background.runner import run_background_transition
+    from django_logic.conf import job_process_finish
 
+    finish = job_process_finish()
     timeout_seconds = SAFETY_NET_TIMEOUT_SECONDS if pk is None else (
         TransitionMessage.objects
         .filter(pk=pk)
@@ -178,9 +183,23 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
         .first()
     )
     connections.close_all()
-    attempt_pid = os.fork()
+    read_fd = write_fd = None
+    if finish is not None:
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(read_fd, False)
+    try:
+        attempt_pid = os.fork()
+    except BaseException:
+        if read_fd is not None:
+            os.close(read_fd)
+            os.close(write_fd)
+        raise
     if attempt_pid == 0:
-        # fork() answers 0 inside the attempt process itself.
+        if read_fd is not None:
+            os.close(read_fd)
+        for running in attempts.values():
+            if running.result_fd is not None:
+                os.close(running.result_fd)
         status = 1
         try:
             if pk is None:
@@ -189,9 +208,14 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
                 run_background_transition(pk)
             status = 0
         finally:
-            # _exit, so a crashing attempt cannot run the worker's cleanup
-            # handlers or flush its buffers twice.
-            os._exit(status)
+            try:
+                if finish is not None:
+                    reporting.finish_job_process(finish, write_fd, status)
+            finally:
+                # Do not run inherited exit handlers or resend the worker's buffers.
+                os._exit(status)
+    if write_fd is not None:
+        os.close(write_fd)
     attempts[attempt_pid] = _Attempt(
         pk=pk,
         timeout_seconds=timeout_seconds,
@@ -199,7 +223,23 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
             None if timeout_seconds is None
             else time.monotonic() + timeout_seconds
         ),
+        result_fd=read_fd,
     )
+
+
+def _read_work_result(attempt: _Attempt) -> None:
+    """Once work ends, give report delivery its own deadline and preserve the outcome."""
+    if attempt.result_fd is None:
+        return
+    try:
+        result = os.read(attempt.result_fd, reporting.WORK_RESULT.size)
+    except BlockingIOError:
+        return
+    os.close(attempt.result_fd)
+    attempt.result_fd = None
+    if len(result) == reporting.WORK_RESULT.size:
+        attempt.work_exit_code, finished_at = reporting.WORK_RESULT.unpack(result)
+        attempt.deadline = finished_at + reporting.FINISH_SECONDS
 
 
 def _poll_delay(attempts: dict[int, _Attempt], maximum: float) -> float:
@@ -218,6 +258,7 @@ def _poll_delay(attempts: dict[int, _Attempt], maximum: float) -> float:
 def _stop_overdue(attempts: dict[int, _Attempt]) -> None:
     now = time.monotonic()
     for pid, attempt in attempts.items():
+        _read_work_result(attempt)
         if attempt.killed or attempt.deadline is None or now < attempt.deadline:
             continue
         attempt.killed = True
@@ -229,6 +270,13 @@ def _stop_overdue(attempts: dict[int, _Attempt]) -> None:
 
 
 def _finish_attempt(attempt: _Attempt, pending: deque[_Attempt]) -> None:
+    _read_work_result(attempt)
+    if attempt.result_fd is not None:
+        os.close(attempt.result_fd)
+        attempt.result_fd = None
+    if attempt.work_exit_code is not None:
+        attempt.exit_code = attempt.work_exit_code
+        attempt.killed = False
     attempt.reaped = True
     attempt.deadline = None
     if not _try_account(attempt):
@@ -288,7 +336,9 @@ def _harvest(
         try:
             pid, raw_status = os.waitpid(
                 -1, 0 if block and next_deadline is None
-                and not pending and wait_until is None else os.WNOHANG,
+                and not pending and wait_until is None
+                and not any(item.result_fd is not None for item in attempts.values())
+                else os.WNOHANG,
             )
         except ChildProcessError:
             # Another handler collected these exit statuses; none will arrive here.

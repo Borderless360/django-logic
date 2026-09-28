@@ -9,6 +9,7 @@ def validate_on_ready() -> None:
     mode = conf.background_execution()
     # Surface value errors now rather than on first use.
     conf.default_queue()
+    conf.job_process_finish()
     # Safety settings: every numeric knob the retry/cleanup/lock
     # machinery depends on is validated at boot in EVERY mode — a bad
     # value must not wait for its first use (which may be a 3am retry

@@ -188,6 +188,7 @@ def check_background_database_routing(app_configs, **kwargs):
 _KNOWN_SETTINGS = frozenset({
     'BACKGROUND_EXECUTION',
     'DEFAULT_QUEUE',
+    'JOB_PROCESS_FINISH',
     'LOCK_TIMEOUT',
     'TRANSITION_MESSAGE_MAX_ERRORS',
     'TRANSITION_MESSAGE_RETRY_MINUTES',

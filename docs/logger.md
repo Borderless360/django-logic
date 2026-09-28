@@ -1,9 +1,7 @@
 # Django-Logic Logging
 
-State-change logging flows through two standard Python loggers. There is no
-custom logger abstraction and no `DJANGO_LOGIC_*` logging settings (those
-were removed in 0.3.0) — configure these loggers via Django `LOGGING` as you
-would for any library.
+State-change logging uses two standard Python loggers. Configure their
+handlers through Django `LOGGING`, as you would for any library.
 
 ## Loggers
 
@@ -34,6 +32,57 @@ does too. Those kwargs can include a `user` object and arbitrary business
 data (amounts, emails, tokens), so scrub them in your
 logging configuration (a `logging.Filter` on the `django-logic.transition`
 logger) if the deployment is privacy-sensitive.
+
+## Send buffered reports before a job process exits
+
+Pull workers use `os._exit()` when each job process finishes. This skips
+Python exit handlers. Buffered logs and telemetry may still be waiting to send.
+The separate process that checks stuck jobs and deletes old records exits the same way.
+
+Applications with buffered reporting can configure one function:
+
+```python
+DJANGO_LOGIC = {
+    'JOB_PROCESS_FINISH': 'myapp.reporting.finish_job_process',
+}
+```
+
+The function takes no arguments. It sends only reports belonging to the
+current job process. It must not change business data.
+
+```python
+# myapp/reporting.py
+def finish_job_process():
+    collector.send_current_process_records()
+```
+
+`collector` is application code. The library does not provide a collector
+or automatically flush logging handlers, queues, or Sentry.
+The setting defaults to `None`, which keeps the existing exit behavior.
+
+The library calls this function on a new daemon thread after engine work
+finishes, including handled job failures. Report delivery has its own
+two-second limit, even when the job has `timeout=None`.
+The worker continues checking other jobs while reports are sent.
+If sending blocks Python itself, the worker stops that job process.
+Reporting errors or timeouts do not change the recorded job outcome or add retry errors.
+This also applies when the finish function raises `SystemExit` or calls `os._exit()`.
+
+Each collector must replace inherited buffers, private locks, sender threads,
+and network clients before their first use in a job process.
+Check the process ID before acquiring an inherited lock, or reset state with
+`os.register_at_fork(after_in_child=...)`. Discard inherited worker records
+from the job's copy; the worker still owns its original buffer.
+Flush only the resulting process-local state. A standard handler's `flush()`
+may do nothing, and it does not flush a separate telemetry client.
+When several senders can block, start them independently within the shared
+two-second limit. The finish function runs on a new thread, so it must not
+depend on the thread-local state of a side effect.
+
+Delivery is best effort. A crash, `SIGKILL`, or `os._exit()` during business
+work skips the function. The library retains `os._exit()` after delivery
+and does not run inherited Python exit handlers. Sync mode does not create
+a job process and does not call this function.
 
 
 ## Event types
