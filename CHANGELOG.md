@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.3.1] — 2026-09-28
 
 ### Fixed
 
@@ -8,8 +8,13 @@
   Set `DJANGO_LOGIC['JOB_PROCESS_FINISH']` to a no-argument function's dotted path.
   The function has a separate two-second limit for jobs and periodic maintenance.
   A blocked or failing sender does not change the job outcome or delay other jobs' timeouts.
-  Applications must provide process-local buffers, locks, and sender state.
+  Each job process must use its own reporting buffers, locks, and connections.
   Delivery remains best effort; crashes and forced exits during work can lose reports.
+
+### Tests
+
+- Added regression coverage for report delivery, delayed reporting, maintenance
+  error messages, independent queue scans, and starting the next job (#297).
 
 ## [2.3.0] — 2026-09-23
 
