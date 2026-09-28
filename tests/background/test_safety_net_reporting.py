@@ -30,7 +30,7 @@ def make_message(*, created, queue='reporting', status='fulfilling',
     return widget, message
 
 
-@override_settings(DJANGO_LOGIC=_SETTINGS)
+@override_settings(DJANGO_LOGIC=_SETTINGS, USE_TZ=True)
 class SafetyNetReportingTests(TestCase):
     def test_only_old_unstarted_rows_are_reported_without_changes(self):
         cutoff = _NOW - timedelta(minutes=16)
@@ -122,7 +122,7 @@ class SafetyNetReportingTests(TestCase):
         self.assertIn(f'retry_pending: TransitionMessage#{failed_message.pk}', warnings[0].getMessage())
 
 
-@override_settings(DJANGO_LOGIC=_SETTINGS)
+@override_settings(DJANGO_LOGIC=_SETTINGS, USE_TZ=True)
 class ClaimableOrderingTests(TestCase):
     def test_queue_filters_preserve_oldest_first_order_and_retry_boundaries(self):
         cutoff = _NOW - timedelta(minutes=4)
