@@ -17,6 +17,7 @@ from contextvars import ContextVar
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.utils.module_loading import import_string
 
 LOCK_TIMEOUT_DEFAULT = 7200
 
@@ -116,6 +117,28 @@ def default_queue() -> str:
             "DJANGO_LOGIC['DEFAULT_QUEUE'] must be a non-empty string."
         )
     return queue
+
+
+def job_process_finish():
+    """Optional application function that sends this job process's reports."""
+    path = _conf().get('JOB_PROCESS_FINISH')
+    if path is None:
+        return None
+    if not isinstance(path, str) or not path:
+        raise ImproperlyConfigured(
+            "DJANGO_LOGIC['JOB_PROCESS_FINISH'] must be a dotted callable path or None."
+        )
+    try:
+        finish = import_string(path)
+    except (ImportError, AttributeError) as exc:
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['JOB_PROCESS_FINISH'] could not import {path!r}."
+        ) from exc
+    if not callable(finish):
+        raise ImproperlyConfigured(
+            f"DJANGO_LOGIC['JOB_PROCESS_FINISH'] must name a callable; got {path!r}."
+        )
+    return finish
 
 
 def _validated_number(

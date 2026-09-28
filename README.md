@@ -412,6 +412,12 @@ worker claims a row and what happens when one dies.
 
 One `dl_worker` process serves one group of queues.
 
+If logging or telemetry buffers reports, configure
+`DJANGO_LOGIC['JOB_PROCESS_FINISH']` with an application function's dotted path.
+The function sends this job process's reports before exit, with a separate
+two-second limit. See [buffered reporting](docs/logger.md#send-buffered-reports-before-a-job-process-exits)
+for process-local state requirements and delivery limits.
+
 ```bash
 python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 python manage.py dl_worker --queues django_logic.slow --concurrency=4
