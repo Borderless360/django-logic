@@ -363,7 +363,7 @@ class TransitionMessage(TimeStampedModel):
             ms = max(int(delta.total_seconds() * 1000), 0)
             self.duration_ms = ms
             update_fields.append('duration_ms')
-        self.save(update_fields=update_fields)
+        self.save(using=self._state.db, update_fields=update_fields)
 
     def mark_as_superseded(self, note: str) -> None:
         """Terminal outcome for a row whose instance was moved by something
@@ -376,7 +376,7 @@ class TransitionMessage(TimeStampedModel):
         """
         self.last_error_message = db_safe_text(note)
         self.last_error_dt = timezone.now()
-        self.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
+        self.save(using=self._state.db, update_fields=['last_error_message', 'last_error_dt', 'modified'])
         self.mark_as_completed(measure_duration=False)
 
     def record_error(self, exception: BaseException) -> None:
@@ -389,7 +389,7 @@ class TransitionMessage(TimeStampedModel):
         # two writers racing on the same row — e.g. the stuck finalizer
         # and a reconnected zombie worker that lost its row lock — cannot
         # lose an increment. .update() bypasses auto_now, so set ``modified`` here.
-        type(self).objects.filter(pk=self.pk).update(
+        type(self).objects.using(self._state.db).filter(pk=self.pk).update(
             errors_count=models.F('errors_count') + 1,
             last_error_message=self.last_error_message,
             last_error_dt=self.last_error_dt,
@@ -397,7 +397,7 @@ class TransitionMessage(TimeStampedModel):
         )
         # Reflect the committed value in memory so the caller's MAX_ERRORS
         # comparison sees the true count, not the stale snapshot.
-        self.refresh_from_db(fields=['errors_count', 'modified'])
+        self.refresh_from_db(using=self._state.db, fields=['errors_count', 'modified'])
 
     def record_failure_side_effect_error(
         self, exception: BaseException, *, label: str = '',
@@ -415,7 +415,7 @@ class TransitionMessage(TimeStampedModel):
         if label:
             note = f'{label}: {note}'
         self.failure_side_effect_error = db_safe_text(note)
-        self.save(update_fields=['failure_side_effect_error', 'modified'])
+        self.save(using=self._state.db, update_fields=['failure_side_effect_error', 'modified'])
 
 
 def in_flight(instance, process_name: str = 'process') -> bool:

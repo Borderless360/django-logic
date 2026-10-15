@@ -2,8 +2,8 @@
 
 ## The problem
 
-A `BackgroundTransition` runs its whole side-effect inside one attempt, and
-the attempt is all-or-nothing: its database writes run in a savepoint
+By default, `BackgroundTransition` runs its whole side-effect inside one attempt,
+and the attempt is all-or-nothing: its database writes run in a savepoint
 and roll back together when the attempt fails, is killed at its
 `timeout=` budget, or dies with its worker. That rule is what lets a
 retry run the side-effect again from scratch.
@@ -16,9 +16,13 @@ has two costs:
 * nothing the job writes is visible to the rest of the system until the
   whole job commits, so downstream work waits for the last record.
 
-Do not ask for a partial-commit mode. The per-attempt rollback is a
-guarantee other transitions rely on; giving it up inside one long
-attempt would make that attempt's retries unsafe. Split the job instead.
+For a bulk import, split the job into chunks so each attempt stays small.
+Keep the default atomic behavior when a chunk must succeed or fail together.
+
+Provider requests have another requirement: their saved confirmations must
+survive a later local failure. Even one request can succeed before its receipt
+rolls back. Use the explicit `atomic=False` option for that case, with durable
+protection against repeated requests. See [provider receipts](provider-receipts.md).
 
 ## The shape
 

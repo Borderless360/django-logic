@@ -39,7 +39,7 @@ class State:
             .get(pk=self.instance.pk)
         )
 
-    def set_state(self, state):
+    def set_state(self, state, *, using=None):
         """Persist the state field without touching other in-memory fields.
 
         ``update_fields=[self.field_name]`` respects custom ``save()``
@@ -47,10 +47,11 @@ class State:
         re-reads the state column — any side-effect mutations on other
         attributes survive.
         """
+        database_kwargs = {'using': using} if using is not None else {}
         previous = getattr(self.instance, self.field_name)
         setattr(self.instance, self.field_name, state)
         try:
-            self.instance.save(update_fields=[self.field_name])
+            self.instance.save(update_fields=[self.field_name], **database_kwargs)
         except Exception:
             # Restore the attribute the database refused. setattr happens
             # before the write, so a rejected save used to leave the instance
@@ -60,7 +61,7 @@ class State:
             # failure_callbacks and the sync caller.
             setattr(self.instance, self.field_name, previous)
             raise
-        self.instance.refresh_from_db(fields=[self.field_name])
+        self.instance.refresh_from_db(fields=[self.field_name], **database_kwargs)
 
     @property
     def instance_key(self):

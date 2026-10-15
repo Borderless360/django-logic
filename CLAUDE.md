@@ -122,7 +122,7 @@ never `getattr(process, action_name)` with the name held in a variable.
 
 1. **Side-effects must be idempotent against external systems.** Background
    side-effects re-run from scratch on every retry. Since 0.4 each attempt's
-   *database* writes run in a savepoint and roll back on failure
+   *database* writes run in a savepoint and roll back on failure by default
    (all-or-nothing per attempt), so the idempotency you owe is for external
    calls (APIs, emails, payments). Critical work goes in `side_effects`;
    `callbacks` are best-effort (exceptions swallowed, lost on crash).

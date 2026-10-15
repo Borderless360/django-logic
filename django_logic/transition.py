@@ -163,7 +163,7 @@ class Transition:
             # worked. Name it at declaration time instead.
             takes = sorted(_DECLARATION_KWARGS | {'lock'})
             if self.is_background:
-                takes += ['queue', 'timeout', 'no_retry_on']
+                takes += ['queue', 'timeout', 'no_retry_on', 'atomic']
             raise ImproperlyConfigured(
                 f"{type(self).__name__} {action_name!r} does not take "
                 f"{', '.join(sorted(unknown))}. It takes: {', '.join(takes)}."

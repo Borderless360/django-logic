@@ -6,7 +6,7 @@ a durable background transition. It runs the same way in:
 * the pull worker loop (:mod:`django_logic.background.pull`), and
 * sync mode, directly after enqueue in the same process.
 
-Structure:
+Default atomic execution:
 
 1. One ``atomic`` block that:
 
@@ -31,6 +31,9 @@ Structure:
 
    * success callbacks + ``next_transition`` (success path), or
    * failure callbacks (terminal-failure path).
+
+``atomic=False`` declarations use :mod:`django_logic.background.non_atomic`
+to preserve provider receipts without an enclosing model transaction.
 
 Side-effect exceptions re-raise out of ``run_background_transition``
 only in **sync mode**, so inline callers and tests can ``assertRaises``
@@ -92,6 +95,9 @@ def run_background_transition(transition_message_id: int) -> None:
         return
     try:
         outcome = _run_atomic(transition_message_id)
+        if isinstance(outcome, _NonAtomicAttempt):
+            from django_logic.background.non_atomic import run_non_atomic
+            outcome = run_non_atomic(transition_message_id)
     except _StopRetry as exc:
         # The atomic block rolled back, so mark_as_completed could not run
         # inside it. Run it here, in its own statement, so the retry loop
@@ -117,6 +123,10 @@ def run_background_transition(transition_message_id: int) -> None:
         # of the worker loop would only add noise.
         if conf.sync_mode():
             raise outcome.exception
+
+
+class _NonAtomicAttempt:
+    """Run this declaration without an enclosing model transaction."""
 
 
 class _NothingToDo(Exception):
@@ -323,6 +333,7 @@ def _complete_terminal_failure(
     prefix: str,
     consequence: str,
     measure_duration: bool,
+    using=None,
 ):
     """The one terminal-failure completion: write ``failed_state`` (when
     declared), then mark the row completed even if the write fails.
@@ -336,7 +347,7 @@ def _complete_terminal_failure(
     if transition.failed_state:
         write_error = write_failed_state(
             state, transition.failed_state,
-            prefix=prefix, consequence=consequence,
+            prefix=prefix, consequence=consequence, using=using,
         )
         if write_error is not None:
             transition_message.record_failure_side_effect_error(
@@ -367,8 +378,10 @@ def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
         )
 
 
-def _run_atomic(transition_message_id: int) -> _Outcome:
-    """One attempt, one atomic block. Read it top to bottom:
+def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
+    """Run an atomic declaration, or return the explicit non-atomic choice.
+
+    Default execution uses one atomic block. Read it top to bottom:
 
     lock the row -> decode the saved kwargs -> restore the instance and
     its transition -> stop if something else moved the instance -> run
@@ -400,6 +413,8 @@ def _run_atomic(transition_message_id: int) -> _Outcome:
         if restore_error is not None:
             return _handle_restore_failure(transition_message, restore_error)
         instance, process, transition = restored
+        if not transition.atomic:
+            return _NonAtomicAttempt()
         state = process.state
 
         superseded = _superseded_outcome(
@@ -435,7 +450,7 @@ def _run_atomic(transition_message_id: int) -> _Outcome:
             _transition_context.reset(token)
 
 
-def _lock_uncompleted_row(transition_message_id: int) -> TransitionMessage:
+def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> TransitionMessage:
     """Lock the row for this attempt, or raise ``_NothingToDo``.
 
     Already completed / missing, and held by another worker, are the
@@ -444,7 +459,7 @@ def _lock_uncompleted_row(transition_message_id: int) -> TransitionMessage:
     """
     try:
         return (
-            TransitionMessage.objects
+            TransitionMessage.objects.using(using)
             .select_for_update(nowait=True)
             .get(pk=transition_message_id, is_completed=False)
         )
@@ -523,7 +538,7 @@ def _restore_for_attempt(transition_message):
 
 
 def _superseded_outcome(
-    transition_message, transition, state, kwargs
+    transition_message, transition, state, kwargs, *, after_side_effects=False,
 ) -> '_Outcome | None':
     """The state guard: stop if something else moved the instance.
 
@@ -538,11 +553,15 @@ def _superseded_outcome(
     matches, expected, current = _state_guard_matches(transition, state)
     if matches:
         return None
+    skipped = (
+        'Final state write skipped; earlier side effects may have completed.'
+        if after_side_effects else 'Side-effects skipped.'
+    )
     note = (
         f'[superseded] worker state guard: expected {expected}, '
         f'found {current!r} — the instance was moved by something '
-        f'else while this transition was pending. Side-effects '
-        f'skipped; the external state change wins.'
+        f'else while this transition was pending. {skipped} '
+        f'The external state change wins.'
     )
     transition_logger.error(
         f'{kwargs.get("tr_id")} TransitionMessage#{transition_message.pk} '
@@ -621,7 +640,7 @@ def _handle_restore_failure(
     transition_logger.error(
         f'TransitionMessage#{transition_message.pk} restore raised '
         f'{type(error).__name__}: {error}',
-        exc_info=True,
+        exc_info=(type(error), error, error.__traceback__),
     )
     if transition_message.errors_count < conf.max_errors():
         return _Outcome(terminal=False, succeeded=False, exception=error)
@@ -643,9 +662,7 @@ def _handle_success(
     state,
     kwargs: dict,
 ) -> _Outcome:
-    # The target write happens inside the attempt savepoint in _run_atomic,
-    # so by here the state is already committed-pending and this only has
-    # to close the row out.
+    # The caller writes the target in the same transaction as this completion.
     transition_message.mark_as_completed()
     transition_logger.info(
         f'{kwargs.get("tr_id")} {TransitionEventType.COMPLETE.value}'
@@ -665,12 +682,13 @@ def _handle_failure(
     state,
     kwargs: dict,
     error: BaseException,
+    *, using=None,
 ) -> _Outcome:
     transition_message.record_error(error)
     transition_logger.error(
         f'{kwargs.get("tr_id")} {TransitionEventType.FAIL.value}: '
         f'{type(error).__name__}: {error}',
-        exc_info=True,
+        exc_info=(type(error), error, error.__traceback__),
     )
 
     exhausted = transition_message.errors_count >= conf.max_errors()
@@ -695,6 +713,7 @@ def _handle_failure(
                 f'again from there to move it on.'
             ),
             measure_duration=True,
+            using=using,
         )
     # Not terminal: leave uncompleted → claimable again after the retry wait.
     return _Outcome(
