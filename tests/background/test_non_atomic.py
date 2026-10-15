@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
-from django.db import DatabaseError, connection, connections, transaction
+from django.db import InterfaceError, OperationalError, connection, connections, transaction
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
 from django_logic import Process
@@ -387,10 +387,11 @@ class NonAtomicProviderTests(TransactionTestCase):
         def later_operation(instance, **kwargs):
             later_calls.append(True)
 
+        # The drivers report a terminated connection with different disconnection exceptions.
         with patch.object(non_atomic, '_job_connection', remember_connection), patch.object(
             ReceiptProcess.transitions[0].side_effects, '_commands',
             [submit_provider, lose_lock, later_operation],
-        ), self.assertRaises(DatabaseError):
+        ), self.assertRaises((InterfaceError, OperationalError)):
             run_background_transition(transition_message.pk)
         self.widget.refresh_from_db()
         transition_message.refresh_from_db()
