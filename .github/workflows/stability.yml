@@ -100,7 +100,7 @@ jobs:
           POSTGRES_PASSWORD: django_logic
           REDIS_URL: redis://localhost:6380/0
         run: |
-          python tests/manage.py test tests.background --verbosity=2
+          python tests/manage.py test tests.background tests.test_scenario --verbosity=2
 
       - name: Run stability tests
         env:

@@ -138,8 +138,8 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
     from django_logic.state import State as _State
     original_set_state = _State.set_state
 
-    def _recording_set_state(self, state):
-        result = original_set_state(self, state)
+    def _recording_set_state(self, state, **kwargs):
+        result = original_set_state(self, state, **kwargs)
         tracker.state_trace.append(state)
         return result
     _recording_set_state.__name__ = 'set_state'
