@@ -1,7 +1,7 @@
 """Run provider work while preserving each committed model write.
 
 The job row stays locked on a separate connection. Model work uses autocommit.
-Final state and job accounting share the lock connection's transaction.
+The final state and job completion are written in the same transaction.
 """
 from contextlib import contextmanager
 from uuid import uuid4
