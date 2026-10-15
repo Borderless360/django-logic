@@ -11,7 +11,8 @@ from django.contrib.auth import get_user_model
 
 from django_logic.background.models import TransitionMessage
 from django_logic.testing import ProcessScenario
-from tests.background.models import ScenarioGuardProcess, Widget, WidgetProcess
+from tests.background.models import ScenarioGuardProcess, ScenarioNonAtomicProcess, Widget, WidgetProcess
+from tests.stability.base import requires_postgres
 
 
 class WidgetFulfilmentScenario(ProcessScenario):
@@ -144,3 +145,50 @@ class GuardedApprovalScenario(ProcessScenario):
 
         widget._stock_available = True
         self.assert_available(widget, ['approve'], user=staff)
+
+
+@requires_postgres
+class NonAtomicScenario(ProcessScenario):
+    process_class = ScenarioNonAtomicProcess
+    model = Widget
+    state_field = 'status'
+
+    def test_completion_records_the_final_state(self):
+        widget = self.create_instance(status='draft')
+        self.background_transition(widget, 'fulfil')
+        self.assert_state(widget, 'fulfilled')
+        self.assert_state_trace(['fulfilling', 'fulfilled'])
+        self.assert_side_effects_ran(['bg_ok', 'bg_record_kwargs'])
+        self.assert_callbacks_ran(['bg_callback'])
+        self.assertEqual(widget.se_log, 'ok,')
+
+    def test_retry_records_the_final_state_after_a_side_effect_fails(self):
+        widget = self.create_instance(status='draft')
+        self.background_transition(
+            widget, 'fulfil', fail_side_effect='bg_record_kwargs',
+            fail_with=ValueError('report unavailable'),
+        )
+        self.assert_state(widget, 'fulfilling')
+        self.assert_state_trace(['fulfilling'])
+        self.assert_error_recorded(widget, 'report unavailable')
+        self.assertEqual(widget.se_log, 'ok,')
+
+        self.retry_transition(widget)
+        self.assert_state(widget, 'fulfilled')
+        self.assert_state_trace(['fulfilled'])
+        self.assert_error_count(widget, 1)
+        self.assert_callbacks_ran(['bg_callback'])
+
+    def test_terminal_failure_records_the_failed_state(self):
+        from django_logic.background import PermanentFailure
+
+        widget = self.create_instance(status='draft')
+        self.background_transition(
+            widget, 'fulfil', fail_side_effect='bg_record_kwargs',
+            fail_with=PermanentFailure('report refused'),
+        )
+        self.assert_state(widget, 'fulfilment_failed')
+        self.assert_state_trace(['fulfilling', 'fulfilment_failed'])
+        self.assert_error_recorded(widget, 'report refused')
+        self.assert_failure_callbacks_ran(['bg_failure_callback'])
+        self.assertEqual(widget.se_log, 'ok,')

@@ -1159,3 +1159,16 @@ class ProxyBProcess(Process):
             target='touched',
         ),
     ]
+
+
+class ScenarioNonAtomicProcess(Process):
+    process_name = 'scenario_non_atomic'
+    transitions = [
+        BackgroundTransition(
+            action_name='fulfil', sources=['draft'], target='fulfilled',
+            in_progress_state='fulfilling', failed_state='fulfilment_failed',
+            conditions=[], side_effects=[bg_ok, bg_record_kwargs],
+            callbacks=[bg_callback], failure_callbacks=[bg_failure_callback],
+            atomic=False,
+        ),
+    ]

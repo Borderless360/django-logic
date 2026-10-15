@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.4.1] — 2026-10-15
+
+### Fixed
+
+- `ProcessScenario` forwards the database option when recording state changes (#300).
+  Tests can complete and retry `BackgroundTransition(atomic=False)` jobs without a test-helper error.
+  Failed-state writes use the requested database connection too.
+
 ## [2.4.0] — 2026-10-15
 
 ### Added

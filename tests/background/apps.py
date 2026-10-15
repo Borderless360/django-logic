@@ -26,6 +26,7 @@ class BackgroundTestsConfig(AppConfig):
             ProxyAProcess,
             ProxyBProcess,
             ScenarioGuardProcess,
+            ScenarioNonAtomicProcess,
             SharedActionConversationProcess,
             Widget,
             WidgetAmbiguousConditionProcess,
@@ -53,6 +54,7 @@ class BackgroundTestsConfig(AppConfig):
         ProcessManager.bind_model_process(Conversation, MixedSyncBgProcess, state_field='status')
         # Test-local processes attached to Widget (see models.py).
         ProcessManager.bind_model_process(Widget, ScenarioGuardProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, ScenarioNonAtomicProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, WidgetChainProcess, state_field='status')
         # Behavior-focused scenario fixtures (sync matrix + bg->bg chain +
         # context chain + nested sync delegation).
