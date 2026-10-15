@@ -383,8 +383,8 @@ order.process.fulfil(user=request.user)
 ```
 
 The call writes `in_progress_state` and one `TransitionMessage` row in a single
-transaction, then returns. A worker claims that row, runs the side-effects and
-writes the target state, all in one atomic block. A failed attempt rolls back
+transaction, then returns. By default, a worker runs the side-effects and
+writes the target state in one transaction. A failed attempt rolls back
 its own database writes and becomes claimable again after
 `TRANSITION_MESSAGE_RETRY_MINUTES`. After `TRANSITION_MESSAGE_MAX_ERRORS`
 attempts django-logic writes `failed_state`, runs `failure_callbacks` and
@@ -392,6 +392,10 @@ completes the row.
 
 - **Side-effects must be idempotent against external systems.** A retry runs
   them again from the start, so a payment or an email can happen twice.
+- `atomic=False` preserves committed model writes when later work fails. Use it
+  for provider receipts that must survive a report or state-write failure.
+  See [provider receipts](docs/recipes/provider-receipts.md) for restrictions and
+  retry safety. The default `atomic=True` behavior is unchanged.
 - `queue=` is optional. A transition without it runs on
   `DJANGO_LOGIC['DEFAULT_QUEUE']`, which is `django_logic`. Name a queue per
   service level and give it its own worker.

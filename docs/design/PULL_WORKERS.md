@@ -199,9 +199,11 @@ three one-slot workers on 512 MB, two of them killed by the platform's
 memory quota, an import attempt peaking at 804 MB, and an hourly fan-out
 of 119 rows draining at 2.6 rows a minute across two swapping workers.
 
-**Connections.** Each running attempt holds one database connection —
-two where the app opens a second one. Budget
-`workers × (concurrency + 2)` connections per queue group. The two extras
+**Connections.** Each running attempt normally holds one database connection.
+An `atomic=False` attempt uses two: one locks its job, while the other saves
+model writes independently. Applications may open additional connections. Budget
+`workers × (concurrency + 2)` connections per queue group for atomic jobs.
+For `atomic=False` jobs, budget `workers × (2 × concurrency + 2)`. The two extras
 are the worker's LISTEN connection and its separate safety-net process.
 Add any connections that consumer callbacks open. Keep the total under the
 database plan's cap, or under the pgbouncer pool size. A worker that
@@ -240,6 +242,21 @@ past the retry window with no attempt started, naming the queue and the
 `dl_worker` line that would serve it. That log line is the one to page
 on. It only fires while some worker is alive to run it, which is why the
 process alert comes first.
+
+## Provider receipts that must survive a failed attempt
+
+`BackgroundTransition(atomic=False)` keeps the same job-row lock on a separate
+connection. Model side effects use their normal connection in autocommit.
+Final state and job completion commit together on the connection holding the lock.
+The default atomic execution remains unchanged.
+
+This option works with transaction pooling: it uses no session advisory lock.
+The locking transaction remains open during provider work, so the database
+idle-transaction timeout must exceed the declared job timeout. Losing that
+connection releases its lock. An external request already running may continue;
+durable pending receipts or provider idempotency keys must prevent duplicate requests.
+The engine checks the connection before starting each subsequent side effect.
+See [provider receipts](../recipes/provider-receipts.md) for the consumer contract.
 
 ## 8. Migration path
 

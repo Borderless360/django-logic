@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0] — 2026-10-15
+
+### Added
+
+- `BackgroundTransition(atomic=False)` preserves committed provider confirmations when later work fails (#219, #299).
+  A separate PostgreSQL connection locks the job while model writes commit independently.
+  Final state and job completion still commit together. The default atomic behavior is unchanged.
+  This option requires the default PostgreSQL database and durable protection against repeated provider requests.
+  Inline sync execution requires autocommit; pull enqueue can run inside a caller transaction.
+
+### Tests
+
+- Verify confirmed receipts, report and state-write failures, concurrent workers, process crashes, timeouts, and lost database locks.
+
 ## [2.3.1] — 2026-09-28
 
 ### Fixed

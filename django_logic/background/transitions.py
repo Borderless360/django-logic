@@ -52,6 +52,13 @@ class BackgroundTransition(Transition):
     durable row under the state lock.
 
     Optional:
+        - ``atomic`` — defaults to True. With False, each side-effect
+          keeps its committed model writes when later work fails. The job
+          remains locked on a separate PostgreSQL connection. Final state
+          and job completion still commit together. Provider calls need
+          durable receipts or provider idempotency keys before enabling it.
+          Only the default PostgreSQL database is supported. Inline sync
+          execution requires autocommit; pull enqueue may use a transaction.
         - ``queue`` — the queue name this transition's row carries.
           Defaults to ``DJANGO_LOGIC['DEFAULT_QUEUE']``
           (``'django_logic'``). Name queues per SLA (e.g. ``critical`` /
@@ -87,6 +94,7 @@ class BackgroundTransition(Transition):
         queue: str | None = None,
         timeout: int | None = None,
         no_retry_on: tuple = (),
+        atomic: bool = True,
         **kwargs,
     ):
         if queue is not None and (not queue or not isinstance(queue, str)):
@@ -112,6 +120,11 @@ class BackgroundTransition(Transition):
                     f"BackgroundTransition '{action_name}': no_retry_on must "
                     f"contain exception types, got {exception_type!r}."
                 )
+        if type(atomic) is not bool:
+            raise ImproperlyConfigured(
+                f"BackgroundTransition '{action_name}': atomic must be True or False."
+            )
+        self.atomic = atomic
         self.queue = queue
         self.timeout = timeout
         self.no_retry_on = no_retry_on
@@ -132,6 +145,9 @@ class BackgroundTransition(Transition):
         # Before the lock, and before the kwargs are serialized into a row
         # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
+        if not self.atomic:
+            from django_logic.background.non_atomic import validate_non_atomic
+            validate_non_atomic(state.instance, require_autocommit=conf.sync_mode())
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
         queue_name = self.get_queue_name()

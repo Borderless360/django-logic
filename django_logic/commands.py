@@ -67,7 +67,7 @@ def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
     return result
 
 
-def write_failed_state(state, failed_state, *, prefix, consequence):
+def write_failed_state(state, failed_state, *, prefix, consequence, using=None):
     """Write ``failed_state`` in a savepoint. The one copy of this write.
 
     Returns ``None`` when the write landed (and logs the ``SET_STATE``
@@ -88,11 +88,12 @@ def write_failed_state(state, failed_state, *, prefix, consequence):
     a savepoint Django discards without an exception must surface as
     the failure it is, not log a state change that never landed.
     """
+    database_kwargs = {'using': using} if using is not None else {}
     previous = state.get_state()
     try:
         _run_in_savepoint(
-            state.instance._state.db or DEFAULT_DB_ALIAS,
-            lambda: state.set_state(failed_state),
+            using or state.instance._state.db or DEFAULT_DB_ALIAS,
+            lambda: state.set_state(failed_state, **database_kwargs),
             require_commit=True,
         )
     except Exception as write_error:
