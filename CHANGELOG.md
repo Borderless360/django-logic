@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## [2.4.0] — 2026-10-15
 
 ### Added
 
-- `BackgroundTransition(atomic=False)` preserves committed provider receipts when later work fails.
+- `BackgroundTransition(atomic=False)` preserves committed provider confirmations when later work fails (#219, #299).
   A separate PostgreSQL connection locks the job while model writes commit independently.
   Final state and job completion still commit together. The default atomic behavior is unchanged.
   This option requires the default PostgreSQL database and durable protection against repeated provider requests.

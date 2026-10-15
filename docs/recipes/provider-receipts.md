@@ -4,6 +4,11 @@ A provider can accept a request before a later report fails. With the default
 atomic transition, that failure also rolls back the locally saved confirmation.
 A retry cannot distinguish an accepted request from one never sent.
 
+Splitting submission and reporting into separate jobs reduces their work, but
+even one request can succeed before its final database write fails.
+Callbacks cannot solve this because they are best effort and can be lost.
+Use provider idempotency keys when available; many integrations do not offer them.
+
 Use `BackgroundTransition(atomic=False)` when those confirmations must survive:
 
 ```python

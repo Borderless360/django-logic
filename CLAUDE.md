@@ -126,6 +126,8 @@ never `getattr(process, action_name)` with the name held in a variable.
    (all-or-nothing per attempt), so the idempotency you owe is for external
    calls (APIs, emails, payments). Critical work goes in `side_effects`;
    `callbacks` are best-effort (exceptions swallowed, lost on crash).
+   Use `atomic=False` only when committed provider confirmations must survive
+   later failure. The application must protect requests against repetition.
 2. **Route by SLA with named queues.** `queue=` is optional — transitions
    without it go to `DJANGO_LOGIC['DEFAULT_QUEUE']` (`'django_logic'`).
    Give heavy or SLA-sensitive transitions their own queue (e.g.
@@ -181,10 +183,12 @@ Its corollaries, each pinned by a shipped mistake:
   forever when a worker is hard-killed. That design shipped once, grew a
   sweeper whose defects dominated four review passes, and was cut in
   0.12.0. Do not rebuild it.
-- **The mutex stays in the cache, and refusal is instant.** A conditional
-  UPDATE is a durable busy marker; a row lock held inside a transaction
-  keeps a connection idle-in-transaction across external side effects
-  (fatal under pgbouncer) and turns instant refusal into blocking.
+- **State changes use the cache lock, and refusal is immediate.** Do not
+  replace it with a saved busy flag or a blocking model-row lock. Workers
+  separately lock their job row using a non-blocking database claim. That
+  transaction works with PgBouncer transaction pooling, but holds a database
+  connection until the job finishes. Allow for that connection and set the
+  database idle-transaction timeout above the job timeout.
 - **The row names its transition.** Recovery re-runs work from
   `TransitionMessage` rows, never from broker messages, so the row records
   `transition_name` and `owning_process_class`. The row is also the queue:
