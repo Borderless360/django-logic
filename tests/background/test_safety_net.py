@@ -303,6 +303,22 @@ class WaitingRowReportTests(TestCase):
         records = self._report()
         self.assertEqual([record.levelname for record in records], ['ERROR'])
 
+    def test_rows_that_wait_for_a_retry_or_spent_every_attempt_are_not_probed(self):
+        _waiting_row('outage', 40)
+        for errors in (1, 3):
+            failed = _attempt('outage', started_minutes_ago=30)
+            TransitionMessage.objects.filter(pk=failed.pk).update(
+                errors_count=errors,
+                last_error_dt=timezone.now() - timedelta(minutes=29))
+        crashed = _attempt('outage', started_minutes_ago=20)
+        with patch.object(
+            TransitionMessage, 'worker_holds_row', return_value=False,
+        ) as probe:
+            records = self._report()
+        probe.assert_called_once_with(crashed.pk)
+        reports = [r for r in records if "queue 'outage'" in r.getMessage()]
+        self.assertEqual([r.levelname for r in reports], ['ERROR'])
+
     def test_each_queue_gets_its_own_line(self):
         _waiting_row('first', 30)
         _waiting_row('first', 20)

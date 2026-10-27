@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import DEFAULT_DB_ALIAS, router, transaction
-from django.db.models import Count, Min, Q
+from django.db.models import Count, F, Min, Q
 from django.utils import timezone
 
 from django_logic import conf
@@ -63,7 +63,9 @@ def _queue_is_served(queue_name: str, now, window_minutes: int) -> bool:
 
     A long attempt starts nothing new but keeps its row lock, so the lock
     probe tells a busy worker from a missing one. A dead worker's lock dies
-    with its connection.
+    with its connection. Only a row with no error after its start can be in
+    an attempt, so rows that wait for a retry or spent every attempt are not
+    probed. An outage's failed rows therefore cost no probes.
     """
     recent = now - timedelta(minutes=window_minutes)
     rows = TransitionMessage.objects.filter(queue_name=queue_name)
@@ -73,10 +75,11 @@ def _queue_is_served(queue_name: str, now, window_minutes: int) -> bool:
         | Q(is_completed=False, started_at__gte=recent)
     ).exists():
         return True
-    started = rows.filter(
+    in_attempt = rows.filter(
+        Q(last_error_dt__isnull=True) | Q(last_error_dt__lt=F('started_at')),
         is_completed=False, started_at__isnull=False,
     ).values_list('pk', flat=True)
-    return any(TransitionMessage.worker_holds_row(pk) for pk in started)
+    return any(TransitionMessage.worker_holds_row(pk) for pk in in_attempt)
 
 
 def retry_pending() -> int:
