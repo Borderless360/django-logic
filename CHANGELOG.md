@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.4.2] — 2026-10-27
+
+### Fixed
+
+- The waiting-row report no longer calls a busy worker a missing one (#302).
+  `detect_stuck_transitions` writes one line per queue, not one line per row every minute.
+  It names the oldest waiting row and counts the rows behind it.
+  The line is a WARNING when a worker started a row from that queue inside the retry window, or holds one now.
+  It is an ERROR only when no worker does. Then no worker serves the queue, or work from other queues fills every slot of the workers that serve it.
+- `dl_transitions` says a waiting row waits its turn when a worker takes rows from its queue.
+
+### Tests
+
+- Cover one line per queue, a busy queue, a long attempt that holds its row lock, and an attempt no worker holds.
+
 ## [2.4.1] — 2026-10-15
 
 ### Fixed

@@ -445,8 +445,8 @@ python manage.py dl_transitions --send 1234
 
 `dl_transitions` lists every uncompleted background transition and says why
 each one is not moving: it has spent every attempt, it waits out the retry
-pause, a worker runs it now, or no worker serves its queue. `--queues` narrows
-the list.
+pause, a worker runs it now, it waits its turn behind older rows, or no worker
+serves its queue. `--queues` narrows the list.
 
 `--send <pk>` clears the retry wait on one row and wakes the workers, so the
 next claim takes it. The command runs no side-effects itself.
@@ -459,8 +459,12 @@ Nothing else needs a schedule.
 
 - `detect_stuck_transitions` finalizes a row that has spent every attempt: it
   writes `failed_state`, runs `failure_callbacks` and completes the row. It
-  also reports a row that waited past the retry window with no attempt, which
-  means no worker serves that row's queue.
+  also reports rows that waited past the retry window with no attempt, in one
+  line per queue. If a worker started a row from that queue inside the window,
+  or holds one now, the queue is behind, and the line is a WARNING. If not, no
+  worker has taken a row from the queue for the whole window, and the line is
+  an ERROR. Either no worker serves the queue, or work from other queues fills
+  every slot of the workers that do.
 - `cleanup_completed_transitions` deletes completed rows older than
   `TRANSITION_MESSAGE_CLEANUP_DAYS`. It keeps the newest failed row per
   instance and process, because that row is the only explanation for an
