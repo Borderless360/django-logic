@@ -75,6 +75,13 @@ class ListUncompletedTests(TestCase):
         self.assertIn("does a worker serve 'nobody_serves_this'", listing)
         self.assertIn('dl_worker --queues nobody_serves_this', listing)
 
+    def test_a_waiting_row_on_a_queue_a_worker_takes_rows_from_waits_its_turn(self):
+        self._row(queue='busy', created=timezone.now() - timedelta(hours=4))
+        self._row(queue='busy', started_at=timezone.now())
+        listing = self._listing()
+        self.assertIn("waiting its turn — a worker takes rows from 'busy'", listing)
+        self.assertNotIn('does a worker serve', listing)
+
     def test_a_started_row_is_not_reported_as_untouched(self):
         self._row(started_at=timezone.now())
         self.assertIn('an attempt has started it', self._listing())

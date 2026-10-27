@@ -16,7 +16,7 @@ from django.utils import timezone
 from django_logic import conf
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import notify_workers
-from django_logic.background.safety_nets import _claimable
+from django_logic.background.safety_nets import _claimable, _queue_is_served
 
 
 class Command(BaseCommand):
@@ -57,12 +57,21 @@ class Command(BaseCommand):
         now = timezone.now()
         max_errors = conf.max_errors()
         report_after = conf.retry_window_minutes()
+        served = {}
+
+        def queue_is_served(queue_name):
+            if queue_name not in served:
+                served[queue_name] = _queue_is_served(
+                    queue_name, now, report_after)
+            return served[queue_name]
+
         count = 0
         for row in rows.order_by('created'):
             count += 1
             age_minutes = int((now - row.created).total_seconds() // 60)
             why = self._why(
-                row, claimable, max_errors, report_after, age_minutes)
+                row, claimable, max_errors, report_after, age_minutes,
+                queue_is_served)
             self.stdout.write(
                 f'#{row.pk} {row.recorded_model_label}'
                 f'#{row.instance_id} {row.process_name}.{row.transition_name} '
@@ -72,7 +81,8 @@ class Command(BaseCommand):
         self.stdout.write(f'{count} uncompleted transitions.')
 
     @staticmethod
-    def _why(row, claimable, max_errors, report_after, age_minutes):
+    def _why(row, claimable, max_errors, report_after, age_minutes,
+             queue_is_served):
         """One line saying why this row is where it is."""
         if row.errors_count >= max_errors:
             return (
@@ -90,6 +100,11 @@ class Command(BaseCommand):
                 'or its worker died and the next claim takes it'
             )
         if age_minutes >= report_after:
+            if queue_is_served(row.queue_name):
+                return (
+                    f'claimable, and waiting its turn — a worker takes rows '
+                    f'from {row.queue_name!r}, and older rows go first'
+                )
             return (
                 f'claimable, and no worker has ever started it — does a '
                 f'worker serve {row.queue_name!r}? Start one: '

@@ -12,7 +12,8 @@ What each one owns:
   and past the retry wait after the last recorded error. Sync mode's
   "time passed" simulation.
 * :func:`detect_stuck_transitions` — finalize rows stuck at
-  ``MAX_ERRORS``, and report rows that no worker has ever picked up.
+  ``MAX_ERRORS``, and report, once per queue, rows that wait past the
+  retry window.
 * :func:`cleanup_completed_transitions` — delete old completed rows,
   keeping the newest terminal-failure row per instance and process.
 
@@ -25,7 +26,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import DEFAULT_DB_ALIAS, router, transaction
-from django.db.models import Q
+from django.db.models import Count, Min, Q
 from django.utils import timezone
 
 from django_logic import conf
@@ -56,6 +57,28 @@ def _claimable(queues: list[str] | None = None):
     return rows.order_by('created')
 
 
+def _queue_is_served(queue_name: str, now, window_minutes: int) -> bool:
+    """Whether a worker takes rows from this queue: it started one inside
+    the retry window, or it holds one right now.
+
+    A long attempt starts nothing new but keeps its row lock, so the lock
+    probe tells a busy worker from a missing one. A dead worker's lock dies
+    with its connection.
+    """
+    recent = now - timedelta(minutes=window_minutes)
+    rows = TransitionMessage.objects.filter(queue_name=queue_name)
+    # Two ranges of the (is_completed, started_at) index instead of a scan.
+    if rows.filter(
+        Q(is_completed=True, started_at__gte=recent)
+        | Q(is_completed=False, started_at__gte=recent)
+    ).exists():
+        return True
+    started = rows.filter(
+        is_completed=False, started_at__isnull=False,
+    ).values_list('pk', flat=True)
+    return any(TransitionMessage.worker_holds_row(pk) for pk in started)
+
+
 def retry_pending() -> int:
     """Run every claimable row inline. Returns how many ran cleanly.
 
@@ -76,35 +99,58 @@ def retry_pending() -> int:
 
 
 def detect_stuck_transitions() -> int:
-    """Finalize rows stuck at ``MAX_ERRORS``, and name the rows no worker
-    has ever picked up.
+    """Finalize rows stuck at ``MAX_ERRORS``, and report the queues whose
+    rows wait past the retry window with no attempt.
 
-    A row that sits unstarted past the retry window means no worker
-    serves its queue — the worker process is down, its ``--queues`` list
-    is missing that name, or the deployment never started one. The
-    library cannot fix that, but it can say it, which is the one thing
-    that was missing when five silent rows sat on a staging database.
+    It writes one line per queue, so a long backlog does not write one
+    line per row every minute. A queue a worker still takes rows from is
+    behind, which is a WARNING. A queue no worker takes rows from is an
+    ERROR. Then the worker process is down, its ``--queues`` list misses
+    that name, or no deployment started one. Or other work holds all its
+    slots.
 
     Returns the number of rows finalized.
     """
     now = timezone.now()
     report_after = conf.retry_window_minutes()
-    never_started = (
-        TransitionMessage.objects
-        .filter(
-            is_completed=False,
-            started_at__isnull=True,
-            created__lt=now - timedelta(minutes=report_after),
-        )
-        .values_list('pk', 'queue_name', 'created')
+    never_started = TransitionMessage.objects.filter(
+        is_completed=False,
+        started_at__isnull=True,
+        created__lt=now - timedelta(minutes=report_after),
     )
-    for pk, queue_name, created in never_started:
-        age_minutes = int((now - created).total_seconds() // 60)
+    waiting = (
+        never_started
+        .values('queue_name')
+        .annotate(rows=Count('pk'), oldest=Min('created'))
+        .order_by('queue_name')
+    )
+    for queue in waiting:
+        queue_name, rows = queue['queue_name'], queue['rows']
+        oldest_pk = (
+            never_started.filter(queue_name=queue_name)
+            .order_by('created', 'pk')
+            .values_list('pk', flat=True)
+            .first()
+        )
+        age_minutes = int((now - queue['oldest']).total_seconds() // 60)
+        if _queue_is_served(queue_name, now, report_after):
+            waited = f'{rows} rows have' if rows > 1 else '1 row has'
+            logger.warning(
+                f'detect_stuck_transitions: queue {queue_name!r} is behind. '
+                f'{waited} waited longer than {report_after} minutes; '
+                f'the oldest, TransitionMessage#{oldest_pk}, has waited '
+                f'{age_minutes} minutes. A worker takes rows from this queue, '
+                f'so they run in turn.'
+            )
+            continue
+        behind = f' {rows - 1} more rows wait behind it.' if rows > 1 else ''
         logger.error(
-            f'detect_stuck_transitions: TransitionMessage#{pk} has waited '
-            f'{age_minutes} minutes on queue {queue_name!r} and no worker '
-            f'has picked it up — does a worker serve that queue? Start one '
-            f'(dl_worker --queues {queue_name}); it takes the row at once.'
+            f'detect_stuck_transitions: TransitionMessage#{oldest_pk} has '
+            f'waited {age_minutes} minutes on queue {queue_name!r}, and no '
+            f'worker has picked up a row from that queue for {report_after} '
+            f'minutes.{behind} Does a worker serve that queue? Start one '
+            f'(dl_worker --queues {queue_name}); it takes the rows at once. '
+            f'If one runs, other work holds all its slots.'
         )
 
     max_errors = conf.max_errors()

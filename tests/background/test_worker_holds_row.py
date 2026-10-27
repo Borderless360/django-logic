@@ -7,11 +7,14 @@ always answers False, and the time-based classification stands — that
 degradation is pinned here too.
 """
 import threading
+from datetime import timedelta
 
 from django.db import connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 
 from django_logic.background.models import TransitionMessage
+from django_logic.background.safety_nets import detect_stuck_transitions
 from django_logic.testing import open_transition_message
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres
@@ -92,6 +95,23 @@ class HeldRowTests(TransactionTestCase):
         row = open_transition_message(widget, 'process', 'fulfil')
         self._hold(row.pk)
         self.assertTrue(TransitionMessage.worker_holds_row(row.pk))
+
+    def test_a_held_long_attempt_keeps_its_queue_served(self):
+        waiting = open_transition_message(
+            Widget.objects.create(status='fulfilling'), 'process', 'fulfil',
+            queue_name='slow',
+        )
+        TransitionMessage.objects.filter(pk=waiting.pk).update(
+            created=timezone.now() - timedelta(minutes=30))
+        attempt = open_transition_message(
+            Widget.objects.create(status='fulfilling'), 'process', 'fulfil',
+            queue_name='slow', started_minutes_ago=25,
+        )
+        self._hold(attempt.pk)
+        with self.assertLogs('django-logic', level='WARNING') as logs:
+            detect_stuck_transitions()
+        self.assertEqual(
+            [record.levelname for record in logs.records], ['WARNING'])
 
     def test_a_held_old_row_is_retrying_not_stranded(self):
         widget = Widget.objects.create(status='fulfilling')
