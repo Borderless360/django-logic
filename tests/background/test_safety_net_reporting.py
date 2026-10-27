@@ -34,7 +34,7 @@ def make_message(*, created, queue='reporting', status='fulfilling',
 class SafetyNetReportingTests(TestCase):
     def test_only_old_unstarted_rows_are_reported_without_changes(self):
         cutoff = _NOW - timedelta(minutes=16)
-        _, overdue = make_message(created=cutoff - timedelta(microseconds=1), queue='unserved')
+        make_message(created=cutoff - timedelta(microseconds=1), queue='unserved')
         make_message(created=cutoff)
         make_message(created=cutoff + timedelta(microseconds=1))
         make_message(created=cutoff - timedelta(minutes=1), started_at=cutoff)
@@ -48,10 +48,44 @@ class SafetyNetReportingTests(TestCase):
         self.assertEqual(len(captured.records), 1)
         self.assertEqual(captured.records[0].levelname, 'ERROR')
         report = captured.records[0].getMessage()
-        self.assertIn(f'TransitionMessage#{overdue.pk}', report)
+        self.assertIn('1 unstarted row has waited 16 minutes', report)
         self.assertIn("queue 'unserved'", report)
         self.assertIn('dl_worker --queues unserved', report)
         self.assertEqual(list(TransitionMessage.objects.order_by('pk').values()), before)
+
+    def test_backlogs_warn_once_per_queue_and_unserved_queues_error_once(self):
+        busy_oldest = _NOW - timedelta(minutes=32)
+        _, oldest_waiting = make_message(created=busy_oldest, queue='busy')
+        _, second_waiting = make_message(
+            created=_NOW - timedelta(minutes=20), queue='busy',
+        )
+        make_message(
+            created=_NOW - timedelta(minutes=10), queue='busy',
+            started_at=_NOW - timedelta(minutes=10), is_completed=True,
+        )
+        _, unserved_oldest = make_message(
+            created=_NOW - timedelta(minutes=25), queue='unserved',
+        )
+        make_message(created=_NOW - timedelta(minutes=17), queue='unserved')
+
+        with patch.object(safety_nets.timezone, 'now', return_value=_NOW), \
+                self.assertLogs('django-logic', level='WARNING') as captured:
+            self.assertEqual(safety_nets.detect_stuck_transitions(), 0)
+
+        self.assertEqual(len(captured.records), 2)
+        reports = {record.levelname: record.getMessage() for record in captured.records}
+        self.assertEqual(set(reports), {'WARNING', 'ERROR'})
+        self.assertIn("queue 'busy' is behind", reports['WARNING'])
+        self.assertNotIn("queue 'unserved'", reports['WARNING'])
+        self.assertIn('2 unstarted rows are waiting', reports['WARNING'])
+        self.assertIn('oldest has waited 32 minutes', reports['WARNING'])
+        self.assertNotIn(f'TransitionMessage#{oldest_waiting.pk}', reports['WARNING'])
+        self.assertNotIn(f'TransitionMessage#{second_waiting.pk}', reports['WARNING'])
+        self.assertIn('2 unstarted rows have waited 25 minutes', reports['ERROR'])
+        self.assertIn("queue 'unserved'", reports['ERROR'])
+        self.assertNotIn("queue 'busy'", reports['ERROR'])
+        self.assertIn('dl_worker --queues unserved', reports['ERROR'])
+        self.assertNotIn(f'TransitionMessage#{unserved_oldest.pk}', reports['ERROR'])
 
     def test_a_failed_finalizer_does_not_stop_other_rows_or_inflate_the_count(self):
         widgets = {}

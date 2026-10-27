@@ -237,11 +237,12 @@ nothing else reports the backlog. Alert on the process, not on the rows:
 - `python manage.py dl_transitions` during an incident: it lists the
   uncompleted rows and names the ones nothing is serving.
 
-`detect_stuck_transitions` already logs at ERROR when a row has waited
-past the retry window with no attempt started, naming the queue and the
-`dl_worker` line that would serve it. That log line is the one to page
-on. It only fires while some worker is alive to run it, which is why the
-process alert comes first.
+`detect_stuck_transitions` groups unstarted rows past the retry window by
+queue. It logs one line for each affected queue. A row with `started_at` after
+the oldest waiting row was created shows that a worker served the queue. That
+queue gets a WARNING with its waiting count and oldest age. Without a later
+start, it logs an ERROR with the worker command. The check runs only while a
+worker is alive, which is why the process alert comes first.
 
 ## Provider receipts that must survive a failed attempt
 

@@ -11,8 +11,8 @@ What each one owns:
   rule is the same one the pull claim uses: uncompleted, retries left,
   and past the retry wait after the last recorded error. Sync mode's
   "time passed" simulation.
-* :func:`detect_stuck_transitions` — finalize rows stuck at
-  ``MAX_ERRORS``, and report rows that no worker has ever picked up.
+* :func:`detect_stuck_transitions` — finalize rows at ``MAX_ERRORS`` and
+  report old unstarted rows by queue.
 * :func:`cleanup_completed_transitions` — delete old completed rows,
   keeping the newest terminal-failure row per instance and process.
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import DEFAULT_DB_ALIAS, router, transaction
-from django.db.models import Q
+from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
 from django_logic import conf
@@ -76,36 +76,65 @@ def retry_pending() -> int:
 
 
 def detect_stuck_transitions() -> int:
-    """Finalize rows stuck at ``MAX_ERRORS``, and name the rows no worker
-    has ever picked up.
+    """Finalize rows at ``MAX_ERRORS`` and report old unstarted rows by queue.
 
-    A row that sits unstarted past the retry window means no worker
-    serves its queue — the worker process is down, its ``--queues`` list
-    is missing that name, or the deployment never started one. The
-    library cannot fix that, but it can say it, which is the one thing
-    that was missing when five silent rows sat on a staging database.
+    A later start on the same queue shows that a worker served work after
+    the oldest unstarted row arrived. That queue gets a warning. A queue
+    without a later start gets an error with the command to start a worker.
 
     Returns the number of rows finalized.
     """
     now = timezone.now()
     report_after = conf.retry_window_minutes()
-    never_started = (
+    never_started = list(
         TransitionMessage.objects
         .filter(
             is_completed=False,
             started_at__isnull=True,
             created__lt=now - timedelta(minutes=report_after),
         )
-        .values_list('pk', 'queue_name', 'created')
+        .values('queue_name')
+        .annotate(waiting_count=Count('pk'), oldest_created=Min('created'))
+        .order_by('queue_name')
     )
-    for pk, queue_name, created in never_started:
-        age_minutes = int((now - created).total_seconds() // 60)
-        logger.error(
-            f'detect_stuck_transitions: TransitionMessage#{pk} has waited '
-            f'{age_minutes} minutes on queue {queue_name!r} and no worker '
-            f'has picked it up — does a worker serve that queue? Start one '
-            f'(dl_worker --queues {queue_name}); it takes the row at once.'
-        )
+    if never_started:
+        queue_names = [row['queue_name'] for row in never_started]
+        oldest_waiting = min(row['oldest_created'] for row in never_started)
+        # A completed row still shows that a worker served the queue after the
+        # oldest unstarted row arrived.
+        latest_started = {
+            row['queue_name']: row['latest_started']
+            for row in (
+                TransitionMessage.objects
+                .filter(queue_name__in=queue_names, started_at__gt=oldest_waiting)
+                .values('queue_name')
+                .annotate(latest_started=Max('started_at'))
+            )
+        }
+        for row in never_started:
+            queue_name = row['queue_name']
+            waiting_count = row['waiting_count']
+            oldest_created = row['oldest_created']
+            row_word = 'row' if waiting_count == 1 else 'rows'
+            is_are = 'is' if waiting_count == 1 else 'are'
+            has_have = 'has' if waiting_count == 1 else 'have'
+            count_phrase = f'{waiting_count} unstarted {row_word}'
+            age_minutes = int((now - oldest_created).total_seconds() // 60)
+
+            if latest_started.get(queue_name, oldest_created) > oldest_created:
+                logger.warning(
+                    f'detect_stuck_transitions: queue {queue_name!r} is behind: '
+                    f'{count_phrase} {is_are} waiting; the oldest has waited '
+                    f'{age_minutes} minutes.'
+                )
+                continue
+
+            logger.error(
+                f'detect_stuck_transitions: {count_phrase} {has_have} waited '
+                f'{age_minutes} minutes on queue {queue_name!r}, and no worker '
+                f'has picked them up. Start a worker with '
+                f'dl_worker --queues {queue_name}.'
+            )
 
     max_errors = conf.max_errors()
     stuck_ids = list(

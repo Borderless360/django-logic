@@ -178,6 +178,14 @@ tr_id Set State fulfilled
 tr_id Complete
 ```
 
+## Safety-net reports
+
+`detect_stuck_transitions` checks unstarted rows older than the retry window.
+It logs one line for each affected queue. A later `started_at` shows that a
+worker served the queue after the oldest row arrived, even if that row is now
+complete. That backlog gets a WARNING with the waiting count and oldest age.
+Without a later start, the queue gets an ERROR with a command to start a worker.
+
 ## Nested transitions
 
 A transition can be invoked from inside another transition's side-effects or
