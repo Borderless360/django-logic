@@ -462,7 +462,9 @@ Nothing else needs a schedule.
   also reports rows that waited past the retry window with no attempt, in one
   line per queue. If a worker started a row from that queue inside the window,
   or holds one now, the queue is behind, and the line is a WARNING. If not, no
-  worker serves the queue, and the line is an ERROR.
+  worker has taken a row from the queue for the whole window, and the line is
+  an ERROR. Either no worker serves the queue, or work from other queues fills
+  every slot of the workers that do.
 - `cleanup_completed_transitions` deletes completed rows older than
   `TRANSITION_MESSAGE_CLEANUP_DAYS`. It keeps the newest failed row per
   instance and process, because that row is the only explanation for an

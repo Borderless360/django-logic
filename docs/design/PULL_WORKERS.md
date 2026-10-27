@@ -244,8 +244,12 @@ now, the line is an ERROR. It names the oldest row, the count behind it
 and the `dl_worker` line that would serve the queue. That log line is the
 one to page on. When a worker still takes rows from the queue, the queue
 is behind, and the line is a WARNING: a backlog drains in turn, so it is
-no reason to page. The ERROR only fires while some worker is alive to run
-it, which is why the process alert comes first.
+no reason to page. A worker that serves several queues takes the oldest
+row across all of them. If older work from its other queues fills every
+slot for the whole window, a queue it serves still gets the ERROR, because
+nothing has run from that queue for that long. Give that queue its own
+worker or more slots. The ERROR only fires while some worker is alive to
+run it, which is why the process alert comes first.
 
 ## Provider receipts that must survive a failed attempt
 

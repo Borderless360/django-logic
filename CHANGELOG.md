@@ -8,7 +8,7 @@
   `detect_stuck_transitions` writes one line per queue, not one line per row every minute.
   It names the oldest waiting row and counts the rows behind it.
   The line is a WARNING when a worker started a row from that queue inside the retry window, or holds one now.
-  It is an ERROR only when no worker does: the worker is down, or its `--queues` list misses the queue.
+  It is an ERROR only when no worker does. Then no worker serves the queue, or work from other queues fills every slot of the workers that serve it.
 - `dl_transitions` says a waiting row waits its turn when a worker takes rows from its queue.
 
 ### Tests
