@@ -163,7 +163,7 @@ class Transition:
             # worked. Name it at declaration time instead.
             takes = sorted(_DECLARATION_KWARGS | {'lock'})
             if self.is_background:
-                takes += ['queue', 'timeout', 'no_retry_on', 'atomic']
+                takes += ['queue', 'timeout', 'no_retry_on', 'atomic', 'required_next', 'fairness_key']
             raise ImproperlyConfigured(
                 f"{type(self).__name__} {action_name!r} does not take "
                 f"{', '.join(sorted(unknown))}. It takes: {', '.join(takes)}."
@@ -285,6 +285,20 @@ class Transition:
         return valid
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
+        if not self.lock:
+            return self._change_state(state, **kwargs)
+        error = None
+        with state.protected():
+            try:
+                result = self._change_state(state, **kwargs)
+            except Exception as exception:
+                # Preserve the failed-state write before reporting the action's failure.
+                error = exception
+        if error is not None:
+            raise error.with_traceback(error.__traceback__)
+        return result
+
+    def _change_state(self, state: State, **kwargs) -> UUID | None:
         # Before the lock: a clash here must not become a leaked lock.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
         process_class = kwargs.get('process_class', '')

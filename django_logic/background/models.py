@@ -53,6 +53,13 @@ def db_safe_text(value: str) -> str:
 
 
 class TransitionMessage(TimeStampedModel):
+    request_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
+    request_fingerprint = models.CharField(max_length=64, blank=True, default='')
+    fairness_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    deferral_reason = models.TextField(blank=True, default='')
+    completion_kind = models.CharField(max_length=16, blank=True, default='')
+    required_next = models.CharField(max_length=100, blank=True, default='')
     is_completed = models.BooleanField(default=False)
     errors_count = models.PositiveIntegerField(default=0)
     last_error_dt = models.DateTimeField(blank=True, null=True)
@@ -127,6 +134,7 @@ class TransitionMessage(TimeStampedModel):
     class Meta:
         app_label = 'django_logic_background'
         indexes = [
+            models.Index(fields=['fairness_key', 'created'], condition=models.Q(is_completed=False), name='dl_bg_fair_ready_idx'),
             models.Index(
                 fields=['is_completed', 'created'],
                 name='dl_bg_incomplete_idx',
@@ -321,6 +329,7 @@ class TransitionMessage(TimeStampedModel):
                     cls.objects
                     .select_for_update(nowait=True)
                     .filter(pk=transition_message_id, is_completed=False)
+                    .filter(models.Q(eligible_at__isnull=True) | models.Q(eligible_at__lte=now))
                     .exists()
                 )
                 if not held:
@@ -336,7 +345,7 @@ class TransitionMessage(TimeStampedModel):
         return True
 
     def mark_as_completed(
-        self, measure_duration: bool = True, *, ended_in_failure: bool = False,
+        self, measure_duration: bool = True, *, ended_in_failure: bool = False, completion_kind=None,
     ) -> None:
         """Mark the row completed and (optionally) record ``duration_ms``.
 
@@ -353,7 +362,10 @@ class TransitionMessage(TimeStampedModel):
         now = timezone.now()
         self.is_completed = True
         self.completed_at = now
-        update_fields = ['is_completed', 'completed_at', 'modified']
+        self.eligible_at = None
+        self.deferral_reason = ''
+        self.completion_kind = completion_kind or ('failed' if ended_in_failure else 'succeeded')
+        update_fields = ['is_completed', 'completed_at', 'modified', 'completion_kind', 'eligible_at', 'deferral_reason']
         if ended_in_failure:
             self.ended_in_failure = True
             update_fields.append('ended_in_failure')
@@ -377,7 +389,7 @@ class TransitionMessage(TimeStampedModel):
         self.last_error_message = db_safe_text(note)
         self.last_error_dt = timezone.now()
         self.save(using=self._state.db, update_fields=['last_error_message', 'last_error_dt', 'modified'])
-        self.mark_as_completed(measure_duration=False)
+        self.mark_as_completed(measure_duration=False, completion_kind='superseded')
 
     def record_error(self, exception: BaseException) -> None:
         # db_safe_text, not a bare slice: the accounting write must never be

@@ -149,6 +149,11 @@ class Process:
         return transition_method
 
     def _get_transition_method(self, action_name: str, **kwargs):
+        from django_logic.background.operations import prepare_submission
+        submission, existing = prepare_submission(self, action_name, kwargs)
+        if existing is not None:
+            trace = existing.kwargs.get('tr_id')
+            return uuid.UUID(trace) if trace else None
         parent_ctx = _transition_context.get()
         if parent_ctx:
             kwargs.setdefault('root_id', parent_ctx['root_id'])
@@ -159,6 +164,8 @@ class Process:
             action_name, user
         )
 
+        if submission is not None and not transition.is_background:
+            raise ImproperlyConfigured('operation_options requires a BackgroundTransition.')
         tr_id = uuid.uuid4()
         target_note = (
             f"to {transition.target}" if transition.target is not None
@@ -196,6 +203,8 @@ class Process:
             {'root_id': kwargs['root_id'], 'tr_id': kwargs['tr_id']}
         )
         try:
+            if submission is not None:
+                return transition.change_state(self.state, _submission=submission, **kwargs)
             return transition.change_state(self.state, **kwargs)
         except TransitionNotAllowed as error:
             self._set_refusal_message(error, action_name, owning_process, transition)

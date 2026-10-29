@@ -20,7 +20,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, transaction, router, DEFAULT_DB_ALIAS
 
 from django_logic import conf
 from django_logic.background.exceptions import AlreadyInProgress
@@ -95,6 +95,8 @@ class BackgroundTransition(Transition):
         timeout: int | None = None,
         no_retry_on: tuple = (),
         atomic: bool = True,
+        required_next: str | None = None,
+        fairness_key=None,
         **kwargs,
     ):
         if queue is not None and (not queue or not isinstance(queue, str)):
@@ -124,6 +126,14 @@ class BackgroundTransition(Transition):
             raise ImproperlyConfigured(
                 f"BackgroundTransition '{action_name}': atomic must be True or False."
             )
+        if required_next is not None and (not isinstance(required_next, str) or not required_next or len(required_next) > 100):
+            raise ImproperlyConfigured('required_next must name a background transition.')
+        if required_next and kwargs.get('next_transition'):
+            raise ImproperlyConfigured('Declare required_next or next_transition, not both.')
+        if fairness_key is not None and not isinstance(fairness_key, str) and not callable(fairness_key):
+            raise ImproperlyConfigured('fairness_key must be a string or callable.')
+        self.required_next = required_next or ''
+        self.fairness_key = fairness_key
         self.atomic = atomic
         self.queue = queue
         self.timeout = timeout
@@ -141,7 +151,7 @@ class BackgroundTransition(Transition):
         """
         return self.queue or conf.default_queue()
 
-    def change_state(self, state: State, **kwargs) -> UUID | None:
+    def change_state(self, state: State, _submission=None, **kwargs) -> UUID | None:
         # Before the lock, and before the kwargs are serialized into a row
         # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
@@ -150,6 +160,17 @@ class BackgroundTransition(Transition):
             validate_non_atomic(state.instance, require_autocommit=conf.sync_mode())
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
+        if self.required_next:
+            job_database = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+            if (state.instance._state.db or DEFAULT_DB_ALIAS) != job_database:
+                raise ImproperlyConfigured('required_next requires the business record and job on the same database.')
+            from django.utils.module_loading import import_string
+            from django_logic.process import _iter_process_tree
+            process_type = import_string(process_class) if process_class else type(getattr(state.instance, state.process_name))
+            following = [item for cls in _iter_process_tree(process_type)
+                         for item in cls.transitions if item.action_name == self.required_next]
+            if not following or any(not item.is_background for item in following):
+                raise ImproperlyConfigured('required_next must name a declared BackgroundTransition on this process.')
         queue_name = self.get_queue_name()
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.START.value} '
@@ -172,55 +193,59 @@ class BackgroundTransition(Transition):
         # a caller's surrounding transaction rolled back (a cache write
         # does not roll back with the database), and a DB row needs no TTL
         # refresh across long retries.
-        if not state.lock():
-            # Logged before the raise, at INFO, with the instance key — a
-            # frozen instance must not read as "the transition starts and
-            # the worker drops it".
+        with state.protected():
+            if not state.lock():
+                # Logged before the raise, at INFO, with the instance key — a
+                # frozen instance must not read as "the transition starts and
+                # the worker drops it".
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
+                    f'failed {state.instance_key} — state is locked'
+                )
+                raise TransitionNotAllowed("State is locked", reason=RefusalReason.LOCKED)
             transition_logger.info(
                 f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-                f'failed {state.instance_key} — state is locked'
-            )
-            raise TransitionNotAllowed("State is locked", reason=RefusalReason.LOCKED)
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-            f'{state.instance_key}'
-        )
-        try:
-            # Same under-the-lock revalidation as the synchronous path:
-            # the source check ran before the lock was acquired.
-            self._ensure_db_state_in_sources(state)
-            try:
-                transition_message = self._enqueue_atomic(
-                    state, kwargs, queue_name)
-            except AlreadyInProgress:
-                # Nothing is retrying a stranded row, so "try again shortly"
-                # would be wrong forever. Queried here, after
-                # _enqueue_atomic's rolled-back atomic, so the connection is
-                # healthy; still under the cache lock. A row that completed
-                # in the window keeps AlreadyInProgress — it just finished,
-                # so retrying is exactly right.
-                if TransitionMessage.retry_status(
-                    state.instance, state.process_name,
-                ) == TransitionMessage.STRANDED:
-                    raise TransitionNotAllowed(
-                        f"BackgroundTransition '{self.action_name}' is not "
-                        f"allowed: an uncompleted TransitionMessage for "
-                        f"{state.instance_key} is stranded — nothing is "
-                        f"retrying it. Likely causes: no worker serves its "
-                        f"queue, or a worker outage longer than the retry "
-                        f"window. Start a worker for that queue "
-                        f"(dl_worker --queues ...) — it takes the row at "
-                        f"once — or complete the row.",
-                        reason=RefusalReason.BACKGROUND_STRANDED,
-                    )
-                raise
-        finally:
-            state.unlock()
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
                 f'{state.instance_key}'
             )
+            try:
+                # Same under-the-lock revalidation as the synchronous path:
+                # the source check ran before the lock was acquired.
+                self._ensure_db_state_in_sources(state)
+                try:
+                    transition_message = self._enqueue_atomic(
+                        state, kwargs, queue_name, submission=_submission)
+                except AlreadyInProgress:
+                    # Nothing is retrying a stranded row, so "try again shortly"
+                    # would be wrong forever. Queried here, after
+                    # _enqueue_atomic's rolled-back atomic, so the connection is
+                    # healthy; still under the cache lock. A row that completed
+                    # in the window keeps AlreadyInProgress — it just finished,
+                    # so retrying is exactly right.
+                    if TransitionMessage.retry_status(
+                        state.instance, state.process_name,
+                    ) == TransitionMessage.STRANDED:
+                        raise TransitionNotAllowed(
+                            f"BackgroundTransition '{self.action_name}' is not "
+                            f"allowed: an uncompleted TransitionMessage for "
+                            f"{state.instance_key} is stranded — nothing is "
+                            f"retrying it. Likely causes: no worker serves its "
+                            f"queue, or a worker outage longer than the retry "
+                            f"window. Start a worker for that queue "
+                            f"(dl_worker --queues ...) — it takes the row at "
+                            f"once — or complete the row.",
+                            reason=RefusalReason.BACKGROUND_STRANDED,
+                        )
+                    raise
+            finally:
+                state.unlock()
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
+                    f'{state.instance_key}'
+                )
 
+        if _submission is not None and not _submission.created:
+            trace = transition_message.kwargs.get('tr_id')
+            return UUID(trace) if trace else None
         if conf.sync_mode():
             # Inline, bypassing transaction.on_commit, so Django's
             # TestCase (whose wrapping transaction never commits) still
@@ -237,7 +262,7 @@ class BackgroundTransition(Transition):
         return kwargs.get('tr_id')
 
     def _enqueue_atomic(
-        self, state: State, kwargs: dict, queue_name: str
+        self, state: State, kwargs: dict, queue_name: str, *, submission=None, using=None, request_key=None, fairness_key=None
     ) -> TransitionMessage:
         """Atomic: set in_progress_state + create TransitionMessage row.
 
@@ -259,7 +284,34 @@ class BackgroundTransition(Transition):
                 f"on the TransitionMessage row."
             ) from e
 
-        with transaction.atomic():
+        state_using = using or state.instance._state.db
+        using = using or router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+        rows = TransitionMessage.objects if using == DEFAULT_DB_ALIAS else TransitionMessage.objects.using(using)
+        from django_logic.background.operations import record_submission, validate_key, verify_internal_request
+        from django_logic.background.fairness import ensure_group
+        if submission is not None:
+            request_key = submission.request_key
+            if submission.fairness_key is not None:
+                fairness_key = submission.fairness_key
+        if fairness_key is None:
+            fairness_key = self.fairness_key(state.instance, **kwargs) if callable(self.fairness_key) else self.fairness_key
+        fairness_key = validate_key(fairness_key or '', 'fairness_key', allow_empty=True)
+        with transaction.atomic(using=using):
+            if request_key is not None:
+                existing = TransitionMessage.objects.using(using).filter(request_key=request_key).first()
+                if existing is not None:
+                    if submission is None:
+                        verify_internal_request(existing, state, self.action_name, serialized,
+                                                kwargs.get('owning_process_class', ''))
+                    record_submission(submission, existing, created=False)
+                    return existing
+            # Do not wait on a job while holding its business row.
+            if TransitionMessage.objects.using(using).filter(
+                **TransitionMessage.instance_key(state.instance, state.process_name), is_completed=False,
+            ).exists():
+                raise AlreadyInProgress(f"Another background transition is already in progress for process '{state.process_name}'.",
+                                        reason=RefusalReason.BACKGROUND_IN_FLIGHT)
+            ensure_group(fairness_key, using=using)
             # Create the TransitionMessage FIRST. It carries the partial
             # unique constraint and has no other unique/FK constraints, so
             # an IntegrityError from this create is unambiguously the
@@ -268,33 +320,46 @@ class BackgroundTransition(Transition):
             # column (CHECK, NOT NULL, FK, trigger) surface as the
             # misleading "another transition is already in progress".
             try:
-                transition_message = TransitionMessage.objects.create(
-                    # The key columns name the concrete model; the
-                    # recording class goes on proxy_model_label so the
-                    # worker restores that class.
-                    **TransitionMessage.instance_key(
-                        state.instance, state.process_name),
-                    proxy_model_label=TransitionMessage.proxy_label_for(
-                        state.instance),
-                    # Recorded so the worker can reconstruct the process
-                    # from the stored process_class even when the model
-                    # property was renamed or rebound in between.
-                    field_name=state.field_name,
-                    transition_name=self.action_name,
-                    # The (possibly nested) process class that declared
-                    # this transition, resolved by
-                    # Process._get_transition_method. Lets the worker pick
-                    # the exact transition when an action_name is shared
-                    # across nested processes that use conditions to
-                    # choose. Empty when invoked outside that path (e.g. a
-                    # directly-constructed transition) — the worker then
-                    # falls back to first-match by transition_name.
-                    owning_process_class=kwargs.get('owning_process_class', ''),
-                    queue_name=queue_name,
-                    timeout_seconds=self.timeout,
-                    kwargs=serialized,
-                )
+                with transaction.atomic(using=using):
+                    transition_message = rows.create(
+                        # The key columns name the concrete model; the
+                        # recording class goes on proxy_model_label so the
+                        # worker restores that class.
+                        **TransitionMessage.instance_key(
+                            state.instance, state.process_name),
+                        proxy_model_label=TransitionMessage.proxy_label_for(
+                            state.instance),
+                        # Recorded so the worker can reconstruct the process
+                        # from the stored process_class even when the model
+                        # property was renamed or rebound in between.
+                        field_name=state.field_name,
+                        transition_name=self.action_name,
+                        # The (possibly nested) process class that declared
+                        # this transition, resolved by
+                        # Process._get_transition_method. Lets the worker pick
+                        # the exact transition when an action_name is shared
+                        # across nested processes that use conditions to
+                        # choose. Empty when invoked outside that path (e.g. a
+                        # directly-constructed transition) — the worker then
+                        # falls back to first-match by transition_name.
+                        owning_process_class=kwargs.get('owning_process_class', ''),
+                        request_key=request_key,
+                        request_fingerprint=submission.fingerprint if submission is not None else '',
+                        fairness_key=fairness_key,
+                        required_next=self.required_next,
+                        queue_name=queue_name,
+                        timeout_seconds=self.timeout,
+                        kwargs=serialized,
+                    )
             except IntegrityError as exc:
+                if request_key is not None:
+                    existing = TransitionMessage.objects.using(using).filter(request_key=request_key).first()
+                    if existing is not None:
+                        if submission is None:
+                            verify_internal_request(existing, state, self.action_name, serialized,
+                                                    kwargs.get('owning_process_class', ''))
+                        record_submission(submission, existing, created=False)
+                        return existing
                 raise AlreadyInProgress(
                     f"{state.instance_key}: another background transition "
                     f"is already in progress for this instance and process "
@@ -329,13 +394,14 @@ class BackgroundTransition(Transition):
                 # A constraint violation here propagates as a raw
                 # IntegrityError (not AlreadyInProgress) — it is the user's
                 # own model constraint, not our concurrency guard.
-                state.set_state(self.in_progress_state)
+                state.set_state(self.in_progress_state, using=state_using)
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} '
                     f'{TransitionEventType.SET_STATE.value} '
                     f'{self.in_progress_state}'
                 )
 
+        record_submission(submission, transition_message, created=True)
         transition_logger.info(
             f'{kwargs.get("tr_id")} TransitionMessage#{transition_message.pk} '
             f'created (queue={queue_name})'

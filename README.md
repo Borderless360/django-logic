@@ -1,3 +1,7 @@
+> **3.0.0rc1:** Optional request identity, deferred eligibility, required background follow-ups,
+> and fair group selection are described in [the operation contract](docs/operation-contract.md).
+> PostgreSQL state protection now lasts through outer commit. This requires a coordinated upgrade.
+
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
 [![CI](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml/badge.svg)](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml)

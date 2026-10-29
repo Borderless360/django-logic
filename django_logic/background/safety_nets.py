@@ -52,9 +52,10 @@ def _claimable(queues: list[str] | None = None):
     ).filter(
         Q(last_error_dt__isnull=True) | Q(last_error_dt__lt=retry_cutoff)
     )
+    rows = rows.filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
     if queues is not None:
         rows = rows.filter(queue_name__in=queues)
-    return rows.order_by('created')
+    return rows.order_by('created', 'pk')
 
 
 def _queue_is_served(queue_name: str, now, window_minutes: int) -> bool:
@@ -120,7 +121,7 @@ def detect_stuck_transitions() -> int:
         is_completed=False,
         started_at__isnull=True,
         created__lt=now - timedelta(minutes=report_after),
-    )
+    ).filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=now))
     waiting = (
         never_started
         .values('queue_name')
@@ -211,7 +212,7 @@ def cleanup_completed_transitions() -> int:
         .values('pk')[:1]
     )
     eligible = (
-        rows.filter(is_completed=True, modified__lt=cutoff)
+        rows.filter(is_completed=True, modified__lt=cutoff, request_key__isnull=True)
         .exclude(failed & Q(pk=Subquery(newest_failed)))
     )
     deleted = 0
