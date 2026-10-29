@@ -1,4 +1,4 @@
-> **3.0.0rc1:** Optional request identity, deferred eligibility, required background follow-ups,
+> **3.0.0:** Optional request identity, deferred eligibility, required background follow-ups,
 > and fair group selection are described in [the operation contract](docs/operation-contract.md).
 > PostgreSQL state protection now lasts through outer commit. This requires a coordinated upgrade.
 

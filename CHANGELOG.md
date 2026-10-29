@@ -1,4 +1,8 @@
-## 3.0.0rc1
+# Changelog
+
+## [Unreleased]
+
+## [3.0.0] — 2026-10-29
 
 - Add optional request keys with conflicting-input rejection and retained duplicate protection.
 - Save normal waiting separately from failed attempts with `Defer` and `eligible_at`.
@@ -8,8 +12,6 @@
 - Add nonblocking pending cancellation and explicit completion outcomes.
 - Preserve the existing one-unfinished-job rule and best-effort callback behavior.
 - Require a coordinated producer/worker upgrade; see `docs/operation-contract.md` for migration and subclass compatibility.
-
-# Changelog
 
 ## [2.4.2] — 2026-10-27
 
