@@ -33,6 +33,7 @@ class State:
                     raise TransitionTemporarilyUnavailable(
                         'Another transaction is changing this record. Try again shortly.',
                         reason=RefusalReason.LOCKED,
+                        user_message='Another transaction is changing this record. Try again shortly.',
                     ) from error
                 raise
             yield
