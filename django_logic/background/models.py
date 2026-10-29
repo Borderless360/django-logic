@@ -53,13 +53,15 @@ def db_safe_text(value: str) -> str:
 
 
 class TransitionMessage(TimeStampedModel):
+    # The database defaults let a producer on an earlier version keep
+    # inserting rows during a rolling upgrade.
     request_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
-    request_fingerprint = models.CharField(max_length=64, blank=True, default='')
-    fairness_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    request_fingerprint = models.CharField(max_length=64, blank=True, default='', db_default='')
+    fairness_key = models.CharField(max_length=255, blank=True, default='', db_default='', db_index=True)
     eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    deferral_reason = models.TextField(blank=True, default='')
-    completion_kind = models.CharField(max_length=16, blank=True, default='')
-    required_next = models.CharField(max_length=100, blank=True, default='')
+    deferral_reason = models.TextField(blank=True, default='', db_default='')
+    completion_kind = models.CharField(max_length=16, blank=True, default='', db_default='')
+    required_next = models.CharField(max_length=100, blank=True, default='', db_default='')
     is_completed = models.BooleanField(default=False)
     errors_count = models.PositiveIntegerField(default=0)
     last_error_dt = models.DateTimeField(blank=True, null=True)

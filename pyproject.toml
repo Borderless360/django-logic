@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "3.0.0"
+version = "3.0.1"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -20,7 +20,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Intended Audience :: Developers",
     "Framework :: Django",
-    "Framework :: Django :: 4.2",
     "Framework :: Django :: 5.1",
     "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.0",
@@ -35,9 +34,10 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
     # The floor matches the tested matrix in the classifiers and CI. Version
-    # 0.5.0 dropped 4.0, 4.1 and 5.0, so this excludes 5.0. There is no upper
-    # bound: the django-main CI job warns about an unreleased Django instead.
-    "django>=4.2,!=5.0.*",
+    # 3.0.1 dropped 4.2, which reached end of life in April 2026, because the
+    # job table's database defaults need Django's db_default. There is no
+    # upper bound: the django-main CI job warns about an unreleased Django instead.
+    "django>=5.1",
     "django-model-utils>=4.5.1",
 ]
 

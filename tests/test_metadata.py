@@ -137,17 +137,17 @@ class MetadataDriftTests(unittest.TestCase):
             'django dependency floor (%s) is below the smallest claimed '
             'classifier (%s): pip could install a Django version the project '
             'neither tests nor claims (%r)' % (floor, min_classifier, dep))
-        # The concrete, current contract: floor at 4.2 (4.0/4.1/5.0 support
-        # was dropped in 0.5.0 — see CHANGELOG).
+        # The concrete, current contract: floor at 5.1 (4.2 support was
+        # dropped in 3.0.1 for db_default — see CHANGELOG).
         self.assertIn(
-            '>=4.2', dep.replace(' ', ''),
-            'django dependency (%r) must exclude versions below 4.2' % dep)
+            '>=5.1', dep.replace(' ', ''),
+            'django dependency (%r) must exclude versions below 5.1' % dep)
 
     # -- 4. README agrees and carries no stale install instructions ----------
 
     def test_readme_states_the_same_django_floor(self):
         self.assertIn(
-            'Django 4.2', self.readme_text,
-            'README.md no longer states the "Django 4.2" support floor — '
+            'Django 5.1', self.readme_text,
+            'README.md no longer states the "Django 5.1" support floor — '
             'keep it in sync with pyproject.toml and CI (#147)')
 
