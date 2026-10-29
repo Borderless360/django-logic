@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Timer
 from unittest.mock import patch
 
+from importlib import import_module
+
 from django.db import IntegrityError, connection, connections, transaction
 from django.test import TestCase, TransactionTestCase
 
@@ -125,3 +127,24 @@ class EarlierProducerInsertTests(TestCase):
              copy.deferral_reason, copy.completion_kind, copy.required_next),
             (None, '', '', None, '', '', ''),
         )
+
+
+@requires_postgres
+class RestoreDatabaseDefaultsTests(TransactionTestCase):
+    def test_migration_0013_restores_the_defaults_dropped_by_the_published_0011(self):
+        from django.apps import apps
+        from django_logic.migrations import __name__ as package
+        restore = import_module(f'{package}.0013_column_defaults').restore_database_defaults
+
+        table = connection.ops.quote_name(TransitionMessage._meta.db_table)
+        with connection.cursor() as cursor:
+            cursor.execute(f'ALTER TABLE {table} ALTER COLUMN "fairness_key" DROP DEFAULT')
+        with connection.schema_editor() as schema_editor:
+            restore(apps, schema_editor)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name = %s AND column_name = 'fairness_key'",
+                [TransitionMessage._meta.db_table],
+            )
+            self.assertEqual(cursor.fetchone()[0], "''::character varying")

@@ -15,6 +15,7 @@
 - A background job refused by a held row records an error and retries after the normal pause.
   3.0.0 deferred it by one second without counting, so a job behind an abandoned transaction retried quietly forever, and a targetless job repeated its side effects on every retry.
 - The new job columns carry database defaults (`db_default`). Producers on an earlier version keep inserting rows during a rolling upgrade.
+  Migration 0011 keeps the defaults when it adds the columns; migration 0013 restores them on a database that applied the 3.0.0 copy of 0011.
   Django 4.2 support is dropped; it reached end of life in April 2026.
 
 ## [3.0.0] — 2026-10-29
