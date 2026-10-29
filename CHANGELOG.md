@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-10-29
+
+### Fixed
+
+- A synchronous transition writes its failed state again after a database error in a side effect.
+  3.0.0 ran the whole transition inside the row-lock transaction, so the error aborted that transaction and the failed-state write and the failure callbacks failed with `TransactionManagementError`.
+  Side effects now run in a savepoint inside that transaction. A database error discards their writes as one unit; any other error keeps the writes made so far, as before.
+- The business-row lock waits up to two seconds (`django_logic.state.ROW_LOCK_WAIT_SECONDS`; zero refuses at once) instead of refusing at once.
+  A web request or a job finalization that holds the row for milliseconds no longer refuses the caller.
+  A refusal logs a warning that names the record.
+- A background job refused by a held row records an error and retries after the normal pause.
+  3.0.0 deferred it by one second without counting, so a job behind an abandoned transaction retried quietly forever, and a targetless job repeated its side effects on every retry.
+- The new job columns carry database defaults (`db_default`). Producers on an earlier version keep inserting rows during a rolling upgrade.
+  Django 4.2 support is dropped; it reached end of life in April 2026.
+
 ## [3.0.0] — 2026-10-29
 
 - Add optional request keys with conflicting-input rejection and retained duplicate protection.
