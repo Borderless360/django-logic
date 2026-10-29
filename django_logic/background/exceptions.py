@@ -35,3 +35,20 @@ class AlreadyInProgress(TransitionTemporarilyUnavailable):
         clear it inside the side-effect, and dispatch again from a
         success callback when it is still set.
     """
+
+
+class RequestConflict(ValueError):
+    """A retained request key was reused with different inputs."""
+
+
+class Defer(Exception):
+    """Wait until a specified time without recording a failed attempt."""
+
+    def __init__(self, *, until, reason=''):
+        from datetime import datetime
+        from django.utils import timezone
+        if not isinstance(until, datetime) or timezone.is_naive(until):
+            raise ValueError('Defer.until must be a timezone-aware datetime.')
+        self.until = until
+        self.reason = str(reason)
+        super().__init__(self.reason)

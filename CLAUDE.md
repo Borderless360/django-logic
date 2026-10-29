@@ -183,12 +183,12 @@ Its corollaries, each pinned by a shipped mistake:
   forever when a worker is hard-killed. That design shipped once, grew a
   sweeper whose defects dominated four review passes, and was cut in
   0.12.0. Do not rebuild it.
-- **State changes use the cache lock, and refusal is immediate.** Do not
-  replace it with a saved busy flag or a blocking model-row lock. Workers
-  separately lock their job row using a non-blocking database claim. That
-  transaction works with PgBouncer transaction pooling, but holds a database
-  connection until the job finishes. Allow for that connection and set the
-  database idle-transaction timeout above the job timeout.
+- **PostgreSQL protects state through the actual transaction commit.**
+  State changes take a non-blocking business-row lock. The cache gate remains
+  for compatibility. Workers separately lock their job row. Finalization takes
+  the job lock before the business row. Enqueue must not wait for an unfinished
+  job while holding its business row. Allow for a separate connection when
+  provider receipts use `atomic=False`. See `docs/operation-contract.md`.
 - **The row names its transition.** Recovery re-runs work from
   `TransitionMessage` rows, never from broker messages, so the row records
   `transition_name` and `owning_process_class`. The row is also the queue:

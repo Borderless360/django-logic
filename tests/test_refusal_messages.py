@@ -2,11 +2,12 @@
 import inspect
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import Mock
 
 from django.core.cache import cache
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.db import connections, transaction
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from django_logic import Process, Transition, commands, conf
@@ -16,7 +17,9 @@ from django_logic.background.models import TransitionMessage
 from django_logic.commands import StrictPermissions
 from django_logic.exceptions import RefusalReason, TransitionNotAllowed, TransitionTemporarilyUnavailable
 from tests import dl_settings
+from tests.background.models import Widget
 from tests.models import Invoice
+from tests.stability.base import requires_postgres
 
 
 def deny(instance, **kwargs):
@@ -331,6 +334,47 @@ class RefusalMessageTests(TestCase):
         self.assertIs(type(error), TransitionNotAllowed)
         self.assertEqual(error.user_message,
                          "Action 'go' is not allowed: a background transition for this record is stranded. Please contact support.")
+
+
+@requires_postgres
+class DatabaseLockRefusalMessageTests(TransactionTestCase):
+    def test_bound_actions_keep_retry_guidance_while_another_transaction_changes_the_record(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        widget = Widget.objects.create()
+        locked, release = Event(), Event()
+
+        def hold_business_row():
+            try:
+                with transaction.atomic():
+                    Widget.objects.select_for_update().get(pk=widget.pk)
+                    locked.set()
+                    if not release.wait(10):
+                        raise AssertionError('The caller did not release the database lock.')
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            holder = executor.submit(hold_business_row)
+            try:
+                self.assertTrue(locked.wait(5))
+                for action in (widget.process.cancel, widget.process.fulfil):
+                    with self.subTest(action=action.__name__):
+                        with self.assertRaises(TransitionTemporarilyUnavailable) as caught:
+                            action()
+                        self.assertEqual(caught.exception.reason, RefusalReason.LOCKED)
+                        self.assertEqual(caught.exception.user_message,
+                                         'Another transaction is changing this record. Try again shortly.')
+                self.assertFalse(TransitionMessage.objects.exists())
+                widget.refresh_from_db()
+                self.assertEqual((widget.status, widget.se_log), ('draft', ''))
+            finally:
+                release.set()
+                holder.result(timeout=10)
+
+        widget.process.cancel()
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'cancelled')
 
 
 class MessageCallableTests(SimpleTestCase):

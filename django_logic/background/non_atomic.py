@@ -15,6 +15,28 @@ from django_logic.logger import TransitionEventType, transition_logger
 from django_logic.process import _transition_context
 
 
+class JobOwnershipLost(RuntimeError):
+    """The database transaction protecting this job no longer exists."""
+
+
+def _job_transaction_id(connection):
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT txid_current()')
+        return cursor.fetchone()[0]
+
+
+def _check_job_transaction(connection, raw_connection, transaction_id):
+    # A new connection or transaction can answer SELECT 1 successfully but
+    # does not retain the original row lock. Never continue provider work
+    # or record completion on the strength of that successful query alone.
+    if (connection.connection is not raw_connection
+            or connection.closed_in_transaction or connection.needs_rollback
+            or not connection.in_atomic_block or connection.get_autocommit()):
+        raise JobOwnershipLost('The job database transaction was lost; stop this attempt.')
+    if _job_transaction_id(connection) != transaction_id or connection.connection is not raw_connection:
+        raise JobOwnershipLost('The job database transaction changed; stop this attempt.')
+
+
 def validate_non_atomic(instance, *, require_autocommit):
     """Refuse database arrangements that cannot preserve independent writes."""
     model = type(instance)
@@ -71,6 +93,9 @@ def run_non_atomic(transition_message_id):
         )
     with _job_connection() as alias, transaction.atomic(using=alias):
         transition_message = _lock_uncompleted_row(transition_message_id, using=alias)
+        job_connection = connections[alias]
+        raw_job_connection = job_connection.connection
+        job_transaction_id = _job_transaction_id(job_connection)
         kwargs, decode_error = _decode_kwargs(transition_message)
         restored, restore_error = _restore_for_attempt(transition_message)
         if restore_error is not None:
@@ -100,8 +125,7 @@ def run_non_atomic(transition_message_id):
                     for command in transition.side_effects.commands:
                         # Refuse another operation if this connection lost its job lock.
                         # An external request already in progress still needs a saved receipt.
-                        with connections[alias].cursor() as cursor:
-                            cursor.execute('SELECT 1')
+                        _check_job_transaction(job_connection, raw_job_connection, job_transaction_id)
                         transition_logger.info(
                             f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                             f'{getattr(command, "__name__", repr(command))}'
@@ -112,30 +136,41 @@ def run_non_atomic(transition_message_id):
 
             # The state guard and final writes use the connection that still holds the job.
             # Provider writes used the normal connection and have already committed.
+            _check_job_transaction(job_connection, raw_job_connection, job_transaction_id)
             instance._state.db = alias
-            superseded = _superseded_outcome(
-                transition_message, transition, state, kwargs, after_side_effects=True,
-            )
-            if superseded is not None:
-                return superseded
-            if error is not None:
-                return _handle_failure(
-                    transition_message, transition, state, kwargs, error, using=alias,
-                )
-
-            def complete():
-                if transition.target is not None:
-                    state.set_state(transition.target, using=alias)
-                    transition_logger.info(
-                        f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                        f'{transition.target}'
-                    )
-                return _handle_success(transition_message, transition, state, kwargs)
-
             try:
-                return _run_in_savepoint(alias, complete, require_commit=True)
+                with state.protected():
+                    superseded = _superseded_outcome(
+                        transition_message, transition, state, kwargs, after_side_effects=True,
+                    )
+                    if superseded is not None:
+                        return superseded
+                    if error is not None:
+                        return _handle_failure(
+                            transition_message, transition, state, kwargs, error, using=alias,
+                        )
+
+                    def complete():
+                        if transition.target is not None:
+                            state.set_state(transition.target, using=alias)
+                            transition_logger.info(
+                                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                                f'{transition.target}'
+                            )
+                        return _handle_success(transition_message, transition, state, kwargs)
+
+                    try:
+                        return _run_in_savepoint(alias, complete, require_commit=True)
+                    except Exception as exception:
+                        transition_message.refresh_from_db(using=alias)
+                        instance.refresh_from_db(using=alias, fields=[state.field_name])
+                        return _handle_failure(
+                            transition_message, transition, state, kwargs, exception, using=alias,
+                        )
             except Exception as exception:
-                instance.refresh_from_db(using=alias, fields=[state.field_name])
+                from django_logic.exceptions import TransitionTemporarilyUnavailable
+                if not isinstance(exception, TransitionTemporarilyUnavailable):
+                    raise
                 return _handle_failure(
                     transition_message, transition, state, kwargs, exception, using=alias,
                 )

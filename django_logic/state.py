@@ -1,8 +1,9 @@
+from contextlib import contextmanager
 from hashlib import blake2b
 from uuid import uuid4
 
 from django.core.cache import cache
-from django.db import DEFAULT_DB_ALIAS
+from django.db import DEFAULT_DB_ALIAS, connections, transaction, OperationalError
 
 from django_logic.conf import lock_timeout as _get_lock_timeout
 
@@ -12,6 +13,30 @@ class State:
         self.instance = instance
         self.field_name = field_name
         self.process_name = process_name
+
+    @contextmanager
+    def protected(self):
+        """Keep PostgreSQL state protection until the caller's transaction commits."""
+        using = self.instance._state.db or DEFAULT_DB_ALIAS
+        if connections[using].vendor != 'postgresql':
+            yield
+            return
+        from django_logic.exceptions import TransitionTemporarilyUnavailable, RefusalReason
+        with transaction.atomic(using=using):
+            try:
+                with transaction.atomic(using=using):
+                    model = self.instance._meta.get_field(self.field_name).model
+                    model._base_manager.using(using).select_for_update(nowait=True).get(pk=self.instance.pk)
+            except OperationalError as error:
+                cause = error.__cause__
+                if (getattr(cause, 'sqlstate', None) or getattr(cause, 'pgcode', None)) == '55P03':
+                    raise TransitionTemporarilyUnavailable(
+                        'Another transaction is changing this record. Try again shortly.',
+                        reason=RefusalReason.LOCKED,
+                        user_message='Another transaction is changing this record. Try again shortly.',
+                    ) from error
+                raise
+            yield
 
     def get_persisted_state(self):
         """Read the state column straight from the database row.

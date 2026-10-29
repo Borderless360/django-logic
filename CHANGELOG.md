@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+## [3.0.0] — 2026-10-29
+
+- Add optional request keys with conflicting-input rejection and retained duplicate protection.
+- Save normal waiting separately from failed attempts with `Defer` and `eligible_at`.
+- Persist a required background successor with predecessor completion on the same database connection.
+- Select eligible fairness groups through shared database cursors while allowing one group to fill available capacity.
+- Protect PostgreSQL state changes through the caller's actual commit; refuse competing transactions without waiting.
+- Add nonblocking pending cancellation and explicit completion outcomes.
+- Preserve the existing one-unfinished-job rule and best-effort callback behavior.
+- Require a coordinated producer/worker upgrade; see `docs/operation-contract.md` for migration and subclass compatibility.
+
 ## [2.4.2] — 2026-10-27
 
 ### Fixed

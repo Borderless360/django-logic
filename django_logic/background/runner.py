@@ -45,11 +45,15 @@ re-raising out of the worker loop would only add noise.
 from __future__ import annotations
 
 import importlib
+from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from dataclasses import dataclass
 from typing import Any
 
 from django.apps import apps
+from django.conf import settings
 from django.db import DEFAULT_DB_ALIAS, OperationalError, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from django_logic import conf
@@ -170,6 +174,7 @@ def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -
         TransitionMessage.objects.filter(pk=transition_message_id, is_completed=False).update(
             is_completed=True,
             ended_in_failure=True,
+            completion_kind='failed',
             completed_at=now,
             last_error_message=note,
             last_error_dt=now,
@@ -417,37 +422,62 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
             return _NonAtomicAttempt()
         state = process.state
 
-        superseded = _superseded_outcome(
-            transition_message, transition, state, kwargs
-        )
-        if superseded is not None:
-            return superseded
-
-        token = _transition_context.set(
-            {
-                'root_id': kwargs.get('root_id'),
-                'tr_id': kwargs.get('tr_id'),
-            }
-        )
         try:
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} Execute Start '
-                f'{transition.action_name} {state.instance_key} '
-                f'queue={transition_message.queue_name}'
+            with state.protected() if (transition.target is not None or transition.failed_state) else nullcontext():
+                return _run_atomic_state(transition_message, transition, state, instance, kwargs, decode_error)
+        except Exception as error:
+            from django_logic.exceptions import TransitionTemporarilyUnavailable
+            from django_logic.background.exceptions import Defer
+            if isinstance(error, TransitionTemporarilyUnavailable):
+                error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
+            return _handle_failure(transition_message, transition, state, kwargs, error)
+
+
+def _run_atomic_state(transition_message, transition, state, instance, kwargs, decode_error):
+    superseded = _superseded_outcome(
+        transition_message, transition, state, kwargs
+    )
+    if superseded is not None:
+        return superseded
+
+    token = _transition_context.set(
+        {
+            'root_id': kwargs.get('root_id'),
+            'tr_id': kwargs.get('tr_id'),
+        }
+    )
+    try:
+        transition_logger.info(
+            f'{kwargs.get("tr_id")} Execute Start '
+            f'{transition.action_name} {state.instance_key} '
+            f'queue={transition_message.queue_name}'
+        )
+        if decode_error is not None:
+            return _handle_failure(
+                transition_message, transition, state, kwargs, decode_error
             )
-            if decode_error is not None:
-                return _handle_failure(
-                    transition_message, transition, state, kwargs, decode_error
-                )
-            try:
-                _execute_attempt(instance, transition, state, kwargs)
-            except Exception as error:
-                return _handle_failure(
-                    transition_message, transition, state, kwargs, error
-                )
-            return _handle_success(transition_message, transition, state, kwargs)
-        finally:
-            _transition_context.reset(token)
+        def execute_and_complete():
+            _execute_attempt(instance, transition, state, kwargs)
+            with state.protected():
+                if transition.target is None:
+                    superseded = _superseded_outcome(
+                        transition_message, transition, state, kwargs, after_side_effects=True,
+                    )
+                    if superseded is not None:
+                        return superseded
+                return _handle_success(transition_message, transition, state, kwargs)
+        try:
+            return _run_in_savepoint(
+                instance._state.db or DEFAULT_DB_ALIAS, execute_and_complete, require_commit=True,
+            )
+        except Exception as error:
+            transition_message.refresh_from_db()
+            instance.refresh_from_db(fields=[state.field_name])
+            return _handle_failure(
+                transition_message, transition, state, kwargs, error
+            )
+    finally:
+        _transition_context.reset(token)
 
 
 def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> TransitionMessage:
@@ -461,6 +491,7 @@ def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> Transiti
         return (
             TransitionMessage.objects.using(using)
             .select_for_update(nowait=True)
+            .filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
             .get(pk=transition_message_id, is_completed=False)
         )
     except TransitionMessage.DoesNotExist as exc:
@@ -664,6 +695,8 @@ def _handle_success(
 ) -> _Outcome:
     # The caller writes the target in the same transaction as this completion.
     transition_message.mark_as_completed()
+    if transition_message.required_next:
+        _write_required_next(transition_message, state, kwargs)
     transition_logger.info(
         f'{kwargs.get("tr_id")} {TransitionEventType.COMPLETE.value}'
     )
@@ -684,6 +717,21 @@ def _handle_failure(
     error: BaseException,
     *, using=None,
 ) -> _Outcome:
+    from django_logic.background.exceptions import Defer
+    from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
+    if isinstance(error, TransitionTemporarilyUnavailable) and error.reason == RefusalReason.LOCKED:
+        error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
+    if isinstance(error, Defer):
+        transition_message.eligible_at = (
+            error.until if settings.USE_TZ else timezone.make_naive(error.until, timezone.get_default_timezone())
+        )
+        transition_message.deferral_reason = db_safe_text(error.reason)
+        transition_message.save(using=using or transition_message._state.db,
+                                update_fields=['eligible_at', 'deferral_reason', 'modified'])
+        return _Outcome(terminal=False, succeeded=False)
+    transition_message.eligible_at = None
+    transition_message.deferral_reason = ''
+    transition_message.save(using=using or transition_message._state.db, update_fields=['eligible_at', 'deferral_reason'])
     transition_message.record_error(error)
     transition_logger.error(
         f'{kwargs.get("tr_id")} {TransitionEventType.FAIL.value}: '
@@ -944,3 +992,34 @@ def _find_transition(process, transition_message: TransitionMessage):
             f'move a background action_name onto shared nested processes.'
         )
     return None  # zero matches -> generic not-found _RestoreError in _restore
+
+
+def _write_required_next(parent, state, kwargs):
+    """Save one required successor on the connection that completes its parent."""
+    from uuid import uuid4
+    from django.utils.module_loading import import_string
+    from django.core.exceptions import ImproperlyConfigured
+
+    using = parent._state.db or DEFAULT_DB_ALIAS
+    process_class = kwargs.get('process_class')
+    if process_class:
+        process = import_string(process_class)(state=state)
+    else:
+        process = getattr(state.instance, state.process_name)
+    following, owner = process._resolve_transition_with_owner(
+        parent.required_next, kwargs.get('user'),
+    )
+    if not following.is_background:
+        raise ImproperlyConfigured('required_next must name a BackgroundTransition.')
+    next_kwargs = dict(kwargs)
+    next_kwargs.pop('context', None)
+    next_kwargs.pop('user_id', None)
+    next_kwargs.update(
+        parent_id=kwargs.get('tr_id'), tr_id=uuid4(),
+        process_class=f'{type(process).__module__}.{type(process).__name__}',
+        owning_process_class=f'{type(owner).__module__}.{type(owner).__name__}',
+    )
+    following._enqueue_atomic(
+        state, next_kwargs, following.get_queue_name(), using=using,
+        request_key=f'django-logic:required-next:{parent.pk}', fairness_key=parent.fairness_key,
+    )

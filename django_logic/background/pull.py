@@ -105,17 +105,14 @@ def claim_next(queues: list[str], *, exclude_pks=()) -> int | None:
     without this it would claim the same head row into every free slot.
     """
     from django_logic.background.safety_nets import _claimable
+    from django_logic.background.fairness import claim_fair
+    from django_logic.background.models import TransitionMessage
 
-    rows = _claimable(queues)
+    alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+    rows = _claimable(queues).using(alias)
     if exclude_pks:
         rows = rows.exclude(pk__in=exclude_pks)
-    with transaction.atomic():
-        return (
-            rows
-            .select_for_update(skip_locked=True)
-            .values_list('pk', flat=True)
-            .first()
-        )
+    return claim_fair(rows)
 
 
 def run_once(queues: list[str], *, isolate: bool) -> bool:
@@ -608,6 +605,9 @@ def run_worker(
         try:
             while (sum(attempt.pk is not None for attempt in attempts.values()) < concurrency
                    and len(pending) < MAX_PENDING_ACCOUNTING):
+                # A large capacity setting must not postpone checks on jobs
+                # already running while the worker fills its other slots.
+                _stop_overdue(attempts)
                 pk = claim_next(
                     queues,
                     exclude_pks=[attempt.pk for attempt in attempts.values()

@@ -250,23 +250,14 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
 @tag('stability')
 class TestUnlockBeforeCommitWindow(StabilityTestCase):
-    """The unlock-before-commit window, on two real database connections.
-
-    T1 runs a synchronous transition inside an outer atomic block and holds the
-    transaction open. T1 has already released the cache lock, so T2 on another
-    connection reads the old committed state, accepts it as a source, and runs
-    the same transition again. Both attempts run the side-effects, and the
-    final state depends on commit order. Callers who need to avoid this window
-    start the transition from ``transaction.on_commit``.
-    """
+    """The business row remains protected after the cache lock is released."""
 
     @unittest.skipUnless(connection.vendor == 'postgresql',
                          'needs two concurrent writer connections')
     def test_second_transition_reads_stale_committed_state(self):
-        """Both callers commit, although each accepts the same source state."""
+        """The second caller cannot repeat work before the first caller commits."""
         order = Order.objects.create(status='draft')
         first_transitioned = threading.Event()
-        second_effect_started = threading.Event()
         release_first_transaction = threading.Event()
         effects = []
         commits = []
@@ -275,11 +266,6 @@ class TestUnlockBeforeCommitWindow(StabilityTestCase):
         def record_effect(instance, **kwargs):
             with evidence_lock:
                 effects.append(instance.status)
-            if first_transitioned.is_set():
-                # The target write waits for the first transaction's row lock.
-                # Signal before that write, so the first caller can commit.
-                second_effect_started.set()
-                release_first_transaction.set()
 
         class ConcurrentApprovalProcess(Process):
             process_name = 'process'
@@ -311,17 +297,16 @@ class TestUnlockBeforeCommitWindow(StabilityTestCase):
             with transaction.atomic():
                 stale_order = Order.objects.get(pk=order.pk)
                 self.assertEqual(stale_order.status, 'draft')
-                ConcurrentApprovalProcess(
-                    field_name='status', instance=stale_order,
-                ).approve()
-            with evidence_lock:
-                commits.append('second')
+                from django_logic.exceptions import TransitionTemporarilyUnavailable
+                with self.assertRaises(TransitionTemporarilyUnavailable):
+                    ConcurrentApprovalProcess(
+                        field_name='status', instance=stale_order,
+                    ).approve()
         finally:
             release_first_transaction.set()
             thread.join_and_raise()
 
-        self.assertTrue(second_effect_started.is_set())
-        self.assertEqual(effects, ['draft', 'draft'])
-        self.assertCountEqual(commits, ['first', 'second'])
+        self.assertEqual(effects, ['draft'])
+        self.assertEqual(commits, ['first'])
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')

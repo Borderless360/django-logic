@@ -8,12 +8,13 @@ degradation is pinned here too.
 """
 import threading
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.db import connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
-from django_logic.background.models import TransitionMessage
+from django_logic.background.models import TransitionMessage, in_flight
 from django_logic.background.safety_nets import detect_stuck_transitions
 from django_logic.testing import open_transition_message
 from tests.background.models import Widget
@@ -47,6 +48,22 @@ class TimeBasedClassificationTests(TestCase):
             TransitionMessage.retry_status(widget, 'process'),
             TransitionMessage.RETRYING,
         )
+
+    def test_deferred_row_stays_retrying_until_eligibility_and_pickup_grace(self):
+        from django_logic import conf
+
+        widget = Widget.objects.create(status='fulfilling')
+        row = open_transition_message(widget, 'process', 'fulfil', started_minutes_ago=60)
+        eligible_at = timezone.now() + timedelta(hours=1)
+        TransitionMessage.objects.filter(pk=row.pk).update(eligible_at=eligible_at)
+        window = timedelta(minutes=conf.retry_window_minutes())
+        for now in (eligible_at - timedelta(minutes=1), eligible_at, eligible_at + window):
+            with self.subTest(now=now), patch('django_logic.background.models.timezone.now', return_value=now):
+                self.assertEqual(TransitionMessage.retry_status(widget, 'process'), TransitionMessage.RETRYING)
+                self.assertTrue(in_flight(widget, 'process'))
+        with patch('django_logic.background.models.timezone.now', return_value=eligible_at + window + timedelta(seconds=1)):
+            self.assertEqual(TransitionMessage.retry_status(widget, 'process'), TransitionMessage.STRANDED)
+            self.assertFalse(in_flight(widget, 'process'))
 
     def test_no_row_answers_none(self):
         widget = Widget.objects.create(status='draft')

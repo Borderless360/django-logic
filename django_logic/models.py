@@ -7,3 +7,4 @@ so it never changes. Importing it here registers it when the app loads.
 """
 # Imported so the app registry sees the model when the app loads.
 from django_logic.background.models import TransitionMessage
+from django_logic.background.fairness import FairnessGroup
