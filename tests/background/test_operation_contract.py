@@ -1,5 +1,5 @@
 """Durable submission, expected waiting, cancellation, and required follow-up."""
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
 from django.core.cache import cache
@@ -12,14 +12,16 @@ from django_logic.background import BackgroundTransition, Defer, operation_optio
 from django_logic.background.exceptions import RequestConflict
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
+from django_logic.background.serializers import deserialize_kwargs, serialize_kwargs
 from django_logic.background.safety_nets import _claimable, cleanup_completed_transitions
+from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
 from tests import dl_settings
 from tests.background.models import Widget, bg_ok, bg_callback
 
 
 def wait_for_provider(instance, **kwargs):
     bg_ok(instance)
-    raise Defer(until=timezone.now() + timedelta(hours=1), reason='provider allowance')
+    raise Defer(until=datetime.now(datetime_timezone.utc) + timedelta(hours=1), reason='provider allowance')
 
 
 class OperationProcess(Process):
@@ -71,6 +73,72 @@ class OperationContractTests(TestCase):
             with self.assertRaises(RequestConflict):
                 other.operations.plain()
 
+    def test_request_identity_preserves_lists_in_escaped_user_dictionaries(self):
+        data = {'__dl_type__': 'set', 'value': [1, 2]}
+        first = self.enqueue(data=data)
+        repeated = self.enqueue(data=data)
+        self.assertEqual(repeated.job_id, first.job_id)
+        self.assertFalse(repeated.created)
+        with self.assertRaises(RequestConflict):
+            self.enqueue(data={'__dl_type__': 'set', 'value': [2, 1]})
+        self.assertEqual(TransitionMessage.objects.count(), 1)
+
+    def test_replay_returns_trace_when_kwargs_root_is_escaped(self):
+        kwargs = {'__dl_type__': 'caller-data', 'value': [1, 2]}
+        with operation_options(request_key='root-tag') as first:
+            original_trace = self.widget.operations.plain(**kwargs)
+        with operation_options(request_key='root-tag') as repeated:
+            repeated_trace = self.widget.operations.plain(**kwargs)
+        self.assertEqual(repeated_trace, original_trace)
+        self.assertEqual(repeated.job_id, first.job_id)
+        self.assertFalse(repeated.created)
+
+    def test_required_successor_reuse_ignores_only_trace_when_kwargs_root_is_escaped(self):
+        from django_logic.background.runner import _write_required_next
+
+        result = self.enqueue(action='start', __dl_type__='caller-data', value=[1, 2])
+        run_background_transition(result.job_id)
+        parent = TransitionMessage.objects.get(pk=result.job_id)
+        self.assertTrue(parent.is_completed)
+        self.widget.refresh_from_db()
+        original = deserialize_kwargs(parent.kwargs)
+        _write_required_next(parent, self.widget.operations.state, original)
+        self.assertEqual(TransitionMessage.objects.count(), 2)
+        with self.assertRaises(RequestConflict):
+            _write_required_next(parent, self.widget.operations.state, {**original, 'value': [2, 1]})
+
+    def test_required_successor_preserves_lists_in_escaped_user_dictionaries(self):
+        result = self.enqueue(action='start', data={'__dl_type__': 'set', 'value': [1, 2]})
+        parent = TransitionMessage.objects.get(pk=result.job_id)
+        child_kwargs = deserialize_kwargs(parent.kwargs)
+        child_kwargs.update(parent_id=child_kwargs['tr_id'], tr_id='other-trace',
+                            data={'__dl_type__': 'set', 'value': [2, 1]})
+        TransitionMessage.objects.create(
+            **TransitionMessage.instance_key(self.widget, 'operations'), field_name='status',
+            transition_name='finish', queue_name=parent.queue_name, is_completed=True,
+            owning_process_class=parent.owning_process_class,
+            request_key=f'django-logic:required-next:{parent.pk}', kwargs=serialize_kwargs(child_kwargs),
+        )
+        run_background_transition(parent.pk)
+        parent.refresh_from_db()
+        self.assertFalse(parent.is_completed)
+        self.assertEqual(parent.errors_count, 1)
+        self.assertIn('different operation inputs', parent.last_error_message)
+        self.widget.refresh_from_db()
+        self.assertEqual((self.widget.status, self.widget.se_log), ('draft', ''))
+
+    def test_request_identity_includes_actual_process_class(self):
+        from tests.background.test_restore_verification import RogueProcess
+
+        with operation_options(request_key='same-action') as first:
+            self.widget.process.fulfil()
+        process = RogueProcess(field_name='status', instance=self.widget)
+        with operation_options(request_key='same-action'):
+            with self.assertRaises(RequestConflict):
+                process.fulfil()
+        self.assertTrue(first.created)
+        self.assertEqual(TransitionMessage.objects.count(), 1)
+
     def test_required_successor_exists_before_callbacks_and_has_same_fairness(self):
         result = self.enqueue(action='start')
         parent = TransitionMessage.objects.get(pk=result.job_id)
@@ -100,6 +168,7 @@ class OperationContractTests(TestCase):
         self.assertEqual(self.widget.status, 'draft')
         self.assertEqual(self.widget.se_log, '')
 
+    @override_settings(USE_TZ=True)
     def test_defer_rolls_back_atomic_effect_without_error_or_callbacks(self):
         result = self.enqueue(action='wait')
         run_background_transition(result.job_id)
@@ -115,6 +184,45 @@ class OperationContractTests(TestCase):
         self.assertEqual(row.started_at, started)
         self.widget.refresh_from_db()
         self.assertEqual((self.widget.status, self.widget.se_log, self.widget.cb_log), ('draft', '', ''))
+
+    @override_settings(USE_TZ=False, TIME_ZONE='Asia/Hong_Kong')
+    def test_defer_uses_default_timezone_when_database_datetimes_are_naive(self):
+        result = self.enqueue(action='wait')
+        run_background_transition(result.job_id)
+        row = TransitionMessage.objects.get(pk=result.job_id)
+        self.assertFalse(row.is_completed)
+        self.assertEqual(row.errors_count, 0)
+        self.assertTrue(timezone.is_naive(row.eligible_at))
+        self.assertAlmostEqual((row.eligible_at - timezone.now()).total_seconds(), 3600, delta=5)
+        self.assertFalse(_claimable().filter(pk=row.pk).exists())
+        run_background_transition(row.pk)
+        self.widget.refresh_from_db()
+        self.assertEqual((self.widget.status, self.widget.se_log, self.widget.cb_log), ('draft', '', ''))
+
+    def test_lock_contention_defers_in_both_timezone_modes(self):
+        for use_tz in (False, True):
+            for location in ('state_protection', 'side_effect'):
+                with self.subTest(use_tz=use_tz, location=location), override_settings(USE_TZ=use_tz):
+                    self.widget = Widget.objects.create()
+                    result = self.enqueue(key=f'lock:{use_tz}:{location}')
+                    error = TransitionTemporarilyUnavailable('record busy', reason=RefusalReason.LOCKED)
+                    def locked(instance, **kwargs):
+                        raise error
+                    protection = (
+                        patch('django_logic.state.State.protected', side_effect=error)
+                        if location == 'state_protection'
+                        else patch.object(OperationProcess.transitions[3].side_effects, '_commands', [locked])
+                    )
+                    with protection:
+                        run_background_transition(result.job_id)
+                    row = TransitionMessage.objects.get(pk=result.job_id)
+                    self.assertFalse(row.is_completed)
+                    self.assertEqual(row.errors_count, 0)
+                    self.assertEqual(row.deferral_reason, 'record busy')
+                    self.assertEqual(timezone.is_aware(row.eligible_at), use_tz)
+                    self.assertGreater(row.eligible_at, timezone.now())
+                    self.widget.refresh_from_db()
+                    self.assertEqual((self.widget.status, self.widget.se_log), ('draft', ''))
 
     def test_pending_cancellation_is_terminal_and_does_not_run_effect(self):
         result = self.enqueue()

@@ -46,11 +46,12 @@ from __future__ import annotations
 
 import importlib
 from contextlib import nullcontext
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from dataclasses import dataclass
 from typing import Any
 
 from django.apps import apps
+from django.conf import settings
 from django.db import DEFAULT_DB_ALIAS, OperationalError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -428,7 +429,7 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
             from django_logic.exceptions import TransitionTemporarilyUnavailable
             from django_logic.background.exceptions import Defer
             if isinstance(error, TransitionTemporarilyUnavailable):
-                error = Defer(until=timezone.now() + timedelta(seconds=1), reason=str(error))
+                error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
             return _handle_failure(transition_message, transition, state, kwargs, error)
 
 
@@ -719,9 +720,11 @@ def _handle_failure(
     from django_logic.background.exceptions import Defer
     from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
     if isinstance(error, TransitionTemporarilyUnavailable) and error.reason == RefusalReason.LOCKED:
-        error = Defer(until=timezone.now() + timedelta(seconds=1), reason=str(error))
+        error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
     if isinstance(error, Defer):
-        transition_message.eligible_at = error.until
+        transition_message.eligible_at = (
+            error.until if settings.USE_TZ else timezone.make_naive(error.until, timezone.get_default_timezone())
+        )
         transition_message.deferral_reason = db_safe_text(error.reason)
         transition_message.save(using=using or transition_message._state.db,
                                 update_fields=['eligible_at', 'deferral_reason', 'modified'])

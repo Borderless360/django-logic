@@ -247,9 +247,10 @@ class TransitionMessage(TimeStampedModel):
 
         In order:
 
-        * a row whose newest activity (``modified``, refreshed at
-          attempt start / on every recorded error, or ``started_at``)
-          is within the retry window is still being retried;
+        * a deferred row stays retrying until ``eligible_at``, with the
+          normal retry window allowed for pickup after that time;
+        * other rows stay retrying while ``modified`` or ``started_at``
+          is within the retry window;
         * past the window, a row a worker still holds is still being
           retried: an attempt that runs quietly for longer than the
           window is slow, not lost. The probe is a savepointed
@@ -267,14 +268,13 @@ class TransitionMessage(TimeStampedModel):
         row = (
             cls.in_flight_for(instance, process_name)
             .order_by('-modified')
-            .values('pk', 'modified', 'started_at')
+            .values('pk', 'modified', 'started_at', 'eligible_at')
             .first()
         )
         if row is None:
             return None
         now = timezone.now()
-        started = row['started_at']
-        newest = max(t for t in (row['modified'], started) if t is not None)
+        newest = max(t for t in (row['modified'], row['started_at'], row['eligible_at']) if t is not None)
         retry_window = conf.retry_window_minutes()
         if now - newest > timedelta(minutes=retry_window):
             try:

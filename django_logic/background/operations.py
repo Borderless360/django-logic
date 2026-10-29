@@ -8,7 +8,7 @@ import json
 from django.db import OperationalError, transaction, router, DEFAULT_DB_ALIAS
 
 from django_logic.background.exceptions import RequestConflict
-from django_logic.background.serializers import serialize_kwargs
+from django_logic.background.serializers import TYPE_TAG, decode_value, encode_value, serialize_kwargs
 
 
 @dataclass
@@ -60,7 +60,11 @@ def prepare_submission(process, action_name, kwargs):
                                                'process_class', 'owning_process_class'}})
     identity = TransitionMessage.instance_key(process.state.instance, process.state.process_name)
     identity['database'] = process.state.instance._state.db or DEFAULT_DB_ALIAS
-    payload = {'instance': identity, 'field': process.state.field_name, 'action': action_name, 'kwargs': payload}
+    payload = {
+        'instance': identity, 'field': process.state.field_name,
+        'process_class': f'{type(process).__module__}.{type(process).__qualname__}',
+        'action': action_name, 'kwargs': payload,
+    }
     submission.fingerprint = sha256(json.dumps(_canonical(payload), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     if submission.request_key is None:
         return submission, None
@@ -76,8 +80,13 @@ def _canonical(value):
     if isinstance(value, list):
         return [_canonical(item) for item in value]
     if isinstance(value, dict):
+        if value.get(TYPE_TAG) == 'dict':
+            # The inner dictionary is caller data, even when it resembles a type tag.
+            return {TYPE_TAG: 'dict', 'value': {
+                key: _canonical(item) for key, item in value['value'].items()
+            }}
         result = {key: _canonical(item) for key, item in value.items()}
-        if result.get('__dl_type__') in ('set', 'frozenset'):
+        if result.get(TYPE_TAG) in ('set', 'frozenset'):
             result['value'] = sorted(result['value'], key=lambda item: json.dumps(item, sort_keys=True))
         return result
     return value
@@ -98,9 +107,9 @@ def verify_internal_request(row, state, transition_name, serialized, owner):
     expected = TransitionMessage.instance_key(state.instance, state.process_name)
     expected.update(field_name=state.field_name, transition_name=transition_name, owning_process_class=owner)
     same_identity = all(getattr(row, field) == value for field, value in expected.items())
-    previous = {key: value for key, value in row.kwargs.items() if key != 'tr_id'}
-    current = {key: value for key, value in serialized.items() if key != 'tr_id'}
-    if not same_identity or _canonical(previous) != _canonical(current):
+    previous = {key: value for key, value in decode_value(row.kwargs).items() if key != 'tr_id'}
+    current = {key: value for key, value in decode_value(serialized).items() if key != 'tr_id'}
+    if not same_identity or _canonical(encode_value(previous)) != _canonical(encode_value(current)):
         raise RequestConflict('The required successor key already identifies different operation inputs.')
 
 

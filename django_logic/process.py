@@ -152,7 +152,8 @@ class Process:
         from django_logic.background.operations import prepare_submission
         submission, existing = prepare_submission(self, action_name, kwargs)
         if existing is not None:
-            trace = existing.kwargs.get('tr_id')
+            from django_logic.background.serializers import decode_value
+            trace = decode_value(existing.kwargs).get('tr_id')
             return uuid.UUID(trace) if trace else None
         parent_ctx = _transition_context.get()
         if parent_ctx:

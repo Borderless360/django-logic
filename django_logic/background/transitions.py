@@ -27,6 +27,7 @@ from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
     KwargsSerializationError,
+    decode_value,
     serialize_kwargs,
 )
 from django_logic.exceptions import (
@@ -244,7 +245,7 @@ class BackgroundTransition(Transition):
                 )
 
         if _submission is not None and not _submission.created:
-            trace = transition_message.kwargs.get('tr_id')
+            trace = decode_value(transition_message.kwargs).get('tr_id')
             return UUID(trace) if trace else None
         if conf.sync_mode():
             # Inline, bypassing transaction.on_commit, so Django's

@@ -19,9 +19,10 @@ created = submission.created
 ```
 
 The context applies to one background invocation. It does not add arguments to application hooks.
-Repeating a retained request key with the same object, action, actor, and inputs returns its original job.
+Repeating a retained request key with the same object, process class, action, actor, and inputs returns its original job.
 This also works after that job finishes and the object's state changes.
 Different inputs raise `RequestConflict`. A new key represents a new request, not another execution attempt.
+The process class's module and qualified name form part of this identity. Renaming them changes the identity.
 Application permission checks must still protect the endpoint that accepts submissions.
 
 Request keys are global strings, up to 255 characters. Include an application namespace.
@@ -45,22 +46,23 @@ Applications that combine refresh requests must persist their own dirty flag or 
 ## Expected waiting
 
 ```python
-from datetime import timedelta
-from django.utils import timezone
+from datetime import datetime, timedelta, timezone
 from django_logic.background import Defer
 
 raise Defer(
-    until=timezone.now() + timedelta(seconds=retry_after),
+    until=datetime.now(timezone.utc) + timedelta(seconds=retry_after),
     reason="provider allowance",
 )
 ```
 
 The worker saves `eligible_at` and `deferral_reason`, then frees its execution slot.
+The supplied deadline must include a timezone. With `USE_TZ=False`, the worker converts it to Django's default timezone for storage.
 It does not increment `errors_count`, write a failed state, or run completion callbacks.
 The next attempt starts from the beginning. With default atomic execution, the attempt's database writes roll back.
 With `atomic=False`, previously committed receipts survive. Both modes still require idempotent external requests.
 Direct execution and `retry_pending()` also respect `eligible_at`.
 The operator's `--send` command refuses to override a future deferral.
+`retry_status()` treats deferred jobs as waiting through `eligible_at`, with the normal retry window allowed for pickup afterward.
 
 ## Required follow-up
 
