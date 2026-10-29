@@ -100,9 +100,12 @@ Its own repeated execution must not repeat completed business effects.
 
 ## State protection and cancellation
 
-On PostgreSQL, lock-taking transitions acquire the physical business-row lock without waiting.
-Another transaction changing that row causes `TransitionTemporarilyUnavailable` before application work starts.
-The database retains this lock through the actual outer commit or rollback.
+On PostgreSQL, lock-taking transitions acquire the physical business-row lock.
+They wait at most two seconds for another transaction that holds the row.
+A holder that outlasts the wait causes `TransitionTemporarilyUnavailable` before application work starts, and the engine logs a warning that names the record.
+A background job that meets this refusal records an error and retries after the normal pause. It does not wait quietly.
+The database retains the lock through the actual outer commit or rollback.
+Inside this transaction, synchronous side effects run in a savepoint. A database error in a side effect discards their writes and still records the failed state and runs the failure callbacks. Any other error keeps the writes made before it.
 The cache gate remains for compatibility; it is not the authority for database-state exclusion.
 SQLite remains useful for synchronous tests, but cannot verify concurrent state protection.
 
@@ -124,11 +127,12 @@ An unfinished job between attempts can be cancelled. This is not a promise to in
 
 ## Upgrade and rollback
 
-This release requires a coordinated upgrade. Stop every producer and worker before applying migrations.
-New non-null columns do not support old producers after Django removes migration defaults.
-Old workers also ignore deferred eligibility and cannot execute the new contract safely.
-Restart only processes using this version, then enable the new declaration options.
-Do not roll back to old workers while new operation records remain outstanding.
+The new job columns carry database defaults, so producers on an earlier version keep inserting rows while the migrations run.
+A normal rolling deployment is enough: migrate, then restart web processes and workers.
+Workers on an earlier version ignore deferred eligibility and fairness, so restart them promptly.
+Enable the new declaration options only after every worker runs this version.
+Rolling back to an earlier version is possible while no deferred or required-successor records are outstanding.
+Rows written by this version keep their extra columns; an earlier version ignores them.
 
 Existing job rows receive neutral defaults and preserve their previous identities and inputs.
 The fairness migration creates shared cursor records for their existing group keys.

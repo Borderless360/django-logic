@@ -7,6 +7,13 @@ from django.db import DEFAULT_DB_ALIAS, connections, transaction, OperationalErr
 
 from django_logic.conf import lock_timeout as _get_lock_timeout
 
+#: How long a transition waits for another transaction that holds the
+#: business row. Most holders are a web request or a job finalization
+#: and commit within milliseconds. A holder that outlasts this wait is
+#: refused, which keeps a long job from stalling the caller. Zero refuses
+#: at once.
+ROW_LOCK_WAIT_SECONDS = 2
+
 
 class State:
     def __init__(self, instance, field_name: str, process_name=None):
@@ -22,14 +29,32 @@ class State:
             yield
             return
         from django_logic.exceptions import TransitionTemporarilyUnavailable, RefusalReason
+        from django_logic.logger import transition_logger
         with transaction.atomic(using=using):
             try:
                 with transaction.atomic(using=using):
-                    model = self.instance._meta.get_field(self.field_name).model
-                    model._base_manager.using(using).select_for_update(nowait=True).get(pk=self.instance.pk)
+                    row = self.instance._meta.get_field(self.field_name).model._base_manager.using(using)
+                    if ROW_LOCK_WAIT_SECONDS <= 0:
+                        row.select_for_update(nowait=True).get(pk=self.instance.pk)
+                    else:
+                        with connections[using].cursor() as cursor:
+                            # The wait applies to this savepoint only. A refused
+                            # lock rolls the savepoint back, which also restores
+                            # the caller's own lock_timeout.
+                            cursor.execute("SELECT current_setting('lock_timeout')")
+                            previous = cursor.fetchone()[0]
+                            cursor.execute("SELECT set_config('lock_timeout', %s, true)",
+                                           [f'{int(ROW_LOCK_WAIT_SECONDS * 1000)}ms'])
+                        row.select_for_update().get(pk=self.instance.pk)
+                        with connections[using].cursor() as cursor:
+                            cursor.execute("SELECT set_config('lock_timeout', %s, true)", [previous])
             except OperationalError as error:
                 cause = error.__cause__
                 if (getattr(cause, 'sqlstate', None) or getattr(cause, 'pgcode', None)) == '55P03':
+                    transition_logger.warning(
+                        f'{self.instance_key}: another transaction held the record for more than '
+                        f'{ROW_LOCK_WAIT_SECONDS} seconds; the transition is refused.'
+                    )
                     raise TransitionTemporarilyUnavailable(
                         'Another transaction is changing this record. Try again shortly.',
                         reason=RefusalReason.LOCKED,

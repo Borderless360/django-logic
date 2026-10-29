@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import importlib
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone as datetime_timezone
 from dataclasses import dataclass
 from typing import Any
 
@@ -426,10 +425,6 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
             with state.protected() if (transition.target is not None or transition.failed_state) else nullcontext():
                 return _run_atomic_state(transition_message, transition, state, instance, kwargs, decode_error)
         except Exception as error:
-            from django_logic.exceptions import TransitionTemporarilyUnavailable
-            from django_logic.background.exceptions import Defer
-            if isinstance(error, TransitionTemporarilyUnavailable):
-                error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
             return _handle_failure(transition_message, transition, state, kwargs, error)
 
 
@@ -718,9 +713,10 @@ def _handle_failure(
     *, using=None,
 ) -> _Outcome:
     from django_logic.background.exceptions import Defer
-    from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
-    if isinstance(error, TransitionTemporarilyUnavailable) and error.reason == RefusalReason.LOCKED:
-        error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
+    # A record another transaction holds for longer than the row lock wait
+    # is an error like any other. It counts toward the retry limit, so a
+    # job stuck behind an abandoned transaction ends up reported instead
+    # of waiting quietly forever.
     if isinstance(error, Defer):
         transition_message.eligible_at = (
             error.until if settings.USE_TZ else timezone.make_naive(error.until, timezone.get_default_timezone())

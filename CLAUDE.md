@@ -184,7 +184,8 @@ Its corollaries, each pinned by a shipped mistake:
   sweeper whose defects dominated four review passes, and was cut in
   0.12.0. Do not rebuild it.
 - **PostgreSQL protects state through the actual transaction commit.**
-  State changes take a non-blocking business-row lock. The cache gate remains
+  State changes take the business-row lock and wait at most two seconds for
+  another transaction to commit before they refuse. The cache gate remains
   for compatibility. Workers separately lock their job row. Finalization takes
   the job lock before the business row. Enqueue must not wait for an unfinished
   job while holding its business row. Allow for a separate connection when
