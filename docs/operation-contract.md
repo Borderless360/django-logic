@@ -127,12 +127,21 @@ An unfinished job between attempts can be cancelled. This is not a promise to in
 
 ## Upgrade and rollback
 
-The new job columns carry database defaults, so producers on an earlier version keep inserting rows while the migrations run.
-A normal rolling deployment is enough: migrate, then restart web processes and workers.
-Workers on an earlier version ignore deferred eligibility and fairness, so restart them promptly.
-Enable the new declaration options only after every worker runs this version.
-Rolling back to an earlier version is possible while no deferred or required-successor records are outstanding.
-Rows written by this version keep their extra columns; an earlier version ignores them.
+Migration 0011 in 3.0.1 keeps database defaults on the new job columns, so earlier producers can still insert jobs afterwards.
+Migration 0013 restores these defaults for databases that already applied the published 3.0.0 migration.
+Schema changes can briefly block database queries; compatible inserts do not guarantee an uninterrupted deployment.
+
+Workers from before 3.0 ignore deferred eligibility, required successors and fairness. Their cleanup also does not preserve request-key records.
+Database defaults do not make it safe to run those workers alongside upgraded code. When upgrading from before 3.0, use this order:
+
+1. Stop old workers from taking new work and let their active jobs finish. Include application-specific job runners and maintenance commands, not only `dl_worker`. Keep queued jobs.
+2. Stop those workers before upgraded producers start submitting work. Apply the migrations while worker counts remain zero.
+3. Upgrade the web processes and other producers. Compatible earlier web processes may keep accepting requests and queuing jobs during preparation, provided they do not execute jobs inline and the application has verified that its existing queued jobs still run correctly. Confirm that the old processes have finished; deployment platforms can temporarily overlap versions.
+4. Start the new workers after the application upgrade is complete. Check the installed version, queue coverage and completion of existing queued jobs.
+
+A rollback to a version before 3.0 needs a review of application state and saved job records after new work has run.
+Those workers cannot honor deferred eligibility, required follow-ups or request-key retention, including completed records that protect against duplicate requests.
+Leaving the extra columns in place is not sufficient to preserve those behaviors.
 
 Existing job rows receive neutral defaults and preserve their previous identities and inputs.
 The fairness migration creates shared cursor records for their existing group keys.

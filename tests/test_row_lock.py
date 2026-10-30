@@ -5,14 +5,18 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Timer
 from unittest.mock import patch
 
-from importlib import import_module
-
 from django.db import IntegrityError, connection, connections, transaction
-from django.test import TestCase, TransactionTestCase
+from django.db.migrations.executor import MigrationExecutor
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from django_logic import Process, ProcessManager, Transition
+from django_logic.background.fairness import FairnessGroup
 from django_logic.background.models import TransitionMessage
+from django_logic.background.pull import claim_next
+from django_logic.background.runner import run_background_transition
 from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
+from tests import dl_settings
+from tests.background.models import Widget
 from tests.models import Invoice
 from tests.stability.base import requires_postgres
 
@@ -130,21 +134,82 @@ class EarlierProducerInsertTests(TestCase):
 
 
 @requires_postgres
-class RestoreDatabaseDefaultsTests(TransactionTestCase):
-    def test_migration_0013_restores_the_defaults_dropped_by_the_published_0011(self):
-        from django.apps import apps
-        from django_logic.migrations import __name__ as package
-        restore = import_module(f'{package}.0013_column_defaults').restore_database_defaults
+@override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='pull'))
+class EarlierProducerUpgradeTests(TransactionTestCase):
+    app_label = 'django_logic_background'
+    queue = 'django_logic.critical'
 
-        table = connection.ops.quote_name(TransitionMessage._meta.db_table)
+    def setUp(self):
+        executor = MigrationExecutor(connection)
+        self.latest = executor.loader.graph.leaf_nodes(self.app_label)
+        self.addCleanup(self.migrate, self.latest)
+        old_state = self.migrate([(self.app_label, '0010_proxy_model_label')])
+        # This model generates the INSERT an earlier producer would send. It
+        # knows none of the new columns, even after this test upgrades the schema.
+        self.older_message = old_state.apps.get_model(self.app_label, 'TransitionMessage')
+        self.widget = Widget.objects.create(status='fulfilling')
+
+    def migrate(self, targets):
+        executor = MigrationExecutor(connection)
+        executor.migrate(targets)
+        return executor.loader.project_state(targets)
+
+    def enqueue_from_earlier_producer(self):
+        return self.older_message.objects.create(
+            app_label='bg_tests', model_name='widget', instance_id=str(self.widget.pk),
+            process_name='process', field_name='status', transition_name='fulfil',
+            queue_name=self.queue, kwargs={},
+        ).pk
+
+    def assert_new_worker_completes(self, pk):
+        message = TransitionMessage.objects.get(pk=pk)
+        self.assertEqual(
+            (message.request_key, message.request_fingerprint, message.fairness_key,
+             message.eligible_at, message.deferral_reason, message.completion_kind,
+             message.required_next),
+            (None, '', '', None, '', '', ''),
+        )
+        self.assertEqual(claim_next([self.queue]), pk)
+        run_background_transition(pk)
+        self.widget.refresh_from_db()
+        message.refresh_from_db()
+        self.assertEqual(self.widget.status, 'fulfilled')
+        self.assertEqual(self.widget.se_log, 'ok,')
+        self.assertEqual(self.widget.cb_log, 'cb,')
+        self.assertTrue(message.is_completed)
+        self.assertEqual(message.errors_count, 0)
+        self.assertEqual(message.completion_kind, 'succeeded')
+        self.assertIsNone(claim_next([self.queue]))
+
+    def test_earlier_producer_inserts_after_0011_before_the_remaining_migrations(self):
+        self.migrate([(self.app_label, '0011_operation_contract')])
+        pk = self.enqueue_from_earlier_producer()
+        self.migrate(self.latest)
+
+        self.assertTrue(FairnessGroup.objects.filter(key='').exists())
+        self.assert_new_worker_completes(pk)
+
+    def test_earlier_producer_inserts_after_the_upgrade_without_a_fairness_group(self):
+        self.migrate(self.latest)
+        self.assertFalse(FairnessGroup.objects.exists())
+        pk = self.enqueue_from_earlier_producer()
+        self.assertFalse(FairnessGroup.objects.exists())
+
+        self.assert_new_worker_completes(pk)
+        self.assertTrue(FairnessGroup.objects.filter(key='').exists())
+
+    def test_0013_repairs_published_300_defaults_before_the_new_worker_runs(self):
+        self.migrate([(self.app_label, '0012_fairness_groups')])
+        quote = connection.ops.quote_name
+        table = quote(TransitionMessage._meta.db_table)
+        # The published 3.0.0 migration dropped all five defaults. Reproduce that
+        # schema without replacing the checked-in migration or its recorded state.
         with connection.cursor() as cursor:
-            cursor.execute(f'ALTER TABLE {table} ALTER COLUMN "fairness_key" DROP DEFAULT')
-        with connection.schema_editor() as schema_editor:
-            restore(apps, schema_editor)
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT column_default FROM information_schema.columns "
-                "WHERE table_name = %s AND column_name = 'fairness_key'",
-                [TransitionMessage._meta.db_table],
-            )
-            self.assertEqual(cursor.fetchone()[0], "''::character varying")
+            for column in ['request_fingerprint', 'fairness_key', 'deferral_reason',
+                           'completion_kind', 'required_next']:
+                cursor.execute(f'ALTER TABLE {table} ALTER COLUMN {quote(column)} DROP DEFAULT')
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.enqueue_from_earlier_producer()
+
+        self.migrate(self.latest)
+        self.assert_new_worker_completes(self.enqueue_from_earlier_producer())

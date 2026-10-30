@@ -1,7 +1,9 @@
 > **3.0.1:** Optional request identity, deferred eligibility, required background follow-ups,
 > and fair group selection are described in [the operation contract](docs/operation-contract.md).
 > PostgreSQL state protection lasts through outer commit and waits up to two seconds for a
-> competing transaction. Producers on an earlier version keep working during the upgrade.
+> competing transaction. Database defaults preserve inserts from earlier producers.
+> When upgrading from before 3.0, stop old workers before upgraded code starts submitting work. See the
+> [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).
 
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
