@@ -14,6 +14,9 @@
   A refusal logs a warning that names the record.
 - A background job refused by a held row records an error and retries after the normal pause.
   3.0.0 deferred it by one second without counting, so a job behind an abandoned transaction retried quietly forever, and a targetless job repeated its side effects on every retry.
+- Completing a failed background job also checks the business row under a bounded lock.
+  If another transaction still holds it, or its state cannot be checked, the job completes as failed with the reason recorded, leaving the business state unchanged and skipping failure callbacks.
+  If that transaction has committed a newer state, the job is superseded and keeps that state. This also applies to non-atomic jobs and stuck-job completion.
 - The new job columns carry database defaults (`db_default`), preserving inserts from producers on an earlier version.
   Migration 0011 keeps the defaults when it adds the columns; migration 0013 restores them on a database that applied the 3.0.0 copy of 0011.
   Workers from before 3.0 must stop before upgraded producers start submitting work. Complete the application upgrade before starting the new workers; the database defaults alone do not make mixed worker execution compatible. See the [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).

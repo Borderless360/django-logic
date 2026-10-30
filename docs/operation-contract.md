@@ -115,6 +115,17 @@ Targetless jobs without a failed state protect only finalization, so independent
 Allow for both database connections. Provider requests must be bounded.
 A connection loss cannot undo an external request that was already sent.
 
+Completing a failed job makes a bounded check of the business row before writing
+`failed_state`. If the state changed, the job completes as `superseded` and skips
+failure callbacks. If another transaction still holds the row, or its state cannot
+be checked, the job completes
+as failed, records why the failed state could not be written, and leaves the
+business state unchanged without running failure callbacks. A final attempt can
+therefore make two bounded lock attempts: one before its work and one before
+completion. Normal retries keep their existing error count and pause. The same
+completion check applies to `atomic=False` jobs and stuck-job completion; a
+non-atomic job keeps any provider confirmations already committed.
+
 ```python
 from django_logic.background import cancel_pending
 result = cancel_pending(job_id)
