@@ -1,6 +1,9 @@
-> **3.0.0:** Optional request identity, deferred eligibility, required background follow-ups,
+> **3.0.1:** Optional request identity, deferred eligibility, required background follow-ups,
 > and fair group selection are described in [the operation contract](docs/operation-contract.md).
-> PostgreSQL state protection now lasts through outer commit. This requires a coordinated upgrade.
+> PostgreSQL state protection lasts through outer commit and waits up to two seconds for a
+> competing transaction. Database defaults preserve inserts from earlier producers.
+> When upgrading from before 3.0, stop old workers before upgraded code starts submitting work. See the
+> [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).
 
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
@@ -19,7 +22,7 @@ runs it.
 ## Requirements
 
 - Python 3.11 or later.
-- Django 4.2 or later. CI tests 4.2, 5.1, 5.2 and 6.0. Django 5.0 is not supported.
+- Django 5.1 or later. CI tests 5.1, 5.2 and 6.0.
 - PostgreSQL for background transitions. The worker claims a row with
   `SELECT FOR UPDATE SKIP LOCKED`, and SQLite has no row locks.
 - A cross-process `default` cache. The web processes and the worker processes

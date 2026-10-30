@@ -7,7 +7,7 @@ run them.
 """
 import logging
 
-from django.db import DEFAULT_DB_ALIAS, transaction
+from django.db import DEFAULT_DB_ALIAS, DatabaseError, transaction
 
 from django_logic.exceptions import TransitionTemporarilyUnavailable, _record_failed_check
 from django_logic.logger import (
@@ -65,6 +65,33 @@ def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
         if require_commit:
             raise _SilentRollback(note)
     return result
+
+
+def _run_side_effects_in_savepoint(using: str, fn):
+    """Run the side effects of a transition whose caller holds an open transaction.
+
+    A database error aborts that transaction. The savepoint discards the
+    side effects' writes and keeps the connection usable, so the failed
+    state and the failure callbacks can still be written. Any other error
+    keeps the writes made so far, as it does for a caller outside a
+    transaction.
+    """
+    connection = transaction.get_connection(using)
+    error = None
+    with transaction.atomic(using=using):
+        try:
+            fn()
+        except Exception as exc:
+            if isinstance(exc, DatabaseError) or connection.needs_rollback:
+                raise
+            error = exc
+        if error is None and connection.needs_rollback:
+            raise _SilentRollback(
+                'a side effect raised a database error and suppressed it, so '
+                'every write the side effects made is discarded.'
+            )
+    if error is not None:
+        raise error
 
 
 def write_failed_state(state, failed_state, *, prefix, consequence, using=None):
@@ -212,16 +239,23 @@ class SideEffects(BaseCommand):
     """
 
     def execute(self, state: State, **kwargs):
-        try:
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} SideEffects {len(self.commands)}'
-            )
+        def run_commands():
             for command in self.commands:
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                     f'{getattr(command, "__name__", repr(command))}'
                 )
                 command(state.instance, **kwargs)
+
+        try:
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} SideEffects {len(self.commands)}'
+            )
+            using, in_transaction = _in_open_transaction(state.instance)
+            if in_transaction:
+                _run_side_effects_in_savepoint(using, run_commands)
+            else:
+                run_commands()
         except Exception as error:
             _log_hook_error(f'{kwargs.get("tr_id")} {error}', error)
             self._transition.fail_transition(state, error, **kwargs)

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-10-29
+
+### Fixed
+
+- A synchronous transition writes its failed state again after a database error in a side effect.
+  3.0.0 ran the whole transition inside the row-lock transaction, so the error aborted that transaction and the failed-state write and the failure callbacks failed with `TransactionManagementError`.
+  Side effects now run in a savepoint inside that transaction. A database error discards their writes as one unit; any other error keeps the writes made so far, as before.
+- The business-row lock waits up to two seconds (`django_logic.state.ROW_LOCK_WAIT_SECONDS`; zero refuses at once) instead of refusing at once.
+  A web request or a job finalization that holds the row for milliseconds no longer refuses the caller.
+  A refusal logs a warning that names the record.
+- A background job refused by a held row records an error and retries after the normal pause.
+  3.0.0 deferred it by one second without counting, so a job behind an abandoned transaction retried quietly forever, and a targetless job repeated its side effects on every retry.
+- Completing a failed background job also checks the business row under a bounded lock.
+  If another transaction still holds it, or its state cannot be checked, the job completes as failed with the reason recorded, leaving the business state unchanged and skipping failure callbacks.
+  If that transaction has committed a newer state, the job is superseded and keeps that state. This also applies to non-atomic jobs and stuck-job completion.
+- The new job columns carry database defaults (`db_default`), preserving inserts from producers on an earlier version.
+  Migration 0011 keeps the defaults when it adds the columns; migration 0013 restores them on a database that applied the 3.0.0 copy of 0011.
+  Workers from before 3.0 must stop before upgraded producers start submitting work. Complete the application upgrade before starting the new workers; the database defaults alone do not make mixed worker execution compatible. See the [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).
+  Django 4.2 support is dropped; it reached end of life in April 2026.
+
 ## [3.0.0] — 2026-10-29
 
 - Add optional request keys with conflicting-input rejection and retained duplicate protection.

@@ -294,7 +294,9 @@ class TestUnlockBeforeCommitWindow(StabilityTestCase):
         thread.start()
         try:
             self.assertTrue(first_transitioned.wait(10))
-            with transaction.atomic():
+            # The first caller holds the row until the assertions are done,
+            # so the refusal is certain; a short wait keeps the test fast.
+            with transaction.atomic(), patch('django_logic.state.ROW_LOCK_WAIT_SECONDS', 0.2):
                 stale_order = Order.objects.get(pk=order.pk)
                 self.assertEqual(stale_order.status, 'draft')
                 from django_logic.exceptions import TransitionTemporarilyUnavailable

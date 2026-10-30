@@ -3,7 +3,7 @@ import inspect
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier, Event
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from django.core.cache import cache
 from django.db import connections, transaction
@@ -354,7 +354,9 @@ class DatabaseLockRefusalMessageTests(TransactionTestCase):
             finally:
                 connections.close_all()
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        # The holder keeps the row until the assertions are done, so the
+        # refusal is certain; a short wait keeps the test fast.
+        with ThreadPoolExecutor(max_workers=1) as executor, patch('django_logic.state.ROW_LOCK_WAIT_SECONDS', 0.2):
             holder = executor.submit(hold_business_row)
             try:
                 self.assertTrue(locked.wait(5))

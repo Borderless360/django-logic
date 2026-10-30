@@ -100,9 +100,12 @@ Its own repeated execution must not repeat completed business effects.
 
 ## State protection and cancellation
 
-On PostgreSQL, lock-taking transitions acquire the physical business-row lock without waiting.
-Another transaction changing that row causes `TransitionTemporarilyUnavailable` before application work starts.
-The database retains this lock through the actual outer commit or rollback.
+On PostgreSQL, lock-taking transitions acquire the physical business-row lock.
+They wait at most two seconds for another transaction that holds the row.
+A holder that outlasts the wait causes `TransitionTemporarilyUnavailable` before application work starts, and the engine logs a warning that names the record.
+A background job that meets this refusal records an error and retries after the normal pause. It does not wait quietly.
+The database retains the lock through the actual outer commit or rollback.
+Inside this transaction, synchronous side effects run in a savepoint. A database error in a side effect discards their writes and still records the failed state and runs the failure callbacks. Any other error keeps the writes made before it.
 The cache gate remains for compatibility; it is not the authority for database-state exclusion.
 SQLite remains useful for synchronous tests, but cannot verify concurrent state protection.
 
@@ -111,6 +114,17 @@ Targetless jobs without a failed state protect only finalization, so independent
 `atomic=False` jobs retain a separate job-row lock and protect business state only when finalizing.
 Allow for both database connections. Provider requests must be bounded.
 A connection loss cannot undo an external request that was already sent.
+
+Completing a failed job makes a bounded check of the business row before writing
+`failed_state`. If the state changed, the job completes as `superseded` and skips
+failure callbacks. If another transaction still holds the row, or its state cannot
+be checked, the job completes
+as failed, records why the failed state could not be written, and leaves the
+business state unchanged without running failure callbacks. A final attempt can
+therefore make two bounded lock attempts: one before its work and one before
+completion. Normal retries keep their existing error count and pause. The same
+completion check applies to `atomic=False` jobs and stuck-job completion; a
+non-atomic job keeps any provider confirmations already committed.
 
 ```python
 from django_logic.background import cancel_pending
@@ -124,11 +138,21 @@ An unfinished job between attempts can be cancelled. This is not a promise to in
 
 ## Upgrade and rollback
 
-This release requires a coordinated upgrade. Stop every producer and worker before applying migrations.
-New non-null columns do not support old producers after Django removes migration defaults.
-Old workers also ignore deferred eligibility and cannot execute the new contract safely.
-Restart only processes using this version, then enable the new declaration options.
-Do not roll back to old workers while new operation records remain outstanding.
+Migration 0011 in 3.0.1 keeps database defaults on the new job columns, so earlier producers can still insert jobs afterwards.
+Migration 0013 restores these defaults for databases that already applied the published 3.0.0 migration.
+Schema changes can briefly block database queries; compatible inserts do not guarantee an uninterrupted deployment.
+
+Workers from before 3.0 ignore deferred eligibility, required successors and fairness. Their cleanup also does not preserve request-key records.
+Database defaults do not make it safe to run those workers alongside upgraded code. When upgrading from before 3.0, use this order:
+
+1. Stop old workers from taking new work and let their active jobs finish. Include application-specific job runners and maintenance commands, not only `dl_worker`. Keep queued jobs.
+2. Stop those workers before upgraded producers start submitting work. Apply the migrations while worker counts remain zero.
+3. Upgrade the web processes and other producers. Compatible earlier web processes may keep accepting requests and queuing jobs during preparation, provided they do not execute jobs inline and the application has verified that its existing queued jobs still run correctly. Confirm that the old processes have finished; deployment platforms can temporarily overlap versions.
+4. Start the new workers after the application upgrade is complete. Check the installed version, queue coverage and completion of existing queued jobs.
+
+A rollback to a version before 3.0 needs a review of application state and saved job records after new work has run.
+Those workers cannot honor deferred eligibility, required follow-ups or request-key retention, including completed records that protect against duplicate requests.
+Leaving the extra columns in place is not sufficient to preserve those behaviors.
 
 Existing job rows receive neutral defaults and preserve their previous identities and inputs.
 The fairness migration creates shared cursor records for their existing group keys.

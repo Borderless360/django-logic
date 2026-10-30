@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import importlib
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone as datetime_timezone
 from dataclasses import dataclass
 from typing import Any
 
@@ -340,23 +339,53 @@ def _complete_terminal_failure(
     measure_duration: bool,
     using=None,
 ):
-    """The one terminal-failure completion: write ``failed_state`` (when
-    declared), then mark the row completed even if the write fails.
-    Completing the row is what stops the retry loop; a failed write is
-    recorded on the row where an operator will see it.
+    """Complete a failed job after checking the business row under its lock.
+
+    A newer business state wins. If its state cannot be checked under the
+    bounded lock, record that problem and complete the failed job without changing
+    the business state or running failure callbacks. A rejected state write
+    after the check still preserves the existing callback behavior.
 
     Returns the ``(transition, state, kwargs, exception)`` tuple the
     caller needs to run ``failure_callbacks`` after its atomic block
-    commits and the row lock is released.
+    commits and the row lock is released, or ``None`` when callbacks must
+    not run.
     """
-    if transition.failed_state:
-        write_error = write_failed_state(
-            state, transition.failed_state,
-            prefix=prefix, consequence=consequence, using=using,
+    try:
+        # A failed business-row check must not discard the job's recorded error.
+        with transaction.atomic(using=using or state.instance._state.db or DEFAULT_DB_ALIAS), state.protected():
+            matches, expected, current = _state_guard_matches(transition, state)
+            write_error = None
+            if matches and transition.failed_state:
+                write_error = write_failed_state(
+                    state, transition.failed_state,
+                    prefix=prefix, consequence=consequence, using=using,
+                )
+    except Exception as error:
+        transition_message.record_failure_side_effect_error(
+            error, label='failed_state protection',
         )
-        if write_error is not None:
-            transition_message.record_failure_side_effect_error(
-                write_error, label='failed_state write')
+        transition_logger.warning(
+            f'{prefix} Completing the failed job without changing the business '
+            f'state or running failure callbacks because its state could not '
+            f'be checked under the row lock: {type(error).__name__}: {error}'
+        )
+        transition_message.mark_as_completed(
+            measure_duration=measure_duration, ended_in_failure=True)
+        return None
+    if not matches:
+        note = (
+            f'[superseded] {prefix} failure completion: expected {expected}, '
+            f'found {current!r}. The business state changed, so failed_state '
+            f'and failure callbacks are skipped. Earlier error: '
+            f'{transition_message.last_error_message or "(none recorded)"}'
+        )
+        transition_logger.warning(note)
+        transition_message.mark_as_superseded(note)
+        return None
+    if write_error is not None:
+        transition_message.record_failure_side_effect_error(
+            write_error, label='failed_state write')
     transition_message.mark_as_completed(
         measure_duration=measure_duration, ended_in_failure=True)
     return (transition, state, kwargs, exception)
@@ -426,10 +455,6 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
             with state.protected() if (transition.target is not None or transition.failed_state) else nullcontext():
                 return _run_atomic_state(transition_message, transition, state, instance, kwargs, decode_error)
         except Exception as error:
-            from django_logic.exceptions import TransitionTemporarilyUnavailable
-            from django_logic.background.exceptions import Defer
-            if isinstance(error, TransitionTemporarilyUnavailable):
-                error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
             return _handle_failure(transition_message, transition, state, kwargs, error)
 
 
@@ -718,9 +743,10 @@ def _handle_failure(
     *, using=None,
 ) -> _Outcome:
     from django_logic.background.exceptions import Defer
-    from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
-    if isinstance(error, TransitionTemporarilyUnavailable) and error.reason == RefusalReason.LOCKED:
-        error = Defer(until=datetime.now(datetime_timezone.utc) + timedelta(seconds=1), reason=str(error))
+    # A record another transaction holds for longer than the row lock wait
+    # is an error like any other. It counts toward the retry limit, so a
+    # job stuck behind an abandoned transaction ends up reported instead
+    # of waiting quietly forever.
     if isinstance(error, Defer):
         transition_message.eligible_at = (
             error.until if settings.USE_TZ else timezone.make_naive(error.until, timezone.get_default_timezone())
@@ -746,13 +772,14 @@ def _handle_failure(
             f'{kwargs.get("tr_id")} {transition.action_name} failed '
             f'permanently ({type(error).__name__}); not retried.'
         )
+    run_failure_hooks = True
     if terminal:
         # The completion comes AFTER record_error, so letting a rejected
         # failed_state write propagate would roll that error back and hold
         # errors_count one below MAX_ERRORS forever. The instance then stays
         # in its in_progress_state, which is an implicit source of the same
         # transition, so it can be run again.
-        _complete_terminal_failure(
+        run_failure_hooks = _complete_terminal_failure(
             transition_message, transition, state, kwargs, error,
             prefix=f'{kwargs.get("tr_id")}',
             consequence=(
@@ -762,13 +789,13 @@ def _handle_failure(
             ),
             measure_duration=True,
             using=using,
-        )
+        ) is not None
     # Not terminal: leave uncompleted → claimable again after the retry wait.
     return _Outcome(
         terminal=terminal,
         succeeded=False,
         exception=error,
-        transition=transition,
+        transition=transition if run_failure_hooks else None,
         state_obj=state,
         kwargs=kwargs,
     )

@@ -15,9 +15,7 @@ jobs:
       # versions that Django release supports.
       matrix:
         include:
-          - { python-version: "3.11", django: "4.2" }
           - { python-version: "3.11", django: "5.1" }
-          - { python-version: "3.12", django: "4.2" }
           - { python-version: "3.12", django: "5.1" }
           - { python-version: "3.12", django: "5.2" }
           - { python-version: "3.12", django: "6.0" }

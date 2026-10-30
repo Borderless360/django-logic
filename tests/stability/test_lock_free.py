@@ -8,6 +8,7 @@ transition holds is left exactly as it was.
 """
 import threading
 import time
+from unittest.mock import patch
 
 from django.test import tag
 
@@ -63,7 +64,10 @@ class LockFreeTransitionUnderThreadsTests(StabilityTestCase):
         self.assertEqual(sorted(_posted), list(range(10)))
 
     def test_the_lock_taking_sibling_refuses_the_overlapping_callers(self):
-        outcomes = self._ten('post_parcel_locked')
+        # With no wait on the row lock, overlapping callers are refused
+        # instead of served in turn.
+        with patch('django_logic.state.ROW_LOCK_WAIT_SECONDS', 0):
+            outcomes = self._ten('post_parcel_locked')
         refused = [error for _, error in outcomes if isinstance(error, TransitionNotAllowed)]
         self.assertTrue(refused, 'ten overlapping callers on one lock, none refused')
         self.assertEqual(len(_posted) + len(refused), 10)

@@ -199,30 +199,32 @@ class OperationContractTests(TestCase):
         self.widget.refresh_from_db()
         self.assertEqual((self.widget.status, self.widget.se_log, self.widget.cb_log), ('draft', '', ''))
 
-    def test_lock_contention_defers_in_both_timezone_modes(self):
-        for use_tz in (False, True):
-            for location in ('state_protection', 'side_effect'):
-                with self.subTest(use_tz=use_tz, location=location), override_settings(USE_TZ=use_tz):
-                    self.widget = Widget.objects.create()
-                    result = self.enqueue(key=f'lock:{use_tz}:{location}')
-                    error = TransitionTemporarilyUnavailable('record busy', reason=RefusalReason.LOCKED)
-                    def locked(instance, **kwargs):
-                        raise error
-                    protection = (
-                        patch('django_logic.state.State.protected', side_effect=error)
-                        if location == 'state_protection'
-                        else patch.object(OperationProcess.transitions[3].side_effects, '_commands', [locked])
-                    )
-                    with protection:
-                        run_background_transition(result.job_id)
-                    row = TransitionMessage.objects.get(pk=result.job_id)
-                    self.assertFalse(row.is_completed)
-                    self.assertEqual(row.errors_count, 0)
-                    self.assertEqual(row.deferral_reason, 'record busy')
-                    self.assertEqual(timezone.is_aware(row.eligible_at), use_tz)
-                    self.assertGreater(row.eligible_at, timezone.now())
-                    self.widget.refresh_from_db()
-                    self.assertEqual((self.widget.status, self.widget.se_log), ('draft', ''))
+    def test_lock_contention_counts_as_an_error(self):
+        """A record held longer than the row lock wait is a failed attempt,
+        not quiet waiting: the retry limit then reports a job stuck behind
+        an abandoned transaction."""
+        for location in ('state_protection', 'side_effect'):
+            with self.subTest(location=location):
+                self.widget = Widget.objects.create()
+                result = self.enqueue(key=f'lock:{location}')
+                error = TransitionTemporarilyUnavailable('record busy', reason=RefusalReason.LOCKED)
+                def locked(instance, **kwargs):
+                    raise error
+                protection = (
+                    patch('django_logic.state.State.protected', side_effect=error)
+                    if location == 'state_protection'
+                    else patch.object(OperationProcess.transitions[3].side_effects, '_commands', [locked])
+                )
+                with protection:
+                    run_background_transition(result.job_id)
+                row = TransitionMessage.objects.get(pk=result.job_id)
+                self.assertFalse(row.is_completed)
+                self.assertEqual(row.errors_count, 1)
+                self.assertIn('record busy', row.last_error_message)
+                self.assertIsNone(row.eligible_at)
+                self.assertEqual(row.deferral_reason, '')
+                self.widget.refresh_from_db()
+                self.assertEqual((self.widget.status, self.widget.se_log), ('draft', ''))
 
     def test_pending_cancellation_is_terminal_and_does_not_run_effect(self):
         result = self.enqueue()
