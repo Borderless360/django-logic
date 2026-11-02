@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [3.0.2rc1] — 2026-11-02
 
 - Retain the first recorded start attempt, start-attempt count, and recorded deferral count on each background job.
   Simultaneous workers can record more starts than executions; this count does not measure provider requests.
