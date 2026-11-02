@@ -1,6 +1,8 @@
 # Changelog
 
-## [3.1.0rc1] — 2026-11-02
+## [Unreleased]
+
+## [3.1.0] — 2026-11-02
 
 - Declare independent `BackgroundEffect` work on a background transition. Save
   each effect job atomically with parent completion, using stable request keys,
@@ -14,8 +16,11 @@
   preserve legacy submission for older parent jobs with empty effect snapshots.
 - Show independent effects with their parent identity in job reports. Parent
   transition test helpers and snapshots continue to select the parent job.
+- Add `include_locked=True` to public action and transition eligibility queries.
+  Callers can check source, permissions and conditions during a temporary state
+  lock. Execution still takes the normal locks and checks state and unfinished
+  work again; default queries keep their previous behavior.
 
-## [3.0.2rc1] — 2026-11-02
 
 - Retain the first recorded start attempt, start-attempt count, and recorded deferral count on each background job.
   Simultaneous workers can record more starts than executions; this count does not measure provider requests.

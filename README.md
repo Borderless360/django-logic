@@ -1,4 +1,4 @@
-> **3.1.0rc1:** Independent background effects are saved with parent completion and
+> **3.1.0:** Independent background effects are saved with parent completion and
 > run through the same workers without blocking later parent actions. See
 > [the effect contract and upgrade requirements](docs/operation-contract.md#independent-background-effects).
 >
