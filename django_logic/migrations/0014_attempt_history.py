@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name='transitionmessage',
-            name='attempt_count',
+            name='start_attempt_count',
             field=models.PositiveIntegerField(db_default=0, default=0),
         ),
         migrations.AddField(

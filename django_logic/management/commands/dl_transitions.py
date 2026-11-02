@@ -76,7 +76,7 @@ class Command(BaseCommand):
                 f'#{row.pk} {row.recorded_model_label}'
                 f'#{row.instance_id} {row.process_name}.{row.transition_name} '
                 f'queue={row.queue_name} errors={row.errors_count} '
-                f'attempts={row.attempt_count} deferrals={row.deferral_count} '
+                f'start_attempts={row.start_attempt_count} deferrals={row.deferral_count} '
                 f'age={age_minutes}m — {why}'
             )
         self.stdout.write(f'{count} uncompleted transitions.')

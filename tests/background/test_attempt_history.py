@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
 from django.core.cache import cache
-from django.db import connection
+from django.db import connection, connections
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -87,13 +87,13 @@ class AttemptHistoryTests(TestCase):
 
     def test_multiple_deferrals_retain_first_start_and_history_after_success(self):
         row = self.enqueue()
-        self.assertEqual((row.attempt_count, row.deferral_count), (0, 0))
+        self.assertEqual((row.start_attempt_count, row.deferral_count), (0, 0))
         self.assertIsNone(row.first_started_at)
         run_background_transition(row.pk)
         row.refresh_from_db()
         first_start = row.first_started_at
         self.assertEqual(first_start, row.started_at)
-        self.assertEqual((row.attempt_count, row.deferral_count, row.errors_count), (1, 1, 0))
+        self.assertEqual((row.start_attempt_count, row.deferral_count, row.errors_count), (1, 1, 0))
         self.assertEqual(row.last_deferred_until, row.eligible_at)
         self.assertGreaterEqual(row.last_deferred_at, first_start)
         self.assertEqual(row.last_deferral_reason, 'provider allowance')
@@ -102,12 +102,12 @@ class AttemptHistoryTests(TestCase):
 
         run_background_transition(row.pk)
         row.refresh_from_db()
-        self.assertEqual((row.attempt_count, row.deferral_count), (1, 1), 'a future wait must not start')
+        self.assertEqual((row.start_attempt_count, row.deferral_count), (1, 1), 'a future wait must not start')
         self.allow_retry(row)
         run_background_transition(row.pk)
         row.refresh_from_db()
         last_wait = (row.last_deferred_at, row.last_deferred_until, row.last_deferral_reason)
-        self.assertEqual((row.attempt_count, row.deferral_count), (2, 2))
+        self.assertEqual((row.start_attempt_count, row.deferral_count), (2, 2))
         self.assertEqual(row.first_started_at, first_start)
         self.assertGreaterEqual(row.started_at, first_start)
 
@@ -116,14 +116,14 @@ class AttemptHistoryTests(TestCase):
             run_background_transition(row.pk)
         row.refresh_from_db()
         self.assertTrue(row.is_completed)
-        self.assertEqual((row.attempt_count, row.deferral_count, row.errors_count), (3, 2, 0))
+        self.assertEqual((row.start_attempt_count, row.deferral_count, row.errors_count), (3, 2, 0))
         self.assertEqual(row.first_started_at, first_start)
         self.assertIsNone(row.eligible_at)
         self.assertEqual(row.deferral_reason, '')
         self.assertEqual((row.last_deferred_at, row.last_deferred_until, row.last_deferral_reason), last_wait)
         run_background_transition(row.pk)
         row.refresh_from_db()
-        self.assertEqual(row.attempt_count, 3, 'a completed job must not start again')
+        self.assertEqual(row.start_attempt_count, 3, 'a completed job must not start again')
 
     def test_error_after_deferral_keeps_wait_history(self):
         row = self.enqueue()
@@ -135,7 +135,7 @@ class AttemptHistoryTests(TestCase):
         with patch.object(HistoryProcess.transitions[0].side_effects, '_commands', [reject_provider]):
             run_background_transition(row.pk)
         row.refresh_from_db()
-        self.assertEqual((row.attempt_count, row.deferral_count, row.errors_count), (2, 1, 1))
+        self.assertEqual((row.start_attempt_count, row.deferral_count, row.errors_count), (2, 1, 1))
         self.assertEqual(row.first_started_at, first_start)
         self.assertIsNone(row.eligible_at)
         self.assertEqual(row.deferral_reason, '')
@@ -161,13 +161,13 @@ class AttemptHistoryTests(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.first_started_at, row.started_at)
         self.assertGreater(row.first_started_at, old_start)
-        self.assertEqual(row.attempt_count, 1)
+        self.assertEqual(row.start_attempt_count, 1)
 
     def test_earlier_producer_can_omit_new_columns(self):
         row = self.enqueue()
         row.is_completed = True
         row.save(update_fields=['is_completed'])
-        new_fields = {'id', 'attempt_count', 'deferral_count', 'first_started_at',
+        new_fields = {'id', 'start_attempt_count', 'deferral_count', 'first_started_at',
                       'last_deferral_reason', 'last_deferred_at', 'last_deferred_until'}
         columns = ', '.join(connection.ops.quote_name(field.column)
                             for field in TransitionMessage._meta.concrete_fields if field.name not in new_fields)
@@ -175,7 +175,7 @@ class AttemptHistoryTests(TestCase):
         with connection.cursor() as cursor:
             cursor.execute(f'INSERT INTO {table} ({columns}) SELECT {columns} FROM {table} WHERE id = %s', [row.pk])
         copied = TransitionMessage.objects.exclude(pk=row.pk).get()
-        self.assertEqual((copied.attempt_count, copied.deferral_count, copied.last_deferral_reason), (0, 0, ''))
+        self.assertEqual((copied.start_attempt_count, copied.deferral_count, copied.last_deferral_reason), (0, 0, ''))
         self.assertIsNone(copied.first_started_at)
         self.assertIsNone(copied.last_deferred_at)
         self.assertIsNone(copied.last_deferred_until)
@@ -212,13 +212,59 @@ class AttemptHistoryPostgresTests(TransactionTestCase):
             run_background_transition(row.pk)
             row.refresh_from_db()
             self.assertIsNone(row.first_started_at)
-            self.assertEqual(row.attempt_count, 0)
+            self.assertEqual(row.start_attempt_count, 0)
         finally:
             release.set()
             thread.join(timeout=10)
         run_background_transition(row.pk)
         row.refresh_from_db()
-        self.assertEqual(row.attempt_count, 1)
+        self.assertEqual(row.start_attempt_count, 1)
+
+    def test_simultaneous_start_markers_do_not_imply_duplicate_execution(self):
+        from django_logic.background import runner
+
+        HistoryProcess(field_name='status', instance=self.widget).submit()
+        row = TransitionMessage.objects.get()
+        recorded, release = threading.Event(), threading.Event()
+        original_run = runner._run_atomic
+        failures = []
+
+        def pause_after_start(message_id):
+            if threading.current_thread() is first_worker:
+                recorded.set()
+                if not release.wait(timeout=10):
+                    raise AssertionError('The other worker did not finish.')
+            return original_run(message_id)
+
+        def first_start():
+            try:
+                run_background_transition(row.pk)
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                connections.close_all()
+
+        first_worker = threading.Thread(target=first_start, daemon=True)
+        with patch.object(runner, '_run_atomic', side_effect=pause_after_start), \
+                patch.object(HistoryProcess.transitions[0].side_effects, '_commands', [bg_ok]):
+            first_worker.start()
+            try:
+                self.assertTrue(recorded.wait(timeout=10))
+                row.refresh_from_db()
+                first_start_time = row.first_started_at
+                self.assertEqual(row.start_attempt_count, 1)
+                run_background_transition(row.pk)
+            finally:
+                release.set()
+                first_worker.join(timeout=10)
+        self.assertFalse(first_worker.is_alive())
+        self.assertEqual(failures, [])
+        row.refresh_from_db()
+        self.widget.refresh_from_db()
+        self.assertTrue(row.is_completed)
+        self.assertEqual(row.start_attempt_count, 2)
+        self.assertEqual(row.first_started_at, first_start_time)
+        self.assertEqual(self.widget.se_log, 'ok,')
 
     def test_separate_job_processes_retain_progress_and_deferral_history(self):
         ReceiptHistoryProcess(field_name='status', instance=self.widget).submit()
@@ -230,12 +276,12 @@ class AttemptHistoryPostgresTests(TransactionTestCase):
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.se_log, 'confirmed')
         self.assertFalse(row.is_completed)
-        self.assertEqual((row.attempt_count, row.deferral_count, row.errors_count), (1, 1, 0))
+        self.assertEqual((row.start_attempt_count, row.deferral_count, row.errors_count), (1, 1, 0))
         TransitionMessage.objects.filter(pk=row.pk).update(eligible_at=timezone.now() - timedelta(seconds=1))
         self.assertTrue(run_once([QUEUE], isolate=True))
         row.refresh_from_db()
         self.assertTrue(row.is_completed)
-        self.assertEqual((row.attempt_count, row.deferral_count, row.errors_count), (2, 1, 0))
+        self.assertEqual((row.start_attempt_count, row.deferral_count, row.errors_count), (2, 1, 0))
         self.assertEqual(row.first_started_at, first_start)
         self.assertEqual(row.last_deferred_until, wait_until)
         self.assertEqual(row.last_deferral_reason, 'next portion')
@@ -248,12 +294,12 @@ class AttemptHistoryPostgresTests(TransactionTestCase):
         row.refresh_from_db()
         first_start = row.first_started_at
         self.assertIsNotNone(first_start)
-        self.assertEqual((row.attempt_count, row.deferral_count, row.errors_count), (1, 0, 1))
+        self.assertEqual((row.start_attempt_count, row.deferral_count, row.errors_count), (1, 0, 1))
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.se_log, 'confirmed')
         self.assertFalse(row.is_completed)
         self.assertTrue(run_once([QUEUE], isolate=True))
         row.refresh_from_db()
         self.assertTrue(row.is_completed)
-        self.assertEqual((row.attempt_count, row.deferral_count, row.errors_count), (2, 0, 1))
+        self.assertEqual((row.start_attempt_count, row.deferral_count, row.errors_count), (2, 0, 1))
         self.assertEqual(row.first_started_at, first_start)

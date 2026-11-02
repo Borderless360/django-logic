@@ -66,12 +66,15 @@ The operator's `--send` command refuses to override a future deferral.
 
 ## Measurements retained after completion
 
-Each job retains `first_started_at` and `attempt_count`. The worker saves them
-before running the attempt, together with the existing `started_at` value.
-They survive an attempt rollback or a job process crash. A refused start,
-such as a locked job or a future `eligible_at`, does not increase the count.
-An accepted start includes restoration and state checks, even if no provider
-request follows. The count therefore does not measure provider requests.
+Each job retains `first_started_at` and `start_attempt_count`. The worker saves them
+before trying to execute the job, together with the existing `started_at` value.
+They survive an attempt rollback or a job process crash. A job already locked
+at this check, or waiting for a future `eligible_at`, does not increase the count.
+The worker releases this short lock before taking the lock used during execution.
+Two workers can therefore record a start before only one executes the job.
+`start_attempt_count` counts these saved start markers, not executed side effects
+or provider requests. `first_started_at` is the first recorded start attempt,
+which can precede the worker that actually performs the work.
 
 Every recorded `Defer` increases `deferral_count` without increasing
 `errors_count`. The worker also saves `last_deferred_at`,
@@ -82,7 +85,7 @@ not all elapsed waiting. Applications should use a short reason without
 credentials or request payloads.
 
 For jobs created after the upgrade, `first_started_at - created` measures
-the delay until the first accepted attempt. That delay includes any initial
+the delay until the first recorded start attempt. That delay includes any initial
 application-specified eligibility time. `completed_at - created` includes
 execution, errors, deferrals and time waiting for a worker. `duration_ms`
 still measures only the last attempt and excludes completion callbacks.

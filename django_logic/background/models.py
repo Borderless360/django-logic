@@ -95,10 +95,10 @@ class TransitionMessage(TimeStampedModel):
     # failure). ``duration_ms`` measures the last attempt only; null if
     # the worker never ran.
     started_at = models.DateTimeField(blank=True, null=True)
-    # These measurements begin when a worker with these fields first starts the job.
-    # They do not reconstruct attempts made by an earlier worker version.
+    # Two workers can record starts before only one obtains the execution lock.
+    # These count recorded starts, beginning with upgraded workers, not provider requests.
     first_started_at = models.DateTimeField(blank=True, null=True)
-    attempt_count = models.PositiveIntegerField(default=0, db_default=0)
+    start_attempt_count = models.PositiveIntegerField(default=0, db_default=0)
     completed_at = models.DateTimeField(blank=True, null=True)
     duration_ms = models.PositiveIntegerField(blank=True, null=True)
 
@@ -351,7 +351,7 @@ class TransitionMessage(TimeStampedModel):
                 ).update(
                     started_at=now, modified=now,
                     first_started_at=Coalesce('first_started_at', now),
-                    attempt_count=models.F('attempt_count') + 1,
+                    start_attempt_count=models.F('start_attempt_count') + 1,
                 )
         except OperationalError:
             # Locked by a live attempt: it owns the marker.
