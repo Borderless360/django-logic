@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-11-02
+
+- Declare independent `BackgroundEffect` work on a background transition. Save
+  each effect job atomically with parent completion, using stable request keys,
+  existing workers, fairness and deferred eligibility. Effect failures do not
+  change the parent's completed state or block later parent actions.
+- Run sync-mode effects after the enclosing transaction commits. Keep effect
+  failures on their own jobs and continue with sibling effects.
+- Preserve frozen declarations and exact owners for pending jobs. Reserved
+  child action names prevent earlier workers from running the parent action.
+  Apply migration 0015 and stop earlier workers before enabling effects;
+  preserve legacy submission for older parent jobs with empty effect snapshots.
+- Show independent effects with their parent identity in job reports. Parent
+  transition test helpers and snapshots continue to select the parent job.
+- Add `include_locked=True` to public action and transition eligibility queries.
+  Callers can check source, permissions and conditions during a temporary state
+  lock. Execution still takes the normal locks and checks state and unfinished
+  work again; default queries keep their previous behavior.
+
+
+- Retain the first recorded start attempt, start-attempt count, and recorded deferral count on each background job.
+  Simultaneous workers can record more starts than executions; this count does not measure provider requests.
+  Keep the last deferral's reason and requested times after retries and completion, so an audit can distinguish waiting from failures.
+  Measurements start with upgraded workers; existing history is not reconstructed.
+  Apply migration 0014 before starting them. Database defaults preserve inserts from older producers.
+- Identify the failing callable, action, model record and exception type in essential side-effect error logs without logging callable arguments.
+- Show start-attempt and deferral counts in `dl_transitions`.
+
 ## [3.0.1] — 2026-10-29
 
 ### Fixed

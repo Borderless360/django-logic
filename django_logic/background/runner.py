@@ -113,6 +113,9 @@ def run_background_transition(transition_message_id: int) -> None:
     # Best-effort hooks after the transaction commits.
     if outcome.terminal and outcome.succeeded and outcome.transition is not None:
         _run_success_hooks(outcome)
+        if outcome.transition.background_effects:
+            from django_logic.background.effects import dispatch_effect_jobs
+            dispatch_effect_jobs(transition_message_id)
     elif outcome.terminal and not outcome.succeeded and outcome.transition is not None:
         _run_failure_callbacks(
             outcome.transition, outcome.state_obj,
@@ -353,7 +356,7 @@ def _complete_terminal_failure(
     """
     try:
         # A failed business-row check must not discard the job's recorded error.
-        with transaction.atomic(using=using or state.instance._state.db or DEFAULT_DB_ALIAS), state.protected():
+        with transaction.atomic(using=using or state.instance._state.db or DEFAULT_DB_ALIAS), _protect_completion_state(transition, state):
             matches, expected, current = _state_guard_matches(transition, state)
             write_error = None
             if matches and transition.failed_state:
@@ -429,10 +432,9 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
     mark_as_* / record_error calls out is what broke the unrestorable-row
     path (see _StopRetry). Don't do it.
 
-    started_at is the one deliberate exception. It marks the attempt
-    instead of accounting for it: other connections must see it while the
-    attempt runs, and it must survive the attempt rolling back. The
-    caller therefore stamps and commits it before this block opens.
+    The start times and attempt count are deliberate exceptions.
+    Other connections must see them while the attempt runs.
+    They must survive a rollback, so the caller commits them before this block opens.
     """
     with transaction.atomic():
         transition_message = _lock_uncompleted_row(transition_message_id)
@@ -483,7 +485,7 @@ def _run_atomic_state(transition_message, transition, state, instance, kwargs, d
             )
         def execute_and_complete():
             _execute_attempt(instance, transition, state, kwargs)
-            with state.protected():
+            with _protect_completion_state(transition, state):
                 if transition.target is None:
                     superseded = _superseded_outcome(
                         transition_message, transition, state, kwargs, after_side_effects=True,
@@ -720,6 +722,9 @@ def _handle_success(
 ) -> _Outcome:
     # The caller writes the target in the same transaction as this completion.
     transition_message.mark_as_completed()
+    if transition_message.background_effect_names:
+        from django_logic.background.effects import save_effect_jobs
+        save_effect_jobs(transition_message, transition, state, kwargs)
     if transition_message.required_next:
         _write_required_next(transition_message, state, kwargs)
     transition_logger.info(
@@ -752,8 +757,14 @@ def _handle_failure(
             error.until if settings.USE_TZ else timezone.make_naive(error.until, timezone.get_default_timezone())
         )
         transition_message.deferral_reason = db_safe_text(error.reason)
+        transition_message.deferral_count += 1
+        transition_message.last_deferred_at = timezone.now()
+        transition_message.last_deferred_until = transition_message.eligible_at
+        transition_message.last_deferral_reason = transition_message.deferral_reason
         transition_message.save(using=using or transition_message._state.db,
-                                update_fields=['eligible_at', 'deferral_reason', 'modified'])
+                                update_fields=['eligible_at', 'deferral_reason', 'deferral_count',
+                                               'last_deferred_at', 'last_deferred_until',
+                                               'last_deferral_reason', 'modified'])
         return _Outcome(terminal=False, succeeded=False)
     transition_message.eligible_at = None
     transition_message.deferral_reason = ''
@@ -856,6 +867,8 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
 
     Returns ``(matches, expected_description, current_state)``.
     """
+    if getattr(transition, 'is_independent_effect', False):
+        return True, 'independent background effect', ''
     current = state.get_persisted_state()
     if transition.in_progress_state:
         return (
@@ -868,6 +881,11 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
         f'one of sources {transition.sources!r}',
         current,
     )
+
+
+def _protect_completion_state(transition, state):
+    # Independent effects only complete their job; they never write business state.
+    return nullcontext() if getattr(transition, 'is_independent_effect', False) else state.protected()
 
 
 def _restore(transition_message: TransitionMessage):
@@ -943,6 +961,11 @@ def _restore(transition_message: TransitionMessage):
             f'transition {transition_message.transition_name!r} not found on process '
             f'{type(process).__module__}.{type(process).__name__}'
         )
+    if transition_message.effect_name:
+        try:
+            transition = transition.get_background_effect(transition_message.effect_name).as_transition()
+        except Exception as error:
+            raise _RestoreError(f'background effect declaration cannot be restored: {error}') from error
     return instance, process, transition
 
 
@@ -979,7 +1002,8 @@ def _find_transition(process, transition_message: TransitionMessage):
     integration's side-effects or strand the instance. The row is
     finalized, retries stop, and no side-effects run.
     """
-    action_name = transition_message.transition_name
+    action_name = (transition_message.parent_transition_name if transition_message.effect_name
+                   else transition_message.transition_name)
     owning_path = (transition_message.owning_process_class or '').strip()
     seen, matches = set(), []
     for process_cls in _iter_process_tree(type(process)):
@@ -997,6 +1021,8 @@ def _find_transition(process, transition_message: TransitionMessage):
                     # objects, and a shared object is one match, not two.
                     seen.add(id(transition))
                     matches.append(transition)
+    if transition_message.effect_name:
+        raise _RestoreError('The background effect declaring process no longer matches; refusing another process.')
     if owning_path:
         transition_logger.warning(
             f'TransitionMessage#{transition_message.pk}: recorded process class '

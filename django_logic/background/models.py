@@ -6,7 +6,7 @@ atomically with the ``in_progress_state`` write on the target instance. The work
 a successful execution.
 
 The partial unique constraint ``(app_label, model_name, instance_id,
-process_name)`` where ``is_completed=False`` is the concurrency guard —
+process_name)`` for unfinished non-effect rows is the concurrency guard —
 only one uncompleted message can exist per instance *per process* at a
 time. Two processes bound to different state fields of the same model,
 under distinct process names, are independent state machines and may
@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import OperationalError, models, transaction
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
@@ -60,8 +61,19 @@ class TransitionMessage(TimeStampedModel):
     fairness_key = models.CharField(max_length=255, blank=True, default='', db_default='', db_index=True)
     eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
     deferral_reason = models.TextField(blank=True, default='', db_default='')
+    # Keep the last recorded wait after the current wait ends or the job finishes.
+    deferral_count = models.PositiveIntegerField(default=0, db_default=0)
+    last_deferred_at = models.DateTimeField(blank=True, null=True)
+    last_deferred_until = models.DateTimeField(blank=True, null=True)
+    last_deferral_reason = models.TextField(blank=True, default='', db_default='')
     completion_kind = models.CharField(max_length=16, blank=True, default='', db_default='')
     required_next = models.CharField(max_length=100, blank=True, default='', db_default='')
+    # Names are frozen when the parent is submitted. Earlier producers leave [].
+    background_effect_names = models.JSONField(default=list, db_default=[])
+    effect_name = models.CharField(max_length=100, blank=True, default='', db_default='')
+    parent_transition_name = models.CharField(max_length=100, blank=True, default='', db_default='')
+    # Keep the parent identity even if normal cleanup removes its completed row.
+    parent_job_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
     is_completed = models.BooleanField(default=False)
     errors_count = models.PositiveIntegerField(default=0)
     last_error_dt = models.DateTimeField(blank=True, null=True)
@@ -89,6 +101,10 @@ class TransitionMessage(TimeStampedModel):
     # failure). ``duration_ms`` measures the last attempt only; null if
     # the worker never ran.
     started_at = models.DateTimeField(blank=True, null=True)
+    # Two workers can record starts before only one obtains the execution lock.
+    # These count recorded starts, beginning with upgraded workers, not provider requests.
+    first_started_at = models.DateTimeField(blank=True, null=True)
+    start_attempt_count = models.PositiveIntegerField(default=0, db_default=0)
     completed_at = models.DateTimeField(blank=True, null=True)
     duration_ms = models.PositiveIntegerField(blank=True, null=True)
 
@@ -157,7 +173,7 @@ class TransitionMessage(TimeStampedModel):
             # ``payment_status``) would falsely conflict.
             models.UniqueConstraint(
                 fields=['app_label', 'model_name', 'instance_id', 'process_name'],
-                condition=models.Q(is_completed=False),
+                condition=models.Q(is_completed=False, effect_name=''),
                 name='dl_bg_one_uncompleted_per_process',
             ),
         ]
@@ -174,8 +190,13 @@ class TransitionMessage(TimeStampedModel):
         return (
             f'TransitionMessage#{self.pk} '
             f'{self.recorded_model_label}#{self.instance_id} '
-            f'{self.transition_name} on {self.queue_name}'
+            f'{self.operation_name} '
+            f'on {self.queue_name}'
         )
+
+    @property
+    def operation_name(self):
+        return f'{self.parent_transition_name}/{self.effect_name}' if self.effect_name else self.transition_name
 
     @classmethod
     def instance_key(cls, instance, process_name: str) -> dict:
@@ -208,9 +229,8 @@ class TransitionMessage(TimeStampedModel):
 
     @classmethod
     def in_flight_for(cls, instance, process_name: str):
-        """The uncompleted rows for ``instance`` + ``process_name``. The
-        sync gate and the public ``in_flight()`` probe read through it."""
-        return cls.for_instance(instance, process_name).filter(is_completed=False)
+        """Unfinished parent transitions; independent effects do not block the process."""
+        return cls.for_instance(instance, process_name).filter(is_completed=False, effect_name='')
 
     RETRYING = 'retrying'
     STRANDED = 'stranded'
@@ -294,9 +314,9 @@ class TransitionMessage(TimeStampedModel):
         """Mark an attempt as beginning, in its own committed statement.
 
         Deliberately called from *outside* the attempt's ``atomic`` block.
-        ``started_at`` is the only field that must be visible to other
-        connections *while* the attempt runs, and must survive the attempt
-        rolling back: a hung attempt holds its transaction open (a write
+        The start times and count must be visible to other connections while
+        the attempt runs, and must survive the attempt rolling back.
+        A hung attempt holds its transaction open (a write
         inside it is invisible to other connections), and a crashed worker
         rolls the stamp back with it. Written here it survives both
         cases.
@@ -340,6 +360,8 @@ class TransitionMessage(TimeStampedModel):
                     pk=transition_message_id, is_completed=False
                 ).update(
                     started_at=now, modified=now,
+                    first_started_at=Coalesce('first_started_at', now),
+                    start_attempt_count=models.F('start_attempt_count') + 1,
                 )
         except OperationalError:
             # Locked by a live attempt: it owns the marker.

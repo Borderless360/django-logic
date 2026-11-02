@@ -36,7 +36,7 @@ def operation_options(*, request_key=None, fairness_key=None):
     """Apply metadata to one background submission. Existing action returns stay unchanged."""
     validate_key(request_key, 'request_key')
     if request_key is not None and request_key.startswith('django-logic:'):
-        raise ValueError('The django-logic: request-key prefix is reserved for required successors.')
+        raise ValueError('The django-logic: request-key prefix is reserved for required successors and background effects.')
     submission = Submission(
         request_key,
         validate_key(fairness_key, 'fairness_key', allow_empty=True),

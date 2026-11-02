@@ -72,10 +72,13 @@ class Command(BaseCommand):
             why = self._why(
                 row, claimable, max_errors, report_after, age_minutes,
                 queue_is_served)
+            parent = f'parent_job={row.parent_job_id} ' if row.effect_name else ''
             self.stdout.write(
                 f'#{row.pk} {row.recorded_model_label}'
-                f'#{row.instance_id} {row.process_name}.{row.transition_name} '
+                f'#{row.instance_id} {row.process_name}.{row.operation_name} '
                 f'queue={row.queue_name} errors={row.errors_count} '
+                f'{parent}'
+                f'start_attempts={row.start_attempt_count} deferrals={row.deferral_count} '
                 f'age={age_minutes}m — {why}'
             )
         self.stdout.write(f'{count} uncompleted transitions.')
@@ -87,6 +90,9 @@ class Command(BaseCommand):
         if row.eligible_at is not None and row.eligible_at > timezone.now():
             return f'waiting until {row.eligible_at.isoformat()}: {row.deferral_reason}'
         if row.errors_count >= max_errors:
+            if row.effect_name:
+                return (f'at MAX_ERRORS ({max_errors}) — the next worker check records '
+                        'the effect failure without changing the parent state')
             return (
                 f'at MAX_ERRORS ({max_errors}) — the stuck finalizer ends it '
                 f'in its failed_state on the next pass of any running worker'
