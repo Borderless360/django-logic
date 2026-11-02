@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Retain the first observed start, accepted attempt count, and recorded deferral count on each background job.
+  Keep the last deferral's reason and requested times after retries and completion, so an audit can distinguish waiting from failures.
+  Measurements start with upgraded workers; existing history is not reconstructed.
+  Apply migration 0014 before starting them. Database defaults preserve inserts from older producers.
+- Identify the failing callable, action, model record and exception type in essential side-effect error logs without logging callable arguments.
+- Show attempt and deferral counts in `dl_transitions`.
+
 ## [3.0.1] — 2026-10-29
 
 ### Fixed

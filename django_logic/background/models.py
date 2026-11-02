@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import OperationalError, models, transaction
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
@@ -60,6 +61,11 @@ class TransitionMessage(TimeStampedModel):
     fairness_key = models.CharField(max_length=255, blank=True, default='', db_default='', db_index=True)
     eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
     deferral_reason = models.TextField(blank=True, default='', db_default='')
+    # Keep the last recorded wait after the current wait ends or the job finishes.
+    deferral_count = models.PositiveIntegerField(default=0, db_default=0)
+    last_deferred_at = models.DateTimeField(blank=True, null=True)
+    last_deferred_until = models.DateTimeField(blank=True, null=True)
+    last_deferral_reason = models.TextField(blank=True, default='', db_default='')
     completion_kind = models.CharField(max_length=16, blank=True, default='', db_default='')
     required_next = models.CharField(max_length=100, blank=True, default='', db_default='')
     is_completed = models.BooleanField(default=False)
@@ -89,6 +95,10 @@ class TransitionMessage(TimeStampedModel):
     # failure). ``duration_ms`` measures the last attempt only; null if
     # the worker never ran.
     started_at = models.DateTimeField(blank=True, null=True)
+    # These measurements begin when a worker with these fields first starts the job.
+    # They do not reconstruct attempts made by an earlier worker version.
+    first_started_at = models.DateTimeField(blank=True, null=True)
+    attempt_count = models.PositiveIntegerField(default=0, db_default=0)
     completed_at = models.DateTimeField(blank=True, null=True)
     duration_ms = models.PositiveIntegerField(blank=True, null=True)
 
@@ -294,9 +304,9 @@ class TransitionMessage(TimeStampedModel):
         """Mark an attempt as beginning, in its own committed statement.
 
         Deliberately called from *outside* the attempt's ``atomic`` block.
-        ``started_at`` is the only field that must be visible to other
-        connections *while* the attempt runs, and must survive the attempt
-        rolling back: a hung attempt holds its transaction open (a write
+        The start times and count must be visible to other connections while
+        the attempt runs, and must survive the attempt rolling back.
+        A hung attempt holds its transaction open (a write
         inside it is invisible to other connections), and a crashed worker
         rolls the stamp back with it. Written here it survives both
         cases.
@@ -340,6 +350,8 @@ class TransitionMessage(TimeStampedModel):
                     pk=transition_message_id, is_completed=False
                 ).update(
                     started_at=now, modified=now,
+                    first_started_at=Coalesce('first_started_at', now),
+                    attempt_count=models.F('attempt_count') + 1,
                 )
         except OperationalError:
             # Locked by a live attempt: it owns the marker.

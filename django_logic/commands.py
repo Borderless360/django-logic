@@ -239,11 +239,16 @@ class SideEffects(BaseCommand):
     """
 
     def execute(self, state: State, **kwargs):
+        command_name = 'before the first side effect'
+
         def run_commands():
+            nonlocal command_name
             for command in self.commands:
+                command_name = type(command).__name__
+                command_name = getattr(command, '__name__', None) or command_name
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
-                    f'{getattr(command, "__name__", repr(command))}'
+                    f'{command_name}'
                 )
                 command(state.instance, **kwargs)
 
@@ -257,7 +262,12 @@ class SideEffects(BaseCommand):
             else:
                 run_commands()
         except Exception as error:
-            _log_hook_error(f'{kwargs.get("tr_id")} {error}', error)
+            _log_hook_error(
+                f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
+                f'{command_name} failed action={self._transition.action_name} '
+                f'instance={state.instance_key}: {type(error).__name__}: {error}',
+                error,
+            )
             self._transition.fail_transition(state, error, **kwargs)
             raise
         else:

@@ -429,10 +429,9 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
     mark_as_* / record_error calls out is what broke the unrestorable-row
     path (see _StopRetry). Don't do it.
 
-    started_at is the one deliberate exception. It marks the attempt
-    instead of accounting for it: other connections must see it while the
-    attempt runs, and it must survive the attempt rolling back. The
-    caller therefore stamps and commits it before this block opens.
+    The start times and attempt count are deliberate exceptions.
+    Other connections must see them while the attempt runs.
+    They must survive a rollback, so the caller commits them before this block opens.
     """
     with transaction.atomic():
         transition_message = _lock_uncompleted_row(transition_message_id)
@@ -752,8 +751,14 @@ def _handle_failure(
             error.until if settings.USE_TZ else timezone.make_naive(error.until, timezone.get_default_timezone())
         )
         transition_message.deferral_reason = db_safe_text(error.reason)
+        transition_message.deferral_count += 1
+        transition_message.last_deferred_at = timezone.now()
+        transition_message.last_deferred_until = transition_message.eligible_at
+        transition_message.last_deferral_reason = transition_message.deferral_reason
         transition_message.save(using=using or transition_message._state.db,
-                                update_fields=['eligible_at', 'deferral_reason', 'modified'])
+                                update_fields=['eligible_at', 'deferral_reason', 'deferral_count',
+                                               'last_deferred_at', 'last_deferred_until',
+                                               'last_deferral_reason', 'modified'])
         return _Outcome(terminal=False, succeeded=False)
     transition_message.eligible_at = None
     transition_message.deferral_reason = ''
