@@ -180,9 +180,10 @@ def detect_stuck_transitions() -> int:
 def cleanup_completed_transitions() -> int:
     """Delete completed rows older than ``CLEANUP_DAYS``.
 
-    A row that ended in terminal failure is the only explanation for an
-    instance parked in its ``failed_state``, so the sweep keeps the newest
-    such row per instance and process and deletes the rest.
+    A failed parent or required job can explain an instance in its
+    ``failed_state``, so cleanup keeps the newest such row per instance and
+    process. Independent effects cannot change that state; their failures
+    expire after the normal retention period.
 
     Each batch commits separately, so a stopped maintenance process keeps
     earlier progress. A caller's outer transaction still controls its commit.
@@ -199,8 +200,8 @@ def cleanup_completed_transitions() -> int:
     # completes at one error, and a retried success can carry several, so
     # the count cannot tell them apart. Every terminal-failure path sets
     # the flag; a superseded row does not — the external state change won
-    # and the instance is not parked.
-    failed = Q(ended_in_failure=True)
+    # and the instance did not enter its failed state.
+    failed = Q(ended_in_failure=True, effect_name='')
     alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
     rows = TransitionMessage.objects.using(alias)
     newest_failed = (

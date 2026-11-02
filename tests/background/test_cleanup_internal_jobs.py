@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from django_logic import Process, ProcessManager
 from django_logic.background import BackgroundEffect, BackgroundTransition, operation_options
-from django_logic.background.exceptions import RequestConflict
+from django_logic.background.exceptions import PermanentFailure, RequestConflict
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
 from django_logic.background.safety_nets import cleanup_completed_transitions
@@ -17,12 +17,18 @@ from tests import dl_settings
 from tests.background.models import Widget, bg_ok
 
 
+def retention_effect(instance, **kwargs):
+    if kwargs.get('effect_failure'):
+        raise PermanentFailure('Optional retention fixture failed.')
+    bg_ok(instance, **kwargs)
+
+
 class RetentionProcess(Process):
     process_name = 'retention'
     transitions = [
         BackgroundTransition('start', sources=['draft'], target='ready',
                              side_effects=[bg_ok], required_next='finish',
-                             background_effects=[BackgroundEffect('notify', bg_ok)]),
+                             background_effects=[BackgroundEffect('notify', retention_effect)]),
         BackgroundTransition('finish', sources=['ready'], target='done', side_effects=[bg_ok]),
     ]
 
@@ -91,6 +97,46 @@ class InternalJobCleanupTests(TestCase):
             with self.assertRaises(RequestConflict):
                 self.widget.retention.start(value=2)
 
+    def test_failed_effect_expires_without_changing_successful_parent_or_recreating_work(self):
+        with operation_options(request_key='customer:failed-effect:1') as submitted:
+            self.widget.retention.start(effect_failure=True)
+        parent = TransitionMessage.objects.get(pk=submitted.job_id)
+        run_background_transition(parent.pk)
+        effect = TransitionMessage.objects.get(parent_job_id=parent.pk)
+        successor = TransitionMessage.objects.get(
+            request_key=f'django-logic:required-next:{parent.pk}',
+        )
+        run_background_transition(effect.pk)
+        effect.refresh_from_db()
+        parent.refresh_from_db()
+        self.widget.refresh_from_db()
+        self.assertTrue(effect.is_completed)
+        self.assertTrue(effect.ended_in_failure)
+        self.assertEqual(effect.errors_count, 1)
+        self.assertIn('Optional retention fixture failed.', effect.last_error_message)
+        self.assertTrue(parent.is_completed)
+        self.assertFalse(parent.ended_in_failure)
+        self.assertEqual(self.widget.status, 'ready')
+        run_background_transition(successor.pk)
+        self.widget.refresh_from_db()
+        self.assertEqual((self.widget.status, self.widget.se_log), ('done', 'ok,ok,'))
+        TransitionMessage.objects.filter(pk=effect.pk).update(
+            modified=timezone.now() - timedelta(days=30),
+        )
+
+        self.assertEqual(cleanup_completed_transitions(), 1)
+        self.assertFalse(TransitionMessage.objects.filter(pk=effect.pk).exists())
+        expected = {parent.pk, successor.pk}
+        self.assertEqual(set(TransitionMessage.objects.values_list('pk', flat=True)), expected)
+        with operation_options(request_key='customer:failed-effect:1') as repeated:
+            self.widget.retention.start(effect_failure=True)
+        self.assertEqual(repeated.job_id, parent.pk)
+        self.assertFalse(repeated.created)
+        run_background_transition(parent.pk)
+        self.assertEqual(set(TransitionMessage.objects.values_list('pk', flat=True)), expected)
+        self.widget.refresh_from_db()
+        self.assertEqual((self.widget.status, self.widget.se_log), ('done', 'ok,ok,'))
+
     def test_unfinished_and_recent_internal_jobs_are_retained(self):
         keep = set()
         for kind in ('effect', 'required'):
@@ -99,7 +145,8 @@ class InternalJobCleanupTests(TestCase):
                 is_completed=False, eligible_at=timezone.now() + timedelta(hours=1),
                 deferral_count=2, errors_count=1,
             )
-            keep.update([pending.pk, self.old_internal_row(kind, days_ago=1).pk])
+            keep.update([pending.pk, self.old_internal_row(kind, days_ago=1).pk,
+                         self.old_internal_row(kind, failed=True, days_ago=1).pk])
         self.assertEqual(cleanup_completed_transitions(), 0)
         self.assertEqual(set(TransitionMessage.objects.values_list('pk', flat=True)), keep)
 
@@ -113,7 +160,7 @@ class InternalJobCleanupTests(TestCase):
         self.assertEqual(cleanup_completed_transitions(), 0)
         self.assertEqual(TransitionMessage.objects.count(), 4)
 
-    def test_newest_failure_is_retained_for_each_effect_action_and_required_process(self):
+    def test_all_expired_effect_failures_are_removed_but_newest_required_failure_remains(self):
         keep = set()
         for kind, effect, action in (
             ('effect', 'notify', 'start'), ('effect', 'notify', 'other'),
@@ -122,8 +169,9 @@ class InternalJobCleanupTests(TestCase):
             self.old_internal_row(kind, failed=True, effect_name=effect, parent_action=action)
             newest = self.old_internal_row(kind, failed=True, days_ago=20,
                                            effect_name=effect, parent_action=action)
-            keep.add(newest.pk)
-        self.assertEqual(cleanup_completed_transitions(), 4)
+            if kind == 'required':
+                keep.add(newest.pk)
+        self.assertEqual(cleanup_completed_transitions(), 7)
         self.assertEqual(set(TransitionMessage.objects.values_list('pk', flat=True)), keep)
 
     def test_each_delete_rechecks_internal_key_completion_age_and_failure_retention(self):
@@ -147,6 +195,9 @@ class InternalJobCleanupTests(TestCase):
                         return delete(queryset)
 
                     with patch.object(QuerySet, 'delete', change_before_delete):
-                        self.assertEqual(cleanup_completed_transitions(), 0)
+                        deleted = cleanup_completed_transitions()
+                    expired_effect_failure = kind == 'effect' and change == {'ended_in_failure': True}
+                    self.assertEqual(deleted, int(expired_effect_failure))
                     self.assertEqual(delete_calls, [row.pk])
-                    self.assertTrue(TransitionMessage.objects.filter(pk=row.pk).exists())
+                    self.assertEqual(TransitionMessage.objects.filter(pk=row.pk).exists(),
+                                     not expired_effect_failure)
