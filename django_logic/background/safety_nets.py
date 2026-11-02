@@ -200,7 +200,7 @@ def cleanup_completed_transitions() -> int:
     # completes at one error, and a retried success can carry several, so
     # the count cannot tell them apart. Every terminal-failure path sets
     # the flag; a superseded row does not — the external state change won
-    # and the instance is not parked.
+    # and the instance did not enter its failed state.
     failed = Q(ended_in_failure=True, effect_name='')
     alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
     rows = TransitionMessage.objects.using(alias)
