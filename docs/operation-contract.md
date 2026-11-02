@@ -3,6 +3,20 @@
 Existing `instance.process.action(...)` calls keep their return value and declaration behavior.
 The additions below are optional. PostgreSQL state protection changes for every lock-taking transition.
 
+## Checking eligibility while another action runs
+
+`process.get_available_actions(..., include_locked=True)` and
+`process.get_available_transitions(..., include_locked=True)` check the object's
+current state, conditions and permissions even when another action holds its
+state lock. This lets an application distinguish a temporary wait from a business
+rule that forbids an action. The default continues to hide actions that need a
+held lock.
+
+These queries do not acquire or release locks, save a request, or guarantee that
+an action can run immediately. Calling the action still acquires its normal
+locks, checks the latest persisted state and rejects conflicting unfinished
+work. Applications must handle a later refusal without damaging existing data.
+
 ## Submission identity and fair progress
 
 ```python

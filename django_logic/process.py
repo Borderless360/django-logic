@@ -245,20 +245,26 @@ class Process:
             _record_validity_refusal(self, RefusalReason.CONDITION)
         return valid
 
-    def get_available_actions(self, user=None, action_name=None):
-        """Return a sorted list of unique action names currently available."""
+    def get_available_actions(self, user=None, action_name=None, *, include_locked=False):
+        """List eligible actions, optionally including those hidden by a held state lock."""
+        options = {'include_locked': True} if include_locked else {}
         return sorted(
             {
                 transition.action_name
-                for transition in self.get_available_transitions(user, action_name)
+                for transition in self.get_available_transitions(user, action_name, **options)
             }
         )
 
-    def get_available_transitions(self, user=None, action_name=None):
-        """Yield transitions whose conditions/permissions pass."""
+    def get_available_transitions(self, user=None, action_name=None, *, include_locked=False):
+        """Check current state, conditions and permissions without acquiring a lock.
+
+        ``include_locked`` changes only this query. Executing an action still
+        acquires its locks and checks its requirements again.
+        """
         for transition, _owner in self._iter_available_with_owner(
             user=user,
             action_name=action_name,
+            ignore_state=include_locked,
         ):
             yield transition
 

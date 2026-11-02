@@ -18,6 +18,7 @@ nested-inheritance case, on a real persisted instance.
 from django.contrib.auth import get_user_model
 
 from django_logic.exceptions import TransitionNotAllowed
+from django_logic.state import State
 from django_logic.testing import ProcessScenario
 from tests.background.models import Widget, WidgetProcGuardProcess
 
@@ -91,3 +92,30 @@ class ProcessLevelGuardScenario(ProcessScenario):
                         expect_raises=TransitionNotAllowed)
         self.assert_state(widget, 'draft')
         self.assertNotIn('go,', widget.se_log)
+
+    def test_eligibility_query_keeps_parent_guards_for_nested_actions(self):
+        for flags, user, expected in [
+            ([], self.staff, []),
+            (['gate_open'], self.customer, []),
+            (['gate_open'], self.staff, ['inner_go']),
+        ]:
+            with self.subTest(flags=flags, user=user.username):
+                widget = self.create_instance(status='draft', kwargs_seen=flags)
+                process = self._process(widget)
+                holder = State(widget, 'status', 'proc_guard')
+                self.assertTrue(holder.lock())
+                try:
+                    self.assertEqual(process.get_available_actions(user=user, action_name='inner_go'), [])
+                    self.assertEqual(process.get_available_actions(
+                        user=user, action_name='inner_go', include_locked=True), expected)
+                    with self.assertRaises(TransitionNotAllowed):
+                        process.inner_go(user=user)
+                    widget.refresh_from_db()
+                    self.assertEqual((widget.status, widget.se_log), ('draft', ''))
+                    self.assertTrue(holder.is_locked())
+                finally:
+                    holder.unlock()
+                if expected:
+                    process.inner_go(user=user)
+                    self.assert_state(widget, 'inner_gone')
+                    self.assertEqual(widget.se_log, 'inner_go,')
