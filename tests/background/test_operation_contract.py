@@ -257,8 +257,10 @@ class OperationContractTests(TestCase):
             Defer(until=timezone.now().replace(tzinfo=None))
 
     def test_public_request_cannot_use_internal_successor_prefix(self):
-        with self.assertRaises(ValueError):
-            self.enqueue(key='django-logic:required-next:1')
+        for key in ('django-logic:required-next:1', 'django-logic:effect:1:notify',
+                    'django-logic:unknown:1'):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.enqueue(key=key)
         self.assertEqual(TransitionMessage.objects.count(), 0)
 
     def test_required_next_refuses_another_database_before_submission(self):

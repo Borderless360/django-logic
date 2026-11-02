@@ -186,6 +186,11 @@ def cleanup_completed_transitions() -> int:
 
     Each batch commits separately, so a stopped maintenance process keeps
     earlier progress. A caller's outer transaction still controls its commit.
+
+    Public request keys remain retained for duplicate-submission protection.
+    Internal effects and required successors use the normal retention period:
+    they are saved atomically with parent completion, and completed parents
+    cannot run again through the submission or retry APIs.
     """
     from django.db.models import OuterRef, Subquery
 
@@ -213,8 +218,13 @@ def cleanup_completed_transitions() -> int:
         .order_by('-completed_at', '-pk')
         .values('pk')[:1]
     )
+    internal_request = Q(request_fingerprint='') & (
+        Q(request_key__startswith='django-logic:effect:')
+        | Q(request_key__startswith='django-logic:required-next:')
+    )
     eligible = (
-        rows.filter(is_completed=True, modified__lt=cutoff, request_key__isnull=True)
+        rows.filter(Q(request_key__isnull=True) | internal_request,
+                    is_completed=True, modified__lt=cutoff)
         .exclude(failed & Q(pk=Subquery(newest_failed)))
     )
     deleted = 0

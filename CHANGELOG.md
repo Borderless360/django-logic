@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [3.1.1] — 2026-11-02
+
+- Remove old completed background effects and required successors according to
+  the configured job retention period. Their internal request keys previously
+  kept every record forever. Public request keys remain retained for duplicate
+  protection, and cleanup still preserves unfinished work and the newest
+  terminal failure for each process or effect. No migration is required.
+
 ## [3.1.0] — 2026-11-02
 
 - Declare independent `BackgroundEffect` work on a background transition. Save

@@ -243,7 +243,7 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         self.assertFalse(parent.is_completed)
         self.assertIn('not declared', parent.last_error_message)
 
-    def test_cancellation_and_cleanup_preserve_parent_failure_and_child_identity(self):
+    def test_cleanup_removes_old_cancelled_effect_but_keeps_parent_and_effect_failures(self):
         parent, children = self.finish()
         self.assertEqual(cancel_pending(children[0].pk), 'cancelled')
         TransitionMessage.objects.filter(pk=parent.pk).update(ended_in_failure=True)
@@ -252,7 +252,8 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         TransitionMessage.objects.update(modified=timezone.now() - timedelta(days=10))
         cleanup_completed_transitions()
         self.assertTrue(TransitionMessage.objects.filter(pk=parent.pk).exists())
-        self.assertEqual(TransitionMessage.objects.filter(parent_job_id=parent.pk).count(), 2)
+        self.assertFalse(TransitionMessage.objects.filter(pk=children[0].pk).exists())
+        self.assertTrue(TransitionMessage.objects.filter(pk=children[1].pk, parent_job_id=parent.pk).exists())
 
     def test_job_report_identifies_effect_and_parent_without_claiming_a_state_change(self):
         parent, children = self.finish()

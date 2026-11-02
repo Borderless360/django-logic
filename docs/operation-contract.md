@@ -40,11 +40,17 @@ The process class's module and qualified name form part of this identity. Renami
 Application permission checks must still protect the endpoint that accepts submissions.
 
 Request keys are global strings, up to 255 characters. Include an application namespace.
-The `django-logic:` prefix is reserved for engine-created successors.
+The `django-logic:` prefix is reserved for engine-created successors and effects.
 The database job ID remains stable across retries. Existing provider request IDs can remain in application records.
-**Cleanup retains records with request keys indefinitely**, including required successors.
+**Cleanup retains records with public request keys indefinitely.**
 The application must choose when deleting those records is safe. Deletion ends duplicate-submission protection.
-Records without request keys keep the existing cleanup policy.
+Public keys are opt-in: use one when repeated submissions must resolve to the
+same job. An ordinary background submission does not require a request key.
+Records without request keys, and completed jobs with known internal successor
+or effect keys, use the configured retention period. Cleanup keeps unfinished
+jobs and the newest terminal failure for each process or effect. Internal jobs
+are saved atomically with parent completion; a repeated public parent request
+still returns its retained parent record and cannot recreate expired follow-ups.
 
 For a declaration default, use `fairness_key="group"` or a callable accepting `instance, **kwargs`.
 The callable must return a string. `operation_options` overrides this default.
@@ -216,9 +222,10 @@ parent-action/effect name. `for_instance()` returns parents and effects;
 `in_flight_for()` and `in_flight()` concern only state-owning parent jobs.
 Find effects with `TransitionMessage.objects.filter(parent_job_id=parent.pk)`.
 `cancel_pending()` can cancel one waiting effect without cancelling siblings or
-its parent; running work is not interrupted. Effects retain keyed-job duplicate
-protection through cleanup. Parent IDs remain recorded if normal cleanup removes
-an unkeyed parent. Deleting retained job rows ends their duplicate protection.
+its parent; running work is not interrupted. Completed effects use the configured
+retention period, with the newest terminal failure retained. Parent IDs remain
+recorded if normal cleanup removes an unkeyed parent. Retrying a completed parent
+does not recreate effects that expired. Public request keys remain retained.
 
 `ProcessScenario`'s transition assertions select the parent job; its side-effect
 assertions concern the parent's essential callables. Inspect effect jobs
