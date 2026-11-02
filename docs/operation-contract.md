@@ -48,8 +48,9 @@ Public keys are opt-in: use one when repeated submissions must resolve to the
 same job. An ordinary background submission does not require a request key.
 Records without request keys, and completed jobs with known internal successor
 or effect keys, use the configured retention period. Cleanup keeps unfinished
-jobs and the newest terminal failure for each process or effect. Internal jobs
-are saved atomically with parent completion; a repeated public parent request
+jobs and the newest failed parent or required job for each process. Completed
+independent effects, including failures, expire normally because they cannot
+change the parent state. Internal jobs are saved atomically with parent completion; a repeated public parent request
 still returns its retained parent record and cannot recreate expired follow-ups.
 
 For a declaration default, use `fairness_key="group"` or a callable accepting `instance, **kwargs`.
@@ -223,8 +224,8 @@ parent-action/effect name. `for_instance()` returns parents and effects;
 Find effects with `TransitionMessage.objects.filter(parent_job_id=parent.pk)`.
 `cancel_pending()` can cancel one waiting effect without cancelling siblings or
 its parent; running work is not interrupted. Completed effects use the configured
-retention period, with the newest terminal failure retained. Parent IDs remain
-recorded if normal cleanup removes an unkeyed parent. Retrying a completed parent
+retention period for both success and failure. Their failures do not change the
+parent state and have no indefinite retention exception. Parent IDs remain recorded if normal cleanup removes an unkeyed parent. Retrying a completed parent
 does not recreate effects that expired. Public request keys remain retained.
 
 `ProcessScenario`'s transition assertions select the parent job; its side-effect

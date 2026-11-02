@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [3.1.2] — 2026-11-02
+
+- Apply the configured retention period to failed independent background effects,
+  including the newest failure. These jobs cannot change the parent state.
+  Cleanup still preserves unfinished and recent work, public request keys,
+  and the newest failed parent or required job. No migration is required.
+
 ## [3.1.1] — 2026-11-02
 
 - Remove old completed background effects and required successors according to
