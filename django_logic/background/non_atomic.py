@@ -83,6 +83,7 @@ def run_non_atomic(transition_message_id):
         _handle_restore_failure,
         _handle_success,
         _lock_uncompleted_row,
+        _protect_completion_state,
         _restore_for_attempt,
         _superseded_outcome,
     )
@@ -139,7 +140,7 @@ def run_non_atomic(transition_message_id):
             _check_job_transaction(job_connection, raw_job_connection, job_transaction_id)
             instance._state.db = alias
             try:
-                with state.protected():
+                with _protect_completion_state(transition, state):
                     superseded = _superseded_outcome(
                         transition_message, transition, state, kwargs, after_side_effects=True,
                     )

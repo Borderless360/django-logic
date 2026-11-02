@@ -135,6 +135,99 @@ Synchronous predecessors do not support `required_next`.
 A background successor may perform bounded creation of application-owned child jobs.
 Its own repeated execution must not repeat completed business effects.
 
+## Independent background effects
+
+Use an independent effect for work that must be submitted reliably but whose
+completion is not required for the parent operation to finish:
+
+```python
+from django_logic.background import BackgroundEffect, BackgroundTransition
+
+BackgroundTransition(
+    "submit", sources=["new"], target="submitted", atomic=False,
+    side_effects=[submit_order_and_save_confirmation],
+    background_effects=[
+        BackgroundEffect("annotate", add_optional_annotation,
+                         queue="shared", atomic=False, timeout=300),
+    ],
+)
+```
+
+The parent completion, final state and every effect job are saved in one
+transaction. If saving any effect fails, none of that completion commits;
+the parent retries. Previously committed external confirmations therefore still
+need receipts or provider idempotency. A failed, cancelled, superseded or deferred
+parent creates no effects. Each effect has a stable request key derived from the
+parent job and effect name; retries cannot create another copy of that effect.
+
+Effects use the same workers and job table. They inherit the parent's fairness
+key and saved arguments, with a new trace ID and the parent trace as `parent_id`.
+The default queue is the parent's recorded queue. `timeout`, `atomic` and
+`no_retry_on` have the same meanings as for a background transition; timeout
+defaults to no limit and atomic execution defaults to true. `Defer` releases the
+worker slot normally. Multiple effects are independent and may execute in any
+order, concurrently, or concurrently with a later parent operation.
+
+An effect never owns the parent's unfinished-job allowance. Its success,
+failure, timeout or cancellation does not write the parent's state or run the
+parent's callbacks. Later state changes do not automatically cancel it. The
+callable must check whether its work still applies, and must use appropriate
+receipts, application locks or idempotency for its own writes. Independence does
+not imply that arbitrary edits or cancellation of the underlying business
+record are safe. Those policies belong to the application.
+
+Only background parents are supported. The model and jobs must use the default
+database for reads and writes; cross-database routing is refused. Non-atomic
+work additionally requires PostgreSQL. In sync mode, effect execution is
+scheduled with `transaction.on_commit`: autocommit callers run it before the
+parent call returns; an outer transaction delays it until commit, and rollback
+runs none. Every effect is attempted even when an earlier effect fails; effect
+errors remain on the child jobs and do not raise an error for the successful
+parent. Explicitly running a child in sync mode retains the normal exception
+behavior. `TestCase` callers can use `captureOnCommitCallbacks(execute=True)`;
+non-atomic tests should use `TransactionTestCase` and PostgreSQL.
+
+`background_effect_names` freezes the parent's effect names when it is submitted.
+Adding a declaration later does not add work to an existing job. Removing a
+frozen declaration prevents parent completion; removing an effect or its exact
+declaring process after child creation records a visible failure without running
+another declaration. Preserve names, owning classes and input compatibility
+until outstanding jobs finish. Callables are resolved from deployed code, not
+serialized; compatible code fixes apply to pending jobs.
+
+Effect rows expose `effect_name`, `parent_transition_name` and `parent_job_id`.
+Their reserved `transition_name` cannot resolve to the parent's action in an
+older worker. `operation_name`, `dl_transitions` and monitoring show the readable
+parent-action/effect name. `for_instance()` returns parents and effects;
+`in_flight_for()` and `in_flight()` concern only state-owning parent jobs.
+Find effects with `TransitionMessage.objects.filter(parent_job_id=parent.pk)`.
+`cancel_pending()` can cancel one waiting effect without cancelling siblings or
+its parent; running work is not interrupted. Effects retain keyed-job duplicate
+protection through cleanup. Parent IDs remain recorded if normal cleanup removes
+an unkeyed parent. Deleting retained job rows ends their duplicate protection.
+
+`ProcessScenario`'s transition assertions select the parent job; its side-effect
+assertions concern the parent's essential callables. Inspect effect jobs
+separately. The existing single-job snapshot saves the parent's frozen effect
+names but does not capture independent child history or a related object graph.
+
+### Upgrading to independent effects
+
+Apply migration 0015 before new producers or workers start. Stop all earlier
+workers before code can create effects, then start only upgraded workers.
+Earlier producers can still insert parent rows using database defaults, but
+those rows have an empty effect-name snapshot. When replacing an old callback,
+keep an explicit compatibility path for those outstanding parents; otherwise
+their old follow-up work would disappear. Do not run both that legacy submission
+and a new declared effect for the same operation.
+
+The reserved child action prevents an earlier worker from replaying parent
+side effects; it does not make mixed worker versions supported. An earlier
+worker could mark an effect failed as an unknown action. Before rolling back to
+earlier workers, stop new submissions and finish or explicitly resolve every
+pending effect. Do not reverse migration 0015 while independent jobs remain
+unfinished. This feature reuses the existing workers and introduces no scheduler.
+
 ## State protection and cancellation
 
 On PostgreSQL, lock-taking transitions acquire the physical business-row lock.

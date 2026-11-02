@@ -98,6 +98,7 @@ class BackgroundTransition(Transition):
         atomic: bool = True,
         required_next: str | None = None,
         fairness_key=None,
+        background_effects=(),
         **kwargs,
     ):
         if queue is not None and (not queue or not isinstance(queue, str)):
@@ -134,6 +135,14 @@ class BackgroundTransition(Transition):
         if fairness_key is not None and not isinstance(fairness_key, str) and not callable(fairness_key):
             raise ImproperlyConfigured('fairness_key must be a string or callable.')
         self.required_next = required_next or ''
+        self.background_effects = tuple(background_effects)
+        if self.background_effects:
+            from django_logic.background.effects import BackgroundEffect
+            if any(not isinstance(effect, BackgroundEffect) for effect in self.background_effects):
+                raise ImproperlyConfigured('background_effects must contain BackgroundEffect declarations.')
+            names = [effect.name for effect in self.background_effects]
+            if len(set(names)) != len(names):
+                raise ImproperlyConfigured('Background effect names must be unique within a transition.')
         self.fairness_key = fairness_key
         self.atomic = atomic
         self.queue = queue
@@ -152,10 +161,18 @@ class BackgroundTransition(Transition):
         """
         return self.queue or conf.default_queue()
 
+    def get_background_effect(self, name):
+        for effect in self.background_effects:
+            if effect.name == name:
+                return effect
+        raise ImproperlyConfigured(f'Background effect {name!r} is not declared on {self.action_name!r}.')
+
     def change_state(self, state: State, _submission=None, **kwargs) -> UUID | None:
         # Before the lock, and before the kwargs are serialized into a row
         # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
+        from django_logic.background.effects import validate_effect_submission
+        validate_effect_submission(self, state, kwargs)
         if not self.atomic:
             from django_logic.background.non_atomic import validate_non_atomic
             validate_non_atomic(state.instance, require_autocommit=conf.sync_mode())
@@ -271,6 +288,8 @@ class BackgroundTransition(Transition):
         constraint fires (another uncompleted TransitionMessage exists
         for the same instance + process).
         """
+        from django_logic.background.effects import validate_effect_submission
+        validate_effect_submission(self, state, kwargs, using=using)
         try:
             serialized = serialize_kwargs(kwargs)
         except KwargsSerializationError:
@@ -308,7 +327,7 @@ class BackgroundTransition(Transition):
                     return existing
             # Do not wait on a job while holding its business row.
             if TransitionMessage.objects.using(using).filter(
-                **TransitionMessage.instance_key(state.instance, state.process_name), is_completed=False,
+                **TransitionMessage.instance_key(state.instance, state.process_name), is_completed=False, effect_name='',
             ).exists():
                 raise AlreadyInProgress(f"Another background transition is already in progress for process '{state.process_name}'.",
                                         reason=RefusalReason.BACKGROUND_IN_FLIGHT)
@@ -348,6 +367,7 @@ class BackgroundTransition(Transition):
                         request_fingerprint=submission.fingerprint if submission is not None else '',
                         fairness_key=fairness_key,
                         required_next=self.required_next,
+                        background_effect_names=[effect.name for effect in self.background_effects],
                         queue_name=queue_name,
                         timeout_seconds=self.timeout,
                         kwargs=serialized,

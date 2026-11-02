@@ -86,6 +86,7 @@ def snapshot(instance, *, state_field: str = 'status', process_name: str = 'proc
                 'errors_count': transition_message.errors_count,
                 'last_error_message': transition_message.last_error_message,
                 'timeout_seconds': transition_message.timeout_seconds,
+                'background_effect_names': transition_message.background_effect_names,
                 'kwargs': transition_message.kwargs,
                 # The retry clock: the retry backoff, the retry
                 # classification and the stuck report all read these, so
@@ -193,6 +194,7 @@ def from_snapshot(data_or_path, *, model=None):
             errors_count=tm_data.get('errors_count', 0),
             last_error_message=tm_data.get('last_error_message', ''),
             timeout_seconds=tm_data.get('timeout_seconds'),
+            background_effect_names=tm_data.get('background_effect_names', []),
             kwargs=tm_data.get('kwargs') or {},
             # The retry clock again — see snapshot(): a hung row must
             # replay as hung, not pristine.

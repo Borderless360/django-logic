@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.1.0rc1] — 2026-11-02
+
+- Declare independent `BackgroundEffect` work on a background transition. Save
+  each effect job atomically with parent completion, using stable request keys,
+  existing workers, fairness and deferred eligibility. Effect failures do not
+  change the parent's completed state or block later parent actions.
+- Run sync-mode effects after the enclosing transaction commits. Keep effect
+  failures on their own jobs and continue with sibling effects.
+- Preserve frozen declarations and exact owners for pending jobs. Reserved
+  child action names prevent earlier workers from running the parent action.
+  Apply migration 0015 and stop earlier workers before enabling effects;
+  preserve legacy submission for older parent jobs with empty effect snapshots.
+- Show independent effects with their parent identity in job reports. Parent
+  transition test helpers and snapshots continue to select the parent job.
+
 ## [3.0.2rc1] — 2026-11-02
 
 - Retain the first recorded start attempt, start-attempt count, and recorded deferral count on each background job.

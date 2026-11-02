@@ -25,11 +25,14 @@ def set_sentry_context(transition_message) -> None:
         scope = sentry_sdk.get_current_scope()
         scope.set_transaction_name(
             f'django_logic.{app_label}.'
-            f'{transition_message.transition_name}',
+            f'{transition_message.operation_name}',
             source='custom')
         scope.set_tag('dl.app', app_label)
         scope.set_tag('dl.model', model_name)
-        scope.set_tag('dl.transition', transition_message.transition_name)
+        scope.set_tag('dl.transition', transition_message.operation_name)
+        if transition_message.effect_name:
+            scope.set_tag('dl.effect', transition_message.effect_name)
+            scope.set_tag('dl.parent_job_id', transition_message.parent_job_id)
         scope.set_tag('dl.instance_id', transition_message.instance_id)
         scope.set_tag('dl.queue', transition_message.queue_name)
     except Exception:

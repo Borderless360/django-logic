@@ -23,6 +23,7 @@ from __future__ import annotations
 
 
 _PUBLIC = {
+    'BackgroundEffect': ('django_logic.background.effects', 'BackgroundEffect'),
     'Defer': ('django_logic.background.exceptions', 'Defer'),
     'RequestConflict': ('django_logic.background.exceptions', 'RequestConflict'),
     'operation_options': ('django_logic.background.operations', 'operation_options'),

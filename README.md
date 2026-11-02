@@ -1,3 +1,7 @@
+> **3.1.0rc1:** Independent background effects are saved with parent completion and
+> run through the same workers without blocking later parent actions. See
+> [the effect contract and upgrade requirements](docs/operation-contract.md#independent-background-effects).
+>
 > **3.0.1:** Optional request identity, deferred eligibility, required background follow-ups,
 > and fair group selection are described in [the operation contract](docs/operation-contract.md).
 > PostgreSQL state protection lasts through outer commit and waits up to two seconds for a
