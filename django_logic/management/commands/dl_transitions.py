@@ -91,9 +91,11 @@ class Command(BaseCommand):
         for note in notes:
             self.stdout.write(note)
         for group in groups:
+            action = (f"{group['parent_transition_name']}/{group['effect_name']}"
+                      if group['effect_name'] else group['transition_name'])
             self.stdout.write(
                 f"queue={group['queue_name']} "
-                f"{group['app_label']}.{group['model_name']}.{group['process_name']}.{group['transition_name']} "
+                f"{group['app_label']}.{group['model_name']}.{group['process_name']}.{action} "
                 f"effect={group['effect_name'] or '-'} jobs={group['jobs']} pending={group['pending']} "
                 f"succeeded={group['succeeded']} failed={group['failed']} "
                 f"other_completed={group['other_completed']} errors={group['errors']} "

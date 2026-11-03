@@ -470,7 +470,7 @@ A queue with no progress still reports an error when its worker is present.
 The message directs operators to check capacity and blocked jobs.
 
 `--stats` reports retained jobs created during the selected period, grouped by
-queue, model, process, transition and effect. It includes outcomes, errors,
+queue, model, process, transition, parent action and effect. It includes outcomes, errors,
 recorded starts, repeated starts and deferrals. Initial waiting uses the first
 recorded start. Duration covers the last measured attempt, excluding completion
 callbacks. Each timing includes its sample count, median, 90th percentile and

@@ -86,6 +86,32 @@ class TransitionStatisticsTests(TestCase):
             call_command('dl_transitions', stats=True, send=message.pk)
         self.assertEqual(list(TransitionMessage.objects.values()), before)
 
+    def test_same_named_effects_from_different_parent_actions_stay_separate(self):
+        for parent, duration in (('submit', 10), ('cancel', 90)):
+            self._row(
+                transition_name='django-logic:effect:' + 'f' * 64,
+                parent_transition_name=parent, effect_name='notify',
+                is_completed=True, completion_kind='succeeded', duration_ms=duration,
+            )
+        before = list(TransitionMessage.objects.order_by('pk').values())
+        groups = transition_statistics(since=_NOW - timedelta(days=2))
+        self.assertEqual(
+            [(group['parent_transition_name'], group['effect_name'], group['jobs'],
+              group['last_attempt_duration_ms']['p50']) for group in groups],
+            [('cancel', 'notify', 1, 90), ('submit', 'notify', 1, 10)],
+        )
+        for as_json in (False, True):
+            output = StringIO()
+            with patch('django_logic.management.commands.dl_transitions.timezone.now', return_value=_NOW):
+                call_command('dl_transitions', stats=True, since='7d', json=as_json, stdout=output)
+            if as_json:
+                self.assertEqual(json.loads(output.getvalue())['groups'], groups)
+            else:
+                self.assertIn('.process.submit/notify effect=notify jobs=1 ', output.getvalue())
+                self.assertIn('.process.cancel/notify effect=notify jobs=1 ', output.getvalue())
+                self.assertNotIn('django-logic:effect:', output.getvalue())
+        self.assertEqual(list(TransitionMessage.objects.order_by('pk').values()), before)
+
     def test_command_rejects_an_invalid_window_and_requires_stats_for_its_options(self):
         for since in ('0d', '-1d', 'yesterday', '1.5d', '9999999999999999999999999999w'):
             with self.subTest(since=since), self.assertRaises(CommandError):

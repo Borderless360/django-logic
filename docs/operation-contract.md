@@ -190,7 +190,7 @@ Older workers do not update these measurements, so mixed-worker totals are
 incomplete. Existing retention rules still apply to the job records.
 
 `transition_statistics(since=cutoff, queues=None, using=None)` groups retained
-jobs by queue, model, process class, action and effect. Counts describe each
+jobs by queue, model, process class, action, parent action and effect. Counts describe each
 selected job's recorded history, not events that happened within the window.
 `initial_wait_ms` uses only `first_started_at`; `last_attempt_duration_ms` uses
 only recorded `duration_ms` values. Each contains `samples`, `p50`, `p90` and
