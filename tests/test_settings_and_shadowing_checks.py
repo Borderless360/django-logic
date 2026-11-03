@@ -5,8 +5,7 @@ Each test pins one confirmed finding:
 
 * The install is one ``INSTALLED_APPS`` entry, ``'django_logic'``, and the
   app keeps the label ``django_logic_background`` — the address of the live
-  table, its migration records and its content types. The retired second
-  entry refuses to boot and names the fix. The pull-mode database and cache
+  table, its migration records and its content types. The pull-mode database and cache
   rules (``pull_mode_needs_postgresql``, ``pull_mode_needs_a_shared_cache``)
   fire only when a background
   transition is bound, so a sync-only install runs on SQLite with the
@@ -98,16 +97,9 @@ class OneEntryInstallTests(_BindingHelper, SimpleTestCase):
         loader.load_disk()
         names = {name for app_label, name in loader.disk_migrations
                  if app_label == 'django_logic_background'}
-        self.assertIn('0001_initial', names)
-        self.assertIn('0010_proxy_model_label', names)
+        self.assertIn('0001_squashed_0010_proxy_model_label', names)
+        self.assertIn('0011_operation_contract', names)
 
-    def test_the_retired_second_entry_refuses_to_boot(self):
-        from django.apps.config import AppConfig as DjangoAppConfig
-        with self.assertRaises(ImproperlyConfigured) as ctx:
-            DjangoAppConfig.create('django_logic.background')
-        message = str(ctx.exception)
-        self.assertIn("'django_logic'", message)
-        self.assertIn('alone', message)
 
 
 class RequestParamHookTests(_BindingHelper, SimpleTestCase):

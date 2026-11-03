@@ -1,4 +1,3 @@
-from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
 
 
@@ -47,17 +46,3 @@ def _reject_sync_without_opt_in() -> None:
         "django_logic.conf.enable_sync() in it before Django boots. To run "
         "one block inline elsewhere, use django_logic.conf.sync_execution()."
     )
-
-
-class BackgroundConfig(AppConfig):
-    """The retired second entry. It refuses to boot and names the fix."""
-    name = 'django_logic.background'
-
-    def __init__(self, *args, **kwargs):
-        raise ImproperlyConfigured(
-            "Since 1.1.0 'django_logic.background' is not a valid "
-            "INSTALLED_APPS entry. Install 'django_logic' alone. It keeps "
-            "the same app label, table and migration history, so nothing "
-            "else changes: replace this entry (and a 'django_logic' "
-            "duplicate, if present) with one 'django_logic' line."
-        )

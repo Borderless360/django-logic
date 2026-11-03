@@ -49,6 +49,13 @@
   contributor instructions. Keep the current worker, release and credential rules.
   The tag workflow remains the publishing path and retains its existing checks.
 
+- Remove the ten migrations replaced by the initial squash. Keep its `replaces`
+  history and the next migration's dependency so upgraded and rolled-back
+  applications resolve the same schema. Databases on 0.17.x or earlier must
+  first run `migrate` using Django Logic 3.2 before taking this release.
+- Remove custom messages for the classes and app entry retired in 1.0/1.1.
+  Install `django_logic` alone; removed names now use Python's normal import errors.
+
 ## [3.3.0] — 2026-11-03
 
 - Add read-only transition statistics through `dl_transitions --stats` and

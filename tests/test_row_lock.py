@@ -350,7 +350,7 @@ class EarlierProducerUpgradeTests(TransactionTestCase):
         executor = MigrationExecutor(connection)
         self.latest = executor.loader.graph.leaf_nodes(self.app_label)
         self.addCleanup(self.migrate, self.latest)
-        old_state = self.migrate([(self.app_label, '0010_proxy_model_label')])
+        old_state = self.migrate([(self.app_label, '0001_squashed_0010_proxy_model_label')])
         # This model generates the INSERT an earlier producer would send. It
         # knows none of the new columns, even after this test upgrades the schema.
         self.older_message = old_state.apps.get_model(self.app_label, 'TransitionMessage')

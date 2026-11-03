@@ -261,16 +261,7 @@ class PublicSurfaceTests(TestCase):
         for name in django_logic.__all__:
             self.assertTrue(hasattr(django_logic, name), name)
 
-    def test_the_removed_classes_name_their_replacement(self):
-        import django_logic
-        import django_logic.background
-
-        with self.assertRaises(ImportError) as ctx:
-            django_logic.Action
-        self.assertIn('Transition', str(ctx.exception))
-        with self.assertRaises(ImportError) as ctx:
-            django_logic.background.BackgroundAction
-        self.assertIn('BackgroundTransition', str(ctx.exception))
+    def test_command_bundle_imports_remain_available(self):
         # The command classes are not advertised, but a direct import from
         # django_logic.commands keeps working for existing consumers.
         # The import itself is the assertion: it must not raise.

@@ -56,13 +56,6 @@ shared-cache rules below apply only when a background transition is
 bound — `manage.py check` tells you the moment one is — so a
 synchronous-only project runs on SQLite with Django's default cache.
 
-Upgrading from 1.0.x or earlier? Replace `'django_logic.background'`
-(and a second `'django_logic'` line, if present) with the one entry
-above. Nothing in the database moves: the app keeps the same label,
-table and migration history, so an install that had the background app
-applies no new migration. A 1.0.x install of `'django_logic'` alone had
-no table, so its next `migrate` creates it, empty.
-
 ```bash
 python manage.py migrate
 ```
@@ -80,6 +73,15 @@ CACHES = {
 
 Every `DJANGO_LOGIC` key has a default, so you need no other configuration to
 start.
+
+### Upgrading older installations
+
+Databases on 0.17.x or earlier must first run `migrate` using Django Logic 3.2.
+The current package retains the squashed migration and its replacement history.
+
+When upgrading from before 3.0, stop old workers before upgraded producers
+submit work. Finish the application upgrade before starting the new workers.
+See the [earlier upgrade sequence](https://github.com/Borderless360/django-logic/blob/v3.0.1/docs/operation-contract.md#upgrade-and-rollback).
 
 ## Declare a process
 
