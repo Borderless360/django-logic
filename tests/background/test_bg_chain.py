@@ -14,6 +14,7 @@ The flat case chains ``bg_fulfil`` into ``bg_export``. The nested case picks a
 ``send`` per integration by condition and chains it into a nested ``report``, so
 the follow-up row must record the nested class and not the bound parent.
 """
+from tests import StateTraceMixin
 from django.test import TestCase, override_settings
 
 from django_logic.background.models import TransitionMessage
@@ -35,7 +36,7 @@ _DUMMY_CHAIN = 'tests.background.models.DummyChainProcess'
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class BgToBgChainScenario(ProcessScenario):
+class BgToBgChainScenario(StateTraceMixin, ProcessScenario):
     """A background transition whose ``next_transition`` is another
     background transition, driven end-to-end through the entrypoint."""
 
@@ -112,7 +113,7 @@ class BgToBgChainScenario(ProcessScenario):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class NestedDisambiguatedBgChainScenario(ProcessScenario):
+class NestedDisambiguatedBgChainScenario(StateTraceMixin, ProcessScenario):
     """A nested, condition-disambiguated background chain. The follow-up
     ``report`` must record the NESTED owning class, not the bound parent
     and not the predecessor — the riskiest owner-overwrite case for #98."""

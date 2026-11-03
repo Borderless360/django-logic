@@ -92,11 +92,8 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         self.assertFalse(TransitionMessage.in_flight_for(self.widget, 'effects').exists())
         self.assertEqual(TransitionMessage.for_instance(self.widget, 'effects').count(), 3)
         from django_logic.testing.runner import latest_message, uncompleted_message
-        from django_logic.testing.snapshot import snapshot
         self.assertEqual(latest_message(self.widget, 'effects').pk, parent.pk)
         self.assertIsNone(uncompleted_message(self.widget, 'effects'))
-        self.assertEqual(snapshot(self.widget, process_name='effects')['transition_message']['background_effect_names'],
-                         ['archive', 'notify'])
         self.widget.effects.advance()
         for child in children:
             run_background_transition(child.pk)

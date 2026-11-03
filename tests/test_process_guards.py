@@ -15,6 +15,7 @@ nested-inheritance case, on a real persisted instance.
   transitions=[go]                     # its own
   nested_processes=[GuardedInnerProcess]  # inner_go (no guards of its own)
 """
+from tests import StateTraceMixin
 from django.contrib.auth import get_user_model
 
 from django_logic.exceptions import TransitionNotAllowed
@@ -23,7 +24,7 @@ from django_logic.testing import ProcessScenario
 from tests.background.models import Widget, WidgetProcGuardProcess
 
 
-class ProcessLevelGuardScenario(ProcessScenario):
+class ProcessLevelGuardScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetProcGuardProcess
     model = Widget
     state_field = 'status'

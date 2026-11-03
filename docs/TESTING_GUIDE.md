@@ -5,8 +5,7 @@
 > 1. **You test your process, not the background machinery.** Delivery,
 >    retries, durability, crash recovery and queue routing are the library's
 >    job — guaranteed by its own regression suite, a PostgreSQL + Redis
->    stability suite, and a production-style Heroku validation matrix (see
->    [How the library itself is tested](#how-the-library-itself-is-tested)).
+>    stability suite, and a Heroku validation matrix.
 >    Your tests run the *business process* **entirely without services**.
 > 2. **You test the object's journey, not the wiring.** Assert what the object
 >    *became* as it moved through the process — its state trajectory, the
@@ -21,7 +20,6 @@
 3. [The scenario catalog](#the-scenario-catalog)
 4. [ProcessScenario API reference](#processscenario-api-reference)
 5. [Testing without ProcessScenario](#testing-without-processscenario)
-6. [How the library itself is tested](#how-the-library-itself-is-tested)
 
 ---
 
@@ -47,48 +45,6 @@ object landed, which failure hooks ran, and **what reached the caller**. These
 express intent the code doesn't contain, so they still fail when the engine (or
 a refactor, or an AI rewrite) changes behaviour.
 
-> The real-world proof: the `0.1.6 → 0.2.0` upgrade flipped one line
-> (`SideEffects.execute` began swallowing the exception instead of re-raising
-> it), cascading into double failure-hook runs and changed HTTP semantics —
-> while every definition-mirroring test stayed green. A journey test that
-> pinned *"a failing charge must re-raise to the caller"* would have caught it
-> before the upgrade shipped. See `tests/test_exception_semantics.py`.
-
-### The rule for every process test
-
-Assert at least:
-
-1. the **before → after state** of a real, persisted instance;
-2. at least one **field / DB effect** the side-effects produced (via
-   `assert_changed` / `assert_related_count`, or a direct DB read — not a mock);
-3. for any transition with a `failed_state` or failure hooks, one
-   **failure-path** variant showing where the object lands, which failure hooks
-   ran, and — with `expect_raises` — what propagates to the caller.
-
-Mock only true externals (an HTTP client, a courier API, a payment gateway),
-**never the process machinery itself**.
-
-### Guardrails (worth enforcing in review, human or AI)
-
-Reject a process test that:
-
-- **(a)** asserts `get_available_transitions` / the transition list back
-  against the definition instead of asserting *availability behaviour*. Write
-  a blocked-by-condition or permission-denied journey instead: call
-  `assert_not_available`, then force the transition and assert it raises
-  `TransitionNotAllowed` and changed no state. Worked examples live in the
-  library's own `tests/test_process_guards.py`;
-- **(b)** `patch`es any `django_logic` internal (use `fail_side_effect=` to
-  inject a failure into the real path instead);
-- **(c)** contains no assertion against a persisted instance (a test that only
-  checks a module global or a mock can pass while the object is wrong).
-
-`assert_side_effects_ran` / `assert_callbacks_ran` are **wiring** checks — they
-prove a hook was called, not that it did the right thing. Always pair them with
-an outcome assertion (`assert_changed`, `assert_related_count`, `assert_state`,
-or a direct DB read).
-
----
 
 ## Setup
 
@@ -100,6 +56,9 @@ inline in the test process — the *real* code paths, not a re-implementation:
 
 ```python
 # settings_test.py
+from django_logic.conf import enable_sync
+
+enable_sync()
 DJANGO_LOGIC = {
     'BACKGROUND_EXECUTION': 'sync',
 }
@@ -137,7 +96,6 @@ The running example:
 ```python
 # processes.py
 class OrderProcess(Process):
-    process_name = 'process'
     transitions = [
         Transition(
             action_name='approve', sources=['draft'], target='approved',
@@ -166,7 +124,6 @@ class OrderScenario(ProcessScenario):
     process_class = OrderProcess
     model = Order
     state_field = 'status'      # default 'status'
-    process_name = 'process'    # optional; defaults to process_class.process_name
 ```
 
 ### 1. Happy path through several transitions
@@ -267,7 +224,7 @@ Capture a stuck instance in production (shell, admin action, Sentry hook):
 
 ```python
 from django_logic.testing import snapshot
-data = snapshot(order)    # JSON-able: fields, state, TransitionMessage
+data = snapshot(order)    # The model fields and state only.
 ```
 
 Reproduce and prove the fix:
@@ -275,6 +232,7 @@ Reproduce and prove the fix:
 ```python
 def test_reproduce_stuck_order_12345(self):
     order = self.from_snapshot('fixtures/bug_12345.json')
+    open_transition_message(order, 'process', 'fulfil', field_name='status')
     self.assert_state(order, 'fulfilling')
     self.retry_transition(order)
     self.assert_state(order, 'fulfilled')
@@ -290,7 +248,7 @@ you need one.
 ## ProcessScenario API reference
 
 Class attributes: `process_class`, `model`, `state_field` (default
-`'status'`), `process_name` (optional — defaults to `process_class.process_name`).
+`'status'`). The accessor comes from `process_class.process_name`.
 
 **Driving the process**
 
@@ -300,7 +258,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `transition(obj, action, **kwargs)` | Run a synchronous transition through the normal entrypoint. |
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition` enqueue **and** execute inline. |
 | `retry_transition(obj)` | Re-run the instance's uncompleted `TransitionMessage` — simulates a worker's next claim. |
-| `snapshot(obj)` / `from_snapshot(data_or_path)` | Capture / rebuild instance + `TransitionMessage` state. |
+| `snapshot(obj)` / `from_snapshot(data_or_path)` | Capture / rebuild the model fields. Create background jobs separately with `open_transition_message`. |
 
 `transition`, `background_transition` and `retry_transition` all accept:
 
@@ -362,7 +320,6 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_error_recorded(obj, contains)` | Substring of `last_error_message` on the latest `TransitionMessage`. |
 | `assert_error_count(obj, expected)` | `errors_count` on the latest `TransitionMessage`. |
 | `assert_transition_owner(obj, cls, transition_name=None)` | The `owning_process_class` recorded on a `TransitionMessage` (for chained / condition-disambiguated background transitions). |
-| `assert_state_trace(states)` | The ordered states the object passed through in the last drive (in-progress → target, `next_transition` follow-ups, `failed_state`). |
 
 On failure, every assertion raises with a numbered timeline of each step the
 test took and the relevant `TransitionMessage` — built
@@ -432,34 +389,3 @@ row = open_transition_message(order, 'process', 'fulfil', started_minutes_ago=60
 ```
 
 ---
-
-## How the library itself is tested
-
-You don't have to take the durability contract on faith — this is the test
-pyramid backing it:
-
-1. **Unit + regression suite** (`python tests/manage.py test`, SQLite,
-   ~580 tests): every reproduced defect from the 0.3 stability review has a
-   permanent regression test — savepoint isolation of side-effects
-   (`tests/background/test_savepoint_isolation.py`), the worker's state guard
-   (`test_worker_state_guard.py`), the per-process in-flight constraint
-   (`test_constraint_per_process.py`), restore verification
-   (`test_restore_verification.py`), sync/background mutual exclusion
-   (`test_sync_background_mutex.py`), and lock revalidation
-   (`tests/test_lock_revalidate.py`). The engine's *behavioural contracts* are
-   pinned as journey tests too: the re-raise/swallow asymmetry
-   (`tests/test_exception_semantics.py`), the cross-machine failure cascade
-   (`tests/test_cross_machine_cascade.py`), and process-level
-   conditions/permissions (`tests/test_process_guards.py`) — each verified by
-   mutation to fail on the exact regression it names.
-2. **PostgreSQL + Redis stability suite** (`make stability-up &&
-   make stability-test`, also a GitHub Actions workflow on every PR and
-   nightly): real row locking, real concurrent transactions, deadlock and
-   crash scenarios under `tests/stability/`.
-3. **The Heroku validation matrix** ([django-logic-test](https://github.com/Borderless360/django-logic-test)):
-   a deployed harness (PostgreSQL + Redis + separate worker dynos) running
-   the harness matrix on real infrastructure — worker SIGKILL mid-attempt,
-   deploys mid-flight, queue isolation, pgbouncer transaction pooling,
-   stuck-row finalization, the timeout kill.
-
-That layering is exactly why your own tests can stop at the process level.

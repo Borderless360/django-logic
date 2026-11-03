@@ -13,6 +13,7 @@ the ordered side-effects/callbacks that mutated it, the failure path's
 context contract. Fixtures live in tests/background/models.py; binding in
 tests/background/apps.py.
 """
+from tests import StateTraceMixin
 from unittest import mock
 
 from django.core.cache import cache
@@ -41,7 +42,7 @@ _SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class TransitionSideEffectsScenario(ProcessScenario):
+class TransitionSideEffectsScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
@@ -109,7 +110,7 @@ class TransitionSideEffectsScenario(ProcessScenario):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class ActionScenario(ProcessScenario):
+class ActionScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
@@ -237,7 +238,7 @@ class ActionScenario(ProcessScenario):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class KwargsAndFailureContractScenario(ProcessScenario):
+class KwargsAndFailureContractScenario(StateTraceMixin, ProcessScenario):
     """The kwargs + ``exception`` contract side-effects/callbacks receive."""
 
     process_class = WidgetSyncProcess
@@ -265,7 +266,7 @@ class KwargsAndFailureContractScenario(ProcessScenario):
         self.assertEqual(SYNC_LAST_KWARGS.get('foo'), 'bar')
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class NextTransitionScenario(ProcessScenario):
+class NextTransitionScenario(StateTraceMixin, ProcessScenario):
     """``next_transition`` behavior — the follow-up runs through the entrypoint
     with a fresh ``tr_id`` and chained ``root_id``/``parent_id``, only on
     success, and is refused when ambiguous."""
@@ -297,7 +298,7 @@ class NextTransitionScenario(ProcessScenario):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class NextTransitionFailureScenario(ProcessScenario):
+class NextTransitionFailureScenario(StateTraceMixin, ProcessScenario):
     """``next_transition`` must NOT fire when the parent transition fails."""
 
     process_class = WidgetSyncProcess
@@ -327,7 +328,7 @@ class NextTransitionFailureScenario(ProcessScenario):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class AmbiguousNextTransitionScenario(ProcessScenario):
+class AmbiguousNextTransitionScenario(StateTraceMixin, ProcessScenario):
     """An ambiguous ``next_transition`` (two same-name follow-ups both
     available, no disambiguating condition) is refused — neither runs —
     rather than picking arbitrarily. The parent still completes.

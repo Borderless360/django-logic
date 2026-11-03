@@ -32,3 +32,25 @@ def unbind_model_process(model, process_class=None, state_field=None):
         name = binding.process_class.process_name
         if name not in remaining and isinstance(vars(model).get(name), _ProcessAccessor):
             delattr(model, name)
+
+
+class StateTraceMixin:
+    """Observe state writes only in engine tests that assert their order."""
+
+    def _call(self, function):
+        from unittest.mock import patch
+        from django_logic.state import State
+
+        self._written_states = []
+        original = State.set_state
+
+        def record(state, value, **kwargs):
+            result = original(state, value, **kwargs)
+            self._written_states.append(value)
+            return result
+
+        with patch.object(State, 'set_state', record):
+            return super()._call(function)
+
+    def assert_state_trace(self, expected):
+        self.assertEqual(self._written_states, expected)

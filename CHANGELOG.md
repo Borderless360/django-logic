@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Model snapshots no longer copy partial background job records. GV's billing
+  and shipping-completion tests create required jobs explicitly. Keep model-field
+  capture because these current consumer tests use it.
+- Remove the unused scenario process-name override and state-trace assertion.
+  Engine tests observe state writes with a test-only helper. Consumer test drives
+  no longer replace `State.set_state`. Unknown failure injections still fail tests.
+
 - A refused action no longer runs every condition and permission again to build
   an unused action list. GV uses the existing reason and user message instead.
   Remove `TransitionNotAllowed.available_actions`; callers can explicitly list actions.

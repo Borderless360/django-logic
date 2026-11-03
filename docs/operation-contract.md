@@ -303,8 +303,8 @@ Effect functions must check whether their work still applies before contacting a
 
 `ProcessScenario`'s transition assertions select the parent job; its side-effect
 assertions concern the parent's essential callables. Inspect effect jobs
-separately. The existing single-job snapshot saves the parent's frozen effect
-names but does not capture independent child history or a related object graph.
+separately. Model snapshots capture the model fields only. Use explicit job
+fixtures to reproduce pending work; snapshots do not copy background job history.
 
 ### Upgrading to independent effects
 

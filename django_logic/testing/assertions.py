@@ -30,17 +30,8 @@ def _names(value, assertion: str, argument: str = 'names') -> list:
 class ScenarioAssertions:
     @property
     def _process_name(self) -> str:
-        """The accessor the process is bound under.
-
-        Never read the raw ``process_name`` here: its default is ``None``
-        (it derives from ``process_class.process_name``), and ``None``
-        makes the message lookups find no row.
-        """
-        explicit = getattr(self, 'process_name', None)
-        if explicit is not None:
-            return explicit
-        return getattr(
-            getattr(self, 'process_class', None), 'process_name', 'process')
+        """Use the accessor declared by the process."""
+        return self.process_class.process_name
 
     # --- state -----------------------------------------------------------
 
@@ -206,16 +197,6 @@ class ScenarioAssertions:
         instance.refresh_from_db()
         problems = []
         for field, pair in expected.items():
-            # Say what the shape is, rather than letting the unpack below
-            # fail with "too many values to unpack (expected 2)" — which
-            # gives no clue that {field: (old, new)} is what's wanted.
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
-                raise TypeError(
-                    f"assert_changed expects {{field: (old, new)}}; "
-                    f"{field!r} maps to {pair!r}. Pass the value it held "
-                    f"before and the value it should hold now, e.g. "
-                    f"{{{field!r}: ('draft', 'approved')}}."
-                )
             old, new = pair
             was = before.get(field)
             now = getattr(instance, field)
@@ -318,29 +299,6 @@ class ScenarioAssertions:
                 f'{raised}.')
         self._record_assert('assert_not_raised', ok=True)
 
-    # --- the state trace --------------------------------------------------
-
-    def assert_state_trace(self, expected):
-        """Assert the ordered sequence of states the object passed through
-        during the last drive (in_progress -> target, plus next_transition
-        follow-ups and failed_state writes).
-
-        This is the direct expression of *how the object changed as it went
-        through the action* — e.g. a background chain drive yields
-        ``['fulfilling', 'fulfilled', 'exporting', 'exported']``. Captured
-        by ``track()`` wrapping ``State.set_state``.
-        """
-        trace = list(self._tracker().state_trace)
-        if trace != expected:
-            self._record_assert(f'assert_state_trace({expected})', ok=False,
-                                detail=f'got {trace}')
-            self._fail(
-                f'Expected the object to pass through states {expected}, '
-                f'but the recorded state trace is {trace}.',
-                instance=None,
-            )
-        self._record_assert(f'assert_state_trace({expected})', ok=True,
-                            detail=f'got {trace}')
 
     # --- background owner (worker restore discriminator) ---------------
 
