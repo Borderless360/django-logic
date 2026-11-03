@@ -6,6 +6,7 @@ conditions and permissions, hook tracking, snapshot and replay, and the failure
 timeline. ScenarioGuardProcess is bound under the name `guard` in
 tests/background/apps.py, so this module adds no migration.
 """
+from tests import StateTraceMixin
 from django.conf import settings
 from django.contrib.auth import get_user_model
 
@@ -15,7 +16,7 @@ from tests.background.models import ScenarioGuardProcess, ScenarioNonAtomicProce
 from tests.stability.base import requires_postgres
 
 
-class WidgetFulfilmentScenario(ProcessScenario):
+class WidgetFulfilmentScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
@@ -92,13 +93,15 @@ class WidgetFulfilmentScenario(ProcessScenario):
 
         snap = self.snapshot(widget)
         self.assertEqual(snap['state'], 'fulfilling')
-        self.assertIn('transition_message', snap)
+        self.assertNotIn('transition_message', snap)
 
         # Remove the original so from_snapshot can recreate it with the same pk.
         TransitionMessage.objects.filter(instance_id=str(widget.pk)).delete()
         Widget.objects.filter(pk=widget.pk).delete()
 
         restored = self.from_snapshot(snap)
+        from django_logic.testing import open_transition_message
+        open_transition_message(restored, 'process', 'fulfil', field_name='status', errors_count=1)
         self.assert_state(restored, 'fulfilling')
         self.assert_error_count(restored, 1)
 
@@ -117,7 +120,7 @@ class WidgetFulfilmentScenario(ProcessScenario):
         self.assertIn('cancel', msg)  # the timeline records the cancel step
 
 
-class GuardedApprovalScenario(ProcessScenario):
+class GuardedApprovalScenario(StateTraceMixin, ProcessScenario):
     process_class = ScenarioGuardProcess
     model = Widget
     state_field = 'status'
@@ -148,7 +151,7 @@ class GuardedApprovalScenario(ProcessScenario):
 
 
 @requires_postgres
-class NonAtomicScenario(ProcessScenario):
+class NonAtomicScenario(StateTraceMixin, ProcessScenario):
     process_class = ScenarioNonAtomicProcess
     model = Widget
     state_field = 'status'

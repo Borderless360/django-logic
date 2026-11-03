@@ -7,8 +7,7 @@ crashes at every point in the execution timeline.
 Each test simulates a crash by raising WorkerCrashSimulated at a specific
 step, then verifies the system recovers through the next claim.
 
-Reference: docs/history/BACKGROUND_TRANSITION_ANALYSIS.md "Complete Execution
-Timeline: Every Crash Point"
+See docs/design/PULL_WORKERS.md for current retry and recovery behavior.
 """
 from unittest.mock import patch, MagicMock
 

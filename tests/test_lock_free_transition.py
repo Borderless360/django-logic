@@ -9,6 +9,7 @@ failure callbacks. It may not write state — no ``target``, no
 took it must never release: a State holding no token deletes the key
 outright, which would free a lock another transition holds.
 """
+from tests import unbind_model_process
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, TestCase
@@ -100,7 +101,7 @@ class LockFreeProcess(Process):
 class RunTests(TestCase):
     def setUp(self):
         ProcessManager.bind_model_process(Invoice, LockFreeProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Invoice, LockFreeProcess)
+        self.addCleanup(unbind_model_process, Invoice, LockFreeProcess)
         cache.clear()
         self.addCleanup(cache.clear)
         _ran.clear()
@@ -175,7 +176,7 @@ class BackgroundInFlightTests(TestCase):
 
     def setUp(self):
         ProcessManager.bind_model_process(Invoice, LockFreeProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Invoice, LockFreeProcess)
+        self.addCleanup(unbind_model_process, Invoice, LockFreeProcess)
         cache.clear()
         self.addCleanup(cache.clear)
         _ran.clear()

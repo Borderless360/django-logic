@@ -4,6 +4,9 @@ The test suite runs in sync mode by default (see tests/settings.py), so
 ``instance.process.fulfil()`` enqueues and executes inline. The tests can then
 assert on the final state directly.
 """
+import sys
+from unittest.mock import patch
+
 from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase, override_settings
 
@@ -23,7 +26,9 @@ class HappyPathTests(TestCase):
         self.widget = Widget.objects.create()
 
     def test_transition_reaches_target(self):
-        tr_id = self.widget.process.fulfil()
+        # Optional reporting must not prevent a job from completing.
+        with patch.dict(sys.modules, {'sentry_sdk': None}):
+            tr_id = self.widget.process.fulfil()
         self.assertIsNotNone(tr_id)
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilled')

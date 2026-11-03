@@ -35,7 +35,6 @@ class ReasonValueTests(SimpleTestCase):
         self.assertEqual(error.args, ('old text', 17))
         self.assertIsNone(error.reason)
         self.assertIsNone(error.current_state)
-        self.assertIsNone(error.available_actions)
 
     def test_reason_is_json_serializable_and_survives_exception_pickle(self):
         error = AlreadyInProgress('old text', reason=RefusalReason.BACKGROUND_IN_FLIGHT)
@@ -75,11 +74,10 @@ class ResolverReasonTests(TestCase):
             transitions = [Transition('go', sources=['draft'], permissions=[permission], conditions=[condition])]
 
         error = self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.PERMISSION)
-        self.assertEqual(permission.call_count, 2)  # Resolution, then the existing action hint.
+        self.assertEqual(permission.call_count, 1)
         condition.assert_not_called()
         self.assertEqual(error.current_state, 'draft')
-        self.assertEqual(error.available_actions, [])
-        self.assertIn("The instance is in state 'draft'; available actions: none.", str(error))
+        self.assertIn("The instance is in state 'draft'.", str(error))
 
     def test_condition_is_not_rerun_to_compute_the_reason(self):
         condition = Mock(return_value=False)
@@ -88,7 +86,7 @@ class ResolverReasonTests(TestCase):
             transitions = [Transition('go', sources=['draft'], conditions=[condition])]
 
         self.refusal(lambda: self.process(Workflow).go(), RefusalReason.CONDITION)
-        self.assertEqual(condition.call_count, 2)
+        self.assertEqual(condition.call_count, 1)
 
     def test_success_runs_predicates_once(self):
         condition = Mock(return_value=True)
@@ -169,7 +167,6 @@ class ResolverReasonTests(TestCase):
                            Transition('other', sources=['draft'], conditions=[broken_hint])]
 
         error = self.refusal(lambda: self.process(Workflow).go(), RefusalReason.CONDITION)
-        self.assertIsNone(error.available_actions)
 
     def test_custom_validity_overrides_are_called_and_not_guessed(self):
         class CustomTransition(Transition):
@@ -258,8 +255,8 @@ class ResolverReasonTests(TestCase):
 
         self.refusal(lambda: self.process(ConditionWorkflow).go(), RefusalReason.CONDITION)
         self.refusal(lambda: self.process(PermissionWorkflow).go(user=object()), RefusalReason.PERMISSION)
-        self.assertEqual(condition.call_count, 2)
-        self.assertEqual(permission.call_count, 2)
+        self.assertEqual(condition.call_count, 1)
+        self.assertEqual(permission.call_count, 1)
         wrong_source_guard.assert_not_called()
 
     def test_custom_transition_without_reason_beats_wrong_source_sibling(self):
@@ -291,8 +288,8 @@ class ResolverReasonTests(TestCase):
             nested_processes = [WrongSource, CurrentSource]
 
         self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.CONDITION)
-        self.assertEqual(irrelevant_permission.call_count, 2)
-        self.assertEqual(condition.call_count, 2)
+        self.assertEqual(irrelevant_permission.call_count, 1)
+        self.assertEqual(condition.call_count, 1)
         unchecked.assert_not_called()
 
     def test_permitted_roles_transition_condition_beats_another_roles_permission(self):
@@ -313,9 +310,9 @@ class ResolverReasonTests(TestCase):
             nested_processes = [OtherRole, CallerRole]
 
         self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.CONDITION)
-        self.assertEqual(denied_role.call_count, 2)
-        self.assertEqual(permitted_role.call_count, 2)
-        self.assertEqual(condition.call_count, 2)
+        self.assertEqual(denied_role.call_count, 1)
+        self.assertEqual(permitted_role.call_count, 1)
+        self.assertEqual(condition.call_count, 1)
         unchecked.assert_not_called()
 
     def test_permitted_roles_custom_transition_keeps_no_reason(self):
@@ -379,7 +376,7 @@ class ResolverReasonTests(TestCase):
             transitions = [Transition('go', sources=['approved'], conditions=[unchecked])]
 
         self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.SOURCE_STATE)
-        self.assertEqual(permission.call_count, 2)
+        self.assertEqual(permission.call_count, 1)
         unchecked.assert_not_called()
 
     def test_custom_process_guard_keeps_none_ahead_of_lower_or_equal_choices(self):
@@ -414,7 +411,7 @@ class ResolverReasonTests(TestCase):
 
         Blocked.nested_processes = [Workflow, CurrentSource]
         self.refusal(lambda: self.process(Workflow).go(), RefusalReason.CONDITION)
-        self.assertEqual(condition.call_count, 2)
+        self.assertEqual(condition.call_count, 1)
         unchecked.assert_not_called()
 
     def test_blocked_cycle_does_not_claim_its_ancestors_other_branch(self):
@@ -433,8 +430,8 @@ class ResolverReasonTests(TestCase):
 
         CycleBranch.nested_processes = [Workflow]
         self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.CONDITION)
-        self.assertEqual(denied_role.call_count, 2)
-        self.assertEqual(condition.call_count, 2)
+        self.assertEqual(denied_role.call_count, 1)
+        self.assertEqual(condition.call_count, 1)
 
 
 class ConcurrentReasonTests(SimpleTestCase):

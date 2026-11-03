@@ -39,12 +39,6 @@ class ExecutionTracker:
         # injection that never fired (a silent no-op would turn
         # a failure test into a happy-path run).
         self.requested_fail_side_effect: str | None = None
-        # Ordered sequence of states written to the instance during this
-        # drive (in_progress -> target, plus any next_transition follow-ups
-        # and failed_state writes). Captured by wrapping State.set_state in
-        # track(); lets a test assert HOW the object changed as the workflow
-        # progressed, not just its final state.
-        self.state_trace: list = []
 
 
 def _name(fn) -> str:
@@ -90,28 +84,10 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
     those hooks must be visible to the assertions too). Yields an
     :class:`ExecutionTracker`. Injection only targets ``side_effects`` hooks.
 
-    When ``fail_side_effect`` names a hook that exists on none of the
-    instrumented transitions, ``ValueError`` is raised immediately — a typo
-    or a renamed hook must not silently turn a failure test into a
-    happy-path run.
+    The scenario reports an injection that never ran as a failed test.
     """
     tracker = ExecutionTracker()
     tracker.requested_fail_side_effect = fail_side_effect
-
-    if fail_side_effect is not None:
-        known = {
-            _name(fn)
-            for transition in transitions
-            for fn in getattr(getattr(transition, 'side_effects', None),
-                              '_commands', None) or []
-        }
-        if fail_side_effect not in known:
-            raise ValueError(
-                f'fail_side_effect={fail_side_effect!r} does not match any '
-                f'side-effect on the tracked transitions '
-                f'(known side-effects: {sorted(known)}). Was the hook '
-                f'renamed?'
-            )
 
     saved: list[tuple] = []
     for transition in transitions:
@@ -127,27 +103,8 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
                 for fn in original
             ]
 
-    # Record every persisted state write during the drive — the ordered
-    # sequence of states the object passed through (in_progress -> target,
-    # and any next_transition follow-ups, and failed_state on failure).
-    # Wrapping the base State.set_state captures exactly one append per
-    # write. The wrap is restored on exit alongside the hook bundles.
-    # Patching the
-    # class method is safe because tests are single-threaded and the patch
-    # is scoped to this contextmanager.
-    from django_logic.state import State as _State
-    original_set_state = _State.set_state
-
-    def _recording_set_state(self, state, **kwargs):
-        result = original_set_state(self, state, **kwargs)
-        tracker.state_trace.append(state)
-        return result
-    _recording_set_state.__name__ = 'set_state'
-    _State.set_state = _recording_set_state
-
     try:
         yield tracker
     finally:
-        _State.set_state = original_set_state
         for bundle, original in saved:
             bundle._commands = original

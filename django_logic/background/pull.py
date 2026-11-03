@@ -330,21 +330,12 @@ def _harvest(
              if attempt.deadline is not None and not attempt.killed),
             default=None,
         )
-        try:
-            pid, raw_status = os.waitpid(
-                -1, 0 if block and next_deadline is None
-                and not pending and wait_until is None
-                and not any(item.result_fd is not None for item in attempts.values())
-                else os.WNOHANG,
-            )
-        except ChildProcessError:
-            # Another handler collected these exit statuses; none will arrive here.
-            ended = list(attempts.values())
-            attempts.clear()
-            for attempt in ended:
-                attempt.exit_code = None
-                _finish_attempt(attempt, pending)
-            continue
+        pid, raw_status = os.waitpid(
+            -1, 0 if block and next_deadline is None
+            and not pending and wait_until is None
+            and not any(item.result_fd is not None for item in attempts.values())
+            else os.WNOHANG,
+        )
         if pid == 0:
             if not block or remaining == 0 or budget == 0:
                 return
@@ -401,10 +392,8 @@ def _try_account(attempt: _Attempt) -> bool:
     return True
 
 
-def _account(attempt: _Attempt, exit_code: int | None) -> None:
+def _account(attempt: _Attempt, exit_code: int) -> None:
     """Record one error on the row when the attempt did not end cleanly.
-    ``exit_code`` is ``None`` when another handler collected the exit status,
-    so no status reached this worker.
 
     An attempt process that dies without completing the row left no
     error on it, so the worker records one: the claim's retry wait then
@@ -413,15 +402,14 @@ def _account(attempt: _Attempt, exit_code: int | None) -> None:
     ``failed_state`` like one that fails every time, instead of looping
     forever.
 
-    A process stopped after its deadline counts as a timeout even when its
-    exit status is unavailable. If the status shows it finished on its own,
-    do not record a timeout. ``os.kill`` can succeed after a process exits,
+    If the exit status shows a process finished on its own, do not record
+    a timeout. ``os.kill`` can succeed after a process exits,
     so its result alone does not prove that the process was still running.
     """
     if attempt.pk is None:
         _report_safety_net_result(attempt, exit_code)
         return
-    if attempt.killed and exit_code in (None, -signal.SIGKILL):
+    if attempt.killed and exit_code == -signal.SIGKILL:
         _record_attempt_error(
             attempt.pk,
             f'[timeout] the attempt ran past '
@@ -433,7 +421,7 @@ def _account(attempt: _Attempt, exit_code: int | None) -> None:
             f'stopped. The error recorded here paces the next claim.'
         )
         return
-    if exit_code in (None, 0):
+    if exit_code == 0:
         return
     _record_attempt_error(
         attempt.pk,
@@ -502,14 +490,14 @@ def _run_safety_nets(queues=()) -> None:
                          getattr(step, '__name__', step), exc)
 
 
-def _report_safety_net_result(attempt: _Attempt, exit_code: int | None) -> None:
-    if attempt.killed and exit_code in (None, -signal.SIGKILL):
+def _report_safety_net_result(attempt: _Attempt, exit_code: int) -> None:
+    if attempt.killed and exit_code == -signal.SIGKILL:
         logger.warning(
             'pull: safety nets exceeded their %ss limit and were stopped. '
             'Uncompleted rows will be checked on the next pass.',
             attempt.timeout_seconds,
         )
-    elif exit_code not in (None, 0):
+    elif exit_code != 0:
         logger.warning(
             'pull: safety nets stopped with exit code %s. '
             'Uncompleted rows will be checked on the next pass.',

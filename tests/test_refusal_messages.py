@@ -54,7 +54,6 @@ class RefusalMessageTests(TestCase):
         self.assertIs(type(error), TransitionNotAllowed)
         self.assertEqual(error.reason, RefusalReason.CONDITION)
         self.assertEqual(error.current_state, 'draft')
-        self.assertEqual(error.available_actions, [])
         self.assertEqual(error.args, (str(error),))
         self.assertIn('Process class', str(error))
         self.assertNotEqual(str(error), error.user_message)
@@ -133,7 +132,7 @@ class RefusalMessageTests(TestCase):
 
         error = self.refused(self.process(Workflow).go)
         self.assertEqual(error.user_message, "Action 'go' is not allowed: Add the invoice attachment.")
-        self.assertEqual(counts, ['first', 'first'])
+        self.assertEqual(counts, ['first'])
         later.assert_not_called()
 
     def test_annotated_process_condition_and_permission_supply_detail(self):
@@ -187,7 +186,7 @@ class RefusalMessageTests(TestCase):
 
         self.assertEqual(self.refused(self.process(Workflow).go).user_message,
                          "Action 'go' is not allowed: Original refusal.")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
 
     def test_custom_validity_cannot_use_an_unrelated_checks_message(self):
         @commands.refusal_message('Unrelated check.')

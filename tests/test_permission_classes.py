@@ -6,6 +6,7 @@ branch must refuse a call with no user and the automation branch must
 refuse a call with one — or a caller matches both and the engine refuses
 the action as ambiguous.
 """
+from tests import unbind_model_process
 from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 
@@ -69,7 +70,7 @@ class BranchedProcess(Process):
 class BranchTests(TestCase):
     def setUp(self):
         ProcessManager.bind_model_process(Invoice, BranchedProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Invoice, BranchedProcess)
+        self.addCleanup(unbind_model_process, Invoice, BranchedProcess)
         cache.clear()
         self.addCleanup(cache.clear)
         _ran.clear()

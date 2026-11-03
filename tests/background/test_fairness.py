@@ -9,13 +9,27 @@ from django.utils import timezone
 from django_logic.background.fairness import FairnessGroup
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import claim_next
+from django_logic.background.runner import run_background_transition
 from tests import dl_settings
+from tests.background.models import Widget
 from tests.stability.base import requires_postgres
 
 
 @requires_postgres
 @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='pull'))
 class FairClaimTests(TransactionTestCase):
+    def test_submitted_work_runs_without_a_precreated_client_turn_record(self):
+        widget = Widget.objects.create()
+        widget.process.fulfil()
+        message = TransitionMessage.objects.get(instance_id=str(widget.pk))
+        self.assertFalse(FairnessGroup.objects.exists())
+
+        self.assertEqual(claim_next([message.queue_name]), message.pk)
+        self.assertTrue(FairnessGroup.objects.filter(key=message.fairness_key).exists())
+        run_background_transition(message.pk)
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'fulfilled')
+
     def rows(self, keys, queue='fair-test'):
         offset = TransitionMessage.objects.count()
         return TransitionMessage.objects.bulk_create([

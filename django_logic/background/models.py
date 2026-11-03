@@ -57,7 +57,6 @@ class TransitionMessage(TimeStampedModel):
     # The database defaults let a producer on an earlier version keep
     # inserting rows during a rolling upgrade.
     request_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
-    request_fingerprint = models.CharField(max_length=64, blank=True, default='', db_default='')
     fairness_key = models.CharField(max_length=255, blank=True, default='', db_default='', db_index=True)
     eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
     deferral_reason = models.TextField(blank=True, default='', db_default='')
@@ -67,7 +66,6 @@ class TransitionMessage(TimeStampedModel):
     last_deferred_until = models.DateTimeField(blank=True, null=True)
     last_deferral_reason = models.TextField(blank=True, default='', db_default='')
     completion_kind = models.CharField(max_length=16, blank=True, default='', db_default='')
-    required_next = models.CharField(max_length=100, blank=True, default='', db_default='')
     # Names are frozen when the parent is submitted. Earlier producers leave [].
     background_effect_names = models.JSONField(default=list, db_default=[])
     effect_name = models.CharField(max_length=100, blank=True, default='', db_default='')

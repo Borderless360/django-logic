@@ -85,120 +85,30 @@ and does not run inherited Python exit handlers. Sync mode does not create
 a job process and does not call this function.
 
 
-## Event types
+## Transition identity and locks
 
-Every transition-lifecycle line carries a `tr_id` in the message body so all
-lines for one logical transition can be grepped together. The event vocabulary
-is the `django_logic.logger.TransitionEventType` enum:
+A synchronous transition starts with this literal field order:
 
-`Start`, `Complete`, `Fail`, `SideEffect`, `Callback`,
-`Set State`, `Lock`, `Unlock`, `Next Transition`.
-
-### Transition log format
-
-```
-tr_id <Event> ...args
-```
-
-### Synchronous transition — happy path
-
-```
+```text
 tr_id Start ProcessName action_name instance_key root_id parent_id
-tr_id Lock instance_key
-tr_id Set State in_progress_state          (only if in_progress_state is declared)
-tr_id SideEffect reserve_stock
-tr_id SideEffect generate_labels           (a new SideEffect line means the previous one finished)
-tr_id Set State target
-tr_id Unlock instance_key
-tr_id Callback send_confirmation_email
 ```
 
-`Lock` and `Unlock` carry the `instance_key` (0.12.0, #188) so a per-instance
-log filter shows the whole lock lifecycle — previously only `Start` named the
-instance, so the *absence* of a `Lock` line was invisible without a `tr_id`
-self-join.
+Applications may use these fields to group activity by transition or record.
+A background submission appends its queue information after these fields.
+`state_hash` is also attached to the log record.
 
-A **failed acquisition is logged, at INFO, before the raise** (0.12.0, #188):
+A refused state lock logs at INFO before raising:
 
-```
+```text
 tr_id Lock failed instance_key — state is locked
 ```
 
-Without it, a permanently frozen instance (leaked lock) and a healthy start
-were indistinguishable: both emitted one `Start` line and nothing else. It is
-INFO, not ERROR, because losing the lock race is an expected concurrency
-outcome (#154) — the *pattern* of repeated `Lock failed` lines with no
-interleaved `Unlock` for that instance is the leak signal. A revalidation
-failure releases with `Unlock instance_key after revalidation failure`.
+Repeated `Lock failed` lines without an intervening `Unlock` for the same
+record can indicate an unfinished transition or an expired owner that left a lock.
+Check the running job and the configured lock timeout before retrying.
+A successful release after failed validation logs
+`Unlock instance_key after revalidation failure`.
 
-A `lock=False` transition (2.2.0) takes no lock and releases none, so its
-lifecycle has no `Lock` / `Unlock` pair. One line says why, so a per-instance
-filter does not read a `Start` with no `Lock` as a frozen instance:
-
-```
-tr_id Start ProcessName action_name instance_key root_id parent_id
-tr_id Lock skipped instance_key — lock=False
-tr_id SideEffect post_tracking
-tr_id Callback record_success
-```
-
-(`Complete` is a background-only event — the synchronous path ends with the
-`Unlock` + `Callback` lines.)
-
-On failure the side-effect raises, `Fail` is logged, the state is set to
-`failed_state` (if declared), the lock is
-released, and `failure_callbacks` run.
-
-## Background transitions
-
-A `BackgroundTransition` is split into enqueue and execute. Enqueue (the
-synchronous call) logs the `Start [background queue=...]` line, then its
-critical section: `Lock`, optionally `Set State in_progress_state`, the
-`TransitionMessage#<pk> created` line, and `Unlock` (since 0.4 enqueue
-holds the state lock only for this section — the uncompleted row is the
-gate afterwards). Execute (the worker, or inline in Sync mode) logs
-`Execute Start`, the `SideEffect` lines, `Set State target`, and
-`Complete`. Before 0.14.0 that first line read `Phase2 Start`; update any
-log query or alert that matches on the old text.
-
-All side-effects **and** the target-state write run inside a single worker
-attempt — there is no per-callback fan-out. There are no `Celery`,
-`CeleryCallbacks`, or `Done` events; that was a pre-0.3.0 design.
-
-```
-tr_id Start ProcessName fulfil instance_key root_id parent_id [background queue=django_logic.critical]
-tr_id Lock instance_key
-tr_id Set State fulfilling
-tr_id TransitionMessage#42 created (queue=django_logic.critical)
-tr_id Unlock instance_key
-... worker picks up the task ...
-tr_id Execute Start fulfil instance_key queue=django_logic.critical
-tr_id SideEffect reserve_stock
-tr_id Set State fulfilled
-tr_id Complete
-```
-
-## Nested transitions
-
-A transition can be invoked from inside another transition's side-effects or
-callbacks. `root_id`/`parent_id` propagate through a thread-safe `ContextVar`
-so nested transitions are observable as one logical chain, even when kwargs are
-not explicitly forwarded.
-
-```
-tr_a Start ProcessName outer instance_key root_id parent_a
-tr_a Lock instance_key
-tr_a SideEffect invoke_inner
-
-tr_b Start ProcessName inner instance_key root_id parent_a
-tr_b Lock instance_key
-tr_b Unlock instance_key
-tr_b Complete
-
-tr_a Unlock instance_key
-tr_a Complete
-```
-
-## Future considerations
-
-OpenTelemetry integration is under consideration.
+`lock=False` logs `Lock skipped instance_key — lock=False` and releases no lock.
+Background completion and failure logs describe saved job outcomes.
+Callback errors are best effort and do not change those outcomes.

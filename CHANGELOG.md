@@ -1,5 +1,61 @@
 # Changelog
 
+## [4.0.0] — 2026-11-03
+
+- Model snapshots no longer copy partial background job records. GV's billing
+  and shipping-completion tests create required jobs explicitly. Keep model-field
+  capture because these current consumer tests use it.
+- Remove the unused scenario process-name override and state-trace assertion.
+  Engine tests observe state writes with a test-only helper. Consumer test drives
+  no longer replace `State.set_state`. Unknown failure injections still fail tests.
+
+- A refused action no longer runs every condition and permission again to build
+  an unused action list. GV uses the existing reason and user message instead.
+  Remove `TransitionNotAllowed.available_actions`; callers can explicitly list actions.
+- Remove unused transition command-class overrides, `BackgroundEffect.no_retry_on`,
+  and `ProcessManager.unbind_model_process`. Internal tests keep their own binding
+  cleanup helper. GV uses stock command classes in the current engine.
+
+- Remove unused public request keys, `operation_options`, `RequestConflict`,
+  `required_next` and `cancel_pending`. GV uses none
+  of these APIs. Its required work uses ordinary background jobs and saved
+  business completion states. Background effects keep their unique request keys.
+- Repeated submissions are refused while a job is unfinished. After completion,
+  a valid action creates a new job. Concurrent duplicates roll back preparation
+  writes and callbacks from the refused submission.
+- Remove `request_fingerprint` and `required_next` from the model state only.
+  The database columns and defaults remain so 3.3 producers can keep inserting
+  during deployment. Before upgrading, verify no unfinished job has a nonempty
+  `required_next`. Cleanup no longer retains public request keys indefinitely.
+- Effect jobs are inserted with parent completion. Reopening a completed parent
+  by hand now fails on the effect's unique key instead of reusing old effects.
+- Require new public options, columns and settings to ship with a consumer that
+  uses them. The release notes name that consumer and the problem solved.
+
+- Complete jobs whose model or transition no longer exists while retaining the
+  job lock. A failed completion write now reaches normal failure reporting.
+- Check failed-job business state once, under its row lock. A superseded job
+  now logs a warning. If that lock times out after a manual state change,
+  completion is recorded as failed instead of superseded; the manual state
+  remains unchanged and failure callbacks do not run.
+- Share hook validation traversal and let Python reject positional transition
+  arguments before work starts. Validation messages for declared hooks stay unchanged.
+- Create client turn records when a worker first selects that client's jobs,
+  avoiding the duplicate write during submission. Existing queued jobs remain eligible.
+- Stop the worker if another handler consumed a job process's exit status.
+  An unknown result can no longer count as a successful job process.
+
+- Remove obsolete broker design notes, Docker test wrappers and duplicate
+  contributor instructions. Keep the current worker, release and credential rules.
+  The tag workflow remains the publishing path and retains its existing checks.
+
+- Remove the ten migrations replaced by the initial squash. Keep its `replaces`
+  history and the next migration's dependency so upgraded and rolled-back
+  applications resolve the same schema. Databases on 0.17.x or earlier must
+  first run `migrate` using Django Logic 3.2 before taking this release.
+- Remove custom messages for the classes and app entry retired in 1.0/1.1.
+  Install `django_logic` alone; removed names now use Python's normal import errors.
+
 ## [3.3.0] — 2026-11-03
 
 - Add read-only transition statistics through `dl_transitions --stats` and
@@ -90,7 +146,7 @@
   If that transaction has committed a newer state, the job is superseded and keeps that state. This also applies to non-atomic jobs and stuck-job completion.
 - The new job columns carry database defaults (`db_default`), preserving inserts from producers on an earlier version.
   Migration 0011 keeps the defaults when it adds the columns; migration 0013 restores them on a database that applied the 3.0.0 copy of 0011.
-  Workers from before 3.0 must stop before upgraded producers start submitting work. Complete the application upgrade before starting the new workers; the database defaults alone do not make mixed worker execution compatible. See the [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).
+  Workers from before 3.0 must stop before upgraded producers start submitting work. Complete the application upgrade before starting the new workers; the database defaults alone do not make mixed worker execution compatible. See the [upgrade sequence](https://github.com/Borderless360/django-logic/blob/v3.0.1/docs/operation-contract.md#upgrade-and-rollback).
   Django 4.2 support is dropped; it reached end of life in April 2026.
 
 ## [3.0.0] — 2026-10-29

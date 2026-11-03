@@ -60,8 +60,7 @@ DATABASES['other'] = {
 }
 
 # LocMemCache by default. Tests that need an atomic add() use the
-# @requires_real_redis skip decorator and run under settings_redis.py or
-# settings_stability.py in dedicated CI jobs.
+# @requires_real_redis skip decorator and run under settings_stability.py in dedicated CI jobs.
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',

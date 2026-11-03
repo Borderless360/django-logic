@@ -3,9 +3,7 @@
 Subclass it, point it at your Process + model, and drive the workflow with
 ``transition`` / ``background_transition`` / ``retry_transition``, asserting
 behaviour (state, availability, side-effects, recorded errors) instead of
-poking framework internals. Background transitions run **inline, without
-Celery**. On failure you get an AI-readable timeline (and, opt-in, a
-reproducible snapshot).
+poking framework internals. Background transitions run inline. A failure shows the earlier test steps.
 
     class TestOrderFulfilment(ProcessScenario):
         process_class = OrderProcess
@@ -45,17 +43,11 @@ def _exc_names(exc) -> str:
 
 
 class ProcessScenario(ScenarioAssertions, TransactionTestCase):
-    """Base class for scenario-based Process tests (no Celery required)."""
+    """Base class for scenario-based Process tests."""
 
     process_class = None        # type[Process]
     model = None                # type[Model]
     state_field = 'status'
-    #: Accessor the process is bound under. Leave it alone: it defaults to
-    #: ``process_class.process_name``, so a process with a custom name needs
-    #: no second declaration here. Set it only when the scenario drives a
-    #: process bound under a name that differs from its own ``process_name``.
-    process_name = None
-
     def setUp(self):
         super().setUp()
         self._timeline: list[dict] = []
@@ -97,7 +89,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         return instance
 
     def from_snapshot(self, data_or_path):
-        """Rebuild an instance (and its TransitionMessage) from a snapshot."""
+        """Rebuild a model's own fields from a snapshot."""
         instance = _from_snapshot(data_or_path, model=self.model)
         self._record('from_snapshot', 'OK',
                      f'{self.model.__name__}(pk={instance.pk}, '
@@ -105,8 +97,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         return instance
 
     def snapshot(self, instance):
-        return _snapshot(instance, state_field=self.state_field,
-                         process_name=self._process_name)
+        return _snapshot(instance, state_field=self.state_field)
 
     # --- driving the process --------------------------------------------
 
@@ -166,7 +157,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                    fail_with=fail_with) as tracker:
             raised = self._call(lambda: rerun_message(transition_message.pk))
         self._finish('retry_transition', instance, tracker, raised, before,
-                     action=transition_message.transition_name, expect_raises=expect_raises)
+                     expect_raises=expect_raises)
         return instance
 
     # --- shared execution path ------------------------------------------
@@ -212,7 +203,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                 raised = self._call(
                     lambda: getattr(self._process(instance), action)(**kwargs))
         label = f'{"background_" if background else ""}transition({action!r})'
-        self._finish(label, instance, tracker, raised, before, action=action,
+        self._finish(label, instance, tracker, raised, before,
                      expect_raises=expect_raises)
         return instance
 
@@ -225,7 +216,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         except Exception as exc:
             return exc
 
-    def _finish(self, label, instance, tracker, raised, before, *, action=None,
+    def _finish(self, label, instance, tracker, raised, before, *,
                 expect_raises=None):
         self._last_tracker = tracker
         self._last_raised = raised

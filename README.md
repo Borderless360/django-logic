@@ -6,13 +6,6 @@
 > run through the same workers without blocking later parent actions. See
 > [the effect contract and upgrade requirements](docs/operation-contract.md#independent-background-effects).
 >
-> **3.0.1:** Optional request identity, deferred eligibility, required background follow-ups,
-> and fair group selection are described in [the operation contract](docs/operation-contract.md).
-> PostgreSQL state protection lasts through outer commit and waits up to two seconds for a
-> competing transaction. Database defaults preserve inserts from earlier producers.
-> When upgrading from before 3.0, stop old workers before upgraded code starts submitting work. See the
-> [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).
-
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
 [![CI](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml/badge.svg)](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml)
@@ -63,13 +56,6 @@ shared-cache rules below apply only when a background transition is
 bound — `manage.py check` tells you the moment one is — so a
 synchronous-only project runs on SQLite with Django's default cache.
 
-Upgrading from 1.0.x or earlier? Replace `'django_logic.background'`
-(and a second `'django_logic'` line, if present) with the one entry
-above. Nothing in the database moves: the app keeps the same label,
-table and migration history, so an install that had the background app
-applies no new migration. A 1.0.x install of `'django_logic'` alone had
-no table, so its next `migrate` creates it, empty.
-
 ```bash
 python manage.py migrate
 ```
@@ -87,6 +73,15 @@ CACHES = {
 
 Every `DJANGO_LOGIC` key has a default, so you need no other configuration to
 start.
+
+### Upgrading older installations
+
+Databases on 0.17.x or earlier must first run `migrate` using Django Logic 3.2.
+The current package retains the squashed migration and its replacement history.
+
+When upgrading from before 3.0, stop old workers before upgraded producers
+submit work. Finish the application upgrade before starting the new workers.
+See the [earlier upgrade sequence](https://github.com/Borderless360/django-logic/blob/v3.0.1/docs/operation-contract.md#upgrade-and-rollback).
 
 ## Declare a process
 
@@ -162,7 +157,8 @@ Each declaration slot has one job:
   reaches the target state. A failure stops the state change, and django-logic
   writes `failed_state` when you declare one.
 - `callbacks` — functions that run after the object reaches the target state.
-  They are best-effort: django-logic swallows what they raise.
+  They are best-effort: django-logic swallows what they raise. A crash after
+  the state write can skip them. Put required work in `side_effects`.
 - `failure_callbacks` — functions that run after a side-effect fails. They
   receive `exception=`. Put cleanup and compensation here.
 
@@ -295,9 +291,8 @@ failed check. Process guards still run before their transitions and nested
 processes.
 
 The resolver captures reasons during the existing checks. It does not run
-permissions or conditions again to explain a refusal. The existing
-`available_actions` hint still evaluates the available actions separately.
-A failed hint cannot replace the reason.
+permissions or conditions again to explain a refusal.
+Call `get_available_actions()` explicitly when the caller needs a fresh action list.
 
 A custom `is_valid` override can return `False` without explaining why.
 Its reason is `None` unless a stock check on that same object recorded a
@@ -404,6 +399,16 @@ its own database writes and becomes claimable again after
 `TRANSITION_MESSAGE_RETRY_MINUTES`. After `TRANSITION_MESSAGE_MAX_ERRORS`
 attempts django-logic writes `failed_state`, runs `failure_callbacks` and
 completes the row.
+
+`in_progress_state` is available only on background transitions with a target.
+Several transitions may share it; each saved job records its exact transition.
+A synchronous transition cannot declare it. For synchronous preparation, first
+save a real busy state, then start a background transition with `next_transition`.
+Provide a periodic task to restart records left in that busy state if the
+caller stops before saving the background job.
+
+If another action changes the model's state while a job waits, that change wins.
+The worker completes the job as `superseded` and skips its side effects.
 
 - **Side-effects must be idempotent against external systems.** A retry runs
   them again from the start, so a payment or an email can happen twice.
@@ -565,10 +570,7 @@ Pull requests are welcome. Open an issue first for a major change.
 ```bash
 pip install -e '.[dev]'
 python tests/manage.py test          # SQLite suite
-
-make build                           # or run the same suite in Docker
-make test
-make test-one t=tests.test_transition
+python tests/manage.py test tests.test_transition
 ```
 
 Add a test for every change, and update the documentation the change touches.

@@ -131,66 +131,7 @@ class SnapshotRestoreGuardTests(ProcessScenario):
         with self.assertRaises(ValueError):
             self.from_snapshot(data)
 
-    def test_restore_deletes_the_existing_transition_message(self):
-        widget = self.create_instance(status='draft')
-        self.background_transition(
-            widget, 'fulfil', fail_side_effect='bg_ok',
-            fail_with=ValueError('snap'))
-        data = self.snapshot(widget)
 
-        # The database still holds a row for this instance and process, left
-        # over from an earlier run or driven since the snapshot was taken.
-        stale = TransitionMessage.objects.get(instance_id=str(widget.pk),
-                                              process_name='process')
-        stale.errors_count = 99
-        stale.last_error_message = 'stale orphan'
-        stale.save(update_fields=['errors_count', 'last_error_message'])
-        Widget.objects.filter(pk=widget.pk).delete()
-
-        restored = self.from_snapshot(data)
-        rows = TransitionMessage.objects.filter(
-            instance_id=str(restored.pk), process_name='process')
-        self.assertEqual(rows.count(), 1)
-        self.assertEqual(rows.get().errors_count, 1)
-        self.assertNotIn('stale orphan', rows.get().last_error_message)
-
-    def test_snapshot_round_trips_the_retry_clock(self):
-        widget = self.create_instance(status='draft')
-        self.background_transition(
-            widget, 'fulfil', fail_side_effect='bg_ok',
-            fail_with=ValueError('hung'))
-
-        # A row from production that started an attempt, timed out, and whose
-        # cleanup hook also raised. A timeout-incident test replays this shape.
-        now = timezone.now().replace(microsecond=123456)
-        transition_message = TransitionMessage.objects.get(
-            instance_id=str(widget.pk), process_name='process')
-        transition_message.started_at = now - datetime.timedelta(minutes=30)
-        transition_message.completed_at = now - datetime.timedelta(minutes=20)
-        transition_message.duration_ms = 601_000
-        transition_message.failure_side_effect_error = 'cleanup exploded'
-        transition_message.last_error_dt = now - datetime.timedelta(minutes=25)
-        transition_message.save(
-            update_fields=['started_at', 'completed_at', 'duration_ms',
-                           'failure_side_effect_error', 'last_error_dt'])
-
-        data = self.snapshot(widget)
-        for key in ('started_at', 'completed_at', 'duration_ms',
-                    'failure_side_effect_error', 'last_error_dt'):
-            self.assertIn(key, data['transition_message'])
-
-        TransitionMessage.objects.all().delete()
-        Widget.objects.filter(pk=widget.pk).delete()
-
-        restored = self.from_snapshot(data)
-        replayed = TransitionMessage.objects.get(
-            instance_id=str(restored.pk), process_name='process')
-        self.assertEqual(replayed.started_at, transition_message.started_at)
-        self.assertEqual(replayed.completed_at, transition_message.completed_at)
-        self.assertEqual(replayed.last_error_dt,
-                         transition_message.last_error_dt)
-        self.assertEqual(replayed.duration_ms, 601_000)
-        self.assertEqual(replayed.failure_side_effect_error, 'cleanup exploded')
 
 
 # --- The wrong entrypoint for a background transition ------------------------

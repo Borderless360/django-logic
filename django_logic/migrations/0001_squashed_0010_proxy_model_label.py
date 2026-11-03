@@ -1,10 +1,9 @@
-"""One migration for a fresh install, replacing 0001 through 0010.
+"""Create the initial schema while retaining the original migration history.
 
-A fresh install applies only this file. An install that has applied any
-of the ten originals keeps using them; Django runs the unapplied ones
-and records this file as applied. The originals stay in the package
-until every install has applied this file. The data rewrite in 0010 is
-not repeated here: a fresh install has no rows to rewrite.
+The replacement names let older releases read databases created by this file.
+They also support databases that applied all originals but lack the squash record.
+An installation with only some originals must first migrate using release 3.2.
+The original proxy data rewrite is not needed for a fresh database.
 """
 import django.utils.timezone
 import model_utils.fields

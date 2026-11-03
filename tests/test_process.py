@@ -12,6 +12,7 @@ whatever code exists).
 The fixtures live in tests/background/models.py and are bound in
 tests/background/apps.py (the single binding site, per issue #100).
 """
+from tests import StateTraceMixin
 from django.contrib.auth import get_user_model
 
 from django_logic.exceptions import TransitionNotAllowed
@@ -25,7 +26,7 @@ from tests.background.models import (
 )
 
 
-class SyncProcessAvailabilityScenario(ProcessScenario):
+class SyncProcessAvailabilityScenario(StateTraceMixin, ProcessScenario):
     """What an instance MAY do from a given state — asserted as availability,
     not as the framework's internal transition list."""
 
@@ -98,15 +99,13 @@ class SyncProcessAvailabilityScenario(ProcessScenario):
         self.assertEqual(widget.status, 'draft')
         self.assertNotIn('staff,', widget.se_log)
 
-    def test_refusal_names_the_state_and_the_available_actions(self):
+    def test_refusal_names_the_current_state(self):
         widget = self.create_instance(status='draft')
         with self.assertRaises(TransitionNotAllowed) as caught:
             self._process(widget).no_such_action()
         error = caught.exception
         self.assertEqual(error.current_state, 'draft')
-        self.assertIn('approve', error.available_actions)
         self.assertIn("state 'draft'", str(error))
-        self.assertIn('approve', str(error))
 
     def test_eligibility_query_does_not_bypass_another_actions_lock(self):
         widget = self.create_instance(status='draft')
@@ -158,7 +157,7 @@ class SyncProcessAvailabilityScenario(ProcessScenario):
         self.assertIn('cancel_flagged,', widget.se_log)
 
 
-class SyncProcessDrivingScenario(ProcessScenario):
+class SyncProcessDrivingScenario(StateTraceMixin, ProcessScenario):
     """How the object changes as it is driven through actions."""
 
     process_class = WidgetSyncProcess
@@ -258,7 +257,7 @@ class SyncProcessDrivingScenario(ProcessScenario):
             self._process(widget).approve('not-a-kwarg')
 
 
-class NestedSyncDelegationScenario(ProcessScenario):
+class NestedSyncDelegationScenario(StateTraceMixin, ProcessScenario):
     """A parent process drives a transition declared on a nested process,
     through the parent entrypoint — the observable behavior the old
     ``test_nested_process_*`` tests expressed as transition-object identity."""
@@ -278,7 +277,7 @@ class NestedSyncDelegationScenario(ProcessScenario):
         self.assert_side_effects_ran(['se_inner'])
 
 
-class AmbiguousConditionScenario(ProcessScenario):
+class AmbiguousConditionScenario(StateTraceMixin, ProcessScenario):
     """Two transitions share the action_name 'clash' and BOTH conditions pass.
     Resolution must refuse (raise TransitionNotAllowed) with no state write and
     no side-effect — it must not silently pick whichever comes first."""
@@ -299,7 +298,7 @@ class AmbiguousConditionScenario(ProcessScenario):
         self.assertEqual(widget.se_log, '')
 
 
-class DomainOutcomeScenario(ProcessScenario):
+class DomainOutcomeScenario(StateTraceMixin, ProcessScenario):
     """Assert what the object BECAME, not just that a hook ran (issue #103).
     ``assert_side_effects_ran`` is a wiring check; ``capture`` +
     ``assert_changed`` / ``assert_unchanged`` pin the before/after delta."""

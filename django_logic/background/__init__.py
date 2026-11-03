@@ -27,9 +27,6 @@ from __future__ import annotations
 _PUBLIC = {
     'BackgroundEffect': ('django_logic.background.effects', 'BackgroundEffect'),
     'Defer': ('django_logic.background.exceptions', 'Defer'),
-    'RequestConflict': ('django_logic.background.exceptions', 'RequestConflict'),
-    'operation_options': ('django_logic.background.operations', 'operation_options'),
-    'cancel_pending': ('django_logic.background.operations', 'cancel_pending'),
     'BackgroundTransition': ('django_logic.background.transitions', 'BackgroundTransition'),
     'sync_execution': ('django_logic.conf', 'sync_execution'),
     'retry_pending': ('django_logic.background.safety_nets', 'retry_pending'),
@@ -43,13 +40,6 @@ __all__ = list(_PUBLIC.keys())
 
 
 def __getattr__(name):
-    if name == 'BackgroundAction':
-        raise ImportError(
-            "BackgroundAction was removed in 1.0.0. Declare "
-            "BackgroundTransition(action_name=..., sources=[...]) with no "
-            "target — the behavior is identical: same durability, same "
-            "lock and gate, no state write on success."
-        )
     if name not in _PUBLIC:
         raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
     import importlib

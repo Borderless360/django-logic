@@ -13,7 +13,6 @@ from django.test import SimpleTestCase, override_settings
 
 from django_logic.background.apps import validate_on_ready
 from django_logic.conf import cleanup_days, max_errors, retry_minutes
-from django_logic.conf import lock_timeout
 from tests import dl_settings
 
 
@@ -139,29 +138,6 @@ class SettingValidationTests(SimpleTestCase):
             DJANGO_LOGIC=_conf(TRANSITION_MESSAGE_CLEANUP_DAYS=0)
         ):
             self.assertEqual(cleanup_days(), 0)
-
-    # -- LOCK_TIMEOUT (number > 0) -------------------------------------------
-
-    def test_lock_timeout_rejects_string(self):
-        self.assert_rejected(_conf(LOCK_TIMEOUT='7200'), 'LOCK_TIMEOUT')
-
-    def test_lock_timeout_rejects_bool(self):
-        self.assert_rejected(_conf(LOCK_TIMEOUT=True), 'LOCK_TIMEOUT')
-
-    def test_lock_timeout_rejects_nan(self):
-        self.assert_rejected(_conf(LOCK_TIMEOUT=math.nan), 'LOCK_TIMEOUT')
-
-    def test_lock_timeout_rejects_zero(self):
-        # A zero TTL means the lock never holds — mutual exclusion gone.
-        self.assert_rejected(_conf(LOCK_TIMEOUT=0), 'LOCK_TIMEOUT')
-
-    def test_lock_timeout_rejects_negative(self):
-        self.assert_rejected(_conf(LOCK_TIMEOUT=-5), 'LOCK_TIMEOUT')
-
-    def test_lock_timeout_accepts_positive_float(self):
-        self.assert_accepted(_conf(LOCK_TIMEOUT=0.5))
-        with override_settings(DJANGO_LOGIC=_conf(LOCK_TIMEOUT=0.5)):
-            self.assertEqual(lock_timeout(), 0.5)
 
     def test_unset_optional_settings_validate_clean(self):
         # The documented defaults must pass without the optional keys

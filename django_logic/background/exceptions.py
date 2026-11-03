@@ -37,10 +37,6 @@ class AlreadyInProgress(TransitionTemporarilyUnavailable):
     """
 
 
-class RequestConflict(ValueError):
-    """A retained request key was reused with different inputs."""
-
-
 class Defer(Exception):
     """Wait until a specified time without recording a failed attempt."""
 

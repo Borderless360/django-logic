@@ -29,14 +29,14 @@ class InjectionMustFireTests(ProcessScenario):
     state_field = 'status'
     process_name = 'process'
 
-    def test_unknown_fail_side_effect_rejected_eagerly(self):
+    def test_unknown_fail_side_effect_fails_the_drive(self):
         widget = self.create_instance()
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(AssertionError) as ctx:
             self.background_transition(
                 widget, 'fulfil',
                 fail_side_effect='renamed_hook_that_does_not_exist',
                 fail_with=RuntimeError('x'))
-        self.assertIn('does not match any side-effect', str(ctx.exception))
+        self.assertIn('never fired', str(ctx.exception))
 
     def test_existing_hook_that_never_fires_fails_the_drive(self):
         # 'bg_ok' exists on other transitions, but 'cancel' is synchronous and
@@ -125,24 +125,6 @@ class SnapshotFidelityTests(ProcessScenario):
             _jsonable(object())
         self.assertIn('unsupported field value type', str(ctx.exception))
 
-    def test_snapshot_round_trips_transition_message_field_name(self):
-        # A restored row must take the same worker path as a production row.
-        # With field_name='' the worker infers the state field instead of
-        # reading the recorded one.
-        from django_logic.background import sync_execution
-        from django_logic.background.models import TransitionMessage
-
-        widget = self.create_instance()
-        with sync_execution():
-            widget.process.fulfil()
-        data = snapshot(widget, state_field='status')
-        self.assertEqual(data['transition_message']['field_name'], 'status')
-
-        TransitionMessage.objects.all().delete()
-        widget.delete()
-        restored = from_snapshot(data, model=Widget)
-        row = TransitionMessage.objects.get(instance_id=str(restored.pk))
-        self.assertEqual(row.field_name, 'status')
 
 
 class FailureHookAssertionsTests(ProcessScenario):

@@ -11,6 +11,7 @@ connection and raises ``TransactionManagementError``. One with no target
 writes no state, so nothing runs after the caught error and the row completed with
 ``errors_count=0`` and success callbacks over discarded work.
 """
+from tests import unbind_model_process
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.db.models.signals import post_init
@@ -84,7 +85,7 @@ class _Base(TestCase):
         ProcessManager.bind_model_process(
             Invoice, self.process, state_field='status')
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, self.process)
+            unbind_model_process, Invoice, self.process)
         cache.clear()
         CALLBACKS_RAN.clear()
         self.addCleanup(cache.clear)

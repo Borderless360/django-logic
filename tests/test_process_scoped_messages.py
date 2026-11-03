@@ -185,28 +185,6 @@ class ProcessScopedMessageScenario(ProcessScenario):
 
     # --- snapshot ----------------------------------------------------------
 
-    def test_snapshot_captures_own_process_row(self):
-        widget = self._two_failed_processes()
-
-        snap_main = snapshot(widget, state_field='status',
-                             process_name='process')
-        self.assertEqual(snap_main['state'], 'fulfilling')
-        self.assertEqual(snap_main['transition_message']['transition_name'],
-                         'fulfil')
-        self.assertEqual(snap_main['transition_message']['process_name'],
-                         'process')
-
-        snap_audit = snapshot(widget, state_field='audit_status',
-                              process_name='audit_process')
-        self.assertEqual(snap_audit['state'], 'auditing')
-        self.assertEqual(snap_audit['transition_message']['transition_name'],
-                         'audit')
-        self.assertEqual(snap_audit['transition_message']['process_name'],
-                         'audit_process')
-
-        # The scenario's own snapshot() passes its process scope through.
-        snap = self.snapshot(widget)
-        self.assertEqual(snap['transition_message']['transition_name'], 'fulfil')
 
     # --- failure output ----------------------------------------------------
 

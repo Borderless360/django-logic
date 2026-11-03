@@ -74,7 +74,9 @@ class PositionalArgumentsRejectedTests(TestCase):
         widget = Widget.objects.create()
         with self.assertRaises(TypeError) as ctx:
             widget.process.cancel(object())
-        self.assertIn('keyword arguments only', str(ctx.exception))
+        self.assertIn('cancel() takes 0 positional arguments', str(ctx.exception))
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'draft')
 
     def test_keyword_call_still_works(self):
         widget = Widget.objects.create()

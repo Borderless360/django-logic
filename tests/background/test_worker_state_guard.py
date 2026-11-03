@@ -156,7 +156,7 @@ class SafetyNetGuardTests(TestCase):
         widget.status = 'cancelled'  # the operator's manual fix
         widget.save(update_fields=['status'])
 
-        with self.assertLogs('django-logic.transition', level='ERROR') as cm:
+        with self.assertLogs('django-logic.transition', level='WARNING') as cm:
             self.assertTrue(finalize_stuck_attempt(transition_message.pk))
         self.assertTrue(
             any('[superseded]' in message for message in cm.output), cm.output,

@@ -157,8 +157,9 @@ class SerializeKwargsTests(SimpleTestCase):
         # The enqueue dispatcher wraps generic TypeError in
         # ImproperlyConfigured ("not JSON-serializable") — the strict-mode
         # rejection must stay distinguishable so it propagates verbatim.
-        with self.assertRaises(KwargsSerializationError):
+        with self.assertRaises(KwargsSerializationError) as caught:
             serialize_kwargs({'user_id': 42})
+        self.assertIn('user_id', str(caught.exception))
 
     def test_non_string_dict_keys_are_refused(self):
         # JSON stringifies int keys silently ({1: 'a'} -> {"1": "a"}), which

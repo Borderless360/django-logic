@@ -8,10 +8,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
 from django.template import Context
 from django.template.engine import Engine
-from django.test import TestCase, override_settings
+from django.test import TestCase
 
 from django_logic import Process, ProcessManager, Transition
-from django_logic.checks import check_no_unknown_settings
 from tests.models import Invoice
 
 
@@ -190,35 +189,6 @@ class ShadowedDefinitionTests(TestCase):
         self.assertIn('already names something', str(ctx.exception))
 
 
-class UnknownSettingsCheckTests(TestCase):
-    @override_settings(DJANGO_LOGIC={
-        'BACKGROUND_EXECUTION': 'sync',
-        'TRANSITION_MESSAGE_MAX_ERROR': 3,      # typo: missing S
-    })
-    def test_typo_is_reported_as_w004(self):
-        """A misspelled key used to be ignored, and the default applied without
-        a word."""
-        findings = check_no_unknown_settings(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.unread_setting'])
-        self.assertIn('TRANSITION_MESSAGE_MAX_ERROR', findings[0].msg)
-
-    @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'sync'})
-    def test_known_keys_are_silent(self):
-        self.assertEqual(check_no_unknown_settings(None), [])
-
-    @override_settings(DJANGO_LOGIC={
-        'BACKGROUND_EXECUTION': 'sync',
-        'STRICT_HOOK_SIGNATURES': True,
-        'LEGACY_EXCEPTION_BASE': 'some.fork.TransitionNotAllowed',
-    })
-    def test_keys_a_past_release_removed_are_reported_as_unread(self):
-        findings = check_no_unknown_settings(None)
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].id, 'django_logic.unread_setting')
-        self.assertIn('STRICT_HOOK_SIGNATURES', findings[0].msg)
-        self.assertIn('LEGACY_EXCEPTION_BASE', findings[0].msg)
-
-
 # --- Smaller fixes --------------------------------------------------------
 
 class BareStringSourcesTests(TestCase):
@@ -235,19 +205,6 @@ class BareStringSourcesTests(TestCase):
         self.assertEqual(t.sources, ['draft'])
 
 
-class ReservedUserIdKwargTests(TestCase):
-    def test_caller_supplied_user_id_is_refused(self):
-        """The worker pops ``user_id`` and replaces it with a live user, so a
-        caller's value could never reach a hook. Refused at enqueue."""
-        from django_logic.background.serializers import (
-            KwargsSerializationError, serialize_kwargs,
-        )
-
-        with self.assertRaises(KwargsSerializationError) as ctx:
-            serialize_kwargs({'user_id': 'my-own-data', 'other': 1})
-        self.assertIn('user_id', str(ctx.exception))
-
-
 class PublicSurfaceTests(TestCase):
     def test_star_import_exposes_only_the_documented_names(self):
         """Without __all__, `from django_logic import *` leaked whichever
@@ -261,16 +218,7 @@ class PublicSurfaceTests(TestCase):
         for name in django_logic.__all__:
             self.assertTrue(hasattr(django_logic, name), name)
 
-    def test_the_removed_classes_name_their_replacement(self):
-        import django_logic
-        import django_logic.background
-
-        with self.assertRaises(ImportError) as ctx:
-            django_logic.Action
-        self.assertIn('Transition', str(ctx.exception))
-        with self.assertRaises(ImportError) as ctx:
-            django_logic.background.BackgroundAction
-        self.assertIn('BackgroundTransition', str(ctx.exception))
+    def test_command_bundle_imports_remain_available(self):
         # The command classes are not advertised, but a direct import from
         # django_logic.commands keeps working for existing consumers.
         # The import itself is the assertion: it must not raise.
@@ -279,32 +227,6 @@ class PublicSurfaceTests(TestCase):
         )
 
 
-class BundleSwapTests(TestCase):
-    def test_the_three_kept_swap_points_still_swap(self):
-        """The consumer subclasses these three; the failure-callback and
-        condition bundles are always the stock classes since 1.0.0."""
-        from django_logic.commands import Callbacks, Permissions, SideEffects
-
-        class LoudCallbacks(Callbacks):
-            pass
-
-        class LoudPermissions(Permissions):
-            pass
-
-        class LoudSideEffects(SideEffects):
-            pass
-
-        class Custom(Transition):
-            callbacks_class = LoudCallbacks
-            permissions_class = LoudPermissions
-            side_effects_class = LoudSideEffects
-
-        t = Custom('go', sources=['draft'], target='approved')
-        self.assertIsInstance(t.callbacks, LoudCallbacks)
-        self.assertIsInstance(t.permissions, LoudPermissions)
-        self.assertIsInstance(t.side_effects, LoudSideEffects)
-        self.assertFalse(hasattr(t, 'failure_callbacks_class'))
-        self.assertFalse(hasattr(t, 'conditions_class'))
 
 
 

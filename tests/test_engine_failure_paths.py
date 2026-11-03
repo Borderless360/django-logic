@@ -4,6 +4,7 @@ Every test here fails if its fix is reverted. Each assertion was checked by
 mutation, because this suite has shipped assertions that passed against the
 defect they were meant to catch.
 """
+from tests import unbind_model_process
 import logging
 from datetime import timedelta
 
@@ -40,7 +41,7 @@ class _BindCleanup:
 
     def tearDown(self):
         for process_class in self._bound:
-            ProcessManager.unbind_model_process(Invoice, process_class)
+            unbind_model_process(Invoice, process_class)
         super().tearDown()
 
 

@@ -117,19 +117,7 @@ class Process:
         if item.startswith('_'):
             raise AttributeError(item)
 
-        def transition_method(*args, **kwargs):
-            if args:
-                # Positional arguments used to be dropped, so
-                # ``instance.process.verify(user)`` ran with user=None. That
-                # skips every permission check and loses the audit trail with
-                # no error at all, so fail loudly instead.
-                raise TypeError(
-                    f"{item}() accepts keyword arguments only (got "
-                    f"{len(args)} positional). Pass user and other values "
-                    f"by keyword, e.g. {item}(user=request.user) — a "
-                    f"positional user would be dropped and permission "
-                    f"checks skipped."
-                )
+        def transition_method(**kwargs):
             # Drop an 'action_name' key the caller passed: it would clash with
             # _get_transition_method's first parameter and raise "multiple
             # values for argument 'action_name'". No engine path forwards it;
@@ -139,6 +127,8 @@ class Process:
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 
+        transition_method.__name__ = item
+        transition_method.__qualname__ = item
         # Django's template engine CALLS any callable it resolves, so
         # ``{{ order.process.approve }}`` used to drive the state machine
         # while rendering a page and print the tr_id. ``alters_data``
@@ -149,12 +139,6 @@ class Process:
         return transition_method
 
     def _get_transition_method(self, action_name: str, **kwargs):
-        from django_logic.background.operations import prepare_submission
-        submission, existing = prepare_submission(self, action_name, kwargs)
-        if existing is not None:
-            from django_logic.background.serializers import decode_value
-            trace = decode_value(existing.kwargs).get('tr_id')
-            return uuid.UUID(trace) if trace else None
         parent_ctx = _transition_context.get()
         if parent_ctx:
             kwargs.setdefault('root_id', parent_ctx['root_id'])
@@ -165,8 +149,6 @@ class Process:
             action_name, user
         )
 
-        if submission is not None and not transition.is_background:
-            raise ImproperlyConfigured('operation_options requires a BackgroundTransition.')
         tr_id = uuid.uuid4()
         target_note = (
             f"to {transition.target}" if transition.target is not None
@@ -204,8 +186,6 @@ class Process:
             {'root_id': kwargs['root_id'], 'tr_id': kwargs['tr_id']}
         )
         try:
-            if submission is not None:
-                return transition.change_state(self.state, _submission=submission, **kwargs)
             return transition.change_state(self.state, **kwargs)
         except TransitionNotAllowed as error:
             self._set_refusal_message(error, action_name, owning_process, transition)
@@ -388,29 +368,11 @@ class Process:
             raise error
 
         current_state = self.state.get_state()
-        try:
-            available_actions = self.get_available_actions(user=user)
-        except Exception as list_error:
-            # Listing the actions runs every transition's conditions and
-            # permissions. One of them raising must not replace the
-            # refusal with its own exception — the caller asked why the
-            # action was refused, and it still gets that answer.
-            transition_logger.info(
-                f'Listing the available actions for '
-                f'{self.state.instance_key} failed: '
-                f'{type(list_error).__name__}: {list_error}'
-            )
-            available_actions = None
-        known_actions = (
-            'unknown' if available_actions is None
-            else ', '.join(available_actions) or 'none'
-        )
         message = (
             f"Process class {self.__class__} for object "
             f"{self.state.instance.pk} has no transition "
             f"with action name {action_name}, user {user}. "
-            f"The instance is in state {current_state!r}; "
-            f"available actions: {known_actions}."
+            f"The instance is in state {current_state!r}."
         )
         transition_logger.info(message)
         refusal = next(
@@ -420,7 +382,6 @@ class Process:
         error = TransitionNotAllowed(message, reason=refusal.reason)
         self._set_refusal_message(error, action_name, refusal.process, refusal.transition, refusal.message)
         error.current_state = current_state
-        error.available_actions = available_actions
         raise error
 
 
@@ -565,46 +526,13 @@ def collect_hook_signature_offenders(process_cls) -> list:
     a named positional, as ``module.qualname (on Owner[.action])`` strings.
     Pure collection — bind-time validation enforces.
     """
-    offenders = []
-
-    def check(fn, owner):
-        try:
-            params = list(inspect.signature(fn).parameters.values())
-        except (TypeError, ValueError):
-            return
-        ok = params and params[0].kind in (
+    return _collect_hook_offenders(
+        process_cls,
+        lambda params: not params or next(iter(params.values())).kind not in (
             inspect.Parameter.POSITIONAL_ONLY,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        if not ok:
-            offenders.append(
-                f'{getattr(fn, "__module__", "?")}.'
-                f'{getattr(fn, "__qualname__", fn)} (on {owner})'
-            )
-
-    _HOOK_ATTRS = (
-        'side_effects', 'callbacks', 'failure_callbacks',
-        'conditions', 'permissions',
+        ),
     )
-    for proc_cls in _iter_process_tree(process_cls):
-        owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
-        # Process-level conditions/permissions are plain lists of callables
-        # (executed via Conditions/Permissions in Process.is_valid). A
-        # subclass may instead define them as a property/descriptor computed
-        # per instance — those cannot be inspected at bind time; skip them.
-        for attr in ('conditions', 'permissions'):
-            hooks = getattr(proc_cls, attr, None)
-            if isinstance(hooks, (list, tuple)):
-                for fn in hooks:
-                    check(fn, owner)
-        for transition in proc_cls.transitions or []:
-            # getattr-guarded: a duck-typed custom transition that the
-            # engine never asks for one of these must not fail to bind.
-            for attr in _HOOK_ATTRS:
-                wrapper = getattr(transition, attr, None)
-                for fn in getattr(wrapper, 'commands', None) or []:
-                    check(fn, f'{owner}.{getattr(transition, "action_name", "?")}')
-    return offenders
 
 
 def collect_request_param_offenders(process_cls) -> list:
@@ -613,6 +541,11 @@ def collect_request_param_offenders(process_cls) -> list:
     transition never takes the request, so such a hook waits for a value
     that can never arrive. Pure collection — bind-time validation enforces.
     """
+    return _collect_hook_offenders(process_cls, lambda params: 'request' in params)
+
+
+def _collect_hook_offenders(process_cls, rejects):
+    """Inspect each declared hook and preserve its owner in validation errors."""
     offenders = []
 
     def check(fn, owner):
@@ -620,7 +553,7 @@ def collect_request_param_offenders(process_cls) -> list:
             params = inspect.signature(fn).parameters
         except (TypeError, ValueError):
             return
-        if 'request' in params:
+        if rejects(params):
             offenders.append(
                 f'{getattr(fn, "__module__", "?")}.'
                 f'{getattr(fn, "__qualname__", fn)} (on {owner})'
@@ -632,6 +565,7 @@ def collect_request_param_offenders(process_cls) -> list:
     )
     for proc_cls in _iter_process_tree(process_cls):
         owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
+        # Computed properties cannot be checked before an instance exists.
         for attr in ('conditions', 'permissions'):
             hooks = getattr(proc_cls, attr, None)
             if isinstance(hooks, (list, tuple)):
@@ -755,44 +689,3 @@ class ProcessManager:
             process_class.process_name,
             _ProcessAccessor(make_process_getter(state_field, process_class)),
         )
-
-    @classmethod
-    def unbind_model_process(
-        cls, model, process_class=None, state_field: str | None = None,
-    ) -> None:
-        """Inverse of :meth:`bind_model_process`: drop the registry entries
-        and the model accessor they installed.
-
-        Exists for teardown — a consumer (and this library's own suite)
-        binding a throwaway process in a test otherwise has to rewrite
-        ``ProcessManager.bindings`` and ``delattr`` the accessor by hand,
-        and every copy of that gets the multi-binding cases wrong.
-        ``process_class`` / ``state_field`` narrow which of the model's
-        bindings to remove; omitting both removes all of them. Unbinding
-        something that was never bound is a no-op.
-        """
-        removed = [
-            binding for binding in cls.bindings
-            if binding.model is model
-            and (process_class is None or binding.process_class is process_class)
-            and (state_field is None or binding.state_field == state_field)
-        ]
-        if not removed:
-            return
-        cls.bindings = [b for b in cls.bindings if b not in removed]
-
-        # One model can carry several accessors (one per process_name, e.g.
-        # a second state_field's machine), so only the names no surviving
-        # binding of this model still claims may go — and only when
-        # django-logic owns them: an MTI child inherits its parent's
-        # accessor, which is the parent binding's to remove, not ours.
-        still_bound = {
-            binding.process_class.process_name for binding in cls.bindings
-            if binding.model is model
-        }
-        for binding in removed:
-            name = binding.process_class.process_name
-            if name in still_bound:
-                continue
-            if isinstance(vars(model).get(name), _ProcessAccessor):
-                delattr(model, name)
