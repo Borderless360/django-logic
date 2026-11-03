@@ -74,8 +74,8 @@ process or engine-managed user and trace arguments.
 Preparation and its database writes use the transaction that saves the job.
 Use the supplied `using` alias for queries and `transaction.on_commit` callbacks.
 A refusal, serialization error or failed submission rolls those writes back.
-If another submission already saved the same request, the engine discards the
-losing preparation's writes and callbacks before returning the existing job.
+If another submission already saved unfinished work, the engine discards the
+losing preparation's writes and callbacks, then raises `AlreadyInProgress`.
 Do not suppress errors or mark the transaction for a silent rollback.
 
 Keep the context short and local: no provider calls or other irreversible work.
@@ -83,13 +83,11 @@ After-commit callbacks are appropriate for best-effort external history. They
 do not make that history transactional or recover it after a caller crash.
 Use durable database records when that distinction matters.
 
-Required successors use this same extension on their completion connection.
 The context ends before job execution, including inline execution. An outer
 caller transaction can still retain its database locks until commit.
-Existing retained requests, retries and previously saved jobs do not run the
-context again. Jobs keep the existing serialized argument format. Request-key
-comparison uses caller inputs; prepared values remain those of the first
-accepted request. Independent effects receive those saved values.
+Retries and previously saved jobs do not run the context again. Jobs keep the
+existing serialized argument format. Independent effects receive the saved
+inputs of their parent job.
 
 ## Expected waiting
 
@@ -255,8 +253,8 @@ parent job and effect name; retries cannot create another copy of that effect.
 Effects use the same workers and job table. They inherit the parent's fairness
 key and saved arguments, with a new trace ID and the parent trace as `parent_id`.
 Changes to nested arguments during parent execution do not change these saved inputs.
-The default queue is the parent's recorded queue. `timeout`, `atomic` and
-`no_retry_on` have the same meanings as for a background transition; timeout
+The default queue is the parent's recorded queue. `timeout` and `atomic`
+have the same meanings as for a background transition; timeout
 defaults to no limit and atomic execution defaults to true. `Defer` releases the
 worker slot normally. Multiple effects are independent and may execute in any
 order, concurrently, or concurrently with a later parent operation.
@@ -331,7 +329,9 @@ A holder that outlasts the wait causes `TransitionTemporarilyUnavailable` before
 A background job that meets this refusal records an error and retries after the normal pause. It does not wait quietly.
 The database retains the lock through the actual outer commit or rollback.
 Inside this transaction, synchronous side effects run in a savepoint. A database error in a side effect discards their writes and still records the failed state and runs the failure callbacks. Any other error keeps the writes made before it.
-The cache gate remains for compatibility; it is not the authority for database-state exclusion.
+The shared cache lock also prevents overlapping external calls while its timeout
+remains valid, including after a lost database connection. PostgreSQL protects
+database state; neither lock can undo an external request already sent.
 SQLite remains useful for synchronous tests, but cannot verify concurrent state protection.
 
 Default atomic state-writing background jobs retain the business-row lock during their transaction.
@@ -357,28 +357,24 @@ It does not interrupt a provider request already running or cancel independent e
 
 ## Upgrade and rollback
 
-Migration 0011 in 3.0.1 keeps database defaults on the new job columns, so earlier producers can still insert jobs afterwards.
-Migration 0013 restores these defaults for databases that already applied the published 3.0.0 migration.
-Schema changes can briefly block database queries; compatible inserts do not guarantee an uninterrupted deployment.
+Version 4 removes unused public request keys, required successors and pending-job
+cancellation. Applications must remove calls to these APIs before upgrading.
+Verify that unfinished jobs have empty `required_next` lists. Applications that
+used public request keys must resolve their duplicate-protection policy first.
 
-Workers from before 3.0 ignore deferred eligibility, required successors and fairness. Their cleanup also does not preserve request-key records.
-Database defaults do not make it safe to run those workers alongside upgraded code. When upgrading from before 3.0, use this order:
+Migration 0016 changes Django's model state only. The physical columns and their
+defaults remain, so 3.3 processes can insert and read jobs during deployment.
+The saved arguments, fairness keys, deferral times and independent effects keep
+their existing format. Applications must preserve their own callable names and
+saved inputs while old and new processes overlap.
 
-1. Stop old workers from taking new work and let their active jobs finish. Include application-specific job runners and maintenance commands, not only `dl_worker`. Keep queued jobs.
-2. Stop those workers before upgraded producers start submitting work. Apply the migrations while worker counts remain zero.
-3. Upgrade the web processes and other producers. Compatible earlier web processes may keep accepting requests and queuing jobs during preparation, provided they do not execute jobs inline and the application has verified that its existing queued jobs still run correctly. Confirm that the old processes have finished; deployment platforms can temporarily overlap versions.
-4. Start the new workers after the application upgrade is complete. Check the installed version, queue coverage and completion of existing queued jobs.
+For a 3.3 application that meets these conditions, apply migrations and deploy
+compatible producers and workers through the normal rolling release. Check the
+installed version, queue coverage and completion of previously queued jobs.
+Rollback to 3.3 preserves this schema and these job formats. Application changes
+still need their own rollback review.
 
-A rollback to a version before 3.0 needs a review of application state and saved job records after new work has run.
-Those workers cannot honor deferred eligibility, required follow-ups or request-key retention, including completed records that protect against duplicate requests.
-Leaving the extra columns in place is not sufficient to preserve those behaviors.
-
-Existing job rows receive neutral defaults and preserve their previous identities and inputs.
-The fairness migration creates shared cursor records for their existing group keys.
-The operator output distinguishes normal waiting from retrying after an error.
-
-Version 3.2 adds no migration and keeps the existing saved argument format.
-Use `submission_context` for application rules around accepting new work;
-`_enqueue_atomic` remains private. Deploy updated application declarations only
-with a library version that accepts this option. Workers older than 3.2 still
-use their earlier behavior when creating effects from mutable execution inputs.
+Databases on 0.17.x or earlier must first run `migrate` with Django Logic 3.2.
+The current package keeps the squashed migration's replacement history.
+Upgrades from before 3.0 require different worker ordering; follow the
+[earlier upgrade sequence](https://github.com/Borderless360/django-logic/blob/v3.0.1/docs/operation-contract.md#upgrade-and-rollback).

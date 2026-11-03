@@ -230,6 +230,9 @@ data = snapshot(order)    # The model fields and state only.
 Reproduce and prove the fix:
 
 ```python
+from django_logic.testing import open_transition_message
+
+
 def test_reproduce_stuck_order_12345(self):
     order = self.from_snapshot('fixtures/bug_12345.json')
     open_transition_message(order, 'process', 'fulfil', field_name='status')

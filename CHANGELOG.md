@@ -17,7 +17,7 @@
   cleanup helper. GV uses stock command classes in the current engine.
 
 - Remove unused public request keys, `operation_options`, `RequestConflict`,
-  `required_next` and `cancel_pending` in the next major release. GV uses none
+  `required_next` and `cancel_pending`. GV uses none
   of these APIs. Its required work uses ordinary background jobs and saved
   business completion states. Background effects keep their unique request keys.
 - Repeated submissions are refused while a job is unfinished. After completion,
