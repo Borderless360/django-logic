@@ -359,7 +359,7 @@ It does not interrupt a provider request already running or cancel independent e
 
 Version 4 removes unused public request keys, required successors and pending-job
 cancellation. Applications must remove calls to these APIs before upgrading.
-Verify that unfinished jobs have empty `required_next` lists. Applications that
+Verify that unfinished jobs have empty `required_next` values. Applications that
 used public request keys must resolve their duplicate-protection policy first.
 
 Migration 0016 changes Django's model state only. The physical columns and their
