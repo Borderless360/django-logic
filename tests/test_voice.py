@@ -32,13 +32,6 @@ RETIRED_WORDS = {
 
 #: Text that must keep a retired word. Each entry is (path suffix, substring).
 ALLOWED = (
-    # A key a past release removed. checks.py compares it against a
-    # consumer's settings dict by string, so the literal cannot change.
-    ('django_logic/checks.py', "'PHASE2_STATE_GUARD'"),
-    ('tests/test_removed_settings_check.py', 'PHASE2_STATE_GUARD'),
-    # 0.14.0 renamed a log event. An operator whose alert matches the old
-    # text needs to read the old text here to find that out.
-    ('docs/logger.md', 'Before 0.14.0 that first line read'),
     # CLAUDE.md carries the table below — it has to name what it retires.
     ('CLAUDE.md', 'private dialect'),
 )

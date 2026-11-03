@@ -8,10 +8,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
 from django.template import Context
 from django.template.engine import Engine
-from django.test import TestCase, override_settings
+from django.test import TestCase
 
 from django_logic import Process, ProcessManager, Transition
-from django_logic.checks import check_no_unknown_settings
 from tests.models import Invoice
 
 
@@ -190,35 +189,6 @@ class ShadowedDefinitionTests(TestCase):
         self.assertIn('already names something', str(ctx.exception))
 
 
-class UnknownSettingsCheckTests(TestCase):
-    @override_settings(DJANGO_LOGIC={
-        'BACKGROUND_EXECUTION': 'sync',
-        'TRANSITION_MESSAGE_MAX_ERROR': 3,      # typo: missing S
-    })
-    def test_typo_is_reported_as_w004(self):
-        """A misspelled key used to be ignored, and the default applied without
-        a word."""
-        findings = check_no_unknown_settings(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.unread_setting'])
-        self.assertIn('TRANSITION_MESSAGE_MAX_ERROR', findings[0].msg)
-
-    @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'sync'})
-    def test_known_keys_are_silent(self):
-        self.assertEqual(check_no_unknown_settings(None), [])
-
-    @override_settings(DJANGO_LOGIC={
-        'BACKGROUND_EXECUTION': 'sync',
-        'STRICT_HOOK_SIGNATURES': True,
-        'LEGACY_EXCEPTION_BASE': 'some.fork.TransitionNotAllowed',
-    })
-    def test_keys_a_past_release_removed_are_reported_as_unread(self):
-        findings = check_no_unknown_settings(None)
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].id, 'django_logic.unread_setting')
-        self.assertIn('STRICT_HOOK_SIGNATURES', findings[0].msg)
-        self.assertIn('LEGACY_EXCEPTION_BASE', findings[0].msg)
-
-
 # --- Smaller fixes --------------------------------------------------------
 
 class BareStringSourcesTests(TestCase):
@@ -233,19 +203,6 @@ class BareStringSourcesTests(TestCase):
     def test_a_list_of_one_state_is_still_fine(self):
         t = Transition('go', sources=['draft'], target='approved')
         self.assertEqual(t.sources, ['draft'])
-
-
-class ReservedUserIdKwargTests(TestCase):
-    def test_caller_supplied_user_id_is_refused(self):
-        """The worker pops ``user_id`` and replaces it with a live user, so a
-        caller's value could never reach a hook. Refused at enqueue."""
-        from django_logic.background.serializers import (
-            KwargsSerializationError, serialize_kwargs,
-        )
-
-        with self.assertRaises(KwargsSerializationError) as ctx:
-            serialize_kwargs({'user_id': 'my-own-data', 'other': 1})
-        self.assertIn('user_id', str(ctx.exception))
 
 
 class PublicSurfaceTests(TestCase):

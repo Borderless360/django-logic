@@ -133,16 +133,6 @@ class WidgetProcess(Process):
             side_effects=[bg_hang],
         ),
         BackgroundTransition(
-            action_name='timeboxed',
-            sources=['draft'],
-            target='tb_done',
-            in_progress_state='tb_running',
-            failed_state='tb_failed',
-            queue='django_logic.slow',
-            side_effects=[bg_ok],
-            timeout=60,
-        ),
-        BackgroundTransition(
             action_name='rendezvous',
             sources=['draft'],
             target='met',
