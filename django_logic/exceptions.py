@@ -67,8 +67,7 @@ def _check_validity(owner, *args):
 
 class TransitionNotAllowed(Exception):
     """When the process resolver raises this, it sets ``current_state``
-    and ``available_actions`` on the instance so an API layer does not
-    have to reconstruct them. Both stay ``None`` on other raise sites.
+    on the instance. It stays ``None`` at other raise sites.
     ``reason`` describes the failed check. It stays ``None`` when a custom
     validity override supplies no reason, or the caller creates the exception.
     Process calls attach ``user_message`` for display. Diagnostic text and
@@ -76,7 +75,6 @@ class TransitionNotAllowed(Exception):
     """
 
     current_state = None
-    available_actions = None
     user_message = None
 
     def __init__(self, *args, reason: RefusalReason | None = None, user_message=None):

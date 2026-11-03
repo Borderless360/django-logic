@@ -119,9 +119,6 @@ class Transition:
 
     #: Swap points a consumer may subclass. Only these three — the
     #: failure-callback and condition bundles are always the stock classes.
-    side_effects_class = SideEffects
-    callbacks_class = Callbacks
-    permissions_class = Permissions
 
     #: ``True`` on ``BackgroundTransition``. A public, stable attribute
     #: rather than an ``isinstance`` check: ``Process.__init_subclass__``
@@ -252,13 +249,13 @@ class Transition:
         self.failure_callbacks = Callbacks(
             kwargs.get('failure_callbacks', [])
         )
-        self.side_effects = self.side_effects_class(
+        self.side_effects = SideEffects(
             kwargs.get('side_effects', []), transition=self
         )
-        self.callbacks = self.callbacks_class(
+        self.callbacks = Callbacks(
             kwargs.get('callbacks', [])
         )
-        self.permissions = self.permissions_class(
+        self.permissions = Permissions(
             kwargs.get('permissions', [])
         )
         self.conditions = Conditions(

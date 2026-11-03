@@ -1,4 +1,5 @@
 """Independent effects use the existing durable jobs without owning business state."""
+from tests import unbind_model_process
 import threading
 import tempfile
 import time
@@ -56,7 +57,7 @@ class EffectTestSetup:
         cache.clear()
         self.addCleanup(cache.clear)
         ProcessManager.bind_model_process(Widget, EffectProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Widget, EffectProcess)
+        self.addCleanup(unbind_model_process, Widget, EffectProcess)
         self.widget = Widget.objects.create()
 
     def enqueue(self, **kwargs):
@@ -331,7 +332,7 @@ class NonAtomicEffectProcess(Process):
 class ConcurrentBackgroundEffectTests(EffectTestSetup, TransactionTestCase):
     def test_non_atomic_parent_insert_failure_preserves_receipt_before_safe_retry(self):
         ProcessManager.bind_model_process(Widget, NonAtomicEffectProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Widget, NonAtomicEffectProcess)
+        self.addCleanup(unbind_model_process, Widget, NonAtomicEffectProcess)
         with tempfile.NamedTemporaryFile() as request_file:
             self.widget.receipt_effects.finish(request_path=request_file.name)
             parent = TransitionMessage.in_flight_for(self.widget, 'receipt_effects').get()

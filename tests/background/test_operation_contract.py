@@ -1,4 +1,5 @@
 """Provider waiting preserves the declared retry and fairness rules."""
+from tests import unbind_model_process
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
@@ -41,7 +42,7 @@ class OperationContractTests(TestCase):
         cache.clear()
         self.addCleanup(cache.clear)
         ProcessManager.bind_model_process(Widget, OperationProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Widget, OperationProcess)
+        self.addCleanup(unbind_model_process, Widget, OperationProcess)
         self.widget = Widget.objects.create()
 
     def enqueue(self, action='plain', **kwargs):

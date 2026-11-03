@@ -16,6 +16,7 @@ router passes it, and that is the case the engine's own routing covers. The
 bindings and the router are installed per test, after the startup checks, so the
 check suite still sees the default topology.
 """
+from tests import unbind_model_process
 from datetime import timedelta
 
 from django.core.cache import cache
@@ -86,7 +87,7 @@ class SyncFailedStateAliasTests(TestCase):
         ProcessManager.bind_model_process(
             Invoice, RoutedFailProcess, state_field='status')
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, RoutedFailProcess)
+            unbind_model_process, Invoice, RoutedFailProcess)
         cache.clear()
         self.addCleanup(cache.clear)
 
@@ -129,7 +130,7 @@ class BackgroundAliasTests(TestCase):
         ProcessManager.bind_model_process(
             Invoice, RoutedBgProcess, state_field='status')
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, RoutedBgProcess)
+            unbind_model_process, Invoice, RoutedBgProcess)
         cache.clear()
         self.addCleanup(cache.clear)
 
@@ -169,7 +170,7 @@ class StuckFinalizerAliasTests(TestCase):
         ProcessManager.bind_model_process(
             Invoice, RoutedBgProcess, state_field='status')
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, RoutedBgProcess)
+            unbind_model_process, Invoice, RoutedBgProcess)
         cache.clear()
         self.addCleanup(cache.clear)
 

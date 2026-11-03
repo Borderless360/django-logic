@@ -295,9 +295,8 @@ failed check. Process guards still run before their transitions and nested
 processes.
 
 The resolver captures reasons during the existing checks. It does not run
-permissions or conditions again to explain a refusal. The existing
-`available_actions` hint still evaluates the available actions separately.
-A failed hint cannot replace the reason.
+permissions or conditions again to explain a refusal.
+Call `get_available_actions()` explicitly when the caller needs a fresh action list.
 
 A custom `is_valid` override can return `False` without explaining why.
 Its reason is `None` unless a stock check on that same object recorded a

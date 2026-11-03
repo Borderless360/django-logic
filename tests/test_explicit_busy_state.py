@@ -5,6 +5,7 @@ visible "busy" phase as a real state: a fast transition into it, chained by
 ``next_transition`` to the transition that does the work. These tests cover the
 happy path, failure containment, and the recovery recipe for the crash window.
 """
+from tests import unbind_model_process
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 
@@ -65,9 +66,9 @@ class ExplicitBusyStatePatternTests(TestCase):
         ProcessManager.bind_model_process(
             Invoice, BrokenBusyProcess, state_field='status')
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, ExplicitBusyProcess)
+            unbind_model_process, Invoice, ExplicitBusyProcess)
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, BrokenBusyProcess)
+            unbind_model_process, Invoice, BrokenBusyProcess)
         cache.clear()
         self.addCleanup(cache.clear)
 

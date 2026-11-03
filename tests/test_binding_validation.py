@@ -11,6 +11,7 @@ live here were retired in 0.12.0 with ``recover_stranded_states``:
 ``TransitionMessage`` row, so recovery works from that row and marker sharing is
 harmless — pinned below.
 """
+from tests import unbind_model_process
 from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase
 
@@ -57,7 +58,7 @@ class _BindingCleanupMixin:
 
     def tearDown(self):
         for proc in self._test_processes:
-            ProcessManager.unbind_model_process(Invoice, proc)
+            unbind_model_process(Invoice, proc)
         super().tearDown()
 
 

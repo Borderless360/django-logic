@@ -17,9 +17,10 @@ Each test pins one confirmed finding:
   sibling process holding a helper named like another branch's transition
   rejected a working topology at import time.
 * Unbinding was hand-rolled by every test that binds (registry
-  comprehension + ``delattr``); ``ProcessManager.unbind_model_process`` is
+  comprehension + ``delattr``); ``unbind_model_process`` is
   the supported inverse.
 """
+from tests import unbind_model_process
 from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
 from django.test import (
@@ -54,7 +55,7 @@ class _BindingHelper:
         ProcessManager.bind_model_process(
             model, process_class, state_field=state_field)
         self.addCleanup(
-            ProcessManager.unbind_model_process, model, process_class,
+            unbind_model_process, model, process_class,
             state_field)
 
 

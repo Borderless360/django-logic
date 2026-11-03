@@ -378,29 +378,11 @@ class Process:
             raise error
 
         current_state = self.state.get_state()
-        try:
-            available_actions = self.get_available_actions(user=user)
-        except Exception as list_error:
-            # Listing the actions runs every transition's conditions and
-            # permissions. One of them raising must not replace the
-            # refusal with its own exception — the caller asked why the
-            # action was refused, and it still gets that answer.
-            transition_logger.info(
-                f'Listing the available actions for '
-                f'{self.state.instance_key} failed: '
-                f'{type(list_error).__name__}: {list_error}'
-            )
-            available_actions = None
-        known_actions = (
-            'unknown' if available_actions is None
-            else ', '.join(available_actions) or 'none'
-        )
         message = (
             f"Process class {self.__class__} for object "
             f"{self.state.instance.pk} has no transition "
             f"with action name {action_name}, user {user}. "
-            f"The instance is in state {current_state!r}; "
-            f"available actions: {known_actions}."
+            f"The instance is in state {current_state!r}."
         )
         transition_logger.info(message)
         refusal = next(
@@ -410,7 +392,6 @@ class Process:
         error = TransitionNotAllowed(message, reason=refusal.reason)
         self._set_refusal_message(error, action_name, refusal.process, refusal.transition, refusal.message)
         error.current_state = current_state
-        error.available_actions = available_actions
         raise error
 
 
@@ -745,44 +726,3 @@ class ProcessManager:
             process_class.process_name,
             _ProcessAccessor(make_process_getter(state_field, process_class)),
         )
-
-    @classmethod
-    def unbind_model_process(
-        cls, model, process_class=None, state_field: str | None = None,
-    ) -> None:
-        """Inverse of :meth:`bind_model_process`: drop the registry entries
-        and the model accessor they installed.
-
-        Exists for teardown — a consumer (and this library's own suite)
-        binding a throwaway process in a test otherwise has to rewrite
-        ``ProcessManager.bindings`` and ``delattr`` the accessor by hand,
-        and every copy of that gets the multi-binding cases wrong.
-        ``process_class`` / ``state_field`` narrow which of the model's
-        bindings to remove; omitting both removes all of them. Unbinding
-        something that was never bound is a no-op.
-        """
-        removed = [
-            binding for binding in cls.bindings
-            if binding.model is model
-            and (process_class is None or binding.process_class is process_class)
-            and (state_field is None or binding.state_field == state_field)
-        ]
-        if not removed:
-            return
-        cls.bindings = [b for b in cls.bindings if b not in removed]
-
-        # One model can carry several accessors (one per process_name, e.g.
-        # a second state_field's machine), so only the names no surviving
-        # binding of this model still claims may go — and only when
-        # django-logic owns them: an MTI child inherits its parent's
-        # accessor, which is the parent binding's to remove, not ours.
-        still_bound = {
-            binding.process_class.process_name for binding in cls.bindings
-            if binding.model is model
-        }
-        for binding in removed:
-            name = binding.process_class.process_name
-            if name in still_bound:
-                continue
-            if isinstance(vars(model).get(name), _ProcessAccessor):
-                delattr(model, name)

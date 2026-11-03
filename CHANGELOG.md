@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- A refused action no longer runs every condition and permission again to build
+  an unused action list. GV uses the existing reason and user message instead.
+  Remove `TransitionNotAllowed.available_actions`; callers can explicitly list actions.
+- Remove unused transition command-class overrides, `BackgroundEffect.no_retry_on`,
+  and `ProcessManager.unbind_model_process`. Internal tests keep their own binding
+  cleanup helper. GV uses stock command classes in the current engine.
+
 - Remove unused public request keys, `operation_options`, `RequestConflict`,
   `required_next` and `cancel_pending` in the next major release. GV uses none
   of these APIs. Its required work uses ordinary background jobs and saved

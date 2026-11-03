@@ -279,32 +279,6 @@ class PublicSurfaceTests(TestCase):
         )
 
 
-class BundleSwapTests(TestCase):
-    def test_the_three_kept_swap_points_still_swap(self):
-        """The consumer subclasses these three; the failure-callback and
-        condition bundles are always the stock classes since 1.0.0."""
-        from django_logic.commands import Callbacks, Permissions, SideEffects
-
-        class LoudCallbacks(Callbacks):
-            pass
-
-        class LoudPermissions(Permissions):
-            pass
-
-        class LoudSideEffects(SideEffects):
-            pass
-
-        class Custom(Transition):
-            callbacks_class = LoudCallbacks
-            permissions_class = LoudPermissions
-            side_effects_class = LoudSideEffects
-
-        t = Custom('go', sources=['draft'], target='approved')
-        self.assertIsInstance(t.callbacks, LoudCallbacks)
-        self.assertIsInstance(t.permissions, LoudPermissions)
-        self.assertIsInstance(t.side_effects, LoudSideEffects)
-        self.assertFalse(hasattr(t, 'failure_callbacks_class'))
-        self.assertFalse(hasattr(t, 'conditions_class'))
 
 
 

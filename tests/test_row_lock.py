@@ -1,6 +1,7 @@
 """The business-row lock waits briefly, refuses a long holder, keeps the
 failed state after a database error in a side effect, and lets a producer
 on an earlier version insert job rows."""
+from tests import unbind_model_process
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Timer
 from unittest.mock import patch
@@ -47,7 +48,7 @@ class RowLockProcess(Process):
 class RowLockTests(TransactionTestCase):
     def setUp(self):
         ProcessManager.bind_model_process(Invoice, RowLockProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Invoice, RowLockProcess)
+        self.addCleanup(unbind_model_process, Invoice, RowLockProcess)
         self.invoice = Invoice.objects.create(status='draft')
 
     def hold_row(self, locked, release):
@@ -133,7 +134,7 @@ class BackgroundRowLockProcess(Process):
 class BackgroundTerminalRowLockTests(TransactionTestCase):
     def setUp(self):
         ProcessManager.bind_model_process(Invoice, BackgroundRowLockProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Invoice, BackgroundRowLockProcess)
+        self.addCleanup(unbind_model_process, Invoice, BackgroundRowLockProcess)
         self.invoice = Invoice.objects.create(status='draft')
 
     def enqueue(self, action):

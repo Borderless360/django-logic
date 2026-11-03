@@ -98,15 +98,13 @@ class SyncProcessAvailabilityScenario(ProcessScenario):
         self.assertEqual(widget.status, 'draft')
         self.assertNotIn('staff,', widget.se_log)
 
-    def test_refusal_names_the_state_and_the_available_actions(self):
+    def test_refusal_names_the_current_state(self):
         widget = self.create_instance(status='draft')
         with self.assertRaises(TransitionNotAllowed) as caught:
             self._process(widget).no_such_action()
         error = caught.exception
         self.assertEqual(error.current_state, 'draft')
-        self.assertIn('approve', error.available_actions)
         self.assertIn("state 'draft'", str(error))
-        self.assertIn('approve', str(error))
 
     def test_eligibility_query_does_not_bypass_another_actions_lock(self):
         widget = self.create_instance(status='draft')

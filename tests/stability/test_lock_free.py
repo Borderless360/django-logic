@@ -6,6 +6,7 @@ the lock-taking sibling serialises on the row and the losers are refused,
 the lock-free transition runs on every thread, and a lock another
 transition holds is left exactly as it was.
 """
+from tests import unbind_model_process
 import threading
 import time
 from unittest.mock import patch
@@ -43,7 +44,7 @@ class LockFreeTransitionUnderThreadsTests(StabilityTestCase):
     def setUp(self):
         super().setUp()
         ProcessManager.bind_model_process(Order, StoreProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Order, StoreProcess)
+        self.addCleanup(unbind_model_process, Order, StoreProcess)
         _posted.clear()
         self.order = Order.objects.create(status='draft')
 

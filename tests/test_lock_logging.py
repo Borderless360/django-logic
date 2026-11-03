@@ -8,6 +8,7 @@ it", which is the wrong conclusion, and it reached a bug report. One line at the
 raise site and the ``instance_key`` on the lifecycle lines make a frozen
 instance findable with a per-instance log filter.
 """
+from tests import unbind_model_process
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 
@@ -49,7 +50,7 @@ class FailedLockAcquisitionLoggingTests(TestCase):
         ProcessManager.bind_model_process(
             Invoice, LockLoggingProcess, state_field='status')
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, LockLoggingProcess)
+            unbind_model_process, Invoice, LockLoggingProcess)
         cache.clear()
         self.addCleanup(cache.clear)
 
@@ -104,7 +105,7 @@ class LifecycleLinesCarryInstanceKeyTests(TestCase):
         ProcessManager.bind_model_process(
             Invoice, LockLoggingProcess, state_field='status')
         self.addCleanup(
-            ProcessManager.unbind_model_process, Invoice, LockLoggingProcess)
+            unbind_model_process, Invoice, LockLoggingProcess)
         cache.clear()
         self.addCleanup(cache.clear)
 

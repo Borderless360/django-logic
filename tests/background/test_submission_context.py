@@ -1,4 +1,5 @@
 """Submission preparation uses the same transaction as the saved job."""
+from tests import unbind_model_process
 from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
@@ -41,7 +42,7 @@ class SubmissionTestSetup:
         cache.clear()
         self.addCleanup(cache.clear)
         ProcessManager.bind_model_process(Widget, SubmissionProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Widget, SubmissionProcess)
+        self.addCleanup(unbind_model_process, Widget, SubmissionProcess)
         self.widget = Widget.objects.create()
 
     def declaration(self, **kwargs):

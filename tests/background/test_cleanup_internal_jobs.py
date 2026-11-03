@@ -1,4 +1,5 @@
 """Completed effects expire without removing the latest business failure."""
+from tests import unbind_model_process
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -39,7 +40,7 @@ class InternalJobCleanupTests(TestCase):
         cache.clear()
         self.addCleanup(cache.clear)
         ProcessManager.bind_model_process(Widget, RetentionProcess, state_field='status')
-        self.addCleanup(ProcessManager.unbind_model_process, Widget, RetentionProcess)
+        self.addCleanup(unbind_model_process, Widget, RetentionProcess)
         self.widget = Widget.objects.create()
         self.parent_number = 1000
 

@@ -16,25 +16,24 @@ class BackgroundEffect:
     do not cancel an effect, and the engine never writes the parent's state for it.
     """
 
-    def __init__(self, name, action, *, queue=None, timeout=None, atomic=True, no_retry_on=()):
+    def __init__(self, name, action, *, queue=None, timeout=None, atomic=True):
         if not isinstance(name, str) or not name or len(name) > 100 or '\x00' in name:
             raise ImproperlyConfigured('BackgroundEffect name must contain 1 to 100 characters.')
         if not callable(action):
             raise ImproperlyConfigured('BackgroundEffect action must be callable.')
         # Apply the same option validation as ordinary background work.
         validated = _EffectTransition(name, sources=[], queue=queue, timeout=timeout,
-                                      atomic=atomic, no_retry_on=no_retry_on)
+                                      atomic=atomic)
         self.name = name
         self.action = action
         self.queue = validated.queue
         self.timeout = validated.timeout
         self.atomic = validated.atomic
-        self.no_retry_on = validated.no_retry_on
 
     def as_transition(self):
         return _EffectTransition(
             self.name, sources=[], side_effects=[self.action], queue=self.queue,
-            timeout=self.timeout, atomic=self.atomic, no_retry_on=self.no_retry_on,
+            timeout=self.timeout, atomic=self.atomic,
         )
 
 
