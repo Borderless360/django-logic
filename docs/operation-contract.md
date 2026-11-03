@@ -64,6 +64,61 @@ The existing one-unfinished-job rule per object and process remains.
 A different request key does not bypass it. `AlreadyInProgress` means the new request was **not accepted**.
 Applications that combine refresh requests must persist their own dirty flag or requested version.
 
+## Preparing a submission
+
+Use `submission_context` when accepting work must also lock related records,
+recheck business conditions or save trusted inputs. It replaces a private
+`_enqueue_atomic` override for these application rules.
+
+```python
+from contextlib import contextmanager
+from django.db import transaction
+from django_logic.background import BackgroundTransition
+
+
+@contextmanager
+def prepare_shipping(transition, state, kwargs, *, using):
+    order = Order.objects.using(using).select_for_update().get(pk=state.instance.pk)
+    check_shipping_allowed(order)
+    kwargs["parcel_ids"] = list(order.parcels.using(using).values_list("pk", flat=True))
+    yield
+    transaction.on_commit(lambda: record_shipping_request(order.pk), using=using, robust=True)
+
+
+BackgroundTransition(
+    "ship", sources=["ready"], target="shipped",
+    in_progress_state="shipping", submission_context=prepare_shipping,
+    side_effects=[ship_saved_parcels],
+)
+```
+
+The callable returns a synchronous context manager. The engine gives it the
+transition, bound `State`, a detached argument dictionary and the database alias.
+Add, replace or remove ordinary application arguments before `yield`. The
+engine serializes those arguments, creates the job and writes its in-progress
+state before the context exits. The context cannot change the bound record,
+process or engine-managed user and trace arguments.
+
+Preparation and its database writes use the transaction that saves the job.
+Use the supplied `using` alias for queries and `transaction.on_commit` callbacks.
+A refusal, serialization error or failed submission rolls those writes back.
+If another submission already saved the same request, the engine discards the
+losing preparation's writes and callbacks before returning the existing job.
+Do not suppress errors or mark the transaction for a silent rollback.
+
+Keep the context short and local: no provider calls or other irreversible work.
+After-commit callbacks are appropriate for best-effort external history. They
+do not make that history transactional or recover it after a caller crash.
+Use durable database records when that distinction matters.
+
+Required successors use this same extension on their completion connection.
+The context ends before job execution, including inline execution. An outer
+caller transaction can still retain its database locks until commit.
+Existing retained requests, retries and previously saved jobs do not run the
+context again. Jobs keep the existing serialized argument format. Request-key
+comparison uses caller inputs; prepared values remain those of the first
+accepted request. Independent effects receive those saved values.
+
 ## Expected waiting
 
 ```python
@@ -183,6 +238,7 @@ parent job and effect name; retries cannot create another copy of that effect.
 
 Effects use the same workers and job table. They inherit the parent's fairness
 key and saved arguments, with a new trace ID and the parent trace as `parent_id`.
+Changes to nested arguments during parent execution do not change these saved inputs.
 The default queue is the parent's recorded queue. `timeout`, `atomic` and
 `no_retry_on` have the same meanings as for a background transition; timeout
 defaults to no limit and atomic execution defaults to true. `Defer` releases the
@@ -310,7 +366,8 @@ Existing job rows receive neutral defaults and preserve their previous identitie
 The fairness migration creates shared cursor records for their existing group keys.
 The operator output distinguishes normal waiting from retrying after an error.
 
-Subclasses overriding `_enqueue_atomic` must accept and forward its new keyword arguments:
-`submission`, `using`, `request_key`, and `fairness_key`.
-The internal required-successor writer must retain the supplied database alias.
-Calling the public transition method from inside completion is not a substitute.
+Version 3.2 adds no migration and keeps the existing saved argument format.
+Use `submission_context` for application rules around accepting new work;
+`_enqueue_atomic` remains private. Deploy updated application declarations only
+with a library version that accepts this option. Workers older than 3.2 still
+use their earlier behavior when creating effects from mutable execution inputs.
