@@ -15,7 +15,6 @@ authors = [
 keywords = ["django", "fsm", "state-machine", "workflow", "background", "business-logic"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
-    "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Intended Audience :: Developers",
@@ -44,7 +43,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "coverage>=7.0",
-    # Driver for the PostgreSQL stability suite (make stability-*) and the
+    # Driver for the PostgreSQL stability suite and the
     # PostgreSQL concurrency tests. Without it, `uv sync --extra dev` runs the
     # SQLite suite but not tests.stability.
     "psycopg[binary]>=3.2",
@@ -58,10 +57,7 @@ Homepage = "https://github.com/Borderless360/django-logic"
 Repository = "https://github.com/Borderless360/django-logic"
 
 [tool.setuptools.packages.find]
-exclude = ["tests*", "demo*"]
-
-[tool.setuptools]
-zip-safe = false
+exclude = ["tests*"]
 
 [tool.coverage.run]
 source = ["django_logic"]

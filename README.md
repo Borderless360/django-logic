@@ -6,13 +6,6 @@
 > run through the same workers without blocking later parent actions. See
 > [the effect contract and upgrade requirements](docs/operation-contract.md#independent-background-effects).
 >
-> **3.0.1:** Optional request identity, deferred eligibility, required background follow-ups,
-> and fair group selection are described in [the operation contract](docs/operation-contract.md).
-> PostgreSQL state protection lasts through outer commit and waits up to two seconds for a
-> competing transaction. Database defaults preserve inserts from earlier producers.
-> When upgrading from before 3.0, stop old workers before upgraded code starts submitting work. See the
-> [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).
-
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
 [![CI](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml/badge.svg)](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml)
@@ -162,7 +155,8 @@ Each declaration slot has one job:
   reaches the target state. A failure stops the state change, and django-logic
   writes `failed_state` when you declare one.
 - `callbacks` — functions that run after the object reaches the target state.
-  They are best-effort: django-logic swallows what they raise.
+  They are best-effort: django-logic swallows what they raise. A crash after
+  the state write can skip them. Put required work in `side_effects`.
 - `failure_callbacks` — functions that run after a side-effect fails. They
   receive `exception=`. Put cleanup and compensation here.
 
@@ -404,6 +398,16 @@ its own database writes and becomes claimable again after
 attempts django-logic writes `failed_state`, runs `failure_callbacks` and
 completes the row.
 
+`in_progress_state` is available only on background transitions with a target.
+Several transitions may share it; each saved job records its exact transition.
+A synchronous transition cannot declare it. For synchronous preparation, first
+save a real busy state, then start a background transition with `next_transition`.
+Provide a periodic task to restart records left in that busy state if the
+caller stops before saving the background job.
+
+If another action changes the model's state while a job waits, that change wins.
+The worker completes the job as `superseded` and skips its side effects.
+
 - **Side-effects must be idempotent against external systems.** A retry runs
   them again from the start, so a payment or an email can happen twice.
 - `atomic=False` preserves committed model writes when later work fails. Use it
@@ -564,10 +568,7 @@ Pull requests are welcome. Open an issue first for a major change.
 ```bash
 pip install -e '.[dev]'
 python tests/manage.py test          # SQLite suite
-
-make build                           # or run the same suite in Docker
-make test
-make test-one t=tests.test_transition
+python tests/manage.py test tests.test_transition
 ```
 
 Add a test for every change, and update the documentation the change touches.

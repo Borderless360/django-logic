@@ -45,6 +45,10 @@
 - Stop the worker if another handler consumed a job process's exit status.
   An unknown result can no longer count as a successful job process.
 
+- Remove obsolete broker design notes, Docker test wrappers and duplicate
+  contributor instructions. Keep the current worker, release and credential rules.
+  The tag workflow remains the publishing path and retains its existing checks.
+
 ## [3.3.0] — 2026-11-03
 
 - Add read-only transition statistics through `dl_transitions --stats` and
@@ -135,7 +139,7 @@
   If that transaction has committed a newer state, the job is superseded and keeps that state. This also applies to non-atomic jobs and stuck-job completion.
 - The new job columns carry database defaults (`db_default`), preserving inserts from producers on an earlier version.
   Migration 0011 keeps the defaults when it adds the columns; migration 0013 restores them on a database that applied the 3.0.0 copy of 0011.
-  Workers from before 3.0 must stop before upgraded producers start submitting work. Complete the application upgrade before starting the new workers; the database defaults alone do not make mixed worker execution compatible. See the [upgrade sequence](docs/operation-contract.md#upgrade-and-rollback).
+  Workers from before 3.0 must stop before upgraded producers start submitting work. Complete the application upgrade before starting the new workers; the database defaults alone do not make mixed worker execution compatible. See the [upgrade sequence](https://github.com/Borderless360/django-logic/blob/v3.0.1/docs/operation-contract.md#upgrade-and-rollback).
   Django 4.2 support is dropped; it reached end of life in April 2026.
 
 ## [3.0.0] — 2026-10-29

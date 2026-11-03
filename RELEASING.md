@@ -1,86 +1,35 @@
-# Releasing django-logic
+# Releasing Django Logic
 
-This project publishes to **PyPI** (https://pypi.org/project/django-logic/) and
-creates a matching **GitHub release** on the `Borderless360/django-logic` repo.
+A version tag publishes to PyPI and creates the matching GitHub release.
+Branch pushes do not publish packages.
 
-## Credentials
+1. Merge the release commits into `master` through a pull request.
+2. Set the package version in `pyproject.toml`.
+3. Move the changelog's unreleased entries into a dated version section.
+4. Run `python tests/manage.py test`, including metadata consistency checks.
+   Run the PostgreSQL and Redis checks used by CI as well.
+5. Run each consumer's validation against the candidate source. Include the
+   public `django-logic-test` application's real-worker matrix. Do not publish
+   while these checks fail.
+6. Create and push the version tag:
 
-The PyPI upload token lives in **`.pypirc`** at the repo root. Git ignores this
-file (see `.gitignore`). Never commit it. It holds a project-scoped API token
-for `django-logic`:
-
-```ini
-[pypi]
-username = __token__
-password = pypi-…            # rotate at https://pypi.org/manage/account/token/
-```
-
-If the token leaks, revoke it on PyPI and write a new one into `.pypirc`.
-Nothing else changes.
-
-## One-time tooling
-
-[`uv`](https://github.com/astral-sh/uv) builds the package. `uvx` runs `twine`
-to check and upload it. You need no global installs.
-
-## Release checklist
-
-1. **Merge every release commit into `master`** through a pull request, then
-   pull `master` locally.
-2. **Set the version** in `pyproject.toml` (`[project].version`).
-3. **Update `CHANGELOG.md`**: move `[Unreleased]` into a dated `[X.Y.Z]`
-   section; leave a fresh empty `[Unreleased]`.
-4. **Run the tests**: `python tests/manage.py test` (or `make test`).
-5. **Run the metadata drift check**: `python tests/manage.py test tests.test_metadata`
-   — it checks that the Django trove classifiers, the CI test matrix, the
-   `[project]` dependency floors, and the README support statement agree.
-   Do not publish while it is red. A red run means the package advertises or
-   resolves a Django or Python version that the tests never run.
-6. **Run the downstream consumer checks**: each consumer keeps its own
-   validation, because a library should not know who consumes it. Install this
-   repo at the candidate ref from the consumer's own checkout or CI
-   (`uv pip install --no-deps /path/to/django-logic`), then run that
-   consumer's suite. Do not publish while any of them is red. Always run the
-   public validation rig (`django-logic-test`): it exercises the release
-   candidate on real worker dynos against PostgreSQL and Redis, with induced
-   crashes, timeouts and deploys. Its matrix is the release gate.
-7. **Tag and push. The tag publishes.**
    ```bash
    git tag -a vX.Y.Z -m "django-logic X.Y.Z"
    git push origin master vX.Y.Z
    ```
-   `.github/workflows/publish.yml` refuses a tag whose name disagrees with
-   the packaged version, runs the suite, builds, uploads through PyPI
-   trusted publishing, and creates the GitHub release with the tag's
-   changelog section as the notes. Watch it: `gh run watch`.
 
-   `make publish` still works and stays as the fallback for the day the
-   workflow cannot run. It needs the token in `.pypirc`; the workflow needs
-   no credential at all.
-8. **Check the published package**: `pip install django-logic==X.Y.Z` in a
-   clean virtualenv, then import it.
+   [The publish workflow](.github/workflows/publish.yml) checks the tag against
+   the package version, runs tests, builds the package, uploads it through
+   PyPI trusted publishing, and creates release notes from the changelog.
+   Watch the workflow and verify that it succeeds.
+7. Install the published version in a clean virtual environment and import it.
 
-## Publishing from the tag
+Trusted publishing uses the repository's `pypi` environment and `publish.yml`
+workflow. It does not require a long-lived PyPI token in the repository.
+The workflow skips files and releases that already exist when a tag is rerun.
+A published version cannot be replaced with different files.
 
-`.github/workflows/publish.yml` builds, uploads, and creates the GitHub
-release on a `v*` tag. It refuses a tag whose name disagrees with the
-packaged version, runs the test suite first, and skips files PyPI already
-holds and a GitHub release that exists, so re-running a tag is safe.
-
-It holds no PyPI credential. GitHub mints a short-lived token for the job
-and PyPI verifies it against a publisher record naming this repository, so
-there is nothing in the repo or in CI secrets to leak or rotate.
-
-That record is configured (verified on the `v0.17.1` tag, 2026-08-25: the
-job logged `Found and verified trusted root`, generated attestations, and
-uploaded). If it ever needs rebuilding, it is: owner `Borderless360`,
-repository `django-logic`, workflow **`publish.yml`** — the filename, not
-the `name:` inside the file — and environment `pypi`, plus a `pypi`
-environment in the repository settings.
-
-0.17.0 and 0.17.1 were published by hand, before this worked. Everything
-after them goes out on the tag.
-
-> A PyPI upload is final. You can never upload the same version number twice,
-> so the tag is the point of no return. Re-running a tag is safe — the job
-> passes `skip-existing`, so it will not fail on files PyPI already holds.
+If the workflow is unavailable, create a temporary token that day and use a new,
+empty build directory. Run `uv build --out-dir <directory>`, then
+`uvx twine check <directory>/*` and `uvx twine upload <directory>/*` on those same files.
+Revoke the token immediately afterward. Never commit publishing credentials.

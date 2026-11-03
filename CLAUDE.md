@@ -1,12 +1,8 @@
 # django-logic — guidance for AI assistants
 
-This repo is the **django-logic** library: declarative business logic and state
-machines for Django, with durable, queue-routed background transitions
-(`django_logic.background`). This file tells an AI how to **use the library
-correctly** when generating or reviewing code that depends on it. The rules
-below are distilled from a full
-production-style validation on Heroku (RabbitMQ + PostgreSQL + multiple
-workers + induced worker crashes, deploys, broker loss, and pgbouncer).
+This repository contains Django Logic, a declarative workflow library.
+Read [README.md](README.md) for declarations and supported deployment settings.
+This file records contribution rules and reliability decisions.
 
 ## Voice — simplified English, everywhere
 
@@ -81,34 +77,6 @@ stand on its own. The reader did not watch the work happen.
 - Before you send, ask: does every word work for someone who did not watch
   the work? If not, rewrite.
 
-## What to generate
-
-Model a workflow as a `Process` subclass: a list of `transitions` (edges).
-Each transition has `sources`, `target`, and optional `conditions`,
-`permissions`, `side_effects`, `callbacks`, `failure_callbacks`. **Bind the model to its process in exactly one place — the
-app's `AppConfig.ready()`** — with
-`ProcessManager.bind_model_process(Model, MyProcess, state_field='status')`
-(import the model and process *inside* `ready()`). Never bind at module import
-time in `models.py`/`process.py`: that forces a
-`model → process → actions → model` circular import, because the
-process and its action functions both reference the model. `ready()` runs after
-every app's models are loaded, so the cycle never forms and action modules can
-import the model at the top level. Then drive it via
-`instance.process.<action>(...)` from request/task/method bodies (never at
-module top or in another app's `ready()`).
-
-Use `BackgroundTransition` (durable, runs side-effects on a worker process,
-writes target/`failed_state`) for anything slow, external, or retriable.
-Declared with `target=None`, it changes no state on success — same
-durability, same rules. Since 1.0.0 there is one transition contract:
-every declaration takes the state lock unless it says `lock=False`, is
-refused while a background transition is uncompleted, and runs
-`next_transition`; the old `Action`
-and `BackgroundAction` classes are gone. A side-effect whose unit of work
-is not the bound row — a store posting one parcel's tracking — declares
-`lock=False` (2.2.0): no state lock, no background gate, no `target`, no
-`failed_state`, and never on a `BackgroundTransition`.
-
 **Declarations are specifications.** Write every process and its transitions
 out in full — explicit `sources`, `target`, `conditions`, `side_effects`,
 `callbacks` per declaration, even when sibling processes repeat one shape.
@@ -117,59 +85,6 @@ how the process behaves; a builder that assembles transitions tells how the
 code works and hides the line a reviewer came to check. The same rule holds
 where the process is used: write `instance.process.action(...)` literally,
 never `getattr(process, action_name)` with the name held in a variable.
-
-## Non-negotiable rules
-
-1. **Side-effects must be idempotent against external systems.** Background
-   side-effects re-run from scratch on every retry. Since 0.4 each attempt's
-   *database* writes run in a savepoint and roll back on failure by default
-   (all-or-nothing per attempt), so the idempotency you owe is for external
-   calls (APIs, emails, payments). Critical work goes in `side_effects`;
-   `callbacks` are best-effort (exceptions swallowed, lost on crash).
-   Use `atomic=False` only when committed provider confirmations must survive
-   later failure. The application must protect requests against repetition.
-2. **Route by SLA with named queues.** `queue=` is optional — transitions
-   without it go to `DJANGO_LOGIC['DEFAULT_QUEUE']` (`'django_logic'`).
-   Give heavy or SLA-sensitive transitions their own queue (e.g.
-   `critical`/`slow`/`fast`) and a dedicated worker per queue.
-3. **Never call a nested `x.process.foo()` inside a `side_effect` expecting its
-   exception to propagate** — it cascades failures across state machines (the
-   "fundamental problem"). For parent→children (e.g. an order with many
-   fulfillments): **fan out** to each child's own background transition,
-   contain each child's failure in its own `failed_state`, have children
-   **report back via best-effort callbacks** that run an **idempotent guarded
-   completion check** on the parent, and **aggregate errors by reading child
-   rows** (give the parent an explicit `action_required` partial-failure
-   state). Never re-raise a child error into the parent.
-4. **Set a `failed_state`** so failures are contained. `in_progress_state`
-   is **background-only** (0.12.0): on a `BackgroundTransition` it is written
-   in the same transaction as the `TransitionMessage` row; declaring it on a
-   synchronous `Transition`, or on any transition with no target, raises at
-   class creation. It may be shared
-   freely — every marked instance carries its exact transition on the row, so
-   recovery never guesses which transition it belongs to (the old
-   ambiguous-recovery check is retired). A synchronous "busy" step is a real
-   state: a fast transition into it chained via `next_transition` to a
-   `BackgroundTransition` that does the work, plus a small periodic task
-   that re-runs the background transition for instances parked in the busy
-   state — a caller can die between the busy-state commit and the
-   background call, and only the busy state records that it did.
-5. **Test in sync mode**: `DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'` (or the
-   `sync_execution()` context manager) runs the worker path inline with no
-   broker and propagates exceptions; `retry_pending()` runs every claimable
-   row inline, once. The global default is `'pull'`, so test settings must
-   opt into sync. See `docs/TESTING_GUIDE.md` for the full scenario catalog.
-6. **One uncompleted background transition per instance per process.** While an
-   uncompleted `TransitionMessage` exists, a second background transition
-   raises `AlreadyInProgress` and a *synchronous* transition on the same
-   instance+process raises `TransitionTemporarilyUnavailable` (both subclass
-   `TransitionNotAllowed`; catch the transient type first to answer
-   "retry shortly") — design flows so follow-up work chains from terminal
-   hooks, not while another transition is still running.
-7. **Manual state fixes win.** If an instance is moved externally while a
-   background row is pending, the worker completes the row as *superseded*
-   (`'[superseded]'` in `last_error_message`) and skips side-effects. This is
-   unconditional since 0.10.0.
 
 ## The architecture rule (locked — do not drift back)
 
@@ -218,30 +133,9 @@ same release's own fixes. Therefore:
    This also applies to columns and settings. The CHANGELOG entry names
    that consumer and explains what the change fixes.
 
-## Deployment the durability contract depends on
-
-- PostgreSQL for `TransitionMessage` — the worker's claim is
-  `SELECT FOR UPDATE SKIP LOCKED`; `manage.py check` (and so `migrate`,
-  `runserver` and `dl_worker`) refuses SQLite in pull mode once a
-  background transition is bound (`django_logic.pull_mode_needs_postgresql`).
-- A cross-process `default` cache for the state lock — the same check
-  refuses a locmem/dummy cache when `DEBUG=False` (`django_logic.pull_mode_needs_a_shared_cache`).
-  The engine locks
-  through Django's cache API and imports no backend, so Django's built-in
-  `django.core.cache.backends.redis.RedisCache` is enough; the engine
-  depends on no cache backend package.
-- One `manage.py dl_worker --queues <names>` process per queue group.
-  The loop runs the safety nets once a minute, so nothing is scheduled
-  anywhere else. Crash recovery is the database's own: a dead worker's
-  row lock dies with its connection and the next claim takes the row.
-- Behind **pgbouncer transaction pooling**: `OPTIONS={'prepare_threshold':
-  None}`, `DISABLE_SERVER_SIDE_CURSORS=True`, and no SSL on the app→pgbouncer
-  hop. The concurrency guard (`select_for_update(nowait)` + partial-unique)
-  then holds.
-
 ## Working IN this repo
 
-- Tests: `python tests/manage.py test` (SQLite suite, also `make test`);
+- Tests: `python tests/manage.py test` (SQLite suite);
   PostgreSQL concurrency + stability suites under `tests/stability`,
   `tests/background`. There is no pytest configuration — do not add one
   without wiring `DJANGO_SETTINGS_MODULE`.
@@ -253,7 +147,7 @@ same release's own fixes. Therefore:
 - Read `docs/design/PULL_WORKERS.md` and
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
-  background engine. `docs/history/` holds superseded design records.
+  background engine. Release tags retain removed design records.
 - `CHANGELOG.md` is the record of what shipped and why. Open GitHub issues
   hold what has not. Do not add a TODO.md or planning docs that duplicate
   issues.
