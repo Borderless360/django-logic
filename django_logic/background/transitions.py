@@ -17,6 +17,8 @@ shared between both modes.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from copy import deepcopy
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
@@ -41,6 +43,38 @@ from django_logic.logger import (
 )
 from django_logic.state import State
 from django_logic.transition import Transition, _refuse_engine_param_kwargs
+
+
+class _JobInsertConflict(Exception):
+    """Only the job INSERT can be classified as a duplicate submission."""
+
+
+@contextmanager
+def _submission_scope(transition, state, kwargs, *, using):
+    if transition.submission_context is None:
+        yield
+        return
+    protected = {'process_class', 'owning_process_class', 'tr_id', 'root_id',
+                 'parent_id', 'user', 'user_id', 'state', 'exception', 'request'}
+    identity = deepcopy({key: value for key, value in kwargs.items() if key in protected})
+    instance_key = (TransitionMessage.instance_key(state.instance, state.process_name),
+                    state.field_name, type(state.instance))
+
+    def check_identity():
+        if ({key: value for key, value in kwargs.items() if key in protected} != identity
+                or (TransitionMessage.instance_key(state.instance, state.process_name),
+                    state.field_name, type(state.instance)) != instance_key):
+            raise ImproperlyConfigured('submission_context must not change the job identity or user.')
+
+    context = transition.submission_context(transition, state, kwargs, using=using)
+    finished = False
+    with context:
+        check_identity()
+        yield
+        finished = True
+    if not finished:
+        raise ImproperlyConfigured('submission_context must not suppress submission errors.')
+    check_identity()
 
 
 class BackgroundTransition(Transition):
@@ -99,6 +133,7 @@ class BackgroundTransition(Transition):
         required_next: str | None = None,
         fairness_key=None,
         background_effects=(),
+        submission_context=None,
         **kwargs,
     ):
         if queue is not None and (not queue or not isinstance(queue, str)):
@@ -134,6 +169,9 @@ class BackgroundTransition(Transition):
             raise ImproperlyConfigured('Declare required_next or next_transition, not both.')
         if fairness_key is not None and not isinstance(fairness_key, str) and not callable(fairness_key):
             raise ImproperlyConfigured('fairness_key must be a string or callable.')
+        if submission_context is not None and not callable(submission_context):
+            raise ImproperlyConfigured('submission_context must be callable.')
+        self.submission_context = submission_context
         self.required_next = required_next or ''
         self.background_effects = tuple(background_effects)
         if self.background_effects:
@@ -290,19 +328,6 @@ class BackgroundTransition(Transition):
         """
         from django_logic.background.effects import validate_effect_submission
         validate_effect_submission(self, state, kwargs, using=using)
-        try:
-            serialized = serialize_kwargs(kwargs)
-        except KwargsSerializationError:
-            # Re-raise so the precise refusal message is not wrapped
-            # as "not JSON-serializable".
-            raise
-        except TypeError as e:
-            raise ImproperlyConfigured(
-                f"BackgroundTransition '{self.action_name}' received a "
-                f"kwarg that is not JSON-serializable: {e}. Every value "
-                f"passed to a background transition must be persistable "
-                f"on the TransitionMessage row."
-            ) from e
 
         state_using = using or state.instance._state.db
         using = using or router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
@@ -313,15 +338,12 @@ class BackgroundTransition(Transition):
             request_key = submission.request_key
             if submission.fairness_key is not None:
                 fairness_key = submission.fairness_key
-        if fairness_key is None:
-            fairness_key = self.fairness_key(state.instance, **kwargs) if callable(self.fairness_key) else self.fairness_key
-        fairness_key = validate_key(fairness_key or '', 'fairness_key', allow_empty=True)
         with transaction.atomic(using=using):
             if request_key is not None:
                 existing = TransitionMessage.objects.using(using).filter(request_key=request_key).first()
                 if existing is not None:
                     if submission is None:
-                        verify_internal_request(existing, state, self.action_name, serialized,
+                        verify_internal_request(existing, state, self.action_name, serialize_kwargs(kwargs),
                                                 kwargs.get('owning_process_class', ''))
                     record_submission(submission, existing, created=False)
                     return existing
@@ -331,50 +353,78 @@ class BackgroundTransition(Transition):
             ).exists():
                 raise AlreadyInProgress(f"Another background transition is already in progress for process '{state.process_name}'.",
                                         reason=RefusalReason.BACKGROUND_IN_FLIGHT)
-            ensure_group(fairness_key, using=using)
-            # Create the TransitionMessage FIRST. It carries the partial
-            # unique constraint and has no other unique/FK constraints, so
-            # an IntegrityError from this create is unambiguously the
-            # concurrency guard firing. Writing in_progress_state first
-            # instead would let a model-level constraint on the state
-            # column (CHECK, NOT NULL, FK, trigger) surface as the
-            # misleading "another transition is already in progress".
+            working_kwargs = deepcopy(kwargs) if self.submission_context is not None else dict(kwargs)
             try:
+                # Duplicate submissions must discard preparation writes and callbacks.
                 with transaction.atomic(using=using):
-                    transition_message = rows.create(
-                        # The key columns name the concrete model; the
-                        # recording class goes on proxy_model_label so the
-                        # worker restores that class.
-                        **TransitionMessage.instance_key(
-                            state.instance, state.process_name),
-                        proxy_model_label=TransitionMessage.proxy_label_for(
-                            state.instance),
-                        # Recorded so the worker can reconstruct the process
-                        # from the stored process_class even when the model
-                        # property was renamed or rebound in between.
-                        field_name=state.field_name,
-                        transition_name=self.action_name,
-                        # The (possibly nested) process class that declared
-                        # this transition, resolved by
-                        # Process._get_transition_method. Lets the worker pick
-                        # the exact transition when an action_name is shared
-                        # across nested processes that use conditions to
-                        # choose. Empty when invoked outside that path (e.g. a
-                        # directly-constructed transition) — the worker then
-                        # falls back to first-match by transition_name.
-                        owning_process_class=kwargs.get('owning_process_class', ''),
-                        request_key=request_key,
-                        request_fingerprint=submission.fingerprint if submission is not None else '',
-                        fairness_key=fairness_key,
-                        required_next=self.required_next,
-                        background_effect_names=[effect.name for effect in self.background_effects],
-                        queue_name=queue_name,
-                        timeout_seconds=self.timeout,
-                        kwargs=serialized,
-                    )
-            except IntegrityError as exc:
+                    with _submission_scope(self, state, working_kwargs, using=using):
+                        kwargs = working_kwargs
+                        try:
+                            serialized = serialize_kwargs(kwargs)
+                        except KwargsSerializationError:
+                            # Re-raise so the precise refusal message is not wrapped
+                            # as "not JSON-serializable".
+                            raise
+                        except TypeError as e:
+                            raise ImproperlyConfigured(
+                                f"BackgroundTransition '{self.action_name}' received a "
+                                f"kwarg that is not JSON-serializable: {e}. Every value "
+                                f"passed to a background transition must be persistable "
+                                f"on the TransitionMessage row."
+                            ) from e
+                        resolved_fairness = fairness_key
+                        if resolved_fairness is None:
+                            resolved_fairness = (self.fairness_key(state.instance, **kwargs)
+                                                 if callable(self.fairness_key) else self.fairness_key)
+                        resolved_fairness = validate_key(resolved_fairness or '', 'fairness_key', allow_empty=True)
+                        ensure_group(resolved_fairness, using=using)
+                        try:
+                            with transaction.atomic(using=using):
+                                transition_message = rows.create(
+                                    # Keep the proxy class so the worker restores its behavior.
+                                    **TransitionMessage.instance_key(
+                                        state.instance, state.process_name),
+                                    proxy_model_label=TransitionMessage.proxy_label_for(
+                                        state.instance),
+                                    field_name=state.field_name,
+                                    transition_name=self.action_name,
+                                    # Nested processes can declare the same action name.
+                                    owning_process_class=kwargs.get('owning_process_class', ''),
+                                    request_key=request_key,
+                                    request_fingerprint=submission.fingerprint if submission is not None else '',
+                                    fairness_key=resolved_fairness,
+                                    required_next=self.required_next,
+                                    background_effect_names=[effect.name for effect in self.background_effects],
+                                    queue_name=queue_name,
+                                    timeout_seconds=self.timeout,
+                                    kwargs=serialized,
+                                )
+                        except IntegrityError as exc:
+                            raise _JobInsertConflict from exc
+                        # A finishing job can change the state while this INSERT waits.
+                        current = state.get_persisted_state()
+                        if current not in self.sources:
+                            raise TransitionTemporarilyUnavailable(
+                                f"BackgroundTransition '{self.action_name}' is not "
+                                f"allowed: the persisted state moved to {current!r} "
+                                f"while the insert waited on the unique constraint — "
+                                f"it is no longer one of the source states.",
+                                reason=RefusalReason.SOURCE_STATE,
+                            )
+
+                        if self.in_progress_state:
+                            # Model constraint errors must not appear as duplicate jobs.
+                            state.set_state(self.in_progress_state, using=state_using)
+                            transition_logger.info(
+                                f'{kwargs.get("tr_id")} '
+                                f'{TransitionEventType.SET_STATE.value} '
+                                f'{self.in_progress_state}'
+                            )
+                    if transaction.get_rollback(using=using):
+                        raise ImproperlyConfigured('submission_context must not silently roll back the submission.')
+            except _JobInsertConflict as exc:
                 if request_key is not None:
-                    existing = TransitionMessage.objects.using(using).filter(request_key=request_key).first()
+                    existing = rows.filter(request_key=request_key).first()
                     if existing is not None:
                         if submission is None:
                             verify_internal_request(existing, state, self.action_name, serialized,
@@ -386,41 +436,7 @@ class BackgroundTransition(Transition):
                     f"is already in progress for this instance and process "
                     f"'{state.process_name}'.",
                     reason=RefusalReason.BACKGROUND_IN_FLIGHT,
-                ) from exc
-
-            # Recheck the persisted state AFTER the create. On PostgreSQL
-            # the insert can block while a concurrent worker finishes and
-            # flips is_completed (the row then leaves the partial unique
-            # index). We are admitted after our under-the-lock
-            # revalidation, against an instance that worker has already
-            # moved to its target or failed state. Without this recheck,
-            # two concurrent enqueues on one instance can both be accepted
-            # and the transition silently re-runs from a non-source state
-            # (reproduced under real worker concurrency).
-            current = state.get_persisted_state()
-            if current not in self.sources:
-                # The atomic block rolls the TransitionMessage row back.
-                # Transient: the guard doing its job, the same class of
-                # event as AlreadyInProgress — it resolves when the other
-                # work completes, so the hook runner logs it at WARNING.
-                raise TransitionTemporarilyUnavailable(
-                    f"BackgroundTransition '{self.action_name}' is not "
-                    f"allowed: the persisted state moved to {current!r} "
-                    f"while the insert waited on the unique constraint — "
-                    f"it is no longer one of the source states.",
-                    reason=RefusalReason.SOURCE_STATE,
-                )
-
-            if self.in_progress_state:
-                # A constraint violation here propagates as a raw
-                # IntegrityError (not AlreadyInProgress) — it is the user's
-                # own model constraint, not our concurrency guard.
-                state.set_state(self.in_progress_state, using=state_using)
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} '
-                    f'{TransitionEventType.SET_STATE.value} '
-                    f'{self.in_progress_state}'
-                )
+                ) from exc.__cause__
 
         record_submission(submission, transition_message, created=True)
         transition_logger.info(

@@ -1,3 +1,7 @@
+> **3.2.0:** Background transitions can prepare saved inputs and application locks
+> through the public [submission context](docs/operation-contract.md#preparing-a-submission).
+> Independent effects use the parent's saved inputs even when execution changes its own copy.
+>
 > **3.1.0:** Independent background effects are saved with parent completion and
 > run through the same workers without blocking later parent actions. See
 > [the effect contract and upgrade requirements](docs/operation-contract.md#independent-background-effects).

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-11-03
+
+- Add `submission_context` to background transitions. Applications can lock
+  related records, recheck business conditions and prepare saved inputs in
+  the transaction that creates the job. Required successors use the same
+  extension. Existing requests and execution retries do not prepare inputs again.
+- Roll back preparation writes and after-commit callbacks when submission fails
+  or another submission has already saved the same request.
+- Create independent effects from the parent's saved inputs. Changes to nested
+  arguments during parent execution no longer change the effect's inputs.
+- No database migration or saved-input format change is required.
+
 ## [3.1.2] — 2026-11-02
 
 - Apply the configured retention period to failed independent background effects,
