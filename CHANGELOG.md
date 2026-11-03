@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [3.3.0] — 2026-11-03
 
 - Add read-only transition statistics through `dl_transitions --stats` and
   `transition_statistics`. Report initial waiting, last-attempt duration,
@@ -14,6 +14,9 @@
 - Clarify the architecture decision for #328: retain fair selection, `Defer`
   and independent effects in the standard API. Request keys and required follow-up
   remain optional usage, with existing compatibility and retention guarantees.
+- Document required shipping across related records and the billing completion
+  check for #326 using existing public APIs. No additional successor primitive,
+  migration or saved-job format change is introduced.
 
 ## [3.2.0] — 2026-11-03
 
