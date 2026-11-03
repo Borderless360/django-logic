@@ -232,8 +232,7 @@ nothing else reports the backlog. Alert on the process, not on the rows:
 - a process supervisor that restarts the worker and reports the restart
   (on Heroku, dyno-crash alerts);
 - a heartbeat check — a cron or Sentry cron monitor that fails if no
-  worker has logged `pull worker starting` or completed a row inside a
-  known window;
+  recent worker presence remains for a queue;
 - `python manage.py dl_transitions` during an incident: it lists the
   uncompleted rows and names the ones nothing is serving.
 
@@ -244,12 +243,27 @@ now, the line is an ERROR. It names the oldest row, the count behind it
 and the `dl_worker` line that would serve the queue. That log line is the
 one to page on. When a worker still takes rows from the queue, the queue
 is behind, and the line is a WARNING: a backlog drains in turn, so it is
-no reason to page. A worker that serves several queues takes the oldest
-row across all of them. If older work from its other queues fills every
+no reason to page. A worker can serve several queues. If work from its other queues fills every
 slot for the whole window, a queue it serves still gets the ERROR, because
 nothing has run from that queue for that long. Give that queue its own
 worker or more slots. The ERROR only fires while some worker is alive to
 run it, which is why the process alert comes first.
+
+Each maintenance process records every queue its worker serves in the shared
+cache. A full worker still starts this process. The observation expires after
+the retry window. Stopping one worker never deletes another worker's observation.
+This is recent maintenance evidence, not proof that a worker is still running
+or that a queue is making progress. A stopped worker can remain visible until
+the record expires. Cache failures can also leave presence unknown or absent.
+
+When an observation exists but no job has progressed, the ERROR says to check
+capacity, other served queues and blocked jobs. Without it, the message suggests
+starting a worker. Recent presence never downgrades a stalled queue to a WARNING.
+`queue_worker_presence(queue_name)` exposes this evidence without changing jobs.
+Cache writes run inside the bounded maintenance process. A blocked cache cannot
+delay the worker's job timeout checks. Cache failure leaves database progress
+checks unchanged. The default cache must be shared between reporting processes
+and workers; an in-memory cache cannot provide cross-process observations.
 
 ## Provider receipts that must survive a failed attempt
 

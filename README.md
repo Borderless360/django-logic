@@ -456,12 +456,34 @@ next claim takes the row.
 ```bash
 python manage.py dl_transitions
 python manage.py dl_transitions --send 1234
+python manage.py dl_transitions --stats --since 7d --queues django_logic --json
 ```
 
 `dl_transitions` lists every uncompleted background transition and says why
 each one is not moving: it has spent every attempt, it waits out the retry
 pause, a worker runs it now, it waits its turn behind older rows, or no worker
 serves its queue. `--queues` narrows the list.
+
+Workers record their served queues during each maintenance check, even when all
+job slots are full. This recent observation is separate from queue progress.
+A queue with no progress still reports an error when its worker is present.
+The message directs operators to check capacity and blocked jobs.
+
+`--stats` reports retained jobs created during the selected period, grouped by
+queue, model, process, transition, parent action and effect. It includes outcomes, errors,
+recorded starts, repeated starts and deferrals. Initial waiting uses the first
+recorded start. Duration covers the last measured attempt, excluding completion
+callbacks. Each timing includes its sample count, median, 90th percentile and
+maximum in milliseconds. Missing history stays unknown. Repeated starts include
+deferrals and competing starts; they are not an exact retry count. The report
+cannot infer total runtime or worker utilization. It changes no job records.
+Use `--json` for machine-readable output. `--queue` also accepts the queue filter.
+
+The same report is available as
+`django_logic.background.transition_statistics(since=cutoff, queues=None, using=None)`.
+`cutoff` is a datetime; the optional database alias selects where to read jobs.
+`queue_worker_presence(queue_name)` returns `True` for recent presence, `False`
+for no retained observation, or `None` when the cache cannot answer.
 
 `--send <pk>` clears the retry wait on one row and wakes the workers, so the
 next claim takes it. The command runs no side-effects itself.
@@ -479,7 +501,8 @@ Nothing else needs a schedule.
   or holds one now, the queue is behind, and the line is a WARNING. If not, no
   worker has taken a row from the queue for the whole window, and the line is
   an ERROR. Either no worker serves the queue, or work from other queues fills
-  every slot of the workers that do.
+  every slot of the workers that do. Recent worker presence changes the
+  explanation, but does not reduce the severity of missing progress.
 - `cleanup_completed_transitions` deletes completed rows older than
   `TRANSITION_MESSAGE_CLEANUP_DAYS`. It keeps the newest failed row per
   instance and process, because that row is the only explanation for an

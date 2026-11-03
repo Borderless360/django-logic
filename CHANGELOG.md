@@ -1,6 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## [3.3.0] — 2026-11-03
+
+- Add read-only transition statistics through `dl_transitions --stats` and
+  `transition_statistics`. Report initial waiting, last-attempt duration,
+  outcomes, errors, recorded starts and deferrals without inventing missing
+  history or worker utilization. Optional JSON output supports external reports.
+  Addresses #329 without new database fields.
+- Record recent worker presence for all served queues during bounded maintenance,
+  including when every job slot is busy. Explain missing queue progress separately
+  from missing presence, while keeping the no-progress error. Cache failure cannot
+  delay job timeout checks. Addresses the misleading worker diagnosis in #305.
+- Clarify the architecture decision for #328: retain fair selection, `Defer`
+  and independent effects in the standard API. Request keys and required follow-up
+  remain optional usage, with existing compatibility and retention guarantees.
+- Document required shipping across related records and the billing completion
+  check for #326 using existing public APIs. No additional successor primitive,
+  migration or saved-job format change is introduced.
 
 ## [3.2.0] — 2026-11-03
 
