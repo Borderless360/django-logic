@@ -238,6 +238,55 @@ Synchronous predecessors do not support `required_next`.
 A background successor may perform bounded creation of application-owned child jobs.
 Its own repeated execution must not repeat completed business effects.
 
+### Required work on related records
+
+An order can reach `shipping` before its old callback ships the fulfilments.
+A manifest must not treat that state change as permission to finish billing.
+Required shipping work belongs in a durable order job with a separate completion state:
+
+```python
+from django_logic import Process
+from django_logic.background import BackgroundEffect, BackgroundTransition
+
+
+class OrderShippingCompletion(Process):
+    process_name = "shipping_completion_process"
+    transitions = [
+        BackgroundTransition(
+            "complete", sources=["not_requested", "failed"],
+            in_progress_state="processing", target="completed", failed_state="failed",
+            side_effects=[complete_shipping_and_verify_results],
+            background_effects=[
+                BackgroundEffect("notify", notify_shipping_complete),
+                BackgroundEffect("inventory", publish_inventory),
+                BackgroundEffect("manifest", refresh_manifest),
+            ],
+        ),
+    ]
+```
+
+Bind this process to the order's `shipping_completion_state` in `AppConfig.ready()`.
+Save the accepted shipping change and submit `order.shipping_completion_process.complete()` in one transaction.
+The required callable ships fulfilments, verifies their results and applies shipping rates.
+Required failures must raise errors; legacy helpers that swallow errors need explicit result checks.
+`completed` then records business success even after normal job cleanup.
+Absence of an unfinished job does not establish success.
+
+The manifest submits bounded per-order jobs and lets workers process orders independently.
+It reads the saved completion states and required fulfilment results before billing.
+It raises `Defer` while orders are processing and reports failed orders for recovery.
+Save those order submissions before deferring: a default atomic attempt rolls its writes back on `Defer`.
+An `atomic=False` manifest job can use short application transactions for each order submission.
+Retries must recognize accepted or completed shipping work instead of submitting it again.
+Billing records completion only after its required charges succeed.
+
+Keep required work in one job's `side_effects` when it shares one unit of completion.
+Use `required_next` for a required successor on that same bound process.
+Related models use their own ordinary background jobs and application-owned completion checks, as above.
+Independent publication, notifications and refreshes can use `BackgroundEffect`; they must not decide whether required shipping succeeded.
+Save computed values needed by later jobs in business records.
+Mutating execution arguments does not pass new values to saved successors or effects.
+
 ## Independent background effects
 
 Use an independent effect for work that must be submitted reliably but whose
