@@ -117,19 +117,7 @@ class Process:
         if item.startswith('_'):
             raise AttributeError(item)
 
-        def transition_method(*args, **kwargs):
-            if args:
-                # Positional arguments used to be dropped, so
-                # ``instance.process.verify(user)`` ran with user=None. That
-                # skips every permission check and loses the audit trail with
-                # no error at all, so fail loudly instead.
-                raise TypeError(
-                    f"{item}() accepts keyword arguments only (got "
-                    f"{len(args)} positional). Pass user and other values "
-                    f"by keyword, e.g. {item}(user=request.user) — a "
-                    f"positional user would be dropped and permission "
-                    f"checks skipped."
-                )
+        def transition_method(**kwargs):
             # Drop an 'action_name' key the caller passed: it would clash with
             # _get_transition_method's first parameter and raise "multiple
             # values for argument 'action_name'". No engine path forwards it;
@@ -139,6 +127,8 @@ class Process:
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 
+        transition_method.__name__ = item
+        transition_method.__qualname__ = item
         # Django's template engine CALLS any callable it resolves, so
         # ``{{ order.process.approve }}`` used to drive the state machine
         # while rendering a page and print the tr_id. ``alters_data``
@@ -536,46 +526,13 @@ def collect_hook_signature_offenders(process_cls) -> list:
     a named positional, as ``module.qualname (on Owner[.action])`` strings.
     Pure collection — bind-time validation enforces.
     """
-    offenders = []
-
-    def check(fn, owner):
-        try:
-            params = list(inspect.signature(fn).parameters.values())
-        except (TypeError, ValueError):
-            return
-        ok = params and params[0].kind in (
+    return _collect_hook_offenders(
+        process_cls,
+        lambda params: not params or next(iter(params.values())).kind not in (
             inspect.Parameter.POSITIONAL_ONLY,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        if not ok:
-            offenders.append(
-                f'{getattr(fn, "__module__", "?")}.'
-                f'{getattr(fn, "__qualname__", fn)} (on {owner})'
-            )
-
-    _HOOK_ATTRS = (
-        'side_effects', 'callbacks', 'failure_callbacks',
-        'conditions', 'permissions',
+        ),
     )
-    for proc_cls in _iter_process_tree(process_cls):
-        owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
-        # Process-level conditions/permissions are plain lists of callables
-        # (executed via Conditions/Permissions in Process.is_valid). A
-        # subclass may instead define them as a property/descriptor computed
-        # per instance — those cannot be inspected at bind time; skip them.
-        for attr in ('conditions', 'permissions'):
-            hooks = getattr(proc_cls, attr, None)
-            if isinstance(hooks, (list, tuple)):
-                for fn in hooks:
-                    check(fn, owner)
-        for transition in proc_cls.transitions or []:
-            # getattr-guarded: a duck-typed custom transition that the
-            # engine never asks for one of these must not fail to bind.
-            for attr in _HOOK_ATTRS:
-                wrapper = getattr(transition, attr, None)
-                for fn in getattr(wrapper, 'commands', None) or []:
-                    check(fn, f'{owner}.{getattr(transition, "action_name", "?")}')
-    return offenders
 
 
 def collect_request_param_offenders(process_cls) -> list:
@@ -584,6 +541,11 @@ def collect_request_param_offenders(process_cls) -> list:
     transition never takes the request, so such a hook waits for a value
     that can never arrive. Pure collection — bind-time validation enforces.
     """
+    return _collect_hook_offenders(process_cls, lambda params: 'request' in params)
+
+
+def _collect_hook_offenders(process_cls, rejects):
+    """Inspect each declared hook and preserve its owner in validation errors."""
     offenders = []
 
     def check(fn, owner):
@@ -591,7 +553,7 @@ def collect_request_param_offenders(process_cls) -> list:
             params = inspect.signature(fn).parameters
         except (TypeError, ValueError):
             return
-        if 'request' in params:
+        if rejects(params):
             offenders.append(
                 f'{getattr(fn, "__module__", "?")}.'
                 f'{getattr(fn, "__qualname__", fn)} (on {owner})'
@@ -603,6 +565,7 @@ def collect_request_param_offenders(process_cls) -> list:
     )
     for proc_cls in _iter_process_tree(process_cls):
         owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
+        # Computed properties cannot be checked before an instance exists.
         for attr in ('conditions', 'permissions'):
             hooks = getattr(proc_cls, attr, None)
             if isinstance(hooks, (list, tuple)):

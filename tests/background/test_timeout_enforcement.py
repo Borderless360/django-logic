@@ -151,24 +151,14 @@ class HarvestTests(TransactionTestCase):
             _harvest(attempts, self.pending, block=True)
         self.assertEqual(self.recorded(), [])
 
-    def test_a_killed_attempt_reaped_elsewhere_is_still_a_timeout(self):
-        attempts = self._attempt(12345, timeout_seconds=1, deadline=_PASSED)
-        with patch('django_logic.background.pull.os.waitpid',
-                   side_effect=ChildProcessError), \
-                patch('django_logic.background.pull.os.kill',
-                      return_value=None):
-            _harvest(attempts, self.pending, block=True)
-        self.assertEqual(attempts, {})
-        self.assertEqual(list(self.pending), [])
-        self.assertIn('[timeout]', self.recorded()[0])
-
-    def test_an_attempt_reaped_elsewhere_inside_its_budget_is_charged_nothing(self):
+    def test_missing_exit_status_stops_the_worker_without_claiming_success(self):
         attempts = self._attempt(
             12345, timeout_seconds=60, deadline=time.monotonic() + 60)
         with patch('django_logic.background.pull.os.waitpid',
                    side_effect=ChildProcessError):
-            _harvest(attempts, self.pending, block=True)
-        self.assertEqual(attempts, {})
+            with self.assertRaises(ChildProcessError):
+                _harvest(attempts, self.pending, block=True)
+        self.assertEqual(list(attempts), [12345])
         self.assertEqual(list(self.pending), [])
         self.assertEqual(self.recorded(), [])
 

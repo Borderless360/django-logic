@@ -309,7 +309,6 @@ class BackgroundTransition(Transition):
         using = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
         rows = TransitionMessage.objects if using == DEFAULT_DB_ALIAS else TransitionMessage.objects.using(using)
         from django_logic.background.operations import validate_key
-        from django_logic.background.fairness import ensure_group
         with transaction.atomic(using=using):
             # Do not wait on a job while holding its business row.
             if TransitionMessage.objects.using(using).filter(
@@ -339,7 +338,6 @@ class BackgroundTransition(Transition):
                         resolved_fairness = (self.fairness_key(state.instance, **kwargs)
                                              if callable(self.fairness_key) else self.fairness_key)
                         resolved_fairness = validate_key(resolved_fairness or '', 'fairness_key', allow_empty=True)
-                        ensure_group(resolved_fairness, using=using)
                         try:
                             with transaction.atomic(using=using):
                                 transition_message = rows.create(

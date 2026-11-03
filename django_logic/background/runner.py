@@ -101,12 +101,6 @@ def run_background_transition(transition_message_id: int) -> None:
         if isinstance(outcome, _NonAtomicAttempt):
             from django_logic.background.non_atomic import run_non_atomic
             outcome = run_non_atomic(transition_message_id)
-    except _StopRetry as exc:
-        # The atomic block rolled back, so mark_as_completed could not run
-        # inside it. Run it here, in its own statement, so the retry loop
-        # stops picking the row up.
-        _mark_unrestorable_completed(exc.transition_message_id, exc.reason)
-        return
     except _NothingToDo:
         return
 
@@ -140,53 +134,7 @@ class _NothingToDo(Exception):
     by another worker. Caller should exit silently."""
 
 
-class _StopRetry(Exception):
-    """Internal signal: the row refers to a model or transition that no
-    longer exists. The atomic block rolled back, so the outer handler marks
-    the row completed in its own statement and retries stop. ``reason``
-    describes the restore failure for ``last_error_message``."""
-
-    def __init__(self, transition_message_id: int, reason: str = ''):
-        self.transition_message_id = transition_message_id
-        self.reason = reason
-
-
 UNRESTORABLE_MARKER = '[unrestorable]'
-
-
-def _mark_unrestorable_completed(transition_message_id: int, reason: str = '') -> None:
-    """Mark an unrestorable row completed so no worker claims it again,
-    and record why on ``last_error_message``. The
-    note follows the ``'[superseded]'`` convention (see
-    ``TransitionMessage.mark_as_superseded``) so an operator who reads the
-    row later finds an explanation next to the completion.
-
-    Runs as a single UPDATE outside the worker atomic block, which has
-    already exited and rolled back. Durability is mode-dependent, with
-    the same rule as ``TransitionMessage.stamp_attempt_started``; in sync
-    mode a caller rollback also discards the enqueue INSERT, so no row
-    survives to be retried and the stop-retry promise still holds.
-    """
-    now = timezone.now()
-    # db_safe_text, not a plain slice: ``reason`` carries arbitrary
-    # exception text, and PostgreSQL rejects a NUL or a lone surrogate —
-    # this completion write must never be the statement that fails.
-    note = db_safe_text(f'{UNRESTORABLE_MARKER} {reason or "restore failed"}')
-    try:
-        TransitionMessage.objects.filter(pk=transition_message_id, is_completed=False).update(
-            is_completed=True,
-            ended_in_failure=True,
-            completion_kind='failed',
-            completed_at=now,
-            last_error_message=note,
-            last_error_dt=now,
-            modified=now,  # .update() bypasses auto_now
-        )
-    except Exception as e:
-        transition_logger.error(
-            f'Failed to mark unrestorable TransitionMessage#{transition_message_id} '
-            f'completed: {e}'
-        )
 
 
 def finalize_stuck_attempt(transition_message_id: int) -> bool:
@@ -264,25 +212,13 @@ def _finalize_stuck_row(
         # transaction and take the completion below down with it.
         with transaction.atomic():
             _, process, transition = _restore(transition_message)
-    except _RestoreError:
-        # No attempt ran here, so started_at (if any) belongs to an
-        # abandoned attempt — don't record a misleading duration.
-        transition_message.mark_as_completed(
-            measure_duration=False, ended_in_failure=True)
-        return None
     except Exception as exc:
-        # Anything _restore did not treat as permanent: a consumer
-        # ``process`` property raising, a corrupt instance_id, a short
-        # database outage. Escaping here rolled the whole finalization back on
-        # every run, so the safety net looped forever on this one row.
-        # Completing it stops the loop, and the instance stays in its
-        # in_progress_state, which is an implicit source of the same
-        # transition.
+        # Completion stops repeated restore failures without changing business state.
         transition_logger.warning(
             f'detect_stuck: TransitionMessage#{transition_message.pk} could not be restored '
             f'({type(exc).__name__}: {exc}); completing it so the safety net '
-            f'stops retrying. The instance stays in its in_progress_state; '
-            f'run the transition again from there to move it on.',
+            f'stops retrying. Business state is unchanged; check the restore '
+            f'error before submitting this transition again.',
             exc_info=True,
         )
         transition_message.mark_as_completed(
@@ -298,27 +234,6 @@ def _finalize_stuck_row(
             f'({type(decode_error).__name__}: {decode_error}); finalizing with empty kwargs.'
         )
     state = process.state
-
-    # Same state guard as the worker attempt path, and with the same result: a
-    # manual fix wins over everything here, not only over the failed_state
-    # write. When the guard covered the write alone, this safety net still ran
-    # failure callbacks against an instance an operator had already fixed, and
-    # completed the row with no ``[superseded]`` note to explain it.
-    matches, expected, current = _state_guard_matches(transition, state)
-    if not matches:
-        note = (
-            f'[superseded] detect_stuck state guard: expected {expected}, found '
-            f'{current!r}. Something else moved the instance while this row '
-            f'was pending, so failed_state and the failure callbacks are '
-            f'skipped and the other state change wins. Earlier error: '
-            f'{transition_message.last_error_message or "(none recorded)"}'
-        )
-        transition_logger.error(
-            f'detect_stuck: TransitionMessage#{transition_message.pk} {transition.action_name} '
-            f'{state.instance_key}: {note}'
-        )
-        transition_message.mark_as_superseded(note)
-        return None
 
     # A safety-net finalization is not a worker attempt. started_at belongs to
     # the abandoned attempt, so measuring from it would inflate duration_ms.
@@ -428,9 +343,8 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
     Invariant: everything that must survive together lives inside this
     atomic block — row lock, side-effects, the target state write, and
     either mark_as_completed (on success / terminal failure) or the
-    errors_count increment (on retryable failure). Moving any of the
-    mark_as_* / record_error calls out is what broke the unrestorable-row
-    path (see _StopRetry). Don't do it.
+    errors_count increment (on retryable failure). The same transaction
+    completes a job whose model or transition no longer exists.
 
     The start times and attempt count are deliberate exceptions.
     Other connections must see them while the attempt runs.
@@ -562,10 +476,8 @@ def _decode_kwargs(transition_message) -> 'tuple[dict, BaseException | None]':
 def _restore_for_attempt(transition_message):
     """Rebuild ``(instance, process, transition)`` from the row.
 
-    Returns ``(triple, None)`` on success and ``(None, error)`` on a
-    failure that deserves normal error accounting. Raises ``_StopRetry``
-    for the permanent classes (model uninstalled, row gone, transition
-    renamed), where retrying can never help.
+    Return ``(triple, None)`` on success or ``(None, error)`` on failure.
+    The caller records the outcome while it still holds the job row.
     """
     try:
         # In a savepoint for the same reason as the decode: _restore reads
@@ -574,16 +486,6 @@ def _restore_for_attempt(transition_message):
         # bookkeeping cannot run.
         with transaction.atomic():
             return _restore(transition_message), None
-    except _RestoreError as exc:
-        transition_logger.error(
-            f'TransitionMessage#{transition_message.pk} cannot be restored: {exc}. '
-            f'Marking completed to stop retries.'
-        )
-        # Don't mark_as_completed() here — we're inside an atomic
-        # block that will roll back when we exit. The outer handler
-        # in run_background_transition() performs the mark in a
-        # fresh statement so the stop-retry flag actually persists.
-        raise _StopRetry(transition_message.pk, str(exc)) from exc
     except Exception as exc:
         # _restore raises _RestoreError only for the permanent failures.
         # Everything else — a consumer ``process`` property raising, a
@@ -684,16 +586,23 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
 def _handle_restore_failure(
     transition_message: TransitionMessage, error: BaseException,
 ) -> _Outcome:
-    """Count a restore failure that is not one of the permanent kinds.
+    """Complete missing work, or count a temporary restore failure for retry."""
+    if isinstance(error, _RestoreError):
+        now = timezone.now()
+        TransitionMessage.objects.using(transition_message._state.db).filter(
+            pk=transition_message.pk,
+        ).update(
+            is_completed=True, ended_in_failure=True, completion_kind='failed',
+            completed_at=now, last_error_dt=now, modified=now,
+            last_error_message=db_safe_text(
+                f'{UNRESTORABLE_MARKER} {str(error) or "restore failed"}'),
+        )
+        transition_logger.error(
+            f'TransitionMessage#{transition_message.pk} cannot be restored: {error}. '
+            f'Marking completed to stop retries.'
+        )
+        return _Outcome(terminal=True, succeeded=False)
 
-    There is no transition object to fail through, so this is thinner than
-    ``_handle_failure``. It records the error, retries while retries remain,
-    and at ``MAX_ERRORS`` completes the row so the retry loop stops. Nothing
-    was restored, so no ``failed_state`` is written and the instance stays in
-    its ``in_progress_state``. That state is an implicit source of the same
-    transition, so an operator can run it again, and the completed row carries
-    the reason.
-    """
     transition_message.record_error(error)
     transition_logger.error(
         f'TransitionMessage#{transition_message.pk} restore raised '

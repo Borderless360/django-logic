@@ -18,11 +18,6 @@ class FairnessGroup(models.Model):
         app_label = 'django_logic_background'
 
 
-def ensure_group(key, *, using):
-    """Save the client's turn record alongside its first submitted job."""
-    FairnessGroup.objects.using(using).get_or_create(key=key)
-
-
 def claim_fair(rows):
     """Choose the oldest available job for the least recently served client.
 

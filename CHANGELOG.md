@@ -32,6 +32,19 @@
 - Require new public options, columns and settings to ship with a consumer that
   uses them. The release notes name that consumer and the problem solved.
 
+- Complete jobs whose model or transition no longer exists while retaining the
+  job lock. A failed completion write now reaches normal failure reporting.
+- Check failed-job business state once, under its row lock. A superseded job
+  now logs a warning. If that lock times out after a manual state change,
+  completion is recorded as failed instead of superseded; the manual state
+  remains unchanged and failure callbacks do not run.
+- Share hook validation traversal and let Python reject positional transition
+  arguments before work starts. Validation messages for declared hooks stay unchanged.
+- Create client turn records when a worker first selects that client's jobs,
+  avoiding the duplicate write during submission. Existing queued jobs remain eligible.
+- Stop the worker if another handler consumed a job process's exit status.
+  An unknown result can no longer count as a successful job process.
+
 ## [3.3.0] — 2026-11-03
 
 - Add read-only transition statistics through `dl_transitions --stats` and
