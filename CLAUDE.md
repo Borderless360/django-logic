@@ -100,8 +100,9 @@ Its corollaries, each pinned by a shipped mistake:
   0.12.0. Do not rebuild it.
 - **PostgreSQL protects state through the actual transaction commit.**
   State changes take the business-row lock and wait at most two seconds for
-  another transaction to commit before they refuse. The cache gate remains
-  for compatibility. Workers separately lock their job row. Finalization takes
+  another transaction to commit before they refuse. The shared cache lock also
+  prevents overlapping external calls while its timeout remains valid.
+  Workers separately lock their job row. Finalization takes
   the job lock before the business row. Enqueue must not wait for an unfinished
   job while holding its business row. Allow for a separate connection when
   provider receipts use `atomic=False`. See `docs/operation-contract.md`.

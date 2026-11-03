@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [4.0.0] — 2026-11-03
 
 - Model snapshots no longer copy partial background job records. GV's billing
   and shipping-completion tests create required jobs explicitly. Keep model-field
