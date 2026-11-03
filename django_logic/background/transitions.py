@@ -29,7 +29,6 @@ from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
 from django_logic.background.serializers import (
     KwargsSerializationError,
-    decode_value,
     serialize_kwargs,
 )
 from django_logic.exceptions import (
@@ -130,7 +129,6 @@ class BackgroundTransition(Transition):
         timeout: int | None = None,
         no_retry_on: tuple = (),
         atomic: bool = True,
-        required_next: str | None = None,
         fairness_key=None,
         background_effects=(),
         submission_context=None,
@@ -163,16 +161,11 @@ class BackgroundTransition(Transition):
             raise ImproperlyConfigured(
                 f"BackgroundTransition '{action_name}': atomic must be True or False."
             )
-        if required_next is not None and (not isinstance(required_next, str) or not required_next or len(required_next) > 100):
-            raise ImproperlyConfigured('required_next must name a background transition.')
-        if required_next and kwargs.get('next_transition'):
-            raise ImproperlyConfigured('Declare required_next or next_transition, not both.')
         if fairness_key is not None and not isinstance(fairness_key, str) and not callable(fairness_key):
             raise ImproperlyConfigured('fairness_key must be a string or callable.')
         if submission_context is not None and not callable(submission_context):
             raise ImproperlyConfigured('submission_context must be callable.')
         self.submission_context = submission_context
-        self.required_next = required_next or ''
         self.background_effects = tuple(background_effects)
         if self.background_effects:
             from django_logic.background.effects import BackgroundEffect
@@ -205,7 +198,7 @@ class BackgroundTransition(Transition):
                 return effect
         raise ImproperlyConfigured(f'Background effect {name!r} is not declared on {self.action_name!r}.')
 
-    def change_state(self, state: State, _submission=None, **kwargs) -> UUID | None:
+    def change_state(self, state: State, **kwargs) -> UUID | None:
         # Before the lock, and before the kwargs are serialized into a row
         # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
@@ -216,17 +209,6 @@ class BackgroundTransition(Transition):
             validate_non_atomic(state.instance, require_autocommit=conf.sync_mode())
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
-        if self.required_next:
-            job_database = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
-            if (state.instance._state.db or DEFAULT_DB_ALIAS) != job_database:
-                raise ImproperlyConfigured('required_next requires the business record and job on the same database.')
-            from django.utils.module_loading import import_string
-            from django_logic.process import _iter_process_tree
-            process_type = import_string(process_class) if process_class else type(getattr(state.instance, state.process_name))
-            following = [item for cls in _iter_process_tree(process_type)
-                         for item in cls.transitions if item.action_name == self.required_next]
-            if not following or any(not item.is_background for item in following):
-                raise ImproperlyConfigured('required_next must name a declared BackgroundTransition on this process.')
         queue_name = self.get_queue_name()
         transition_logger.info(
             f'{kwargs.get("tr_id")} {TransitionEventType.START.value} '
@@ -269,7 +251,7 @@ class BackgroundTransition(Transition):
                 self._ensure_db_state_in_sources(state)
                 try:
                     transition_message = self._enqueue_atomic(
-                        state, kwargs, queue_name, submission=_submission)
+                        state, kwargs, queue_name)
                 except AlreadyInProgress:
                     # Nothing is retrying a stranded row, so "try again shortly"
                     # would be wrong forever. Queried here, after
@@ -299,9 +281,6 @@ class BackgroundTransition(Transition):
                     f'{state.instance_key}'
                 )
 
-        if _submission is not None and not _submission.created:
-            trace = decode_value(transition_message.kwargs).get('tr_id')
-            return UUID(trace) if trace else None
         if conf.sync_mode():
             # Inline, bypassing transaction.on_commit, so Django's
             # TestCase (whose wrapping transaction never commits) still
@@ -318,7 +297,7 @@ class BackgroundTransition(Transition):
         return kwargs.get('tr_id')
 
     def _enqueue_atomic(
-        self, state: State, kwargs: dict, queue_name: str, *, submission=None, using=None, request_key=None, fairness_key=None
+        self, state: State, kwargs: dict, queue_name: str
     ) -> TransitionMessage:
         """Atomic: set in_progress_state + create TransitionMessage row.
 
@@ -326,27 +305,12 @@ class BackgroundTransition(Transition):
         constraint fires (another uncompleted TransitionMessage exists
         for the same instance + process).
         """
-        from django_logic.background.effects import validate_effect_submission
-        validate_effect_submission(self, state, kwargs, using=using)
-
-        state_using = using or state.instance._state.db
-        using = using or router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+        state_using = state.instance._state.db
+        using = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
         rows = TransitionMessage.objects if using == DEFAULT_DB_ALIAS else TransitionMessage.objects.using(using)
-        from django_logic.background.operations import record_submission, validate_key, verify_internal_request
+        from django_logic.background.operations import validate_key
         from django_logic.background.fairness import ensure_group
-        if submission is not None:
-            request_key = submission.request_key
-            if submission.fairness_key is not None:
-                fairness_key = submission.fairness_key
         with transaction.atomic(using=using):
-            if request_key is not None:
-                existing = TransitionMessage.objects.using(using).filter(request_key=request_key).first()
-                if existing is not None:
-                    if submission is None:
-                        verify_internal_request(existing, state, self.action_name, serialize_kwargs(kwargs),
-                                                kwargs.get('owning_process_class', ''))
-                    record_submission(submission, existing, created=False)
-                    return existing
             # Do not wait on a job while holding its business row.
             if TransitionMessage.objects.using(using).filter(
                 **TransitionMessage.instance_key(state.instance, state.process_name), is_completed=False, effect_name='',
@@ -372,10 +336,8 @@ class BackgroundTransition(Transition):
                                 f"passed to a background transition must be persistable "
                                 f"on the TransitionMessage row."
                             ) from e
-                        resolved_fairness = fairness_key
-                        if resolved_fairness is None:
-                            resolved_fairness = (self.fairness_key(state.instance, **kwargs)
-                                                 if callable(self.fairness_key) else self.fairness_key)
+                        resolved_fairness = (self.fairness_key(state.instance, **kwargs)
+                                             if callable(self.fairness_key) else self.fairness_key)
                         resolved_fairness = validate_key(resolved_fairness or '', 'fairness_key', allow_empty=True)
                         ensure_group(resolved_fairness, using=using)
                         try:
@@ -390,10 +352,7 @@ class BackgroundTransition(Transition):
                                     transition_name=self.action_name,
                                     # Nested processes can declare the same action name.
                                     owning_process_class=kwargs.get('owning_process_class', ''),
-                                    request_key=request_key,
-                                    request_fingerprint=submission.fingerprint if submission is not None else '',
                                     fairness_key=resolved_fairness,
-                                    required_next=self.required_next,
                                     background_effect_names=[effect.name for effect in self.background_effects],
                                     queue_name=queue_name,
                                     timeout_seconds=self.timeout,
@@ -423,14 +382,6 @@ class BackgroundTransition(Transition):
                     if transaction.get_rollback(using=using):
                         raise ImproperlyConfigured('submission_context must not silently roll back the submission.')
             except _JobInsertConflict as exc:
-                if request_key is not None:
-                    existing = rows.filter(request_key=request_key).first()
-                    if existing is not None:
-                        if submission is None:
-                            verify_internal_request(existing, state, self.action_name, serialized,
-                                                    kwargs.get('owning_process_class', ''))
-                        record_submission(submission, existing, created=False)
-                        return existing
                 raise AlreadyInProgress(
                     f"{state.instance_key}: another background transition "
                     f"is already in progress for this instance and process "
@@ -438,7 +389,6 @@ class BackgroundTransition(Transition):
                     reason=RefusalReason.BACKGROUND_IN_FLIGHT,
                 ) from exc.__cause__
 
-        record_submission(submission, transition_message, created=True)
         transition_logger.info(
             f'{kwargs.get("tr_id")} TransitionMessage#{transition_message.pk} '
             f'created (queue={queue_name})'

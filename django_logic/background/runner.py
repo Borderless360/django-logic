@@ -725,8 +725,6 @@ def _handle_success(
     if transition_message.background_effect_names:
         from django_logic.background.effects import save_effect_jobs
         save_effect_jobs(transition_message, transition, state, kwargs)
-    if transition_message.required_next:
-        _write_required_next(transition_message, state, kwargs)
     transition_logger.info(
         f'{kwargs.get("tr_id")} {TransitionEventType.COMPLETE.value}'
     )
@@ -1045,34 +1043,3 @@ def _find_transition(process, transition_message: TransitionMessage):
             f'move a background action_name onto shared nested processes.'
         )
     return None  # zero matches -> generic not-found _RestoreError in _restore
-
-
-def _write_required_next(parent, state, kwargs):
-    """Save one required successor on the connection that completes its parent."""
-    from uuid import uuid4
-    from django.utils.module_loading import import_string
-    from django.core.exceptions import ImproperlyConfigured
-
-    using = parent._state.db or DEFAULT_DB_ALIAS
-    process_class = kwargs.get('process_class')
-    if process_class:
-        process = import_string(process_class)(state=state)
-    else:
-        process = getattr(state.instance, state.process_name)
-    following, owner = process._resolve_transition_with_owner(
-        parent.required_next, kwargs.get('user'),
-    )
-    if not following.is_background:
-        raise ImproperlyConfigured('required_next must name a BackgroundTransition.')
-    next_kwargs = dict(kwargs)
-    next_kwargs.pop('context', None)
-    next_kwargs.pop('user_id', None)
-    next_kwargs.update(
-        parent_id=kwargs.get('tr_id'), tr_id=uuid4(),
-        process_class=f'{type(process).__module__}.{type(process).__name__}',
-        owning_process_class=f'{type(owner).__module__}.{type(owner).__name__}',
-    )
-    following._enqueue_atomic(
-        state, next_kwargs, following.get_queue_name(), using=using,
-        request_key=f'django-logic:required-next:{parent.pk}', fairness_key=parent.fairness_key,
-    )

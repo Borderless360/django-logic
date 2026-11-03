@@ -14,7 +14,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from django_logic import Process, ProcessManager, Transition
-from django_logic.background import BackgroundEffect, BackgroundTransition, Defer, cancel_pending, operation_options
+from django_logic.background import BackgroundEffect, BackgroundTransition, Defer
 from django_logic.background.exceptions import PermanentFailure
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import claim_next, run_once
@@ -42,7 +42,7 @@ class EffectProcess(Process):
     process_name = 'effects'
     transitions = [
         BackgroundTransition('finish', sources=['draft'], target='ready', failed_state='failed',
-                             side_effects=[bg_ok], queue='effect-test',
+                             side_effects=[bg_ok], queue='effect-test', fairness_key='client:one',
                              background_effects=[BackgroundEffect('archive', record_effect),
                                                  BackgroundEffect('notify', record_effect, queue='notify', timeout=5)]),
         Transition('advance', sources=['ready'], target='done'),
@@ -60,9 +60,8 @@ class EffectTestSetup:
         self.widget = Widget.objects.create()
 
     def enqueue(self, **kwargs):
-        with operation_options(fairness_key='client:one') as submission:
-            self.widget.effects.finish(**kwargs)
-        return TransitionMessage.objects.get(pk=submission.job_id)
+        self.widget.effects.finish(**kwargs)
+        return TransitionMessage.for_instance(self.widget, 'effects').filter(effect_name='').latest('pk')
 
     def finish(self, **kwargs):
         parent = self.enqueue(**kwargs)
@@ -116,30 +115,10 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         self.assertEqual(TransitionMessage.objects.filter(effect_name='archive', is_completed=False).count(), 2)
 
     def test_repeated_completion_does_not_duplicate_effect_jobs(self):
-        from django_logic.background.effects import save_effect_jobs
         parent, children = self.finish()
         run_background_transition(parent.pk)
-        save_effect_jobs(parent, EffectProcess.transitions[0], self.widget.effects.state,
-                         deserialize_kwargs(parent.kwargs))
         self.assertEqual(TransitionMessage.objects.count(), 3)
 
-    def test_required_successor_can_have_its_own_effects(self):
-        with patch.object(EffectProcess.transitions[0], 'required_next', 'repeat'):
-            parent, children = self.finish()
-        successor = TransitionMessage.in_flight_for(self.widget, 'effects').get()
-        self.assertEqual(successor.background_effect_names, ['archive'])
-        run_background_transition(successor.pk)
-        self.assertEqual(TransitionMessage.objects.filter(parent_job_id=successor.pk).count(), 1)
-        self.assertEqual(TransitionMessage.objects.filter(parent_job_id=parent.pk).count(), 2)
-
-    def test_required_successor_rejects_cross_database_effect_routing(self):
-        from django_logic.background.runner import _write_required_next
-        parent, children = self.finish()
-        parent.required_next = 'repeat'
-        with (patch('django_logic.background.effects.router.db_for_read', return_value='other'),
-              self.assertRaisesMessage(ImproperlyConfigured, 'default database')):
-            _write_required_next(parent, self.widget.effects.state, deserialize_kwargs(parent.kwargs))
-        self.assertFalse(TransitionMessage.objects.filter(request_key=f'django-logic:required-next:{parent.pk}').exists())
 
     def test_cross_database_parent_is_refused_before_submission(self):
         with (patch('django_logic.background.effects.router.db_for_read', return_value='other'),
@@ -167,14 +146,12 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         run_background_transition(parent.pk)
         self.assertEqual(TransitionMessage.objects.filter(parent_job_id=parent.pk).count(), 2)
 
-    def test_failed_deferred_superseded_and_cancelled_parents_create_no_effects(self):
-        for mode in ['failed', 'deferred', 'superseded', 'cancelled']:
+    def test_failed_deferred_and_superseded_parents_create_no_effects(self):
+        for mode in ['failed', 'deferred', 'superseded']:
             with self.subTest(mode=mode):
                 self.widget = Widget.objects.create()
                 parent = self.enqueue()
-                if mode == 'cancelled':
-                    self.assertEqual(cancel_pending(parent.pk), 'cancelled')
-                elif mode == 'superseded':
+                if mode == 'superseded':
                     Widget.objects.filter(pk=self.widget.pk).update(status='done')
                 else:
                     action = fail_effect if mode == 'failed' else wait_effect
@@ -205,9 +182,9 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         child = TransitionMessage.objects.get(pk=children[0].pk)
         self.assertEqual((child.deferral_count, child.errors_count, child.fairness_key), (1, 0, 'client:one'))
         self.widget = Widget.objects.create()
-        with operation_options(fairness_key='client:two') as submission:
-            self.widget.effects.finish()
-        self.assertEqual(claim_next(['effect-test']), submission.job_id)
+        with patch.object(EffectProcess.transitions[0], 'fairness_key', 'client:two'):
+            next_parent = self.enqueue()
+        self.assertEqual(claim_next(['effect-test']), next_parent.pk)
 
     def test_missing_effect_and_wrong_owner_fail_closed(self):
         parent, children = self.finish()
@@ -243,9 +220,9 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         self.assertFalse(parent.is_completed)
         self.assertIn('not declared', parent.last_error_message)
 
-    def test_cleanup_removes_old_cancelled_and_failed_effects_but_keeps_parent_failure(self):
+    def test_cleanup_removes_old_successful_and_failed_effects_but_keeps_parent_failure(self):
         parent, children = self.finish()
-        self.assertEqual(cancel_pending(children[0].pk), 'cancelled')
+        run_background_transition(children[0].pk)
         TransitionMessage.objects.filter(pk=parent.pk).update(ended_in_failure=True)
         TransitionMessage.objects.filter(pk=children[1].pk).update(is_completed=True, ended_in_failure=True,
                                                                  completed_at=timezone.now())
@@ -477,7 +454,6 @@ class ConcurrentBackgroundEffectTests(EffectTestSetup, TransactionTestCase):
             thread.start()
             try:
                 self.assertTrue(started.wait(5))
-                self.assertEqual(cancel_pending(children[0].pk), 'running')
                 self.widget.effects.advance()
                 self.assertEqual(Widget.objects.get(pk=self.widget.pk).status, 'done')
             finally:

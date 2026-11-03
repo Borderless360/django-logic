@@ -1,7 +1,4 @@
-# Durable operations in 3.0
-
-Existing `instance.process.action(...)` calls keep their return value and declaration behavior.
-The additions below are optional. PostgreSQL state protection changes for every lock-taking transition.
+# Durable operations
 
 ## Keeping one execution contract
 
@@ -10,14 +7,6 @@ let applications share worker capacity while respecting provider waiting periods
 Independent `BackgroundEffect` work also remains part of this contract. A current
 Mintsoft integration uses it for follow-up work after manifest completion.
 Effects use the same job records, workers and retry rules as parent transitions.
-
-Public request keys and `required_next` remain optional declaration and submission
-choices. Applications need not use them for ordinary background work. They remain
-supported APIs because saved requests and jobs depend on their behavior.
-Separate packages or runtime feature switches would add combinations to support
-without simplifying existing jobs. Keep the current API and improve it against
-observed application failures. Any future removal must preserve saved-job
-compatibility, request-key protection and the retention rules below.
 
 ## Checking eligibility while another action runs
 
@@ -33,51 +22,18 @@ an action can run immediately. Calling the action still acquires its normal
 locks, checks the latest persisted state and rejects conflicting unfinished
 work. Applications must handle a later refusal without damaging existing data.
 
-## Submission identity and fair progress
+## Fair progress
 
-```python
-from django_logic.background import operation_options
-
-with operation_options(
-    request_key=f"orders:ship:{order.pk}:{shipping_revision}",
-    fairness_key=f"client:{order.client_id}",
-) as submission:
-    order.process.ship()
-
-job_id = submission.job_id
-created = submission.created
-```
-
-The context applies to one background invocation. It does not add arguments to application hooks.
-Repeating a retained request key with the same object, process class, action, actor, and inputs returns its original job.
-This also works after that job finishes and the object's state changes.
-Different inputs raise `RequestConflict`. A new key represents a new request, not another execution attempt.
-The process class's module and qualified name form part of this identity. Renaming them changes the identity.
-Application permission checks must still protect the endpoint that accepts submissions.
-
-Request keys are global strings, up to 255 characters. Include an application namespace.
-The `django-logic:` prefix is reserved for engine-created successors and effects.
-The database job ID remains stable across retries. Existing provider request IDs can remain in application records.
-**Cleanup retains records with public request keys indefinitely.**
-The application must choose when deleting those records is safe. Deletion ends duplicate-submission protection.
-Public keys are opt-in: use one when repeated submissions must resolve to the
-same job. An ordinary background submission does not require a request key.
-Records without request keys, and completed jobs with known internal successor
-or effect keys, use the configured retention period. Cleanup keeps unfinished
-jobs and the newest failed parent or required job for each process. Completed
-independent effects, including failures, expire normally because they cannot
-change the parent state. Internal jobs are saved atomically with parent completion; a repeated public parent request
-still returns its retained parent record and cannot recreate expired follow-ups.
-
-For a declaration default, use `fairness_key="group"` or a callable accepting `instance, **kwargs`.
-The callable must return a string. `operation_options` overrides this default.
+Declare `fairness_key="group"` or a callable accepting `instance, **kwargs`.
+The callable returns a string, for example `f"client:{instance.client_id}"`.
+The engine saves the key with the job and preserves it across retries.
 Workers take turns between eligible fairness groups using shared database records.
 A single group can use every free worker slot. Existing running work is not interrupted when another group arrives.
 The empty key groups legacy submissions together. Queues still select which workers may run a job.
 Fair selection does not enforce provider request limits or guarantee equal completion times.
 
 The existing one-unfinished-job rule per object and process remains.
-A different request key does not bypass it. `AlreadyInProgress` means the new request was **not accepted**.
+`AlreadyInProgress` means the new request was **not accepted**.
 Applications that combine refresh requests must persist their own dirty flag or requested version.
 
 ## Preparing a submission
@@ -206,37 +162,9 @@ best-effort callback failures without logging the callable's arguments.
 
 ## Required follow-up
 
-```python
-BackgroundTransition(
-    "generate", sources=["new"], target="ready",
-    side_effects=[generate_artifact], required_next="dispatch",
-)
-BackgroundTransition(
-    "dispatch", sources=["ready"], target="sent",
-    side_effects=[dispatch_artifact],
-)
-```
-
-`required_next` names one background transition on the same bound process.
-The business record and job must use the same database; cross-database declarations are refused.
-The successor receives the existing arguments and a new trace ID.
-Its `parent_id` references the predecessor's trace ID. It inherits the predecessor's fairness key.
-Its request key is `django-logic:required-next:<predecessor job ID>`.
-The successor row, predecessor completion, and final state commit together.
-For `atomic=False`, all these writes use the dedicated job connection.
-No successor side effect runs inside this transaction.
-
-The successor must be valid in the final state. If it cannot be saved, completion fails and the predecessor retries.
-External effects therefore still need receipts or provider idempotency.
-The required successor name is saved when the predecessor is submitted.
-Deployments must keep that action and its serialized inputs compatible with outstanding records.
-
-`callbacks` and `next_transition` retain their existing best-effort behavior.
-Do not specify both `required_next` and `next_transition` on one declaration.
-This release does not serialize arbitrary callbacks or provide cross-process required follow-ups.
-Synchronous predecessors do not support `required_next`.
-A background successor may perform bounded creation of application-owned child jobs.
-Its own repeated execution must not repeat completed business effects.
+`callbacks` and `next_transition` are best-effort. A crash can lose them.
+Keep required work in a job's side effects, or submit application-owned jobs
+and record their completion in business records.
 
 ### Required work on related records
 
@@ -294,11 +222,10 @@ Retries must recognize accepted or completed shipping work instead of submitting
 Billing records completion only after its required charges succeed.
 
 Keep required work in one job's `side_effects` when it shares one unit of completion.
-Use `required_next` for a required successor on that same bound process.
 Related models use their own ordinary background jobs and application-owned completion checks, as above.
 Independent publication, notifications and refreshes can use `BackgroundEffect`; they must not decide whether required shipping succeeded.
 Save computed values needed by later jobs in business records.
-Mutating execution arguments does not pass new values to saved successors or effects.
+Mutating execution arguments does not pass new values to saved jobs or effects.
 
 ## Independent background effects
 
@@ -367,11 +294,12 @@ older worker. `operation_name`, `dl_transitions` and monitoring show the readabl
 parent-action/effect name. `for_instance()` returns parents and effects;
 `in_flight_for()` and `in_flight()` concern only state-owning parent jobs.
 Find effects with `TransitionMessage.objects.filter(parent_job_id=parent.pk)`.
-`cancel_pending()` can cancel one waiting effect without cancelling siblings or
-its parent; running work is not interrupted. Completed effects use the configured
-retention period for both success and failure. Their failures do not change the
-parent state and have no indefinite retention exception. Parent IDs remain recorded if normal cleanup removes an unkeyed parent. Retrying a completed parent
-does not recreate effects that expired. Public request keys remain retained.
+Completed effects use the configured retention period for success and failure.
+Their failures do not change the parent state and have no indefinite retention exception.
+Parent IDs remain recorded if normal cleanup removes the parent.
+Retrying a completed parent does not recreate effects that expired.
+Effect functions must check whether their work still applies before contacting a provider.
+
 
 `ProcessScenario`'s transition assertions select the parent job; its side-effect
 assertions concern the parent's essential callables. Inspect effect jobs
@@ -423,15 +351,9 @@ completion. Normal retries keep their existing error count and pause. The same
 completion check applies to `atomic=False` jobs and stuck-job completion; a
 non-atomic job keeps any provider confirmations already committed.
 
-```python
-from django_logic.background import cancel_pending
-result = cancel_pending(job_id)
-```
-
-Results are `cancelled`, `running`, `finished`, or `missing`.
-The function does not wait for a running job. It does not change business state or invoke callbacks.
-Applications remain responsible for their cancellation state and any earlier confirmed external effects.
-An unfinished job between attempts can be cancelled. This is not a promise to interrupt an active provider request.
+Applications own cancellation state and any confirmed external effects.
+A state change supersedes an unfinished state-changing job before its next attempt.
+It does not interrupt a provider request already running or cancel independent effects.
 
 ## Upgrade and rollback
 

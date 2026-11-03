@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+- Remove unused public request keys, `operation_options`, `RequestConflict`,
+  `required_next` and `cancel_pending` in the next major release. GV uses none
+  of these APIs. Its required work uses ordinary background jobs and saved
+  business completion states. Background effects keep their unique request keys.
+- Repeated submissions are refused while a job is unfinished. After completion,
+  a valid action creates a new job. Concurrent duplicates roll back preparation
+  writes and callbacks from the refused submission.
+- Remove `request_fingerprint` and `required_next` from the model state only.
+  The database columns and defaults remain so 3.3 producers can keep inserting
+  during deployment. Before upgrading, verify no unfinished job has a nonempty
+  `required_next`. Cleanup no longer retains public request keys indefinitely.
+- Effect jobs are inserted with parent completion. Reopening a completed parent
+  by hand now fails on the effect's unique key instead of reusing old effects.
+- Require new public options, columns and settings to ship with a consumer that
+  uses them. The release notes name that consumer and the problem solved.
+
 ## [3.3.0] — 2026-11-03
 
 - Add read-only transition statistics through `dl_transitions --stats` and

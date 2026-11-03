@@ -11,9 +11,9 @@ from django.db import IntegrityError, connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process, ProcessManager
-from django_logic.background import BackgroundEffect, BackgroundTransition, Defer, operation_options
+from django_logic.background import BackgroundEffect, BackgroundTransition, Defer
 from django_logic.background.models import TransitionMessage
-from django_logic.background.operations import Submission
+from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.runner import run_background_transition
 from django_logic.exceptions import TransitionNotAllowed
 from django.utils import timezone
@@ -78,10 +78,10 @@ class SubmissionContextTests(SubmissionTestSetup, TransactionTestCase):
         self.declaration(side_effects=[change_nested_argument], background_effects=[
             BackgroundEffect('copy', save_effect_argument),
         ])
-        with operation_options(request_key='immutable-input') as submitted:
-            self.widget.submission.finish(snapshot={'members': ['original']})
-        run_background_transition(submitted.job_id)
-        child = TransitionMessage.objects.get(parent_job_id=submitted.job_id)
+        self.widget.submission.finish(snapshot={'members': ['original']})
+        parent = TransitionMessage.objects.get()
+        run_background_transition(parent.pk)
+        child = TransitionMessage.objects.get(parent_job_id=parent.pk)
         self.assertEqual(child.kwargs['snapshot'], {'members': ['original']})
         run_background_transition(child.pk)
         self.widget.refresh_from_db()
@@ -128,30 +128,21 @@ class SubmissionContextTests(SubmissionTestSetup, TransactionTestCase):
         self.assertFalse(TransitionMessage.objects.exists())
         self.assertEqual(events, [])
 
-    def test_repeat_request_and_existing_unfinished_job_do_not_enter_context(self):
+    def test_existing_unfinished_job_does_not_prepare_again(self):
         events = []
 
         @contextmanager
         def prepare(transition, state, kwargs, *, using):
             events.append('entered')
-            kwargs['derived'] = len(events)
             yield
             transaction.on_commit(lambda: events.append('accepted'), using=using)
 
         self.declaration(submission_context=prepare)
-        with operation_options(request_key='repeat') as first:
-            self.widget.submission.finish()
-        with operation_options(request_key='repeat') as repeated:
-            self.widget.submission.finish()
-        self.assertEqual(first.job_id, repeated.job_id)
+        self.widget.submission.finish()
         with self.assertRaises(TransitionNotAllowed):
             self.widget.submission.finish()
         self.assertEqual(events, ['entered', 'accepted'])
-        run_background_transition(first.job_id)
-        with operation_options(request_key='repeat') as completed:
-            self.widget.submission.finish()
-        self.assertEqual(first.job_id, completed.job_id)
-        self.assertEqual(events, ['entered', 'accepted'])
+        self.assertEqual(TransitionMessage.objects.count(), 1)
 
     def test_preparation_integrity_error_is_not_reported_as_an_existing_job(self):
         @contextmanager
@@ -342,9 +333,8 @@ class SubmissionContextPostgresTests(SubmissionTestSetup, TransactionTestCase):
         def submit():
             try:
                 widget = Widget.objects.get(pk=self.widget.pk)
-                identity = Submission(request_key='concurrent', fingerprint='same-public-inputs')
-                row = declaration._enqueue_atomic(widget.submission.state, {}, 'test', submission=identity)
-                results.append((row.pk, identity.created))
+                row = declaration._enqueue_atomic(widget.submission.state, {}, 'test')
+                results.append(row.pk)
             except BaseException as error:
                 failures.append(error)
             finally:
@@ -356,42 +346,8 @@ class SubmissionContextPostgresTests(SubmissionTestSetup, TransactionTestCase):
         for thread in threads:
             thread.join(15)
         self.assertFalse(any(thread.is_alive() for thread in threads))
-        self.assertEqual(failures, [])
-        self.assertEqual(len(results), 2)
-        self.assertEqual({row_id for row_id, _ in results}, {TransitionMessage.objects.get().pk})
-        self.assertEqual(sorted(created for _, created in results), [False, True])
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], AlreadyInProgress)
+        self.assertEqual(results, [TransitionMessage.objects.get().pk])
         self.assertEqual(accepted, ['accepted'])
         self.assertEqual(Widget.objects.count(), 2)
-
-    def test_required_successor_uses_completion_connection_and_fresh_preparation(self):
-        prepared, accepted = [], []
-
-        @contextmanager
-        def prepare(transition, state, kwargs, *, using):
-            self.assertTrue(using.startswith('_django_logic_job_'))
-            self.assertTrue(transaction.get_connection(using).in_atomic_block)
-            Widget.objects.using(using).select_for_update().get(pk=state.instance.pk)
-            kwargs['derived'] = {'value': 'successor inputs'}
-            prepared.append(using)
-            yield
-            transaction.on_commit(lambda: accepted.append('accepted'), using=using)
-
-        following = BackgroundTransition('finish', sources=['ready'], target='done',
-                                         in_progress_state='working', submission_context=prepare)
-        parent = BackgroundTransition('begin', sources=['draft'], target='ready',
-                                      atomic=False, required_next='finish')
-        self.enterContext(patch.object(SubmissionProcess, 'transitions', [parent, following]))
-        self.widget.submission.begin()
-        first = TransitionMessage.objects.get()
-        run_background_transition(first.pk)
-        first.refresh_from_db()
-        self.assertTrue(first.is_completed, first.last_error_message)
-        successor = TransitionMessage.objects.exclude(pk=first.pk).get()
-        self.assertEqual(successor.kwargs['derived'], {'value': 'successor inputs'})
-        self.assertEqual(len(prepared), 1)
-        self.assertEqual(accepted, ['accepted'])
-        run_background_transition(first.pk)
-        run_background_transition(successor.pk)
-        self.assertEqual(len(prepared), 1)
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'done')

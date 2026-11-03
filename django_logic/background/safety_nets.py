@@ -190,7 +190,7 @@ def detect_stuck_transitions() -> int:
 def cleanup_completed_transitions() -> int:
     """Delete completed rows older than ``CLEANUP_DAYS``.
 
-    A failed parent or required job can explain an instance in its
+    A failed state-changing job can explain an instance in its
     ``failed_state``, so cleanup keeps the newest such row per instance and
     process. Independent effects cannot change that state; their failures
     expire after the normal retention period.
@@ -198,10 +198,6 @@ def cleanup_completed_transitions() -> int:
     Each batch commits separately, so a stopped maintenance process keeps
     earlier progress. A caller's outer transaction still controls its commit.
 
-    Public request keys remain retained for duplicate-submission protection.
-    Internal effects and required successors use the normal retention period:
-    they are saved atomically with parent completion, and completed parents
-    cannot run again through the submission or retry APIs.
     """
     from django.db.models import OuterRef, Subquery
 
@@ -229,13 +225,8 @@ def cleanup_completed_transitions() -> int:
         .order_by('-completed_at', '-pk')
         .values('pk')[:1]
     )
-    internal_request = Q(request_fingerprint='') & (
-        Q(request_key__startswith='django-logic:effect:')
-        | Q(request_key__startswith='django-logic:required-next:')
-    )
     eligible = (
-        rows.filter(Q(request_key__isnull=True) | internal_request,
-                    is_completed=True, modified__lt=cutoff)
+        rows.filter(is_completed=True, modified__lt=cutoff)
         .exclude(failed & Q(pk=Subquery(newest_failed)))
     )
     deleted = 0

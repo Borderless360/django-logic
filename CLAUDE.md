@@ -214,6 +214,9 @@ same release's own fixes. Therefore:
    fourth fix.** Precedent: 0.12.0 removed the stranded sweep (−582) after
    four passes kept finding defects there — the cut ended the incident
    class where hardening had not.
+4. **Ship new public options with the consumer change that uses them.**
+   This also applies to columns and settings. The CHANGELOG entry names
+   that consumer and explains what the change fixes.
 
 ## Deployment the durability contract depends on
 

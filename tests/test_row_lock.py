@@ -301,6 +301,21 @@ class BackgroundTerminalRowLockTests(TransactionTestCase):
 
 
 class EarlierProducerInsertTests(TestCase):
+    def test_33_producer_and_reader_work_after_unused_fields_leave_the_model(self):
+        old_state = MigrationExecutor(connection).loader.project_state([
+            ('django_logic_background', '0015_background_effects'),
+        ])
+        old_message = old_state.apps.get_model('django_logic_background', 'TransitionMessage')
+        fields = dict(app_label='tests', model_name='invoice', instance_id='1',
+                      process_name='p', field_name='status', transition_name='go',
+                      queue_name='q', kwargs={}, is_completed=True)
+        earlier = old_message.objects.create(**fields)
+        self.assertEqual(TransitionMessage.objects.get(pk=earlier.pk).transition_name, 'go')
+        current = TransitionMessage.objects.create(**fields)
+        read_by_earlier_worker = old_message.objects.get(pk=current.pk)
+        self.assertEqual(read_by_earlier_worker.required_next, '')
+        self.assertEqual(read_by_earlier_worker.request_fingerprint, '')
+
     def test_a_row_without_the_new_columns_gets_the_database_defaults(self):
         """A producer on 2.4 names none of the columns 3.0 added."""
         original = TransitionMessage.objects.create(
@@ -318,9 +333,9 @@ class EarlierProducerInsertTests(TestCase):
                            [original.pk])
         copy = TransitionMessage.objects.exclude(pk=original.pk).get()
         self.assertEqual(
-            (copy.request_key, copy.request_fingerprint, copy.fairness_key, copy.eligible_at,
-             copy.deferral_reason, copy.completion_kind, copy.required_next),
-            (None, '', '', None, '', '', ''),
+            (copy.request_key, copy.fairness_key, copy.eligible_at,
+             copy.deferral_reason, copy.completion_kind),
+            (None, '', None, '', ''),
         )
 
 
@@ -355,10 +370,9 @@ class EarlierProducerUpgradeTests(TransactionTestCase):
     def assert_new_worker_completes(self, pk):
         message = TransitionMessage.objects.get(pk=pk)
         self.assertEqual(
-            (message.request_key, message.request_fingerprint, message.fairness_key,
-             message.eligible_at, message.deferral_reason, message.completion_kind,
-             message.required_next),
-            (None, '', '', None, '', '', ''),
+            (message.request_key, message.fairness_key, message.eligible_at,
+             message.deferral_reason, message.completion_kind),
+            (None, '', None, '', ''),
         )
         self.assertEqual(claim_next([self.queue]), pk)
         run_background_transition(pk)
