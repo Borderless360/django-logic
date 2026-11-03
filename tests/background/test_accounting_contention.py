@@ -319,7 +319,7 @@ class PendingAccountingTests(SimpleTestCase):
                     return pk
             return None
 
-        def start(pk, active):
+        def start(pk, active, **kwargs):
             state['active'] = active
             if pk is not None:
                 active[9000 + pk] = _Attempt(pk=pk, timeout_seconds=None, deadline=None)

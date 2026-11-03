@@ -161,11 +161,11 @@ class PullClaimTests(TransactionTestCase):
         second.process.fulfil()
         with tempfile.TemporaryDirectory(prefix='dl_safety_pass_') as directory:
             marker = Path(directory) / 'ran'
-            def record_pass():
+            def record_pass(queues):
                 marker.write_text(str(TransitionMessage.objects.filter(is_completed=False).count()))
             start_attempt = pull._start_attempt
-            def start_and_wait_for_pass(pk, attempts):
-                start_attempt(pk, attempts)
+            def start_and_wait_for_pass(pk, attempts, **kwargs):
+                start_attempt(pk, attempts, **kwargs)
                 if pk is None:
                     limit = time.monotonic() + 5
                     while not marker.exists():
@@ -243,9 +243,9 @@ class PullClaimTests(TransactionTestCase):
         start_attempt = pull._start_attempt
         limit = time.monotonic() + 10
 
-        def track(pk, attempts):
+        def track(pk, attempts, **kwargs):
             tracked['attempts'] = attempts
-            start_attempt(pk, attempts)
+            start_attempt(pk, attempts, **kwargs)
 
         def wait(timeout):
             waits.append(timeout)

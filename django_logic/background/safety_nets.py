@@ -35,6 +35,7 @@ from django_logic.background.runner import (
     finalize_stuck_attempt,
     run_background_transition,
 )
+from django_logic.background.worker_presence import queue_worker_presence
 from django_logic.logger import logger
 
 
@@ -109,9 +110,9 @@ def detect_stuck_transitions() -> int:
     It writes one line per queue, so a long backlog does not write one
     line per row every minute. A queue a worker still takes rows from is
     behind, which is a WARNING. A queue no worker takes rows from is an
-    ERROR. Then the worker process is down, its ``--queues`` list misses
-    that name, or no deployment started one. Or other work holds all its
-    slots.
+    ERROR. Recent worker presence distinguishes missing workers from workers
+    that serve this queue but have made no progress. Presence does not lower
+    the severity of a queue with no progress.
 
     Returns the number of rows finalized.
     """
@@ -148,6 +149,15 @@ def detect_stuck_transitions() -> int:
             )
             continue
         behind = f' {rows - 1} more rows wait behind it.' if rows > 1 else ''
+        if queue_worker_presence(queue_name):
+            logger.error(
+                f'detect_stuck_transitions: queue {queue_name!r} has a recent '
+                f'worker presence record, but no progress for {report_after} '
+                f'minutes. TransitionMessage#{oldest_pk} has waited '
+                f'{age_minutes} minutes.{behind} Check worker capacity, '
+                'other queues sharing its slots, and blocked jobs.'
+            )
+            continue
         logger.error(
             f'detect_stuck_transitions: TransitionMessage#{oldest_pk} has '
             f'waited {age_minutes} minutes on queue {queue_name!r}, and no '

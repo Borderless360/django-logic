@@ -98,10 +98,10 @@ class WorkerSlotReuseTests(TransactionTestCase):
         tracked = {}
         child_pids = []
 
-        def start(pk, attempts):
+        def start(pk, attempts, **kwargs):
             tracked['attempts'] = attempts
             before = set(attempts)
-            start_attempt(pk, attempts)
+            start_attempt(pk, attempts, **kwargs)
             child_pids.extend(set(attempts) - before)
 
         def claim(*args, **kwargs):
@@ -185,7 +185,7 @@ class WorkerSlotReuseTests(TransactionTestCase):
     def test_a_full_worker_runs_maintenance_before_its_attempt_finishes(self):
         self._enqueue('waiting', wait_for_maintenance=True)
 
-        def record_maintenance():
+        def record_maintenance(queues):
             _write_event(self.directory, 'maintenance')
 
         with patch.object(pull, '_run_safety_nets', record_maintenance), \

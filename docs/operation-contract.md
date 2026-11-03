@@ -3,6 +3,22 @@
 Existing `instance.process.action(...)` calls keep their return value and declaration behavior.
 The additions below are optional. PostgreSQL state protection changes for every lock-taking transition.
 
+## Keeping one execution contract
+
+Fair group selection and `Defer` belong to the standard worker contract. They
+let applications share worker capacity while respecting provider waiting periods.
+Independent `BackgroundEffect` work also remains part of this contract. A current
+Mintsoft integration uses it for follow-up work after manifest completion.
+Effects use the same job records, workers and retry rules as parent transitions.
+
+Public request keys and `required_next` remain optional declaration and submission
+choices. Applications need not use them for ordinary background work. They remain
+supported APIs because saved requests and jobs depend on their behavior.
+Separate packages or runtime feature switches would add combinations to support
+without simplifying existing jobs. Keep the current API and improve it against
+observed application failures. Any future removal must preserve saved-job
+compatibility, request-key protection and the retention rules below.
+
 ## Checking eligibility while another action runs
 
 `process.get_available_actions(..., include_locked=True)` and
@@ -172,6 +188,17 @@ Apply the migration before starting upgraded workers. Its nullable timestamps
 and database defaults let older 3.x producers continue inserting jobs.
 Older workers do not update these measurements, so mixed-worker totals are
 incomplete. Existing retention rules still apply to the job records.
+
+`transition_statistics(since=cutoff, queues=None, using=None)` groups retained
+jobs by queue, model, process class, action and effect. Counts describe each
+selected job's recorded history, not events that happened within the window.
+`initial_wait_ms` uses only `first_started_at`; `last_attempt_duration_ms` uses
+only recorded `duration_ms` values. Each contains `samples`, `p50`, `p90` and
+`max`. Percentiles use the nearest rank. Missing measurements are excluded.
+`repeated_starts` includes deferrals and competing recorded starts. It is not an
+exact retry count. These records cannot establish total runtime or utilization.
+`dl_transitions --stats --since 7d --json` exposes the same report without
+changing jobs. Cleanup limits the available history.
 
 Essential side-effect error logs identify the failing callable, action,
 model record and exception type. This separates business work failures from

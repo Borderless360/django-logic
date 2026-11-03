@@ -139,7 +139,7 @@ class SafetyNetIsolationTests(TransactionTestCase):
         passes = []
         limit = time.monotonic() + 8
 
-        def start(pk, attempts):
+        def start(pk, attempts, **kwargs):
             tracked['attempts'] = attempts
             if pk is None:
                 self.assertFalse(any(attempt.pk is None for attempt in attempts.values()))
@@ -147,7 +147,7 @@ class SafetyNetIsolationTests(TransactionTestCase):
                     self.assertEqual(attempts, {})
                     raise StopWorker
                 passes.append(time.monotonic())
-            start_attempt(pk, attempts)
+            start_attempt(pk, attempts, **kwargs)
 
         def wait(delay):
             self.assertLess(time.monotonic(), limit, 'The worker did not finish its first safety pass.')

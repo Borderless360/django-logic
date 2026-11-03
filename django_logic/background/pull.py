@@ -160,7 +160,7 @@ class _Attempt:
     work_exit_code: int | None = None
 
 
-def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
+def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) -> None:
     """Fork one attempt or safety-net pass and track its deadline.
 
     The worker and the attempt process must not share a database
@@ -200,7 +200,7 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt]) -> None:
         status = 1
         try:
             if pk is None:
-                _run_safety_nets()
+                _run_safety_nets(queues)
             else:
                 run_background_transition(pk)
             status = 0
@@ -478,7 +478,7 @@ def _record_attempt_error(pk: int, message: str) -> None:
         )
 
 
-def _run_safety_nets() -> None:
+def _run_safety_nets(queues=()) -> None:
     """The periodic work: the stuck finalizer and its never-started
     report, and the cleanup sweep. Called from the loop, so pull mode
     schedules nothing anywhere else."""
@@ -486,6 +486,10 @@ def _run_safety_nets() -> None:
         cleanup_completed_transitions,
         detect_stuck_transitions,
     )
+    from django_logic.background.worker_presence import record_worker_presence
+
+    # Cache access stays outside the worker that enforces job deadlines.
+    record_worker_presence(queues)
 
     for step in (
         detect_stuck_transitions,
@@ -639,7 +643,7 @@ def run_worker(
                 and (last_safety_net is None or forever or claimed_any)
                 and (last_safety_net is None or now - last_safety_net >= SAFETY_NET_SECONDS)):
             try:
-                _start_attempt(None, attempts)
+                _start_attempt(None, attempts, queues=queues)
             except Exception as exc:
                 logger.error('pull: could not start safety nets: %s', exc)
             last_safety_net = now
