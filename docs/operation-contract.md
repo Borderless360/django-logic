@@ -255,6 +255,7 @@ class OrderShippingCompletion(Process):
         BackgroundTransition(
             "complete", sources=["not_requested", "failed"],
             in_progress_state="processing", target="completed", failed_state="failed",
+            atomic=False,
             side_effects=[complete_shipping_and_verify_results],
             background_effects=[
                 BackgroundEffect("notify", notify_shipping_complete),
@@ -266,11 +267,23 @@ class OrderShippingCompletion(Process):
 ```
 
 Bind this process to the order's `shipping_completion_state` in `AppConfig.ready()`.
-Save the accepted shipping change and submit `order.shipping_completion_process.complete()` in one transaction.
+In pull mode, save the accepted shipping change and submit `order.shipping_completion_process.complete()` in one transaction.
+The worker runs the saved job after that transaction commits.
 The required callable ships fulfilments, verifies their results and applies shipping rates.
 Required failures must raise errors; legacy helpers that swallow errors need explicit result checks.
 `completed` then records business success even after normal job cleanup.
 Absence of an unfinished job does not establish success.
+
+Use `atomic=False` when existing fulfilment work commits progress or publishes events independently.
+A later rate failure must not roll back shipping that has already been announced.
+Retries preserve confirmed child progress and resume only unfinished work.
+The order reaches `completed` only after every required result is verified.
+Default atomic execution suits required database work whose external publication waits for commit.
+
+Inline execution of `atomic=False` work requires autocommit.
+Tests of transactional submission must submit in pull mode, commit, then call `retry_pending()` to execute saved jobs inline.
+Use `TransactionTestCase` for those real commits.
+Do not add an empty production job just to make transactional submission run inside a synchronous test.
 
 The manifest submits bounded per-order jobs and lets workers process orders independently.
 It reads the saved completion states and required fulfilment results before billing.
