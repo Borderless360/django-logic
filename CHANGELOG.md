@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [4.0.1] — 2026-11-04
 
 - Select a client's ready work before an older job postponed until later.
   GV manifest completion repeatedly waited for shipping jobs that were queued behind it.
