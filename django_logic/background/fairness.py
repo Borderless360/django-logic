@@ -7,6 +7,7 @@ import time
 
 from django.db import connections, models, transaction
 from django.db.models import Exists, F, OuterRef
+from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 
 
@@ -19,9 +20,10 @@ class FairnessGroup(models.Model):
 
 
 def claim_fair(rows):
-    """Choose the oldest available job for the least recently served client.
+    """Choose work ready earliest for the least recently served client.
 
-    Unkeyed jobs share the empty group and preserve their FIFO order.
+    Unkeyed jobs share the empty group. New jobs keep submission order.
+    Postponed jobs follow work ready before their new due time.
     Locked or postponed jobs cannot prevent another client from starting.
     A bounded scan leaves the worker free to check running job deadlines.
     """
@@ -65,8 +67,10 @@ def _claim_in_transaction(rows, groups, started):
         if group is None:
             return None
         examined.append(group.key)
+        # An older job waiting for newer work must not keep taking its turn.
+        # A missing or earlier due time preserves the job's creation order.
         pk = rows.filter(fairness_key=group.key).order_by(
-            'created', 'pk',
+            Greatest('created', Coalesce('eligible_at', 'created')), 'created', 'pk',
         ).select_for_update(skip_locked=True).values_list('pk', flat=True).first()
         # An unavailable group's turn also advances. Otherwise many
         # long-running groups could occupy every bounded scan forever.

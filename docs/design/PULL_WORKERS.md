@@ -10,7 +10,12 @@ Release tags and the changelog retain the history of the replaced design.
 A worker selects an eligible job from its queues using `SELECT FOR UPDATE SKIP LOCKED`.
 A running job holds its database row lock, so other workers skip that job.
 Client turn records let each client make progress without limiting its parallel jobs.
+Within a client, workers select jobs by when they became ready, then by submission order.
+A postponed job follows work ready before its new due time, even when the postponed job was submitted first.
+This lets required newer work run before an older job checks its result again.
+Jobs without a postponement keep their submission order, including jobs without a client key.
 A failed attempt waits until its retry time. The configured error limit stops repeated failures.
+Error retries keep their submission order once the retry wait ends.
 A lost database connection releases the lock, allowing another worker to try again.
 External side effects still require application duplicate protection.
 
