@@ -162,12 +162,34 @@ Each declaration slot has one job:
   receive `exception=`. Put cleanup and compensation here.
 
 On PostgreSQL, a lock-taking synchronous `Transition` runs callbacks and `next_transition` inside its transaction, before the target state commits.
+
 Other connections see the prior committed state until the outermost transaction commits, including any transaction opened by the caller.
 A process interruption during callbacks can therefore discard the state and side-effect writes too.
 Use `transaction.on_commit()` for best-effort work that needs committed data; it does not guarantee delivery of required work.
 Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.
 Inline background execution can still be inside a caller's outer transaction.
 
+Use `DatabaseTransition` for changes that PostgreSQL can roll back completely.
+It takes the same declaration arguments as `Transition` and requires PostgreSQL.
+It keeps row locks, permissions, conditions, source checks, pending-job checks,
+targets, failure handling, callbacks and `next_transition`.
+It refuses reentry without creating a persistent cache lock. A killed process
+therefore leaves no cache lock that delays a saved completion job's retry.
+
+This database-only promise includes **all nested transitions and submissions**,
+including their ordinary callbacks. They must use the same database.
+The scope ends before `transaction.on_commit()` callbacks run. Save required
+external work as a background job; do not call providers, publish messages,
+or perform other irreversible work in this scope. In a synchronous test runtime,
+background work runs inline and must also satisfy that promise.
+
+Ordinary `Transition` calls outside this scope keep their shared cache protection.
+`DatabaseTransition` also refuses an existing cache lock, including one held by
+an external call whose database connection failed. Do not clear that lock to
+force a retry. Replacing an external operation with `DatabaseTransition` is unsafe.
+
+GV uses this declaration for import results and their nested stock and bulk updates.
+Its order notifications and shipping submission run in separately saved background work.
 Declare a `Transition` with no `target` for work that needs conditions,
 permissions and side-effects but writes no state on success. It follows
 the same rules as every transition: it takes the state lock, it is

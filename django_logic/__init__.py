@@ -1,5 +1,6 @@
 from .process import Process, ProcessManager
 from .transition import Transition
+from .database_transition import DatabaseTransition
 
 #: The public surface of the top-level package. Both sibling public packages
 #: (``django_logic.background``, ``django_logic.testing``) define one; without
@@ -13,4 +14,5 @@ __all__ = [
     'Process',
     'ProcessManager',
     'Transition',
+    'DatabaseTransition',
 ]

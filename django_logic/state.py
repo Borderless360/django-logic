@@ -1,4 +1,6 @@
 from contextlib import contextmanager
+from contextvars import ContextVar
+import os
 from hashlib import blake2b
 from uuid import uuid4
 
@@ -13,6 +15,46 @@ from django_logic.conf import lock_timeout as _get_lock_timeout
 #: refused, which keeps a long job from stalling the caller. Zero refuses
 #: at once.
 ROW_LOCK_WAIT_SECONDS = 2
+
+_database_scope = ContextVar('django_logic_database_scope', default=None)
+_database_locks = ContextVar('django_logic_database_locks', default=())
+
+
+def _database_lock_key(state):
+    return (state.instance._state.db or DEFAULT_DB_ALIAS, state.instance_key)
+
+
+def _active_database_scope():
+    scope = _database_scope.get()
+    return scope if scope and scope['active'] and scope['process_id'] == os.getpid() else None
+
+
+def _database_lock_is_held(state):
+    key = _database_lock_key(state)
+    return any(held['active'] and held['process_id'] == os.getpid() and held['key'] == key
+               for held in _database_locks.get())
+
+
+@contextmanager
+def _database_only_scope(state):
+    using = state.instance._state.db or DEFAULT_DB_ALIAS
+    parent = _active_database_scope()
+    if parent and parent['using'] != using:
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured('Nested database transitions must use the same database transaction.')
+    scope = {'using': using, 'active': True, 'process_id': os.getpid()}
+    scope_token = _database_scope.set(scope)
+    locks_token = _database_locks.set(_database_locks.get())
+    try:
+        yield
+    finally:
+        # A copied async context must not retain a completed call's refusal.
+        scope['active'] = False
+        for held in _database_locks.get():
+            if held['scope'] is scope:
+                held['active'] = False
+        _database_locks.reset(locks_token)
+        _database_scope.reset(scope_token)
 
 
 class State:
@@ -144,6 +186,19 @@ class State:
         holder whose lock TTL-expired cannot release a successor's lock
         (see ``unlock``).
         """
+        if _database_lock_is_held(self):
+            return False
+        scope = _active_database_scope()
+        if scope:
+            if (self.instance._state.db or DEFAULT_DB_ALIAS) != scope['using']:
+                from django.core.exceptions import ImproperlyConfigured
+                raise ImproperlyConfigured('Nested database transitions must use the same database transaction.')
+            if cache.get(self._get_hash()) is not None:
+                return False
+            held = {'state': self, 'key': _database_lock_key(self), 'scope': scope,
+                    'active': True, 'process_id': os.getpid()}
+            _database_locks.set((*_database_locks.get(), held))
+            return True
         token = uuid4().hex
         if cache.add(self._get_hash(), token, _get_lock_timeout()):
             self._lock_token = token
@@ -165,6 +220,13 @@ class State:
         falls back to an unconditional delete — the historical
         force-release behavior, kept for manual repair paths.
         """
+        for held in reversed(_database_locks.get()):
+            if held['active'] and held['process_id'] == os.getpid() and held['state'] is self:
+                held['active'] = False
+                _database_locks.set(tuple(item for item in _database_locks.get() if item is not held))
+                return
+        if _active_database_scope():
+            return
         key = self._get_hash()
         token = getattr(self, '_lock_token', None)
         if token is None or cache.get(key) == token:
@@ -174,4 +236,5 @@ class State:
         """Whether the lock key exists right now. Racy — a lock can appear
         or expire between this read and the caller's next step; ``lock()``
         is the only atomic gate."""
-        return cache.get(self._get_hash()) is not None
+        return (_database_lock_is_held(self)
+                or cache.get(self._get_hash()) is not None)
