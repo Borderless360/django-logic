@@ -24,8 +24,9 @@ Default atomic execution:
      ``DatabaseError``, so the error bookkeeping below still runs,
    * on success, writes the ``target`` state (when one is declared)
      and marks the TransitionMessage completed,
-   * on failure, records the error and either leaves the row for retry
-     or, at ``MAX_ERRORS``, writes ``failed_state`` and marks completed.
+   * on ``Defer``, saves the next eligible time without counting an error,
+   * on other failures, records the error and retries unless it is permanent or the error allowance is exhausted.
+     Terminal failure checks the business state under its lock before writing ``failed_state`` and completing the job.
 
 2. After the atomic block (best-effort):
 
@@ -310,13 +311,12 @@ def _complete_terminal_failure(
 
 
 def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
-    """Run a terminal row's ``failure_callbacks`` best-effort, *after* the
-    finalizing atomic block has committed and released the row lock.
+    """Run a terminal row's ``failure_callbacks`` after its execution block exits.
 
-    Every terminal-failure path runs through here: a row that reached
-    MAX_ERRORS during an attempt, and a row detect_stuck
-    finalized. ``Callbacks.execute`` already swallows exceptions; the guard
-    here also covers a malformed hook list.
+    Pull workers have committed by this point. Inline callers may still hold an outer transaction.
+
+    Restoration failures and jobs whose business state cannot be checked do not run these callbacks.
+    ``Callbacks.execute`` already swallows ordinary exceptions; this guard also covers a malformed hook list.
     """
     try:
         transition.failure_callbacks.execute(
@@ -851,12 +851,8 @@ def _restore(transition_message: TransitionMessage):
         try:
             process = _load_process_from_path(instance, recorded_path, transition_message)
         except Exception as exc:
-            # Fail closed through the stop-retry path: the row completes as
-            # unrestorable, with no side-effects and no state write. A bare
-            # ImportError would escape _run_atomic, which catches only
-            # _RestoreError, and roll the attempt back with errors_count
-            # unchanged, so the claim filter would offer the row forever.
-            # Let pending rows complete before you rename a Process class.
+            # A missing recorded process completes the job without side effects or state changes.
+            # Other restoration errors count toward the normal retry limit.
             raise _RestoreError(
                 f'recorded process_class {recorded_path!r} could not be '
                 f'loaded: {exc}'

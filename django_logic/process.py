@@ -63,7 +63,7 @@ class Process:
 
     Subclasses declare class-level attributes ``transitions``,
     ``nested_processes``, ``conditions``, ``permissions``,
-    ``process_name``, and ``state_class``.
+    ``process_name``, ``state_class``, ``permissions_class`` and ``refusal_messages``.
 
     Class-time validation enforces that a background transition is
     uniquely identifiable by ``(process class that declared it,
@@ -238,8 +238,8 @@ class Process:
     def get_available_transitions(self, user=None, action_name=None, *, include_locked=False):
         """Check current state, conditions and permissions without acquiring a lock.
 
-        ``include_locked`` changes only this query. Executing an action still
-        acquires its locks and checks its requirements again.
+        ``include_locked`` changes only this query. Calling the action checks conditions and permissions before locking.
+        Under the lock, execution checks persisted state and conflicting unfinished work again.
         """
         for transition, _owner in self._iter_available_with_owner(
             user=user,
@@ -616,9 +616,7 @@ class ProcessManager:
                 f"not in INSTALLED_APPS. Add it and run manage.py migrate."
             )
 
-        # The state field must be a concrete column: a typo, a property,
-        # or a relation silently accepted here only fails much later —
-        # deep inside a transition's state write or the stranded sweep.
+        # Refuse an invalid state field here, before a later transition tries to write it.
         try:
             field = model._meta.get_field(state_field)
         except FieldDoesNotExist as exc:
@@ -634,11 +632,7 @@ class ProcessManager:
                 f"must be a concrete model field (got {type(field).__name__})."
             )
 
-        # A different binding under the same process_name would silently
-        # overwrite the model property while its registry entry kept
-        # claiming the old machine — every registry consumer (coverage,
-        # system checks, stranded recovery) would then disagree with
-        # runtime dispatch.
+        # A different binding under the same name would leave system checks inspecting a process the model no longer calls.
         for existing in cls.bindings:
             if (existing.model is model
                     and existing.process_class.process_name

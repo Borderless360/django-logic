@@ -178,7 +178,7 @@ class Command(BaseCommand):
             if queue_is_served(row.queue_name):
                 return (
                     f'claimable, and waiting its turn — a worker takes rows '
-                    f'from {row.queue_name!r}, and older rows go first'
+                    f'from {row.queue_name!r}; eligible clients take turns and ready work goes first within each client'
                 )
             if queue_has_worker(row.queue_name):
                 return (

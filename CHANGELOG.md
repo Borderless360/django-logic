@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Correct guidance for synchronous transactions and callbacks, lock refusals, client ordering, effect retention, testing and release preparation.
+  Keep existing APIs, execution behavior and upgrade prerequisites.
+
 - Preserve non-atomic side effects' failures and postponements when another transaction holds the business row.
   A permanent failure stops retries; a postponed job keeps its due time and error allowance.
   GV uses both results for provider submissions and waits between manifest operations.

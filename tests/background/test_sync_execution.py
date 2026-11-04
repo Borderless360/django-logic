@@ -65,7 +65,7 @@ class HappyPathTests(TestCase):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class BackgroundActionTests(TestCase):
+class BackgroundTransitionTests(TestCase):
     def setUp(self):
         self.widget = Widget.objects.create(status='fulfilled')
 

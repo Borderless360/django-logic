@@ -1,13 +1,8 @@
-"""
-Category 1: Celery Worker Crash Tests
+"""Synchronous transition behavior after injected exceptions.
 
-Proves that the durable BackgroundTransition design recovers from worker
-crashes at every point in the execution timeline.
-
-Each test simulates a crash by raising WorkerCrashSimulated at a specific
-step, then verifies the system recovers through the next claim.
-
-See docs/design/PULL_WORKERS.md for current retry and recovery behavior.
+These tests check saved state, cache-lock release and explicit repeated calls.
+An ordinary test exception is not proof of hard process-stop recovery.
+Real background-worker recovery tests live in tests.background.
 """
 from unittest.mock import patch, MagicMock
 
@@ -32,10 +27,8 @@ from tests.stability.models import (
 @tag('stability')
 class TestCrashDuringSideEffects(StabilityTestCase):
     """
-    1.1 -- Worker crashes mid-side-effects.
-
-    Side effects partially execute. On recovery, all side effects
-    re-run from scratch. Requires idempotency.
+    A side effect raises after earlier work ran.
+    An explicit repeated call runs those side effects again, so they require duplicate protection.
     """
 
     def test_crash_during_second_side_effect_then_recover(self):
@@ -126,12 +119,7 @@ class TestCrashDuringSideEffects(StabilityTestCase):
 @tag('stability')
 class TestCrashAfterTargetStateSet(StabilityTestCase):
     """
-    1.2 -- Worker crashes after target state is set but before any
-    "mark as completed" step.
-
-    The state is correct (target). On recovery, the handler should detect
-    that the transition already completed and clean up without re-running
-    side effects.
+    A record already at the target state does not offer the earlier action.
     """
 
     def test_state_already_at_target_no_duplicate_side_effects(self):
@@ -150,11 +138,8 @@ class TestCrashAfterTargetStateSet(StabilityTestCase):
 @tag('stability')
 class TestCrashDuringCallbacks(StabilityTestCase):
     """
-    1.3 -- Worker crashes during callbacks (after target state set and
-    transition marked as completed).
-
-    State is correct. Callbacks are best-effort and may be lost.
-    This validates the documented reliability contract.
+    An ordinary callback exception is swallowed after the target state is written.
+    The synchronous call can then finish and commit that state.
     """
 
     def test_callback_crash_does_not_corrupt_state(self):
@@ -186,16 +171,10 @@ class TestCrashDuringCallbacks(StabilityTestCase):
 
 
 @tag('stability')
-class TestCrashBetweenCommitAndDispatch(StabilityTestCase):
+class TestCommittedStateWithHeldCacheLock(StabilityTestCase):
     """
-    1.4 -- The enqueue atomic block commits but on_commit never fires.
-
-    The TransitionMessage row exists but no attempt has started it.
-    The next claim must take the row.
-
-    NOTE: This test validates the contract at the state/lock level.
-    Full TransitionMessage integration requires the BackgroundTransition
-    implementation from Stage 2.
+    A direct state write commits independently of the held cache lock.
+    This test creates no background job and does not exercise worker delivery.
     """
 
     def test_state_set_but_dispatch_fails_lock_remains(self):
@@ -217,8 +196,7 @@ class TestCrashBetweenCommitAndDispatch(StabilityTestCase):
 @tag('stability')
 class TestMaxRetriesExhausted(StabilityTestCase):
     """
-    1.6 -- After N consecutive failures, the transition should reach
-    failed_state permanently.
+    Each explicit synchronous call records its declared failed state when its side effect raises.
     """
 
     def test_repeated_failures_reach_failed_state(self):

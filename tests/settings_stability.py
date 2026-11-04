@@ -6,7 +6,6 @@ These are needed for:
   - select_for_update (not supported by SQLite)
   - Proper transaction isolation (SQLite serializes all writes)
   - Atomic cache.add with nx=True (LocMemCache is single-process only)
-  - UniqueConstraint with condition (partial indexes, not supported by SQLite)
 """
 import os
 

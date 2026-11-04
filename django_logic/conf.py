@@ -57,10 +57,8 @@ _sync_enabled = False
 def enable_sync() -> None:
     """Allow ``BACKGROUND_EXECUTION='sync'`` in this process.
 
-    Sync runs the worker path inline, in the caller's own thread. That
-    is a test runtime, not a deployment: in a web process it runs every
-    side-effect inside the request, and nothing retries what fails.
-    Production is always pull.
+    This global setting runs background work in the caller's thread; it starts no retry loop.
+    Deployments normally use pull workers. Use ``sync_execution()`` when only one block needs an immediate result.
 
     Call this from a test settings module, before Django boots::
 
@@ -217,9 +215,9 @@ _force_sync: ContextVar[bool] = ContextVar('_dl_force_sync', default=False)
 def sync_execution():
     """Force sync mode for the duration of the ``with`` block.
 
-    Useful inside a test / management command when the global setting
-    is ``'pull'`` but you want the worker path to run inline for this
-    block.
+    Business code and tests can use this block when the caller needs an immediate result.
+    Inline execution starts no retry loop. A committed unfinished job can still be claimed by workers serving its queue.
+    Atomic work can join a caller transaction; ``atomic=False`` still requires PostgreSQL autocommit.
     """
     token = _force_sync.set(True)
     try:

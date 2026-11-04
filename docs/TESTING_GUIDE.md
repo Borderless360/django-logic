@@ -136,7 +136,7 @@ def test_order_lifecycle(self):
     self.transition(order, 'approve', user=self.staff)
     self.assert_state(order, 'approved')
 
-    self.background_transition(order, 'fulfil')   # enqueue + execute inline, no Celery
+    self.background_transition(order, 'fulfil')   # enqueue + execute inline
     self.assert_state(order, 'fulfilled')
     self.assert_side_effects_ran(['reserve_stock', 'call_courier'])
     self.assert_callbacks_ran(['send_confirmation_email'])
@@ -187,7 +187,7 @@ def test_courier_failure_is_recorded(self):
     self.assert_side_effects_not_ran(['call_courier'])
 ```
 
-**Per-attempt rollback (0.4+):** the failed attempt's *database* writes are
+**Per-attempt rollback:** the failed attempt's *database* writes are
 rolled back — `reserve_stock`'s rows do not survive attempt 1, and the retry
 re-creates them exactly once. The idempotency you still owe is for *external*
 calls (`call_courier` may genuinely fire twice across attempts).
@@ -270,8 +270,8 @@ Class attributes: `process_class`, `model`, `state_field` (default
   (unexpected) exception fails the test loudly.
 - `expect_raises=` — pin the caller boundary. An **exception type** (or tuple)
   asserts it propagated to the caller (the `SideEffects` re-raise contract);
-  **`False`** asserts nothing propagated (the swallow contract). Omitted (the
-  legacy default), an injected failure is absorbed so you can assert on the
+  **`False`** asserts nothing propagated (the swallow contract). When omitted,
+  an injected failure is absorbed so you can assert on the
   *recorded* error instead.
   On a `background_transition` drive the caller boundary is a sync-mode
   artefact: the runner re-raises the hook's exception to the inline caller,
@@ -280,13 +280,10 @@ Class attributes: `process_class`, `model`, `state_field` (default
   `expect_raises` there for the refusal, and pin the work's own outcome with
   the row-level assertions — `assert_error_recorded`, `assert_error_count`,
   `assert_state`.
-  The caller's object keeps the state the enqueue wrote — the
-  `in_progress_state`, or the source — in every mode, because the worker
-  writes the outcome on its own copy of the instance. That is what a
-  production caller holds, so an API test that reads the response after a
-  background drive rightly sees `validating`, not the follow-up's final
-  state. To read the outcome, use `assert_state` or call
-  `refresh_from_db()` on the object first.
+  A direct `order.process.fulfil()` call keeps the submission state on the caller's object.
+  The worker writes the outcome on its own instance, including during inline execution.
+  A scenario drive refreshes the object after it finishes, so `order.status` reflects the saved outcome.
+  After a direct call, use `assert_state` or `refresh_from_db()` to read that outcome.
 
 **Assertions**
 
@@ -322,7 +319,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_not_raised()` | The last drive propagated nothing (the swallow contract). |
 | `assert_error_recorded(obj, contains)` | Substring of `last_error_message` on the latest `TransitionMessage`. |
 | `assert_error_count(obj, expected)` | `errors_count` on the latest `TransitionMessage`. |
-| `assert_transition_owner(obj, cls, transition_name=None)` | The `owning_process_class` recorded on a `TransitionMessage` (for chained / condition-disambiguated background transitions). |
+| `assert_transition_owner(obj, 'app.process.OrderProcess', transition_name=None)` | The dotted path of the process class that declared the recorded transition. |
 
 On failure, every assertion raises with a numbered timeline of each step the
 test took and the relevant `TransitionMessage` — built

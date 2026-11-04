@@ -2,7 +2,7 @@
 
 Test FSM workflows the way they read in a business document — state
 transitions, conditions, permissions, side-effects, background jobs, failures
-and retries — as ordinary unit tests, **without a Celery broker**.
+and retries — as ordinary unit tests.
 
     from django_logic.testing import ProcessScenario
 

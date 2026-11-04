@@ -122,7 +122,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def background_transition(self, instance, action, *, fail_side_effect=None,
                              fail_with=None, expect_raises=None, **kwargs):
-        """Run a BackgroundTransition's enqueue + the worker inline (no Celery).
+        """Submit a BackgroundTransition and run it inline.
 
         ``fail_side_effect`` / ``fail_with`` make the named side-effect raise,
         exercising the real failure path. ``expect_raises`` pins the

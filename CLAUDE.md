@@ -50,8 +50,8 @@ uncompleted, in progress.
 | `TM`, `TM-scoped` | `TransitionMessage`, scoped to the row |
 | `tm`, `msg`, `inst` | `transition_message`, `message`, `instance` |
 
-`tests/test_voice.py` enforces this table over the library and the current
-docs. It skips `CHANGELOG.md` on purpose: the changelog is a historical
+`tests/test_voice.py` checks selected retired phrases in the library and current
+docs. Reviewers check the remaining wording rules and abbreviations. It skips `CHANGELOG.md` on purpose: the changelog is a historical
 record, so it must keep naming the words and APIs that shipped at the time.
 
 ### Writing to people — no riddles

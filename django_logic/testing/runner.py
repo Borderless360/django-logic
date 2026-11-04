@@ -1,5 +1,5 @@
 """Synchronous execution helpers — run background transitions and their
-retries inline, without Celery.
+retries inline.
 
 Built on the library's own ``sync_execution()`` context manager (which forces
 the worker to run in-process) so tests exercise the *real* enqueue + worker code,
@@ -33,7 +33,7 @@ def all_transitions(process_class) -> list:
 
 
 def run_background_sync(instance, process_name, action_name, kwargs):
-    """Run a BackgroundTransition's enqueue + the worker inline (no broker)."""
+    """Submit a BackgroundTransition and run it inline."""
     from django_logic.background import sync_execution
     with sync_execution():
         process = getattr(instance, process_name)

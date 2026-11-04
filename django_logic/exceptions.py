@@ -67,7 +67,7 @@ def _check_validity(owner, *args):
 
 class TransitionNotAllowed(Exception):
     """When the process resolver raises this, it sets ``current_state``
-    on the instance. It stays ``None`` at other raise sites.
+    on the exception. It stays ``None`` at other raise sites.
     ``reason`` describes the failed check. It stays ``None`` when a custom
     validity override supplies no reason, or the caller creates the exception.
     Process calls attach ``user_message`` for display. Diagnostic text and
@@ -93,7 +93,8 @@ class TransitionTemporarilyUnavailable(TransitionNotAllowed):
     sync gate while the uncompleted ``TransitionMessage`` is still being
     retried — all of these resolve when that work completes. A row
     nothing is retrying is stranded, not busy, and raises the plain
-    base: it has no TTL, so "retry shortly" would be wrong forever. Lock
-    contention ("State is locked") stays plain ``TransitionNotAllowed``
-    for the same reason: a TTL-stuck lock is not "retry shortly".
+    base: no worker will retry it automatically.
+    A PostgreSQL row-lock timeout also raises this subclass, with reason ``locked``.
+    A cache lock refusal ("State is locked") raises plain ``TransitionNotAllowed``.
+    The shared reason alone does not determine whether a short retry is appropriate.
     """

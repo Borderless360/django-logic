@@ -1,11 +1,3 @@
-> **3.2.0:** Background transitions can prepare saved inputs and application locks
-> through the public [submission context](docs/operation-contract.md#preparing-a-submission).
-> Independent effects use the parent's saved inputs even when execution changes its own copy.
->
-> **3.1.0:** Independent background effects are saved with parent completion and
-> run through the same workers without blocking later parent actions. See
-> [the effect contract and upgrade requirements](docs/operation-contract.md#independent-background-effects).
->
 ![django-logic](https://user-images.githubusercontent.com/6745569/87846635-dabb1500-c903-11ea-9fae-f1960dd2f82d.png)
 
 [![CI](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml/badge.svg)](https://github.com/Borderless360/django-logic/actions/workflows/ci.yml)
@@ -34,6 +26,10 @@ runs it.
 
 ## Install
 
+The current release is **4.0.1**. See the [changelog](CHANGELOG.md) for its fixes.
+Before upgrading to 4.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
+
+
 ```bash
 pip install django-logic
 ```
@@ -55,6 +51,9 @@ Running no background transitions? The same entry. The PostgreSQL and
 shared-cache rules below apply only when a background transition is
 bound — `manage.py check` tells you the moment one is — so a
 synchronous-only project runs on SQLite with Django's default cache.
+On other databases, a synchronous transition takes its cache lock but opens no transaction.
+Without a caller transaction, earlier writes survive an interruption, and swallowed database errors may not be detected.
+Use PostgreSQL to verify the transaction and concurrent-state guarantees described below.
 
 ```bash
 python manage.py migrate
@@ -157,10 +156,17 @@ Each declaration slot has one job:
   reaches the target state. A failure stops the state change, and django-logic
   writes `failed_state` when you declare one.
 - `callbacks` — functions that run after the object reaches the target state.
-  They are best-effort: django-logic swallows what they raise. A crash after
-  the state write can skip them. Put required work in `side_effects`.
+  They are best-effort: django-logic swallows ordinary exceptions they raise.
+  Put required work in `side_effects`.
 - `failure_callbacks` — functions that run after a side-effect fails. They
   receive `exception=`. Put cleanup and compensation here.
+
+On PostgreSQL, a lock-taking synchronous `Transition` runs callbacks and `next_transition` inside its transaction, before the target state commits.
+Other connections see the prior committed state until the outermost transaction commits, including any transaction opened by the caller.
+A process interruption during callbacks can therefore discard the state and side-effect writes too.
+Use `transaction.on_commit()` for best-effort work that needs committed data; it does not guarantee delivery of required work.
+Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.
+Inline background execution can still be inside a caller's outer transaction.
 
 Declare a `Transition` with no `target` for work that needs conditions,
 permissions and side-effects but writes no state on success. It follows
@@ -277,7 +283,9 @@ diagnostic text from `str(error)`, and exception arguments stay unchanged.
 | `ambiguous` | More than one transition passed the checks for this action. |
 
 Reasons describe the existing checks; they do not change retry behavior.
-In particular, `locked` still raises plain `TransitionNotAllowed`.
+A PostgreSQL row-lock timeout raises `TransitionTemporarilyUnavailable` with reason `locked`.
+A cache state-lock refusal raises plain `TransitionNotAllowed` with that same reason.
+Use the exception type, not `reason='locked'` alone, to decide whether to suggest a short retry.
 When declarations share an action name, prefer a transition whose sources
 include the current state and whose process permissions and conditions pass.
 Its failed check supplies the reason. Otherwise, use a process guard that
@@ -466,8 +474,10 @@ python manage.py dl_transitions --stats --since 7d --queues django_logic --json
 
 `dl_transitions` lists every uncompleted background transition and says why
 each one is not moving: it has spent every attempt, it waits out the retry
-pause, a worker runs it now, it waits its turn behind older rows, or no worker
-serves its queue. `--queues` narrows the list.
+pause, its last attempt has no recorded result, or it waits for worker capacity.
+The report also distinguishes recent worker presence from actual queue progress. `--queues` narrows the list.
+Workers take turns between eligible clients. Within a client, jobs run by when they became ready, then submission time and ID.
+A postponed older job can therefore follow newer work that was ready first.
 
 Workers record their served queues during each maintenance check, even when all
 job slots are full. This recent observation is separate from queue progress.
@@ -499,9 +509,9 @@ The worker starts two safety nets once a minute in one separate process.
 Only one safety-net process runs per worker. Its time limit is 60 seconds.
 Nothing else needs a schedule.
 
-- `detect_stuck_transitions` finalizes a row that has spent every attempt: it
-  writes `failed_state`, runs `failure_callbacks` and completes the row. It
-  also reports rows that waited past the retry window with no attempt, in one
+- `detect_stuck_transitions` completes a job that has spent every allowed error.
+  It writes `failed_state` and runs failure callbacks only when the saved state still applies and can be checked under its lock.
+  Otherwise it records why the state change was skipped. It also reports rows that waited past the retry window with no attempt, in one
   line per queue. If a worker started a row from that queue inside the window,
   or holds one now, the queue is behind, and the line is a WARNING. If not, no
   worker has taken a row from the queue for the whole window, and the line is
@@ -542,11 +552,13 @@ class TestOrderFulfilment(ProcessScenario):
         self.assert_side_effects_ran(['book_courier'])
 ```
 
-Sync execution runs the worker path inline, for tests only. A test settings
-module calls `django_logic.conf.enable_sync()` and sets
-`DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'sync'`. Boot refuses that value
-anywhere else. [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) has the setup and
-the full scenario catalog.
+For deployment-wide inline tests, call `django_logic.conf.enable_sync()` in test settings and set
+`DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'sync'`. Boot refuses that setting without the explicit opt-in.
+Production deployments normally use `pull`. Business code can use `django_logic.background.sync_execution()` for one block that needs an immediate result.
+That block runs in the caller's process and starts no retry loop.
+A committed unfinished job can still be claimed by workers serving its queue.
+An atomic background transition can join a caller transaction. `atomic=False` still requires PostgreSQL autocommit.
+[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) has the test setup and scenario catalog.
 
 ## More documentation
 

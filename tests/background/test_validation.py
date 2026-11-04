@@ -145,7 +145,7 @@ class SharedInProgressStateTests(SimpleTestCase):
         self.assertEqual(len(_LooseProcess.transitions), 2)
 
 
-class UniqueBackgroundActionNameTests(SimpleTestCase):
+class UniqueBackgroundTransitionNameTests(SimpleTestCase):
     """The worker finds a background transition by its process class and its
     ``action_name``, so only two background transitions with the same name in
     one Process are ambiguous. The same name in two different nested processes,
@@ -252,7 +252,7 @@ class UniqueBackgroundActionNameTests(SimpleTestCase):
         self.assertEqual(len(_GoodProcess.transitions), 3)
 
 
-class NestedTreeBackgroundActionNameTests(SimpleTestCase):
+class NestedTreeBackgroundTransitionNameTests(SimpleTestCase):
     """The worker searches ``nested_processes`` and selects a transition by its
     process class and its ``action_name``. A background ``action_name`` must
     therefore be unique inside one process class, but it may repeat across

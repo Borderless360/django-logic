@@ -1,8 +1,7 @@
 """How transitions behave with Django's transaction machinery.
 
-Covers on_commit ordering inside an outer atomic block, a lost broker message
-after on_commit fires, and a database connection lost while the worker runs.
-These tests check the framework when the infrastructure under it fails.
+Covers on_commit ordering, state and cache-lock independence, rollback, and concurrent database access.
+These tests exercise synchronous transitions and direct state writes.
 """
 import threading
 import unittest
@@ -137,11 +136,8 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
 
 
 @tag('stability')
-class TestBrokerMessageLoss(StabilityTestCase):
-    """on_commit fires but Celery apply_async fails, because the broker is
-    down. The durable state write and the advisory cache lock have independent
-    lifetimes, so recovering a lost run is an ordinary re-dispatch.
-    """
+class TestCommittedStateAndCacheLock(StabilityTestCase):
+    """Committed state survives cache-lock release; an explicit call can run from a valid source."""
 
     def test_committed_state_write_persists_with_the_lock(self):
         """A committed set_state persists whatever happens to the cache lock.
