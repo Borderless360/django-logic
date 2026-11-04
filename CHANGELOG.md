@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.1.0] — 2026-11-04
+
+- Add `DatabaseTransition` for synchronous PostgreSQL work that can roll back completely.
+  Its nested transitions and job submissions use transaction protection without persistent cache locks.
+  GV import, stock and bulk-update completion can retry after a killed job without waiting for a two-hour cache timeout.
+  Ordinary transitions retain shared cache protection for external calls.
+  Existing cache locks, source checks, pending jobs, permissions and reentry refusal remain respected.
+
 ## [4.0.2] — 2026-11-04
 
 - Correct guidance for synchronous transactions and callbacks, lock refusals, client ordering, effect retention, testing and release preparation.

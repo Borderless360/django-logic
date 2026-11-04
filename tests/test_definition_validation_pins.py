@@ -213,7 +213,7 @@ class PublicSurfaceTests(TestCase):
         import django_logic
 
         self.assertEqual(sorted(django_logic.__all__), [
-            'Process', 'ProcessManager', 'Transition',
+            'DatabaseTransition', 'Process', 'ProcessManager', 'Transition',
         ])
         for name in django_logic.__all__:
             self.assertTrue(hasattr(django_logic, name), name)
