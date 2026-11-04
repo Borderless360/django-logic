@@ -112,6 +112,31 @@ class TransitionStatisticsTests(TestCase):
                 self.assertNotIn('django-logic:effect:', output.getvalue())
         self.assertEqual(list(TransitionMessage.objects.order_by('pk').values()), before)
 
+    def test_text_statistics_distinguish_same_named_provider_process_classes(self):
+        alpha = 'providers.alpha.SubmitProcess'
+        beta = 'providers.beta.SubmitProcess'
+        self._row(owning_process_class=alpha)
+        self._row(owning_process_class=beta)
+        self._row(owning_process_class=beta)
+        before = list(TransitionMessage.objects.order_by('pk').values())
+        groups = transition_statistics(since=_NOW - timedelta(days=2))
+        self.assertEqual([(group['owning_process_class'], group['jobs']) for group in groups],
+                         [(alpha, 1), (beta, 2)])
+        for as_json in (False, True):
+            output = StringIO()
+            with patch('django_logic.management.commands.dl_transitions.timezone.now', return_value=_NOW):
+                call_command('dl_transitions', stats=True, since='7d', json=as_json, stdout=output)
+            if as_json:
+                self.assertEqual(json.loads(output.getvalue())['groups'], groups)
+            else:
+                lines = [line for line in output.getvalue().splitlines() if line.startswith('queue=')]
+                self.assertEqual(len(lines), 2)
+                self.assertIn(f'process_class={alpha} ', lines[0])
+                self.assertIn('jobs=1 ', lines[0])
+                self.assertIn(f'process_class={beta} ', lines[1])
+                self.assertIn('jobs=2 ', lines[1])
+        self.assertEqual(list(TransitionMessage.objects.order_by('pk').values()), before)
+
     def test_command_rejects_an_invalid_window_and_requires_stats_for_its_options(self):
         for since in ('0d', '-1d', 'yesterday', '1.5d', '9999999999999999999999999999w'):
             with self.subTest(since=since), self.assertRaises(CommandError):

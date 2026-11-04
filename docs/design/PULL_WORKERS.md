@@ -140,6 +140,9 @@ When an observation exists but no job has progressed, the ERROR says to check
 capacity, other served queues and blocked jobs. Without it, the message suggests
 starting a worker. Recent presence never downgrades a stalled queue to a WARNING.
 `queue_worker_presence(queue_name)` exposes this evidence without changing jobs.
+The job list uses the latest recorded error or postponement to distinguish waiting work from an unfinished attempt.
+An expired wait does not mean the previous attempt is still running.
+Text statistics include the full declaring process class, so same-named provider actions remain distinguishable.
 Cache writes run inside the bounded maintenance process. A blocked cache cannot
 delay the worker's job timeout checks. Cache failure leaves database progress
 checks unchanged. The default cache must be shared between reporting processes
@@ -150,6 +153,10 @@ and workers; an in-memory cache cannot provide cross-process observations.
 `BackgroundTransition(atomic=False)` keeps the same job-row lock on a separate
 connection. Model side effects use their normal connection in autocommit.
 Final state and job completion commit together on the connection holding the lock.
+A side effect's failure or postponement remains its result when another transaction holds the business row.
+A postponed job keeps its due time without spending an allowed error.
+A permanent failure completes the job. If its business row remains locked, the worker records that problem separately.
+It leaves the business state unchanged and skips failure callbacks in that case.
 The default atomic execution remains unchanged.
 
 This option works with transaction pooling: it uses no session advisory lock.

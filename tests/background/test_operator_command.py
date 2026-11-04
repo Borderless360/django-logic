@@ -6,12 +6,14 @@ must clear the retry wait on one row without running anything itself.
 from datetime import timedelta
 from io import StringIO
 
+from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from django_logic.background.models import TransitionMessage
+from django_logic.background.worker_presence import record_worker_presence
 from django_logic.testing import open_transition_message
 from tests.background.models import Widget
 from tests import dl_settings
@@ -84,6 +86,57 @@ class ListUncompletedTests(TestCase):
 
     def test_a_started_row_is_not_reported_as_untouched(self):
         self._row(started_at=timezone.now())
+        self.assertIn('an attempt has started it', self._listing())
+
+    def assert_finished_attempt_has_queue_guidance(self, **updates):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        now = timezone.now()
+        row = self._row(
+            queue='retry_without_worker', created=now - timedelta(hours=4),
+            started_at=now - timedelta(hours=3), **updates,
+        )
+        before = list(TransitionMessage.objects.values())
+        listing = self._listing()
+        self.assertIn(f'#{row.pk}', listing)
+        self.assertIn('dl_worker --queues retry_without_worker', listing)
+        self.assertNotIn('running on a worker now', listing)
+        self.assertNotIn('no worker has ever started it', listing)
+        self.assertEqual(list(TransitionMessage.objects.values()), before)
+        record_worker_presence(['retry_without_worker'])
+        self.assertIn('recent worker presence but no queue progress', self._listing())
+        self.assertEqual(list(TransitionMessage.objects.values()), before)
+
+    def test_due_error_retry_reports_queue_guidance_instead_of_running(self):
+        self.assert_finished_attempt_has_queue_guidance(
+            last_error_dt=timezone.now() - timedelta(hours=2), errors_count=1,
+        )
+
+    def test_expired_defer_reports_queue_guidance_instead_of_running(self):
+        self.assert_finished_attempt_has_queue_guidance(
+            last_deferred_at=timezone.now() - timedelta(hours=2), deferral_count=1,
+            eligible_at=timezone.now() - timedelta(minutes=1),
+        )
+
+    def test_future_defer_keeps_its_wait_and_reason(self):
+        until = timezone.now() + timedelta(minutes=5)
+        self._row(
+            started_at=timezone.now() - timedelta(minutes=1),
+            last_deferred_at=timezone.now(), deferral_count=1,
+            eligible_at=until, deferral_reason='Wait for provider allowance.',
+        )
+        listing = self._listing()
+        self.assertIn(f'waiting until {until.isoformat()}', listing)
+        self.assertIn('Wait for provider allowance.', listing)
+        self.assertNotIn('running on a worker now', listing)
+
+    def test_new_attempt_after_earlier_error_and_defer_is_not_reported_as_waiting(self):
+        self._row(
+            started_at=timezone.now(),
+            last_error_dt=timezone.now() - timedelta(hours=2), errors_count=1,
+            last_deferred_at=timezone.now() - timedelta(hours=1), deferral_count=1,
+            eligible_at=timezone.now() - timedelta(minutes=1),
+        )
         self.assertIn('an attempt has started it', self._listing())
 
     def test_the_queue_filter_holds(self):
