@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [4.1.0] — 2026-11-04
 
 - Add `DatabaseTransition` for synchronous PostgreSQL work that can roll back completely.
   Its nested transitions and job submissions use transaction protection without persistent cache locks.
