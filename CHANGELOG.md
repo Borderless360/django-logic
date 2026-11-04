@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Select a client's ready work before an older job postponed until later.
+  GV manifest completion repeatedly waited for shipping jobs that were queued behind it.
+  Postponed jobs now use their existing due time for ordering within the client.
+  Client turns, job locks, retry limits and database schema stay unchanged.
+
 ## [4.0.0] — 2026-11-03
 
 - Model snapshots no longer copy partial background job records. GV's billing
