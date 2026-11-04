@@ -3,9 +3,8 @@
 Two standard Python loggers are exposed:
 
 - ``django-logic`` — general library activity
-- ``django-logic.transition`` — per-transition lifecycle events; every
-  record includes ``tr_id`` in the message body so lines for one logical
-  transition can be grepped together.
+- ``django-logic.transition`` — transition and worker events. Transition calls include ``tr_id`` when available.
+  Other records identify a job or model instance instead; not every record has a trace ID.
 
 Configure both via ``LOGGING`` in Django settings.
 """

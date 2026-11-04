@@ -15,7 +15,7 @@ is for a side effect whose unit of work is not the bound row — a store
 posting one parcel's tracking, where the row is the store and the work
 is the parcel. Several may run at once on one instance, and one runs
 while a background transition on that instance is uncompleted. It keeps
-conditions, permissions, side effects, callbacks and failure callbacks.
+conditions, permissions, side effects, callbacks, failure callbacks and ``next_transition``.
 It may not declare a ``target`` or a ``failed_state``: a state write must
 serialise on that state. It is refused on ``BackgroundTransition``, whose
 enqueue writes a row and a busy state under that lock.
@@ -54,14 +54,9 @@ from django_logic.logger import (
 from django_logic.state import State
 
 
-#: Names of the engine's OWN method parameters on the state-change path.
-#: A caller kwarg carrying one raises TypeError inside ``fail_transition``
-#: — on the failure path, after the lock was taken: no ``failed_state``,
-#: the real exception replaced, the lock leaked until TTL.
-#: Refused up front, before anything is acquired. Distinct from the names
-#: the engine forwards itself (``tr_id``, ``root_id``, ``parent_id``,
-#: ``process_class``, ``owning_process_class``) — the README documents
-#: those as reserved instead of refusing them.
+#: Refuse argument names that collide with engine parameters before taking locks.
+#: ``state`` collides during side-effect execution; ``exception`` collides during failure handling.
+#: Trace and process identifiers are forwarded separately and documented as reserved names.
 _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception'})
 
 #: Every keyword a ``Transition`` declaration reads. Anything else raises at
@@ -100,25 +95,20 @@ class Transition:
     """Synchronous transition from a source state to a target state.
 
     Execution order on success:
-      1. lock state
+      1. take the PostgreSQL row lock and the cache lock
       2. revalidate under the lock: the persisted state is still a valid
          source AND no background transition is in flight on this
          process (uncompleted ``TransitionMessage``)
       3. run side-effects
-      4. on success: set ``target``, unlock, run callbacks, run ``next_transition``
+      4. on success: set ``target``, release the cache lock, run callbacks and ``next_transition``
       5. on failure: set ``failed_state`` (so failure hooks observe the
-         contained state), unlock, run ``failure_callbacks`` (and re-raise)
+         contained state), release the cache lock, run ``failure_callbacks`` (and re-raise)
 
-    The state field does not change until the transition finishes:
-    ``in_progress_state`` is background-only (0.12.0), where it is written
-    atomically with the durable ``TransitionMessage`` row. A synchronous run
-    that dies mid-run rolls back to its source state and can be run
-    again — a visible "busy" step, where wanted, is a real state with an
-    explicit fast transition into it, chained via ``next_transition``.
+    ``in_progress_state`` belongs to background submissions and is saved with their job.
+    On PostgreSQL, a locked synchronous call keeps database changes inside a transaction through its callbacks and ``next_transition``.
+    An interruption before that transaction commits discards its changes.
+    Other databases and ``lock=False`` do not open this transaction; the caller must supply one when needed.
     """
-
-    #: Swap points a consumer may subclass. Only these three — the
-    #: failure-callback and condition bundles are always the stock classes.
 
     #: ``True`` on ``BackgroundTransition``. A public, stable attribute
     #: rather than an ``isinstance`` check: ``Process.__init_subclass__``
@@ -372,13 +362,13 @@ class Transition:
         return kwargs.get('tr_id')
 
     def complete_transition(self, state: State, **kwargs):
-        """Write the target state (when one is declared), release the
-        lock, then run callbacks.
+        """Write the target, release the cache lock, then run callbacks.
 
-        The lock is released **before** callbacks run, so a callback can
-        safely trigger another transition on the same instance. If the
-        worker crashes during callbacks they are lost — callbacks are
-        best-effort.
+        Releasing the cache lock lets a callback call another transition on this instance.
+        A locked PostgreSQL call still holds its database lock and transaction through callbacks and ``next_transition``.
+        Other connections see the prior state until the outermost transaction commits.
+        A process interruption during callbacks can discard the state write too.
+        Background jobs use separate success hooks after their execution block.
 
         A failed target write must still release the lock (otherwise the
         instance's FSM freezes until the lock TTL): the transition fails

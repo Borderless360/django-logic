@@ -29,10 +29,8 @@ def validate_on_ready() -> None:
 def _reject_sync_without_opt_in() -> None:
     """Sync runs the worker path inline, in the caller's own thread.
 
-    In a web process that means every side-effect runs inside the
-    request, and nothing retries what fails. It is a test runtime, so a
-    deployment must not be able to choose it from a settings value or an
-    environment variable. A test settings module opts in.
+    Require an explicit opt-in before a settings value makes all background work run inline.
+    A scoped ``sync_execution()`` block remains available to business code without this deployment-wide opt-in.
     """
     from django_logic import conf
 
@@ -41,8 +39,8 @@ def _reject_sync_without_opt_in() -> None:
     raise ImproperlyConfigured(
         "DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync' runs background "
         "side-effects inline, in the caller's own thread, and nothing "
-        "retries what fails. It is a test runtime. Production is always "
-        "'pull'. If this is a test settings module, call "
+        "retries what fails. Use 'pull' as the deployment default. "
+        "For a test runtime, call "
         "django_logic.conf.enable_sync() in it before Django boots. To run "
         "one block inline elsewhere, use django_logic.conf.sync_execution()."
     )

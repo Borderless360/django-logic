@@ -116,9 +116,8 @@ transitions): if a worker dies mid-child, the row becomes claimable again and
 a later attempt re-runs it; its callback fires when it finally reaches a
 terminal state.
 
-A full, tested implementation lives in the validation harness:
-[django-logic-test `fulfillment/`](https://github.com/Borderless360/django-logic-test/tree/main/fulfillment)
-+ `docs/design/NESTED_PROCESS_ERROR_HANDLING.md`.
+The private `django-logic-test` qualification application exercises this pattern with real workers.
+It is a maintainer validation resource, not a public example repository.
 
 
 ## Write each sibling process in full

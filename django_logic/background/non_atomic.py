@@ -139,39 +139,31 @@ def run_non_atomic(transition_message_id):
             # Provider writes used the normal connection and have already committed.
             _check_job_transaction(job_connection, raw_job_connection, job_transaction_id)
             instance._state.db = alias
-            try:
+            if error is not None:
+                return _handle_failure(
+                    transition_message, transition, state, kwargs, error, using=alias,
+                )
+
+            def complete():
                 with _protect_completion_state(transition, state):
                     superseded = _superseded_outcome(
                         transition_message, transition, state, kwargs, after_side_effects=True,
                     )
                     if superseded is not None:
                         return superseded
-                    if error is not None:
-                        return _handle_failure(
-                            transition_message, transition, state, kwargs, error, using=alias,
+                    if transition.target is not None:
+                        state.set_state(transition.target, using=alias)
+                        transition_logger.info(
+                            f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                            f'{transition.target}'
                         )
+                    return _handle_success(transition_message, transition, state, kwargs)
 
-                    def complete():
-                        if transition.target is not None:
-                            state.set_state(transition.target, using=alias)
-                            transition_logger.info(
-                                f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                                f'{transition.target}'
-                            )
-                        return _handle_success(transition_message, transition, state, kwargs)
-
-                    try:
-                        return _run_in_savepoint(alias, complete, require_commit=True)
-                    except Exception as exception:
-                        transition_message.refresh_from_db(using=alias)
-                        instance.refresh_from_db(using=alias, fields=[state.field_name])
-                        return _handle_failure(
-                            transition_message, transition, state, kwargs, exception, using=alias,
-                        )
+            try:
+                return _run_in_savepoint(alias, complete, require_commit=True)
             except Exception as exception:
-                from django_logic.exceptions import TransitionTemporarilyUnavailable
-                if not isinstance(exception, TransitionTemporarilyUnavailable):
-                    raise
+                transition_message.refresh_from_db(using=alias)
+                instance.refresh_from_db(using=alias, fields=[state.field_name])
                 return _handle_failure(
                     transition_message, transition, state, kwargs, exception, using=alias,
                 )

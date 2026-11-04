@@ -141,28 +141,43 @@ class WorkerPresenceProcessTests(TransactionTestCase):
         self.assertEqual(row.errors_count, 1)
         self.assertIn('timeout', row.last_error_message)
 
+    def observe_shared_queue(self):
+        connections.close_all()
+        child = os.fork()
+        if child == 0:
+            exit_code = 1
+            try:
+                pull.run_worker(['presence.shared'], forever=False)
+                exit_code = 0
+            finally:
+                os._exit(exit_code)
+        _, status = os.waitpid(child, 0)
+        self.assertEqual(status, 0)
+
     def test_one_stopped_worker_does_not_clear_another_workers_observation(self):
-        def observe():
-            connections.close_all()
-            child = os.fork()
-            if child == 0:
-                try:
-                    pull.run_worker(['presence.shared'], forever=False)
-                finally:
-                    os._exit(0)
-            _, status = os.waitpid(child, 0)
-            self.assertEqual(status, 0)
         with patch.object(worker_presence.conf, 'retry_window_minutes', return_value=1 / 60):
-            observe()
+            self.observe_shared_queue()
             self.assertTrue(queue_worker_presence('presence.shared'))
             time.sleep(0.65)
-            observe()
+            self.observe_shared_queue()
             time.sleep(0.5)
             self.assertTrue(queue_worker_presence('presence.shared'))
             deadline = time.monotonic() + 2
             while queue_worker_presence('presence.shared') and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertFalse(queue_worker_presence('presence.shared'))
+
+    def test_worker_error_after_presence_is_written_fails_the_observation_check(self):
+        original_worker = pull.run_worker
+
+        def fail_after_worker_returns(*args, **kwargs):
+            original_worker(*args, **kwargs)
+            raise RuntimeError('The worker failed after writing its presence.')
+
+        with patch.object(pull, 'run_worker', side_effect=fail_after_worker_returns):
+            with self.assertRaises(AssertionError):
+                self.observe_shared_queue()
+        self.assertTrue(queue_worker_presence('presence.shared'))
 
     def test_failed_maintenance_observation_expires_after_worker_stops(self):
         with patch.object(worker_presence.conf, 'retry_window_minutes', return_value=1 / 60), \

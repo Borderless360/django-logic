@@ -70,8 +70,8 @@ def check_pull_mode_database(app_configs, **kwargs):
         return []
     return [checks.Error(
         f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' requires a database "
-        f"that supports SELECT FOR UPDATE with SKIP LOCKED and partial "
-        f"unique indexes. TransitionMessage is routed to alias '{alias}', "
+        f"that supports SELECT FOR UPDATE with SKIP LOCKED. "
+        f"TransitionMessage is routed to alias '{alias}', "
         f"which uses {engine!r} (SQLite).",
         hint="Point that alias at PostgreSQL.",
         id='django_logic.pull_mode_needs_postgresql',

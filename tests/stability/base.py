@@ -37,14 +37,16 @@ requires_postgres = unittest.skipUnless(
 
 
 class WorkerCrashSimulated(Exception):
-    """Stands in for a Celery worker that dies: out of memory, SIGKILL, or a
-    deploy."""
+    """An ordinary exception used to test synchronous side-effect and callback failures.
+
+    It does not simulate a hard process stop or lost database connection.
+    """
     pass
 
 
 class CrashSimulator:
     """
-    Wraps side effects so a worker crash can happen at a chosen point.
+    Wraps side effects to raise a test exception at a chosen point.
 
     Usage:
         sim = CrashSimulator(crash_during='call_courier')

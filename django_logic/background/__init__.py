@@ -6,7 +6,7 @@ Public API:
   transitions with per-transition queue routing. ``target=None``
   declares one that writes no state on success.
 * :func:`sync_execution` — context manager that forces the current block
-  to run the worker path inline (for tests, management commands, the shell).
+  to run the worker path inline when business code or tests need the result immediately.
 * :func:`retry_pending` — run every claimable row inline, once.
 * :func:`in_flight` — racy read of whether an uncompleted row is still
   being retried, for shaping "busy, try again shortly" answers at API

@@ -488,7 +488,7 @@ class AmbiguousConversationProcess(Process):
     nested_processes = [AmbiguousAProcess, AmbiguousBProcess]
 
 
-# Two nested BackgroundActions that share an action_name, have identical
+# Two nested BackgroundTransitions that share an action_name, have identical
 # sources, and declare no in_progress_state. The worker's state guard only
 # checks that the current state is in sources, so it cannot tell them apart. A
 # row with no recorded owner must not resolve to the first match here, or the

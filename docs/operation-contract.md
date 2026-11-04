@@ -1,13 +1,5 @@
 # Durable operations
 
-## Keeping one execution contract
-
-Fair group selection and `Defer` belong to the standard worker contract. They
-let applications share worker capacity while respecting provider waiting periods.
-Independent `BackgroundEffect` work also remains part of this contract. A current
-Mintsoft integration uses it for follow-up work after manifest completion.
-Effects use the same job records, workers and retry rules as parent transitions.
-
 ## Checking eligibility while another action runs
 
 `process.get_available_actions(..., include_locked=True)` and
@@ -246,7 +238,7 @@ BackgroundTransition(
 The parent completion, final state and every effect job are saved in one
 transaction. If saving any effect fails, none of that completion commits;
 the parent retries. Previously committed external confirmations therefore still
-need receipts or provider idempotency. A failed, cancelled, superseded or deferred
+need receipts or provider idempotency. A failed, superseded or deferred
 parent creates no effects. Each effect has a stable request key derived from the
 parent job and effect name; retries cannot create another copy of that effect.
 
@@ -260,7 +252,7 @@ worker slot normally. Multiple effects are independent and may execute in any
 order, concurrently, or concurrently with a later parent operation.
 
 An effect never owns the parent's unfinished-job allowance. Its success,
-failure, timeout or cancellation does not write the parent's state or run the
+failure or timeout does not write the parent's state or run the
 parent's callbacks. Later state changes do not automatically cancel it. The
 callable must check whether its work still applies, and must use appropriate
 receipts, application locks or idempotency for its own writes. Independence does
@@ -295,7 +287,10 @@ Find effects with `TransitionMessage.objects.filter(parent_job_id=parent.pk)`.
 Completed effects use the configured retention period for success and failure.
 Their failures do not change the parent state and have no indefinite retention exception.
 Parent IDs remain recorded if normal cleanup removes the parent.
-Retrying a completed parent does not recreate effects that expired.
+Do not reopen completed jobs by editing their rows.
+If a reopened parent reaches completion again, retained effect keys reject duplicates; after cleanup, those keys no longer provide protection.
+A state-changing parent may instead stop as superseded before creating effects.
+These records do not provide permanent duplicate protection for external work.
 Effect functions must check whether their work still applies before contacting a provider.
 
 
@@ -321,7 +316,7 @@ earlier workers, stop new submissions and finish or explicitly resolve every
 pending effect. Do not reverse migration 0015 while independent jobs remain
 unfinished. This feature reuses the existing workers and introduces no scheduler.
 
-## State protection and cancellation
+## State protection
 
 On PostgreSQL, lock-taking transitions acquire the physical business-row lock.
 They wait at most two seconds for another transaction that holds the row.
@@ -332,7 +327,16 @@ Inside this transaction, synchronous side effects run in a savepoint. A database
 The shared cache lock also prevents overlapping external calls while its timeout
 remains valid, including after a lost database connection. PostgreSQL protects
 database state; neither lock can undo an external request already sent.
-SQLite remains useful for synchronous tests, but cannot verify concurrent state protection.
+For a lock-taking synchronous `Transition`, callbacks and `next_transition` also run inside the PostgreSQL transaction, before the outermost commit.
+The cache lock is released first, so callbacks can call another transition on the same instance.
+Other connections still see the prior committed state. An interruption can discard the target and side-effect writes before commit.
+Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.
+Inline background execution can still be inside a caller's outer transaction.
+Use `transaction.on_commit()` for best-effort publication that requires committed data, not as a guarantee of required work.
+
+On other databases, `State.protected()` takes no row lock and opens no transaction.
+Without a caller transaction, synchronous writes commit independently and swallowed database errors may not be detected.
+SQLite remains useful for synchronous tests, but does not verify PostgreSQL transaction or concurrent-state protection.
 
 Default atomic state-writing background jobs retain the business-row lock during their transaction.
 Targetless jobs without a failed state protect only finalization, so independent provider work can overlap.

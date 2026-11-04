@@ -4,15 +4,17 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.db import InterfaceError, OperationalError, connection, connections, transaction
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 
 from django_logic import Process
-from django_logic.background import BackgroundTransition, PermanentFailure
+from django_logic.background import BackgroundTransition, Defer, PermanentFailure
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import claim_next, run_once
 from django_logic.background.runner import run_background_transition
@@ -145,6 +147,109 @@ class NonAtomicProviderTests(TransactionTestCase):
         self.assertTrue(transition_message.is_completed)
         self.assertFalse(transition_message.ended_in_failure)
         self.assertEqual(self.request_count(), 1)
+
+    def assert_side_effect_result_survives_business_row_lock(self, error, *, previous_errors=0):
+        transition_message = self.enqueue()
+        if previous_errors:
+            TransitionMessage.objects.filter(pk=transition_message.pk).update(
+                errors_count=previous_errors,
+                last_error_dt=timezone.now() - timedelta(hours=1),
+                last_error_message='an earlier failure',
+            )
+        ready = Widget.objects.create()
+        ready_path = str(Path(self.directory.name) / 'ready_requests')
+        ReceiptProcess(field_name='status', instance=ready).submit(request_path=ready_path)
+        ready_job = TransitionMessage.objects.get(instance_id=str(ready.pk))
+        locked = threading.Event()
+        release = threading.Event()
+        failures = []
+        holder = None
+
+        def hold_business_row():
+            try:
+                with transaction.atomic():
+                    Widget.objects.select_for_update().get(pk=self.widget.pk)
+                    locked.set()
+                    if not release.wait(10):
+                        raise TimeoutError('The test did not release the business row.')
+            except BaseException as failure:
+                failures.append(failure)
+            finally:
+                connections.close_all()
+
+        def refuse_after_confirmation(instance, **kwargs):
+            nonlocal holder
+            if instance.pk != self.widget.pk:
+                return
+            holder = threading.Thread(target=hold_business_row)
+            holder.start()
+            if not locked.wait(5):
+                raise TimeoutError('The other connection did not lock the business row.')
+            raise error
+
+        with patch.object(ReceiptProcess.transitions[0].side_effects, '_commands', [
+            submit_provider, refuse_after_confirmation,
+        ]), patch('django_logic.state.ROW_LOCK_WAIT_SECONDS', 0.1):
+            try:
+                run_background_transition(transition_message.pk)
+                transition_message.refresh_from_db()
+                self.widget.refresh_from_db()
+                self.assertEqual(self.request_count(), 1)
+                self.assertEqual(self.widget.se_log, 'confirmed')
+                self.assertEqual(self.widget.status, 'submitting')
+                self.assertEqual(self.widget.cb_log, '')
+                if isinstance(error, Defer):
+                    self.assertFalse(transition_message.is_completed)
+                    self.assertEqual(transition_message.errors_count, previous_errors)
+                    self.assertEqual(transition_message.deferral_count, 1)
+                    self.assertEqual(transition_message.eligible_at, error.until)
+                    self.assertEqual(transition_message.last_deferred_until, error.until)
+                    self.assertEqual(transition_message.last_deferral_reason, error.reason)
+                    self.assertIsNotNone(transition_message.last_deferred_at)
+                    self.assertEqual(transition_message.last_error_message,
+                                     'an earlier failure' if previous_errors else '')
+                    self.assertEqual(transition_message.failure_side_effect_error, '')
+                else:
+                    self.assertTrue(transition_message.is_completed)
+                    self.assertTrue(transition_message.ended_in_failure)
+                    self.assertEqual(transition_message.errors_count, 1)
+                    self.assertIn(str(error), transition_message.last_error_message)
+                    self.assertIn('failed_state protection', transition_message.failure_side_effect_error)
+                    self.assertIn('Another transaction', transition_message.failure_side_effect_error)
+                # Another job progresses while the original business row remains locked.
+                self.assertTrue(run_once([QUEUE], isolate=False))
+                ready_job.refresh_from_db()
+                self.assertTrue(ready_job.is_completed)
+                self.assertFalse(ready_job.ended_in_failure)
+                self.assertIsNone(claim_next([QUEUE]))
+            finally:
+                release.set()
+                if holder is not None:
+                    holder.join(5)
+        self.assertIsNotNone(holder)
+        self.assertFalse(holder.is_alive())
+        self.assertEqual(failures, [])
+        # A further worker pass neither repeats a permanent failure nor starts a future wait early.
+        self.assertFalse(run_once([QUEUE], isolate=True))
+        transition_message.refresh_from_db()
+        self.assertEqual(transition_message.start_attempt_count, 1)
+        self.assertEqual(self.request_count(), 1)
+
+    def test_first_permanent_failure_survives_contested_completion_lock(self):
+        self.assert_side_effect_result_survives_business_row_lock(
+            PermanentFailure('Verify the provider before sending this request again.'),
+        )
+
+    def test_first_defer_survives_contested_completion_lock_without_spending_errors(self):
+        self.assert_side_effect_result_survives_business_row_lock(
+            Defer(until=timezone.now() + timedelta(minutes=5), reason='Provider allowance refreshes later.'),
+        )
+
+    def test_defer_preserves_existing_error_budget_under_contested_completion_lock(self):
+        self.assert_side_effect_result_survives_business_row_lock(
+            Defer(until=timezone.now() + timedelta(minutes=5), reason='Wait for the required shipment.'),
+            previous_errors=2,
+        )
 
     def test_default_atomic_mode_still_rolls_back_provider_receipt(self):
         transition_message = self.enqueue(AtomicReceiptProcess)

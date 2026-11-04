@@ -44,8 +44,7 @@ def claim_fair(rows):
 
 
 def _claim_in_transaction(rows, groups, started):
-    # Older producers and explicitly constructed rows may have no cursor.
-    # This also makes the additive migration safe for existing queued work.
+    # Workers create client turn records when they first select that client's queued work.
     missing = list(rows.exclude(
         fairness_key__in=groups.values('key'),
     ).order_by().values_list('fairness_key', flat=True).distinct()[:128])

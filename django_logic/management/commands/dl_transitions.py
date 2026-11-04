@@ -94,7 +94,7 @@ class Command(BaseCommand):
             action = (f"{group['parent_transition_name']}/{group['effect_name']}"
                       if group['effect_name'] else group['transition_name'])
             self.stdout.write(
-                f"queue={group['queue_name']} "
+                f"queue={group['queue_name']} process_class={group['owning_process_class']} "
                 f"{group['app_label']}.{group['model_name']}.{group['process_name']}.{action} "
                 f"effect={group['effect_name'] or '-'} jobs={group['jobs']} pending={group['pending']} "
                 f"succeeded={group['succeeded']} failed={group['failed']} "
@@ -167,16 +167,18 @@ class Command(BaseCommand):
                 f'waiting out the retry pause after its last error: '
                 f'{row.last_error_message[:100]}'
             )
-        if row.started_at is not None:
+        if (row.started_at is not None
+                and (row.last_error_dt is None or row.last_error_dt < row.started_at)
+                and (row.last_deferred_at is None or row.last_deferred_at < row.started_at)):
             return (
-                'an attempt has started it — it is running on a worker now, '
-                'or its worker died and the next claim takes it'
+                'an attempt has started it with no recorded result — it may still be running, '
+                'or its worker stopped and another worker must claim it'
             )
         if age_minutes >= report_after:
             if queue_is_served(row.queue_name):
                 return (
                     f'claimable, and waiting its turn — a worker takes rows '
-                    f'from {row.queue_name!r}, and older rows go first'
+                    f'from {row.queue_name!r}; eligible clients take turns and ready work goes first within each client'
                 )
             if queue_has_worker(row.queue_name):
                 return (
@@ -184,7 +186,7 @@ class Command(BaseCommand):
                     f'for {report_after} minutes; check shared capacity and blocked jobs'
                 )
             return (
-                f'claimable, and no worker has ever started it — does a '
+                f'claimable, with no recent queue progress or worker presence — does a '
                 f'worker serve {row.queue_name!r}? Start one: '
                 f'dl_worker --queues {row.queue_name}'
             )

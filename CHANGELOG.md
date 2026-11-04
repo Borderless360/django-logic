@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.0.2] — 2026-11-04
+
+- Correct guidance for synchronous transactions and callbacks, lock refusals, client ordering, effect retention, testing and release preparation.
+  Keep existing APIs, execution behavior and upgrade prerequisites.
+
+- Preserve non-atomic side effects' failures and postponements when another transaction holds the business row.
+  A permanent failure stops retries; a postponed job keeps its due time and error allowance.
+  GV uses both results for provider submissions and waits between manifest operations.
+- Report eligible retries and expired postponements as waiting work instead of suggesting their previous attempt is still running.
+- Include the full declaring process class in text statistics to distinguish same-named provider actions.
+- Fail the worker-presence regression test when its worker process raises an exception after reporting presence.
+- Correct worker, transaction, retry, retention and upgrade guidance to match the current implementation.
+
 ## [4.0.1] — 2026-11-04
 
 - Select a client's ready work before an older job postponed until later.
