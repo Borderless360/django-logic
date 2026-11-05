@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.1.1] — 2026-11-05
+
+- Remove the state re-check after the job insert. On PostgreSQL the business row is locked before the first state read and stays locked until the caller's transaction commits, so the re-check could not fire. Its two tests go with it.
+- Validate hook signatures in one walk of the process tree. The undocumented `collect_hook_signature_offenders` and `collect_request_param_offenders` are removed; no consumer imported them.
+- Move the boot gate into `django_logic.conf` and delete `django_logic/background/apps.py`, which defined no app.
+- Delete `django_logic/background/operations.py`; the fairness key check lives in its one caller. Drop two always-true clauses from the cleanup subquery and four dead lines: an unused options dict, a class attribute that is always overwritten, a traceback re-attachment, and a `getattr` on an attribute every transition has.
+- Delete test fixtures and helpers that no test used.
+- Run the `DatabaseTransition` tests in the stability job. They need PostgreSQL and Redis and ran in no CI job.
+
 ## [4.1.0] — 2026-11-04
 
 - Add `DatabaseTransition` for synchronous PostgreSQL work that can roll back completely.

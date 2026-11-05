@@ -65,7 +65,7 @@ class SyncIsATestRuntimeTests(SimpleTestCase):
     def test_boot_refuses_sync_without_the_opt_in(self):
         from unittest.mock import patch
 
-        from django_logic.background.apps import validate_on_ready
+        from django_logic.conf import validate_on_ready
 
         with patch('django_logic.conf._sync_enabled', False), \
                 override_settings(DJANGO_LOGIC=_conf(
@@ -79,7 +79,7 @@ class SyncIsATestRuntimeTests(SimpleTestCase):
     def test_boot_accepts_sync_after_the_opt_in(self):
         """tests/settings.py calls enable_sync(), which is how the whole
         suite runs inline."""
-        from django_logic.background.apps import validate_on_ready
+        from django_logic.conf import validate_on_ready
         from django_logic.conf import sync_enabled
 
         self.assertTrue(sync_enabled())

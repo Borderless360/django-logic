@@ -31,6 +31,7 @@ class BackgroundEffect:
         self.atomic = validated.atomic
 
     def as_transition(self):
+        # Built per restore: the worker reads the effect's current action.
         return _EffectTransition(
             self.name, sources=[], side_effects=[self.action], queue=self.queue,
             timeout=self.timeout, atomic=self.atomic,
