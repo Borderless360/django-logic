@@ -361,7 +361,7 @@ class NextTransition:
             )
             return None
 
-        if getattr(transitions[0], 'is_background', False):
+        if transitions[0].is_background:
             # user_id is refused at enqueue; forwarding it into a
             # background follow-up would fail kwargs serialization — and
             # that failure is swallowed below, silently killing the

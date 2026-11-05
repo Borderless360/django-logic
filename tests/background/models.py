@@ -1098,9 +1098,6 @@ class WidgetProxyA(Widget):
         proxy = True
         app_label = 'bg_tests'
 
-    def proxy_marker(self) -> str:
-        return 'a'
-
 
 class WidgetProxyB(Widget):
     class Meta:

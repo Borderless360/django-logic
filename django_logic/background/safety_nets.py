@@ -219,8 +219,6 @@ def cleanup_completed_transitions() -> int:
             model_name=OuterRef('model_name'),
             instance_id=OuterRef('instance_id'),
             process_name=OuterRef('process_name'),
-            effect_name=OuterRef('effect_name'),
-            parent_transition_name=OuterRef('parent_transition_name'),
         )
         .order_by('-completed_at', '-pk')
         .values('pk')[:1]

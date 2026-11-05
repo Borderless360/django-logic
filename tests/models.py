@@ -32,4 +32,4 @@ class MtiParent(models.Model):
 
 
 class MtiChild(MtiParent):
-    extra = models.CharField(max_length=32, blank=True)
+    pass

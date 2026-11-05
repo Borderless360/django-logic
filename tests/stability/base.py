@@ -4,7 +4,10 @@
     test which leaks a lock
   - CrashSimulator: raises at a chosen point inside a side effect
   - WorkerCrashSimulated: the exception it raises
+  - IdempotencyTracker: counts how many times each side effect runs
+  - requires_postgres: skips a test that needs PostgreSQL
   - requires_real_redis: skips a test that needs a real Redis (nx=True)
+  - run_concurrent: runs a function in several threads and collects the results
 """
 import threading
 import unittest
@@ -52,36 +55,23 @@ class CrashSimulator:
         sim = CrashSimulator(crash_during='call_courier')
         wrapped = [sim.wrap(fn) for fn in side_effects]
         # Reaching call_courier raises WorkerCrashSimulated.
-
-    After the crash, `sim.calls` lists the side effects that ran.
     """
 
-    def __init__(self, crash_during=None, crash_after_nth_call=None):
+    def __init__(self, crash_during=None):
         self.crash_during = crash_during
-        self.crash_after_nth_call = crash_after_nth_call
         self.call_count = 0
-        self.calls = []
         self._lock = threading.Lock()
 
     def wrap(self, side_effect):
         def wrapper(instance, **kwargs):
             with self._lock:
                 self.call_count += 1
-                count = self.call_count
             name = getattr(side_effect, '__name__', str(side_effect))
             if self.crash_during and name == self.crash_during:
                 raise WorkerCrashSimulated(
                     f"Simulated worker crash during {name}"
                 )
-            if (self.crash_after_nth_call is not None
-                    and count > self.crash_after_nth_call):
-                raise WorkerCrashSimulated(
-                    f"Simulated worker crash after call #{count}"
-                )
-            result = side_effect(instance, **kwargs)
-            with self._lock:
-                self.calls.append(name)
-            return result
+            return side_effect(instance, **kwargs)
         wrapper.__name__ = getattr(side_effect, '__name__', 'wrapped')
         wrapper.__qualname__ = getattr(side_effect, '__qualname__', 'wrapped')
         return wrapper
@@ -89,7 +79,6 @@ class CrashSimulator:
     def reset(self):
         with self._lock:
             self.call_count = 0
-            self.calls.clear()
 
 
 class IdempotencyTracker:
@@ -105,7 +94,6 @@ class IdempotencyTracker:
 
     def __init__(self):
         self.counts = {}
-        self.call_args = {}
         self._lock = threading.Lock()
 
     def track(self, fn):
@@ -115,9 +103,6 @@ class IdempotencyTracker:
             result = fn(instance, **kwargs)
             with self._lock:
                 self.counts[name] = self.counts.get(name, 0) + 1
-                self.call_args.setdefault(name, []).append(
-                    (instance.pk, kwargs.copy())
-                )
             return result
         wrapper.__name__ = fn.__name__
         wrapper.__qualname__ = fn.__qualname__

@@ -4,7 +4,9 @@
 
 * validate conditions + permissions,
 * acquire the state lock for the critical section and revalidate the
-  persisted state under it,
+  persisted state under it (on PostgreSQL the business row is locked
+  before that read and stays locked until the caller's transaction
+  commits, so it is the one check),
 * atomically write ``in_progress_state`` (when declared)
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
@@ -34,7 +36,6 @@ from django_logic.background.serializers import (
 from django_logic.exceptions import (
     RefusalReason,
     TransitionNotAllowed,
-    TransitionTemporarilyUnavailable,
 )
 from django_logic.logger import (
     transition_logger,
@@ -307,8 +308,7 @@ class BackgroundTransition(Transition):
         """
         state_using = state.instance._state.db
         using = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
-        rows = TransitionMessage.objects if using == DEFAULT_DB_ALIAS else TransitionMessage.objects.using(using)
-        from django_logic.background.operations import validate_key
+        rows = TransitionMessage.objects.using(using)
         with transaction.atomic(using=using):
             # Do not wait on a job while holding its business row.
             if TransitionMessage.objects.using(using).filter(
@@ -336,8 +336,10 @@ class BackgroundTransition(Transition):
                                 f"on the TransitionMessage row."
                             ) from e
                         resolved_fairness = (self.fairness_key(state.instance, **kwargs)
-                                             if callable(self.fairness_key) else self.fairness_key)
-                        resolved_fairness = validate_key(resolved_fairness or '', 'fairness_key', allow_empty=True)
+                                             if callable(self.fairness_key) else self.fairness_key) or ''
+                        if (not isinstance(resolved_fairness, str) or len(resolved_fairness) > 255
+                                or '\x00' in resolved_fairness):
+                            raise ValueError('fairness_key must be a string of at most 255 characters without NUL.')
                         try:
                             with transaction.atomic(using=using):
                                 transition_message = rows.create(
@@ -358,17 +360,6 @@ class BackgroundTransition(Transition):
                                 )
                         except IntegrityError as exc:
                             raise _JobInsertConflict from exc
-                        # A finishing job can change the state while this INSERT waits.
-                        current = state.get_persisted_state()
-                        if current not in self.sources:
-                            raise TransitionTemporarilyUnavailable(
-                                f"BackgroundTransition '{self.action_name}' is not "
-                                f"allowed: the persisted state moved to {current!r} "
-                                f"while the insert waited on the unique constraint — "
-                                f"it is no longer one of the source states.",
-                                reason=RefusalReason.SOURCE_STATE,
-                            )
-
                         if self.in_progress_state:
                             # Model constraint errors must not appear as duplicate jobs.
                             state.set_state(self.in_progress_state, using=state_using)

@@ -75,7 +75,6 @@ class TransitionNotAllowed(Exception):
     """
 
     current_state = None
-    user_message = None
 
     def __init__(self, *args, reason: RefusalReason | None = None, user_message=None):
         super().__init__(*args)

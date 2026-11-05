@@ -284,7 +284,7 @@ class Transition:
                 # Preserve the failed-state write before reporting the action's failure.
                 error = exception
         if error is not None:
-            raise error.with_traceback(error.__traceback__)
+            raise error
         return result
 
     def _change_state(self, state: State, **kwargs) -> UUID | None:

@@ -21,6 +21,6 @@ class DjangoLogicConfig(AppConfig):
     def ready(self) -> None:
         # Imported for its side effect: the module registers the system checks.
         from django_logic import checks
-        from django_logic.background.apps import validate_on_ready
+        from django_logic.conf import validate_on_ready
 
         validate_on_ready()

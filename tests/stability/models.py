@@ -31,14 +31,6 @@ def side_effect_three(instance, **kwargs):
     instance.save(update_fields=['side_effect_log'])
 
 
-def side_effect_slow(instance, **kwargs):
-    """Simulates a slow external API call."""
-    import time
-    time.sleep(kwargs.get('sleep_seconds', 0.1))
-    instance.side_effect_log = (instance.side_effect_log or '') + 'slow,'
-    instance.save(update_fields=['side_effect_log'])
-
-
 def callback_one(instance, **kwargs):
     instance.callback_log = (instance.callback_log or '') + 'cb1,'
     instance.save(update_fields=['callback_log'])
@@ -57,14 +49,6 @@ def failure_callback(instance, **kwargs):
 def trigger_nested_transition(instance, **kwargs):
     """Callback that triggers another transition on the SAME instance."""
     instance.process.complete()
-
-
-def trigger_other_instance_transition(instance, **kwargs):
-    """Callback that triggers a transition on a DIFFERENT instance."""
-    other_id = kwargs.get('other_instance_id')
-    if other_id:
-        other = Order.objects.get(pk=other_id)
-        other.process.ship()
 
 
 # ---------------------------------------------------------------------------

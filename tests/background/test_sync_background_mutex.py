@@ -349,69 +349,11 @@ class BackgroundEnqueueMutexTests(TransactionTestCase):
         self.assertTrue(row.is_completed)
 
 
-class EnqueuePostInsertRecheckTests(TransactionTestCase):
-    """Enqueue re-reads the persisted state after it inserts the row.
-
-    On PostgreSQL the insert waits for a concurrent insert on the same unique
-    index to finish — the other row leaves the partial unique index when
-    is_completed flips. The waiting insert is then admitted seconds after its
-    under-the-lock check, against an instance the finished attempt has already
-    moved to its target state. Without the recheck the transition ran twice:
-    the Heroku harness showed two callers both getting HTTP 200 and the work
-    executed twice.
-    """
+class EnqueueFromInProgressStateTests(TransactionTestCase):
+    """An instance stranded in its in-progress state can be driven again."""
 
     def setUp(self):
         self.widget = Widget.objects.create()  # draft
-
-    def test_state_moved_during_insert_is_rejected_and_rolled_back(self):
-        from unittest.mock import patch
-
-        real_create = TransitionMessage.objects.create
-
-        def create_then_state_moves(**kwargs):
-            # Stand in for the waiting insert: by the time it returns, the
-            # other attempt has finished and moved the instance to its target.
-            row = real_create(**kwargs)
-            Widget.objects.filter(pk=self.widget.pk).update(status='fulfilled')
-            return row
-
-        with patch.object(TransitionMessage.objects, 'create',
-                          side_effect=create_then_state_moves):
-            with sync_execution():
-                with self.assertRaises(TransitionNotAllowed) as ctx:
-                    self.widget.process.fulfil()
-
-        self.assertIn('persisted state moved', str(ctx.exception))
-        # The rejected attempt rolled its row back, never wrote the
-        # in_progress_state, and released the lock. The simulated write here
-        # happens inside the enqueue transaction, so the rollback reverts it to
-        # 'draft'; across two real connections the other 'fulfilled' write
-        # survives.
-        self.assertEqual(TransitionMessage.objects.count(), 0)
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'draft')
-        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
-
-    def test_recheck_rejection_is_catchable_as_temporarily_unavailable(self):
-        # Same core-import contract as the AlreadyInProgress guard: the
-        # recheck's refusal means "busy, retry shortly", not "forbidden".
-        from unittest.mock import patch
-
-        real_create = TransitionMessage.objects.create
-
-        def create_then_state_moves(**kwargs):
-            row = real_create(**kwargs)
-            Widget.objects.filter(pk=self.widget.pk).update(status='fulfilled')
-            return row
-
-        with patch.object(TransitionMessage.objects, 'create',
-                          side_effect=create_then_state_moves):
-            with sync_execution():
-                with self.assertRaises(TransitionTemporarilyUnavailable) as ctx:
-                    self.widget.process.fulfil()
-
-        self.assertIn('no longer one of the source states', str(ctx.exception))
 
     def test_retry_from_in_progress_still_admitted(self):
         # The recovery path must keep working: an instance stranded in the
