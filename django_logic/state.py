@@ -168,8 +168,8 @@ class State:
         """
         Return True after taking the lock, or False when already locked.
 
-        Cache locks store an ownership token so an expired holder cannot
-        deliberately release another caller's lock (see ``unlock``).
+        Cache locks store an ownership token, which ``unlock()`` compares
+        before deleting the key.
         Inside DatabaseTransition, ownership is visible only within this call.
         Other connections rely on the PostgreSQL row lock when they act.
         """
