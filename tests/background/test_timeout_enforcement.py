@@ -220,7 +220,7 @@ class HarvestTests(TransactionTestCase):
         }
         self.pending.append(_Attempt(
             pk=2, timeout_seconds=1, deadline=_PASSED,
-            killed=True, reaped=True,
+            killed=True,
         ))
         started = time.monotonic()
         _harvest(attempts, self.pending, block=True)
@@ -231,7 +231,7 @@ class HarvestTests(TransactionTestCase):
             landed_at[0] - started, 2.5,
             'the retry waited for the sibling instead of polling',
         )
-        # Every retried call carries the reaped attempt's own row.
+        # Each retry records the failure against the finished job's row.
         self.assertEqual(self.record.call_args_list[0].args[0], 2)
 
     def test_harvesting_nothing_returns_at_once(self):
@@ -250,7 +250,7 @@ class HarvestTests(TransactionTestCase):
         }
         self.pending.append(_Attempt(
             pk=2, timeout_seconds=None, deadline=None,
-            reaped=True, exit_code=3,
+            exit_code=3,
         ))
         started = time.monotonic()
         try:
@@ -258,9 +258,8 @@ class HarvestTests(TransactionTestCase):
                 _harvest(attempts, self.pending, block=True, max_wait=0.15)
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(self.record.call_count, 1)
-            self.assertFalse(attempts[sibling_pid].reaped)
+            self.assertIn(sibling_pid, attempts)
             self.assertEqual(len(self.pending), 1)
-            self.assertTrue(self.pending[0].reaped)
             self.assertEqual(self.pending[0].pk, 2)
         finally:
             try:
@@ -285,7 +284,6 @@ class HarvestTests(TransactionTestCase):
         # The process is gone. Its error write stays pending for a retry.
         self.assertEqual(attempts, {})
         self.assertEqual(len(self.pending), 1)
-        self.assertTrue(self.pending[0].reaped)
 
         _harvest(attempts, self.pending, block=True)
         self.assertEqual(attempts, {})

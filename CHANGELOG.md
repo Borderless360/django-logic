@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.1.2] — 2026-11-10
+
+- Release a status check's temporary job-row lock before returning, even inside a caller's transaction.
+  Reading `in_flight()` no longer prevents another worker from starting the job until that caller commits.
+- Keep optional follow-up lookup and guard failures inside the existing error handler and transaction savepoint.
+  A failed optional follow-up no longer makes a completed action appear to fail or breaks its surrounding transaction.
+- Include action, model record and saved job identity in background failure logs.
+  After `dl_transitions --send`, distinguish a cleared retry wait from an attempt with no recorded result.
+- Remove insert-conflict handling that public PostgreSQL submissions cannot reach.
+  Keep the unfinished-job check, transaction rollback and database uniqueness constraint.
+- Remove redundant worker checks and attribute defaults used only by unsupported test fixtures.
+  Copy saved inputs into independent effect jobs without reading the submitting user again.
+  Simplify synchronous database-only scope tracking while retaining row protection, cache-lock checks and reentry refusal.
+- Correct temporary-refusal, retry, lock-visibility and competing-start documentation.
+  Restore the list of engine-managed arguments; callers must use other names for business data.
+  No database migration, queue setting or provider rate change is required.
+
 ## [4.1.1] — 2026-11-05
 
 - Remove the state re-check after the job insert. On PostgreSQL the business row is locked before the first state read and stays locked until the caller's transaction commits, so the re-check could not fire. Its two tests go with it.

@@ -3,9 +3,8 @@
 The committed ``TransitionMessage`` row is the signal. A worker asks the
 database for one claimable row, runs the shared execute path on it, and
 asks again. Nothing is sent to a broker, so nothing can be lost,
-duplicated, or published to a queue nobody consumes — the defect class
-recorded in the design record (``docs/design/PULL_WORKERS.md``, issue
-#217).
+duplicated, or published to a queue nobody consumes.
+See ``docs/design/PULL_WORKERS.md`` for the worker design.
 
 The claim's WHERE clause is the retry rule:
 
@@ -96,9 +95,11 @@ def claim_next(queues: list[str], *, exclude_pks=()) -> int | None:
 
     The lock taken by ``SKIP LOCKED`` is released when this short
     transaction ends; the runner then takes its own row lock for the
-    attempt. Two workers can race through that gap, and the loser exits
-    through the runner's existing skip-if-locked guard — wasteful once
-    in a while, never wrong.
+    attempt. Several workers can select the same row during that gap.
+    Competing starts are common when workers share queues with few client groups.
+    Non-atomic jobs expose another gap while the runner changes connections.
+    The runner's row lock prevents overlapping execution. A competing process
+    can record a start and exit without running the job's side effects.
 
     ``exclude_pks`` names the rows this worker already runs. One worker
     claims faster than its own attempt processes take their row locks, so
@@ -151,7 +152,6 @@ class _Attempt:
     timeout_seconds: float | None
     deadline: float | None
     killed: bool = False
-    reaped: bool = False
     exit_code: int | None = None
     next_retry_at: float = 0.0
     deferred_since: float | None = None
@@ -242,8 +242,6 @@ def _read_work_result(attempt: _Attempt) -> None:
 def _poll_delay(attempts: dict[int, _Attempt], maximum: float) -> float:
     now = time.monotonic()
     for attempt in attempts.values():
-        if attempt.reaped:
-            continue
         if attempt.killed:
             # Collect a stopped process's exit status before another long wait.
             maximum = min(maximum, 0.01)
@@ -274,7 +272,6 @@ def _finish_attempt(attempt: _Attempt, pending: deque[_Attempt]) -> None:
     if attempt.work_exit_code is not None:
         attempt.exit_code = attempt.work_exit_code
         attempt.killed = False
-    attempt.reaped = True
     attempt.deadline = None
     if not _try_account(attempt):
         attempt.next_retry_at = time.monotonic() + BUSY_POLL_SECONDS

@@ -167,7 +167,7 @@ class Process:
             kwargs['process_class'] = (
                 f"{self.__class__.__module__}.{self.__class__.__name__}"
             )
-        if getattr(transition, 'is_background', False):
+        if transition.is_background:
             # Record the process class that DECLARES this transition. For a
             # nested transition this differs from ``process_class`` (the bound
             # process this call entered through); for a transition on the bound
@@ -399,7 +399,7 @@ def _iter_process_tree(process_cls, _seen=None):
         return
     _seen.add(id(process_cls))
     yield process_cls
-    for sub_process_cls in process_cls.nested_processes or []:
+    for sub_process_cls in process_cls.nested_processes:
         yield from _iter_process_tree(sub_process_cls, _seen)
 
 
@@ -422,10 +422,8 @@ def _validate_action_names_not_shadowed(process_cls):
     subclass is validated as its own root when it is defined.
     """
     for proc_cls in _iter_process_tree(process_cls):
-        for transition in proc_cls.transitions or []:
-            action_name = getattr(transition, 'action_name', None)
-            if not action_name:
-                continue
+        for transition in proc_cls.transitions:
+            action_name = transition.action_name
             # Transitions of the whole tree, attributes of the root only:
             # a nested transition is called through the bound (root) class,
             # so that is the class whose attributes shadow it.
@@ -467,8 +465,8 @@ def _validate_unique_background_action_names(process_cls):
 
     for proc_cls in _iter_process_tree(process_cls):
         local_background: dict[str, str] = {}
-        for transition in proc_cls.transitions or []:
-            if not getattr(transition, 'is_background', False):
+        for transition in proc_cls.transitions:
+            if not transition.is_background:
                 continue
             name = transition.action_name
             if name in local_background:
@@ -544,15 +542,15 @@ def _iter_hooks(process_cls):
         owner = f'{proc_cls.__module__}.{proc_cls.__name__}'
         # Computed properties cannot be checked before an instance exists.
         for attr in ('conditions', 'permissions'):
-            hooks = getattr(proc_cls, attr, None)
+            hooks = getattr(proc_cls, attr)
             if isinstance(hooks, (list, tuple)):
                 for fn in hooks:
                     yield fn, owner
-        for transition in proc_cls.transitions or []:
+        for transition in proc_cls.transitions:
             for attr in hook_attrs:
-                wrapper = getattr(transition, attr, None)
-                for fn in getattr(wrapper, 'commands', None) or []:
-                    yield fn, f'{owner}.{getattr(transition, "action_name", "?")}'
+                wrapper = getattr(transition, attr)
+                for fn in wrapper.commands:
+                    yield fn, f'{owner}.{transition.action_name}'
 
 
 #: One record per ``bind_model_process`` call.

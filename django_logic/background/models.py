@@ -253,6 +253,9 @@ class TransitionMessage(TimeStampedModel):
                     .filter(pk=transition_message_id, is_completed=False)
                     .values_list('pk', flat=True)
                 )
+                # Releasing a savepoint keeps its row locks until the caller commits.
+                # Roll back this probe's savepoint to release them now.
+                transaction.set_rollback(True)
         except OperationalError:
             return True
         return False

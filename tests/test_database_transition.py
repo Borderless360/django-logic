@@ -1,6 +1,5 @@
 """Local state changes recover after a killed process without a cache timeout."""
 import os
-from contextvars import copy_context
 from pathlib import Path
 import signal
 import tempfile
@@ -70,7 +69,6 @@ class DatabaseProcess(Process):
     process_name = 'database_process'
     transitions = [
         DatabaseTransition('finish', sources=['draft'], target='done', side_effects=[save_local_work]),
-        DatabaseTransition('observe', sources=['done']),
         BackgroundTransition('pending', sources=['draft'], queue='database-test'),
         DatabaseTransition('reenter', sources=['draft'], target='done', side_effects=[reenter]),
         DatabaseTransition('reenter_cached', sources=['draft'], target='done', side_effects=[reenter_cached]),
@@ -321,18 +319,6 @@ class DatabaseTransitionTests(TransactionTestCase):
         self.assertTrue(observed)
         self.assertTrue(all(observed))
         self.assertFalse(State(row, 'status').is_locked())
-
-    def test_a_copied_context_does_not_retain_a_finished_calls_guard(self):
-        row = Order.objects.create()
-        contexts = []
-        original = Order.save
-        def capture(instance, *args, **kwargs):
-            contexts.append(copy_context())
-            return original(instance, *args, **kwargs)
-        with patch.object(Order, 'save', capture):
-            row.database_process.finish()
-        self.assertTrue(contexts)
-        self.assertIsNotNone(contexts[0].run(row.database_process.observe))
 
     def test_commit_callback_does_not_inherit_database_only_locking(self):
         local, ordinary = Order.objects.create(), Order.objects.create()

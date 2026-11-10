@@ -175,7 +175,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         # entrypoint — a sync+background namesake pair is legitimately driven
         # by transition() (it resolves the sync one).
         if not background and all(
-                getattr(t, 'is_background', False) for t in declared):
+                t.is_background for t in declared):
             self._record(f'transition({action!r})', 'FAILED',
                          'background transition')
             self._fail(

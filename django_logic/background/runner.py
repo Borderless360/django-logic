@@ -678,7 +678,9 @@ def _handle_failure(
     transition_message.save(using=using or transition_message._state.db, update_fields=['eligible_at', 'deferral_reason'])
     transition_message.record_error(error)
     transition_logger.error(
-        f'{kwargs.get("tr_id")} {TransitionEventType.FAIL.value}: '
+        f'{kwargs.get("tr_id")} {TransitionEventType.FAIL.value} '
+        f'action={transition.action_name} instance={state.instance_key} '
+        f'job={transition_message.pk}: '
         f'{type(error).__name__}: {error}',
         exc_info=(type(error), error, error.__traceback__),
     )
@@ -730,7 +732,7 @@ def _failure_is_permanent(transition, error: BaseException) -> bool:
 
     if isinstance(error, PermanentFailure):
         return True
-    no_retry_on = getattr(transition, 'no_retry_on', ())
+    no_retry_on = transition.no_retry_on
     return bool(no_retry_on) and isinstance(error, no_retry_on)
 
 
@@ -886,9 +888,8 @@ def _find_transition(process, transition_message: TransitionMessage):
     supplies the cycle guard — A nesting B nesting A is legal). A
     transition is a candidate when its ``action_name`` matches and it is
     a background one. Only background transitions: the worker never
-    restores a synchronous transition, and the lookup skips state
-    membership on purpose — the instance sits in ``in_progress_state``,
-    which is not in the transition's declared ``sources``.
+    restores a synchronous transition. This lookup does not check sources;
+    the runner checks the persisted state separately before running side effects.
 
     Enqueue records the process class that declared the transition on
     ``transition_message.owning_process_class``. A candidate declared on
@@ -914,7 +915,7 @@ def _find_transition(process, transition_message: TransitionMessage):
         for transition in process_cls.transitions:
             if (
                 transition.action_name == action_name
-                and getattr(transition, 'is_background', False)
+                and transition.is_background
             ):
                 if proc_path == owning_path:
                     return transition

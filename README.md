@@ -188,8 +188,8 @@ Ordinary `Transition` calls outside this scope keep their shared cache protectio
 an external call whose database connection failed. Do not clear that lock to
 force a retry. Replacing an external operation with `DatabaseTransition` is unsafe.
 
-GV uses this declaration for import results and their nested stock and bulk updates.
-Its order notifications and shipping submission run in separately saved background work.
+For example, an import completion saves its results and updates stock in one transaction.
+Its notifications and shipping requests run as separately saved background jobs.
 Declare a `Transition` with no `target` for work that needs conditions,
 permissions and side-effects but writes no state on success. It follows
 the same rules as every transition: it takes the state lock, it is
@@ -272,6 +272,12 @@ share one gate. Use a separate concrete model for an independent workflow.
 order = Order.objects.get(pk=pk)
 order.process.approve(user=request.user)
 ```
+
+The engine manages `tr_id`, `root_id`, `parent_id`, `process_class` and
+`owning_process_class`. Use other names for business data.
+Background transitions rebuild `context`; they do not save a caller's `context`.
+They also refuse `user_id`; pass `user=` instead.
+Calls refuse `state` and `exception` because hooks receive these from the engine.
 
 - The accessor is the process class's `process_name`. It is `process` by
   default.

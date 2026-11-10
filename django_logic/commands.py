@@ -325,11 +325,9 @@ class Callbacks(BaseCommand):
 class NextTransition:
     """Run a follow-up transition after the current one unlocks.
 
-    A dedicated slot because the follow-up must run in the same call
-    frame, after the state unlock: side-effects run before unlock (the
-    follow-up would deadlock on its own lock acquisition), and callbacks
-    execute on a worker process for background transitions — only for
-    synchronous transitions do they run inline.
+    Side effects run before unlock, so the held lock would refuse a follow-up.
+    This optional follow-up runs after callbacks and logs failures without
+    changing the completed action's result.
     """
 
     def __init__(self, next_transition: str | None = None):
@@ -339,53 +337,40 @@ class NextTransition:
         if not self._next_transition:
             return
 
-        process = getattr(state.instance, state.process_name)
-        transitions = list(
-            process.get_available_transitions(
-                action_name=self._next_transition,
-                user=kwargs.get('user'),
+        def run_followup():
+            process = getattr(state.instance, state.process_name)
+            transitions = list(
+                process.get_available_transitions(
+                    action_name=self._next_transition,
+                    user=kwargs.get('user'),
+                )
             )
-        )
-        if not transitions:
-            # Not currently available (state/conditions) — skip silently,
-            # as a follow-up is best-effort.
-            return None
-        if len(transitions) > 1:
-            # Parity with Process._resolve_transition_with_owner: refuse to
-            # guess between ambiguous matches rather than silently running
-            # whichever happens to be first in iteration order.
-            transition_logger.error(
-                f"{kwargs.get('tr_id')} {TransitionEventType.NEXT_TRANSITION.value} "
-                f"'{self._next_transition}' is ambiguous "
-                f"({len(transitions)} matches); not running any."
-            )
-            return None
+            if not transitions:
+                return None
+            if len(transitions) > 1:
+                # An optional follow-up must not choose between ambiguous matches.
+                transition_logger.error(
+                    f"{kwargs.get('tr_id')} {TransitionEventType.NEXT_TRANSITION.value} "
+                    f"'{self._next_transition}' is ambiguous "
+                    f"({len(transitions)} matches); not running any."
+                )
+                return None
 
-        if transitions[0].is_background:
-            # user_id is refused at enqueue; forwarding it into a
-            # background follow-up would fail kwargs serialization — and
-            # that failure is swallowed below, silently killing the
-            # chain. The caller did nothing wrong: it is legal on the
-            # synchronous transition that chains, so the engine drops it
-            # at the boundary it created. (request cannot arrive here:
-            # every transition refuses it at the call.)
-            kwargs = {k: v for k, v in kwargs.items() if k != 'user_id'}
+            followup_kwargs = kwargs
+            if transitions[0].is_background:
+                # Synchronous callers may pass user_id, but saved background jobs refuse it.
+                followup_kwargs = {key: value for key, value in kwargs.items() if key != 'user_id'}
 
-        using, in_transaction = _in_open_transaction(state.instance)
+            # The process entrypoint gives the follow-up its own trace identity.
+            return getattr(process, self._next_transition)(**followup_kwargs)
+
         try:
-            # Invoke through the Process entrypoint so the follow-up mints
-            # its own tr_id and manages _transition_context (root_id chains,
-            # parent_id = this transition), instead of inheriting the
-            # parent's tr_id via a direct change_state call. Failures of the
-            # follow-up must not bubble into the current transition — and,
-            # like Callbacks, a swallowed database error inside an open
-            # transaction must not poison it, so the follow-up runs
-            # in a savepoint there.
+            using, in_transaction = _in_open_transaction(state.instance)
+            # Guard checks can also fail in the database. Protect the completed
+            # action and the caller's transaction before resolving the follow-up.
             if in_transaction:
-                return _run_in_savepoint(
-                    using,
-                    lambda: getattr(process, self._next_transition)(**kwargs))
-            return getattr(process, self._next_transition)(**kwargs)
+                return _run_in_savepoint(using, run_followup)
+            return run_followup()
         except Exception as error:
             _log_hook_error(
                 f"{kwargs.get('tr_id')} "

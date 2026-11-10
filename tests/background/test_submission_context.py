@@ -138,10 +138,13 @@ class SubmissionContextTests(SubmissionTestSetup, TransactionTestCase):
             yield
             transaction.on_commit(lambda: events.append('accepted'), using=using)
 
-        self.declaration(submission_context=prepare)
+        declaration = self.declaration(submission_context=prepare)
+        declaration.in_progress_state = None
         self.widget.submission.finish()
-        with self.assertRaises(TransitionNotAllowed):
-            self.widget.submission.finish()
+        for mode in ('pull', 'sync'):
+            with self.subTest(mode=mode), self.settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION=mode)):
+                with self.assertRaises(AlreadyInProgress):
+                    self.widget.submission.finish()
         self.assertEqual(events, ['entered', 'accepted'])
         self.assertEqual(TransitionMessage.objects.count(), 1)
 
@@ -318,37 +321,64 @@ class SubmissionContextPostgresTests(SubmissionTestSetup, TransactionTestCase):
         self.widget.submission.finish()
         self.assertTrue(TransitionMessage.objects.get().is_completed)
 
-    def test_concurrent_duplicate_insert_rolls_back_losing_context_and_callbacks(self):
-        barrier = threading.Barrier(2)
-        accepted, failures, results = [], [], []
+    def test_public_concurrent_submissions_prepare_and_commit_once(self):
+        for target in ('done', None):
+            for caller_transaction in (False, True):
+                with self.subTest(target=target, caller_transaction=caller_transaction):
+                    self.widget = Widget.objects.create()
+                    barrier = threading.Barrier(2)
+                    prepared = threading.Event()
+                    allow_commit = threading.Event()
+                    accepted, failures, results, preparations = [], [], [], []
 
-        @contextmanager
-        def prepare(transition, state, kwargs, *, using):
-            Widget.objects.using(using).create(se_log=threading.current_thread().name)
-            transaction.on_commit(lambda: accepted.append('accepted'), using=using)
-            barrier.wait(timeout=10)
-            yield
+                    def ready(instance, **kwargs):
+                        barrier.wait(timeout=10)
+                        return True
 
-        declaration = self.declaration(submission_context=prepare)
+                    @contextmanager
+                    def prepare(transition, state, kwargs, *, using):
+                        preparations.append(state.instance.pk)
+                        Widget.objects.using(using).filter(pk=state.instance.pk).update(se_log='prepared')
+                        transaction.on_commit(lambda: accepted.append('accepted'), using=using)
+                        prepared.set()
+                        yield
+                        if not caller_transaction:
+                            self.assertTrue(allow_commit.wait(10))
 
-        def submit():
-            try:
-                widget = Widget.objects.get(pk=self.widget.pk)
-                row = declaration._enqueue_atomic(widget.submission.state, {}, 'test')
-                results.append(row.pk)
-            except BaseException as error:
-                failures.append(error)
-            finally:
-                connections.close_all()
+                    declaration = self.declaration(submission_context=prepare, conditions=[ready])
+                    declaration.target = target
+                    declaration.in_progress_state = None
 
-        threads = [threading.Thread(target=submit) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(15)
-        self.assertFalse(any(thread.is_alive() for thread in threads))
-        self.assertEqual(len(failures), 1)
-        self.assertIsInstance(failures[0], AlreadyInProgress)
-        self.assertEqual(results, [TransitionMessage.objects.get().pk])
-        self.assertEqual(accepted, ['accepted'])
-        self.assertEqual(Widget.objects.count(), 2)
+                    def submit():
+                        try:
+                            widget = Widget.objects.get(pk=self.widget.pk)
+                            if caller_transaction:
+                                with transaction.atomic():
+                                    result = widget.submission.finish()
+                                    self.assertTrue(allow_commit.wait(10))
+                            else:
+                                result = widget.submission.finish()
+                            results.append(result)
+                        except BaseException as error:
+                            failures.append(error)
+                        finally:
+                            connections.close_all()
+
+                    threads = [threading.Thread(target=submit) for _ in range(2)]
+                    try:
+                        for thread in threads:
+                            thread.start()
+                        self.assertTrue(prepared.wait(10))
+                    finally:
+                        allow_commit.set()
+                        for thread in threads:
+                            thread.join(15)
+                    self.assertFalse(any(thread.is_alive() for thread in threads))
+                    self.assertEqual(len(failures), 1)
+                    self.assertIsInstance(failures[0], AlreadyInProgress)
+                    job = TransitionMessage.for_instance(self.widget, 'submission').get()
+                    self.assertEqual([str(result) for result in results], [job.kwargs['tr_id']])
+                    self.assertEqual(preparations, [self.widget.pk])
+                    self.assertEqual(accepted, ['accepted'])
+                    self.widget.refresh_from_db()
+                    self.assertEqual((self.widget.status, self.widget.se_log), ('draft', 'prepared'))

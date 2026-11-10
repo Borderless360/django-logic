@@ -74,18 +74,14 @@ def validate_effect_submission(transition, state, kwargs):
 def save_effect_jobs(parent, transition, state, kwargs):
     """Save every declared effect on the connection completing its parent."""
     from django_logic.background.models import TransitionMessage
-    from django_logic.background.serializers import deserialize_kwargs, serialize_kwargs
 
     using = parent._state.db or DEFAULT_DB_ALIAS
     rows = TransitionMessage.objects.using(using)
-    saved_kwargs = deserialize_kwargs(parent.kwargs)
     for name in parent.background_effect_names:
         effect = transition.get_background_effect(name)
-        child_kwargs = dict(saved_kwargs)
-        child_kwargs.pop('context', None)
-        child_kwargs.pop('user_id', None)
-        child_kwargs.update(parent_id=saved_kwargs.get('tr_id'), tr_id=uuid4())
-        serialized = serialize_kwargs(child_kwargs)
+        child_kwargs = {
+            **parent.kwargs, 'parent_id': parent.kwargs.get('tr_id'), 'tr_id': str(uuid4()),
+        }
         request_key = f'django-logic:effect:{parent.pk}:{name}'
         # Old workers cannot mistake this row for the parent's state-changing action.
         transition_name = 'django-logic:effect:' + sha256(name.encode()).hexdigest()
@@ -101,7 +97,7 @@ def save_effect_jobs(parent, transition, state, kwargs):
             'fairness_key': parent.fairness_key,
             'queue_name': effect.queue or parent.queue_name,
             'timeout_seconds': effect.timeout,
-            'kwargs': serialized,
+            'kwargs': child_kwargs,
         })
 
 

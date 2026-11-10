@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
-import os
 from hashlib import blake2b
 from uuid import uuid4
 
@@ -24,35 +23,23 @@ def _database_lock_key(state):
     return (state.instance._state.db or DEFAULT_DB_ALIAS, state.instance_key)
 
 
-def _active_database_scope():
-    scope = _database_scope.get()
-    return scope if scope and scope['active'] and scope['process_id'] == os.getpid() else None
-
-
 def _database_lock_is_held(state):
     key = _database_lock_key(state)
-    return any(held['active'] and held['process_id'] == os.getpid() and held['key'] == key
-               for held in _database_locks.get())
+    return any(_database_lock_key(held) == key for held in _database_locks.get())
 
 
 @contextmanager
 def _database_only_scope(state):
     using = state.instance._state.db or DEFAULT_DB_ALIAS
-    parent = _active_database_scope()
-    if parent and parent['using'] != using:
+    parent = _database_scope.get()
+    if parent and parent != using:
         from django.core.exceptions import ImproperlyConfigured
         raise ImproperlyConfigured('Nested database transitions must use the same database transaction.')
-    scope = {'using': using, 'active': True, 'process_id': os.getpid()}
-    scope_token = _database_scope.set(scope)
+    scope_token = _database_scope.set(using)
     locks_token = _database_locks.set(_database_locks.get())
     try:
         yield
     finally:
-        # A copied async context must not retain a completed call's refusal.
-        scope['active'] = False
-        for held in _database_locks.get():
-            if held['scope'] is scope:
-                held['active'] = False
         _database_locks.reset(locks_token)
         _database_scope.reset(scope_token)
 
@@ -179,25 +166,23 @@ class State:
 
     def lock(self):
         """
-        Atomically locks the state.
-        Returns True if the lock was acquired, False if already locked.
+        Return True after taking the lock, or False when already locked.
 
-        Stores a unique ownership token as the lock value, so a stale
-        holder whose lock TTL-expired cannot release a successor's lock
-        (see ``unlock``).
+        Cache locks store an ownership token, which ``unlock()`` compares
+        before deleting the key.
+        Inside DatabaseTransition, ownership is visible only within this call.
+        Other connections rely on the PostgreSQL row lock when they act.
         """
         if _database_lock_is_held(self):
             return False
-        scope = _active_database_scope()
-        if scope:
-            if (self.instance._state.db or DEFAULT_DB_ALIAS) != scope['using']:
+        using = _database_scope.get()
+        if using:
+            if (self.instance._state.db or DEFAULT_DB_ALIAS) != using:
                 from django.core.exceptions import ImproperlyConfigured
                 raise ImproperlyConfigured('Nested database transitions must use the same database transaction.')
             if cache.get(self._get_hash()) is not None:
                 return False
-            held = {'state': self, 'key': _database_lock_key(self), 'scope': scope,
-                    'active': True, 'process_id': os.getpid()}
-            _database_locks.set((*_database_locks.get(), held))
+            _database_locks.set((*_database_locks.get(), self))
             return True
         token = uuid4().hex
         if cache.add(self._get_hash(), token, _get_lock_timeout()):
@@ -206,7 +191,10 @@ class State:
         return False
 
     def unlock(self):
-        """Release the lock — but only if this State object still owns it.
+        """Release this State object's lock.
+
+        Inside DatabaseTransition, remove ownership recorded in the current call.
+        PostgreSQL keeps its row lock until the transaction ends.
 
         Compare-and-delete on the ownership token issued by ``lock()``:
         if this holder's lock TTL-expired and another caller acquired the
@@ -221,20 +209,19 @@ class State:
         force-release behavior, kept for manual repair paths.
         """
         for held in reversed(_database_locks.get()):
-            if held['active'] and held['process_id'] == os.getpid() and held['state'] is self:
-                held['active'] = False
+            if held is self:
                 _database_locks.set(tuple(item for item in _database_locks.get() if item is not held))
                 return
-        if _active_database_scope():
-            return
         key = self._get_hash()
         token = getattr(self, '_lock_token', None)
         if token is None or cache.get(key) == token:
             cache.delete(key)
 
     def is_locked(self):
-        """Whether the lock key exists right now. Racy — a lock can appear
-        or expire between this read and the caller's next step; ``lock()``
-        is the only atomic gate."""
+        """Report a cache lock or DatabaseTransition ownership in this call.
+
+        Other connections cannot see DatabaseTransition ownership through this check.
+        Lock status can change before the caller acts; action calls take their own locks.
+        """
         return (_database_lock_is_held(self)
                 or cache.get(self._get_hash()) is not None)

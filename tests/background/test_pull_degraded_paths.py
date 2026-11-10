@@ -69,14 +69,6 @@ class WorkerPollDelayTests(SimpleTestCase):
                 with self.subTest(attempts=attempts):
                     self.assertEqual(pull._poll_delay(attempts, 5), 5)
 
-    def test_an_exit_already_collected_does_not_shorten_the_wait(self):
-        attempts = {
-            1: pull._Attempt(pk=1, timeout_seconds=1, deadline=99, reaped=True),
-            2: pull._Attempt(pk=2, timeout_seconds=1, deadline=99, reaped=True, killed=True),
-        }
-        with patch.object(pull.time, 'monotonic', return_value=100):
-            self.assertEqual(pull._poll_delay(attempts, 5), 5)
-
     def test_a_stopped_job_limits_the_wait_to_ten_milliseconds(self):
         attempts = {1: pull._Attempt(pk=1, timeout_seconds=1, deadline=99, killed=True)}
         with patch.object(pull.time, 'monotonic', return_value=100):
@@ -122,7 +114,6 @@ class UntrackedProcessTests(SimpleTestCase):
 
                 self.assertEqual(attempts, {tracked_pid: attempt})
                 self.assertIsNone(attempt.exit_code)
-                self.assertFalse(attempt.reaped)
                 self.assertEqual(list(pending), [])
                 record_error.assert_not_called()
 

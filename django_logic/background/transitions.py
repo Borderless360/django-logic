@@ -24,7 +24,7 @@ from copy import deepcopy
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db import IntegrityError, transaction, router, DEFAULT_DB_ALIAS
+from django.db import transaction, router, DEFAULT_DB_ALIAS
 
 from django_logic import conf
 from django_logic.background.exceptions import AlreadyInProgress
@@ -43,10 +43,6 @@ from django_logic.logger import (
 )
 from django_logic.state import State
 from django_logic.transition import Transition, _refuse_engine_param_kwargs
-
-
-class _JobInsertConflict(Exception):
-    """Only the job INSERT can be classified as a duplicate submission."""
 
 
 @contextmanager
@@ -302,9 +298,8 @@ class BackgroundTransition(Transition):
     ) -> TransitionMessage:
         """Atomic: set in_progress_state + create TransitionMessage row.
 
-        Raises :class:`AlreadyInProgress` if the partial unique
-        constraint fires (another uncompleted TransitionMessage exists
-        for the same instance + process).
+        Refuse an existing unfinished job before submission preparation.
+        The caller holds the business-row lock on PostgreSQL.
         """
         state_using = state.instance._state.db
         using = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
@@ -317,66 +312,52 @@ class BackgroundTransition(Transition):
                 raise AlreadyInProgress(f"Another background transition is already in progress for process '{state.process_name}'.",
                                         reason=RefusalReason.BACKGROUND_IN_FLIGHT)
             working_kwargs = deepcopy(kwargs) if self.submission_context is not None else dict(kwargs)
-            try:
-                # Duplicate submissions must discard preparation writes and callbacks.
-                with transaction.atomic(using=using):
-                    with _submission_scope(self, state, working_kwargs, using=using):
-                        kwargs = working_kwargs
-                        try:
-                            serialized = serialize_kwargs(kwargs)
-                        except KwargsSerializationError:
-                            # Re-raise so the precise refusal message is not wrapped
-                            # as "not JSON-serializable".
-                            raise
-                        except TypeError as e:
-                            raise ImproperlyConfigured(
-                                f"BackgroundTransition '{self.action_name}' received a "
-                                f"kwarg that is not JSON-serializable: {e}. Every value "
-                                f"passed to a background transition must be persistable "
-                                f"on the TransitionMessage row."
-                            ) from e
-                        resolved_fairness = (self.fairness_key(state.instance, **kwargs)
-                                             if callable(self.fairness_key) else self.fairness_key) or ''
-                        if (not isinstance(resolved_fairness, str) or len(resolved_fairness) > 255
-                                or '\x00' in resolved_fairness):
-                            raise ValueError('fairness_key must be a string of at most 255 characters without NUL.')
-                        try:
-                            with transaction.atomic(using=using):
-                                transition_message = rows.create(
-                                    # Keep the proxy class so the worker restores its behavior.
-                                    **TransitionMessage.instance_key(
-                                        state.instance, state.process_name),
-                                    proxy_model_label=TransitionMessage.proxy_label_for(
-                                        state.instance),
-                                    field_name=state.field_name,
-                                    transition_name=self.action_name,
-                                    # Nested processes can declare the same action name.
-                                    owning_process_class=kwargs.get('owning_process_class', ''),
-                                    fairness_key=resolved_fairness,
-                                    background_effect_names=[effect.name for effect in self.background_effects],
-                                    queue_name=queue_name,
-                                    timeout_seconds=self.timeout,
-                                    kwargs=serialized,
-                                )
-                        except IntegrityError as exc:
-                            raise _JobInsertConflict from exc
-                        if self.in_progress_state:
-                            # Model constraint errors must not appear as duplicate jobs.
-                            state.set_state(self.in_progress_state, using=state_using)
-                            transition_logger.info(
-                                f'{kwargs.get("tr_id")} '
-                                f'{TransitionEventType.SET_STATE.value} '
-                                f'{self.in_progress_state}'
-                            )
-                    if transaction.get_rollback(using=using):
-                        raise ImproperlyConfigured('submission_context must not silently roll back the submission.')
-            except _JobInsertConflict as exc:
-                raise AlreadyInProgress(
-                    f"{state.instance_key}: another background transition "
-                    f"is already in progress for this instance and process "
-                    f"'{state.process_name}'.",
-                    reason=RefusalReason.BACKGROUND_IN_FLIGHT,
-                ) from exc.__cause__
+            with _submission_scope(self, state, working_kwargs, using=using):
+                kwargs = working_kwargs
+                try:
+                    serialized = serialize_kwargs(kwargs)
+                except KwargsSerializationError:
+                    # Re-raise so the precise refusal message is not wrapped
+                    # as "not JSON-serializable".
+                    raise
+                except TypeError as e:
+                    raise ImproperlyConfigured(
+                        f"BackgroundTransition '{self.action_name}' received a "
+                        f"kwarg that is not JSON-serializable: {e}. Every value "
+                        f"passed to a background transition must be persistable "
+                        f"on the TransitionMessage row."
+                    ) from e
+                resolved_fairness = (self.fairness_key(state.instance, **kwargs)
+                                     if callable(self.fairness_key) else self.fairness_key) or ''
+                if (not isinstance(resolved_fairness, str) or len(resolved_fairness) > 255
+                        or '\x00' in resolved_fairness):
+                    raise ValueError('fairness_key must be a string of at most 255 characters without NUL.')
+                transition_message = rows.create(
+                    # Keep the proxy class so the worker restores its behavior.
+                    **TransitionMessage.instance_key(
+                        state.instance, state.process_name),
+                    proxy_model_label=TransitionMessage.proxy_label_for(
+                        state.instance),
+                    field_name=state.field_name,
+                    transition_name=self.action_name,
+                    # Nested processes can declare the same action name.
+                    owning_process_class=kwargs.get('owning_process_class', ''),
+                    fairness_key=resolved_fairness,
+                    background_effect_names=[effect.name for effect in self.background_effects],
+                    queue_name=queue_name,
+                    timeout_seconds=self.timeout,
+                    kwargs=serialized,
+                )
+                if self.in_progress_state:
+                    # Model constraint errors must not appear as duplicate jobs.
+                    state.set_state(self.in_progress_state, using=state_using)
+                    transition_logger.info(
+                        f'{kwargs.get("tr_id")} '
+                        f'{TransitionEventType.SET_STATE.value} '
+                        f'{self.in_progress_state}'
+                    )
+            if transaction.get_rollback(using=using):
+                raise ImproperlyConfigured('submission_context must not silently roll back the submission.')
 
         transition_logger.info(
             f'{kwargs.get("tr_id")} TransitionMessage#{transition_message.pk} '

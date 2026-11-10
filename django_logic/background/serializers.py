@@ -45,7 +45,7 @@ from django_logic.logger import transition_logger
 
 class KwargsSerializationError(TypeError):
     """Rejection of kwargs that enqueue would otherwise mutate silently
-    (a caller-passed ``request``, stringified non-string dict keys).
+    (a caller-supplied ``user_id``, unstorable text, or non-string dict keys).
 
     A ``TypeError`` subclass, so the documented "raises ``TypeError``"
     contract holds — but distinct, so the enqueue dispatcher re-raises it

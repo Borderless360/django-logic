@@ -7,6 +7,7 @@ always answers False, and the time-based classification stands — that
 degradation is pinned here too.
 """
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from django_logic.background.models import TransitionMessage, in_flight
+from django_logic.background.pull import claim_next
 from django_logic.background.safety_nets import detect_stuck_transitions
 from django_logic.testing import open_transition_message
 from tests.background.models import Widget
@@ -95,6 +97,29 @@ def _hold_row_lock(row_pk, locked, release):
 @requires_postgres
 class HeldRowTests(TransactionTestCase):
     databases = '__all__'
+
+    def test_status_check_inside_transaction_leaves_waiting_job_available(self):
+        """A second connection must claim work before the caller commits."""
+        widget = Widget.objects.create(status='fulfilling')
+        row = open_transition_message(
+            widget, 'process', 'fulfil', started_minutes_ago=60,
+        )
+
+        def inspect_and_claim():
+            try:
+                return in_flight(widget, 'process'), claim_next([row.queue_name])
+            finally:
+                connections.close_all()
+
+        with transaction.atomic():
+            Widget.objects.filter(pk=widget.pk).update(se_log='caller change')
+            self.assertFalse(in_flight(widget, 'process'))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                observed = pool.submit(inspect_and_claim).result(timeout=10)
+            self.assertEqual(observed, (False, row.pk))
+
+        widget.refresh_from_db()
+        self.assertEqual(widget.se_log, 'caller change')
 
     def _hold(self, row_pk):
         locked, release = threading.Event(), threading.Event()

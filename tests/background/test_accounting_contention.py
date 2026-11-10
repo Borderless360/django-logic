@@ -67,7 +67,7 @@ class AccountingContentionTests(TransactionTestCase):
         pending = deque([
             _Attempt(
                 pk=row.pk, timeout_seconds=None, deadline=None,
-                reaped=True, exit_code=3,
+                exit_code=3,
             ),
         ])
         with self._locked_row(row) as finished, \
@@ -96,7 +96,7 @@ class AccountingContentionTests(TransactionTestCase):
         row = self._row()
         attempt = _Attempt(
             pk=row.pk, timeout_seconds=None, deadline=None,
-            reaped=True, exit_code=3,
+            exit_code=3,
         )
         with self._locked_row(row, complete=True) as finished:
             self.assertFalse(_try_account(attempt))
@@ -120,7 +120,7 @@ class AccountingContentionTests(TransactionTestCase):
         pending = deque([
             _Attempt(
                 pk=locked_row.pk, timeout_seconds=None, deadline=None,
-                reaped=True, exit_code=3,
+                exit_code=3,
             ),
         ])
         attempts = {
@@ -149,8 +149,7 @@ class AccountingContentionTests(TransactionTestCase):
             locked_row.refresh_from_db()
             self.assertEqual(locked_row.errors_count, 1)
         finally:
-            sibling = attempts.get(sibling_pid)
-            if sibling is not None and not sibling.reaped:
+            if sibling_pid in attempts:
                 try:
                     os.kill(sibling_pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -164,7 +163,7 @@ class AccountingContentionTests(TransactionTestCase):
         row = self._row()
         attempt = _Attempt(
             pk=row.pk, timeout_seconds=None, deadline=None,
-            reaped=True, exit_code=3,
+            exit_code=3,
         )
         with self._locked_row(row), \
                 patch.object(pull.time, 'monotonic') as clock, \
@@ -186,12 +185,12 @@ class AccountingContentionTests(TransactionTestCase):
 
 
 class PendingAccountingTests(SimpleTestCase):
-    """A reaped child leaves a pending write, never a live process slot."""
+    """A finished job can leave a failure to record without using a job slot."""
 
     @staticmethod
     def _attempt(pk):
         return _Attempt(pk=pk, timeout_seconds=None, deadline=None,
-                        reaped=True, exit_code=3)
+                        exit_code=3)
 
     @staticmethod
     def _busy_error():
@@ -236,7 +235,6 @@ class PendingAccountingTests(SimpleTestCase):
                 _harvest(active, pending, block=False)
             self.assertEqual(active, {})
             self.assertEqual(list(pending), [old])
-            self.assertTrue(old.reaped)
             self.assertEqual(old.exit_code, 3)
 
             # This is an injected operating-system PID reuse, not a claim
