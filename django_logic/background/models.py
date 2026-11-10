@@ -254,6 +254,7 @@ class TransitionMessage(TimeStampedModel):
                     .values_list('pk', flat=True)
                 )
                 # Releasing a savepoint keeps its row locks until the caller commits.
+                # Roll back this probe's savepoint to release them now.
                 transaction.set_rollback(True)
         except OperationalError:
             return True
