@@ -152,7 +152,6 @@ class _Attempt:
     timeout_seconds: float | None
     deadline: float | None
     killed: bool = False
-    reaped: bool = False
     exit_code: int | None = None
     next_retry_at: float = 0.0
     deferred_since: float | None = None
@@ -243,8 +242,6 @@ def _read_work_result(attempt: _Attempt) -> None:
 def _poll_delay(attempts: dict[int, _Attempt], maximum: float) -> float:
     now = time.monotonic()
     for attempt in attempts.values():
-        if attempt.reaped:
-            continue
         if attempt.killed:
             # Collect a stopped process's exit status before another long wait.
             maximum = min(maximum, 0.01)
@@ -275,7 +272,6 @@ def _finish_attempt(attempt: _Attempt, pending: deque[_Attempt]) -> None:
     if attempt.work_exit_code is not None:
         attempt.exit_code = attempt.work_exit_code
         attempt.killed = False
-    attempt.reaped = True
     attempt.deadline = None
     if not _try_account(attempt):
         attempt.next_retry_at = time.monotonic() + BUSY_POLL_SECONDS

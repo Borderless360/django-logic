@@ -462,7 +462,7 @@ class Transition:
         is retrying it, so "retry shortly" would be wrong forever, and
         hook-path logging must stay at ERROR — a stuck instance pages.
         The classification (``TransitionMessage.retry_status``) is shared
-        with enqueue's constraint rejection and the public probe.
+        with enqueue's unfinished-job check and the public probe.
         """
         from django.apps import apps
 

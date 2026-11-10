@@ -69,8 +69,8 @@ process or engine-managed user and trace arguments.
 Preparation and its database writes use the transaction that saves the job.
 Use the supplied `using` alias for queries and `transaction.on_commit` callbacks.
 A refusal, serialization error or failed submission rolls those writes back.
-If another submission already saved unfinished work, the engine discards the
-losing preparation's writes and callbacks, then raises `AlreadyInProgress`.
+If another submission already saved unfinished work, the engine raises
+`AlreadyInProgress` before running preparation.
 Do not suppress errors or mark the transaction for a silent rollback.
 
 Keep the context short and local: no provider calls or other irreversible work.

@@ -57,21 +57,10 @@ class _ProcessLevelBad(Process):
     ]
 
 
-class _DuckTransition:
-    """Custom transition exposing only what it needs — the validator must
-    not require the full hook-attribute surface."""
-    action_name = 'quack'
-
-
-class _DuckProcess(Process):
-    process_name = 'sig_duck_process'
-    transitions = [_DuckTransition()]
-
-
 class HookSignatureValidationTests(SimpleTestCase):
     def tearDown(self):
         for name in ('sig_ok_process', 'sig_bad_process',
-                     'sig_proc_level_process', 'sig_duck_process'):
+                     'sig_proc_level_process'):
             if name in vars(Invoice):
                 delattr(Invoice, name)
         ProcessManager.bindings = [
@@ -103,11 +92,6 @@ class HookSignatureValidationTests(SimpleTestCase):
         self.assertIn('task_style_hook', message)
         self.assertIn('_ProcessLevelBad', message)
 
-    def test_duck_typed_transition_without_hook_attributes_binds(self):
-        # A transition object exposing only part of the hook surface must
-        # not crash bind_model_process.
-        ProcessManager.bind_model_process(
-            Invoice, _DuckProcess, state_field='status')
 
 
 class PropertyConditionsRegressionTests(SimpleTestCase):

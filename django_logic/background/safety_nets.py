@@ -125,7 +125,7 @@ def detect_stuck_transitions() -> int:
         is_completed=False,
         started_at__isnull=True,
         created__lt=now - timedelta(minutes=report_after),
-    ).filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=now))
+    )
     waiting = (
         never_started
         .values('queue_name')

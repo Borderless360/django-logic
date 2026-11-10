@@ -5,13 +5,16 @@ import tempfile
 import time
 from io import StringIO
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management import call_command
 from django.db import connection, connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from django_logic import Process, ProcessManager, Transition
@@ -102,6 +105,38 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
             self.assertFalse(child.ended_in_failure)
         self.widget.refresh_from_db()
         self.assertEqual((self.widget.status, self.widget.cb_log), ('done', 'saved'))
+
+    def test_effects_keep_saved_user_and_typed_inputs_without_reloading_user_on_save(self):
+        user = get_user_model().objects.create_user(username='effect-user')
+        received = []
+
+        def parent_action(instance, **kwargs):
+            kwargs['context']['temporary'] = 'parent runtime value'
+            kwargs['snapshot']['amount'] = Decimal('9.99')
+
+        def effect_action(instance, **kwargs):
+            received.append((kwargs['user'], kwargs['snapshot']['amount']))
+            self.assertNotIn('temporary', kwargs['context'])
+
+        parent = self.enqueue(user=user, snapshot={'amount': Decimal('1.25')})
+        with patch.object(EffectProcess.transitions[0].side_effects, '_commands', [parent_action]):
+            with CaptureQueriesContext(connection) as queries:
+                run_background_transition(parent.pk)
+        user_reads = [query for query in queries.captured_queries
+                      if query['sql'].lstrip().upper().startswith('SELECT')
+                      and get_user_model()._meta.db_table in query['sql']]
+        self.assertEqual(len(user_reads), 1)
+        for child in TransitionMessage.objects.filter(parent_job_id=parent.pk):
+            self.assertEqual(child.kwargs['user_id'], user.pk)
+            self.assertEqual(child.kwargs['snapshot'], parent.kwargs['snapshot'])
+            self.assertNotIn('context', child.kwargs)
+            effect = EffectProcess.transitions[0].get_background_effect(child.effect_name)
+            with patch.object(effect, 'action', effect_action):
+                run_background_transition(child.pk)
+            child.refresh_from_db()
+            self.assertTrue(child.is_completed)
+            self.assertFalse(child.ended_in_failure)
+        self.assertEqual(received, [(user, Decimal('1.25')), (user, Decimal('1.25'))])
 
     def test_same_effect_from_two_parent_operations_can_coexist(self):
         parent, children = self.finish()

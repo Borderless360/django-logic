@@ -168,13 +168,12 @@ class CleanupDeadlineTests(TransactionTestCase):
                 )
             finally:
                 post_delete.disconnect(slow_delete, sender=TransitionMessage)
-                for pid, attempt in attempts.items():
-                    if not attempt.reaped:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        os.waitpid(pid, 0)
+                for pid in attempts:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    os.waitpid(pid, 0)
                 connections.close_all()
             with patch.object(safety_nets, '_CLEANUP_BATCH_SIZE', 2):
                 self.assertEqual(safety_nets.cleanup_completed_transitions(), 3)

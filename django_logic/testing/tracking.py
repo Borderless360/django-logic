@@ -92,9 +92,7 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
     saved: list[tuple] = []
     for transition in transitions:
         for slot, sink_attr in _HOOK_SLOTS:
-            bundle = getattr(transition, slot, None)
-            if bundle is None:
-                continue
+            bundle = getattr(transition, slot)
             original = bundle._commands
             saved.append((bundle, original))
             inject_here = fail_side_effect if slot == 'side_effects' else None

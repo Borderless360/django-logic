@@ -19,9 +19,8 @@ class PermanentFailure(Exception):
 
 
 class AlreadyInProgress(TransitionTemporarilyUnavailable):
-    """Raised when enqueue finds an uncompleted TransitionMessage already
-    exists for the target instance + process (the partial unique
-    constraint fires).
+    """Raised before preparation when an unfinished job already exists
+    for the target instance and process.
 
     .. warning::
 

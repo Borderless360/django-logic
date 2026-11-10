@@ -28,7 +28,7 @@ def all_transitions(process_class) -> list:
     return [
         transition
         for process_cls in _iter_process_tree(process_class)
-        for transition in getattr(process_cls, 'transitions', None) or []
+        for transition in process_cls.transitions
     ]
 
 

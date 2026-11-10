@@ -732,7 +732,7 @@ def _failure_is_permanent(transition, error: BaseException) -> bool:
 
     if isinstance(error, PermanentFailure):
         return True
-    no_retry_on = getattr(transition, 'no_retry_on', ())
+    no_retry_on = transition.no_retry_on
     return bool(no_retry_on) and isinstance(error, no_retry_on)
 
 
@@ -915,7 +915,7 @@ def _find_transition(process, transition_message: TransitionMessage):
         for transition in process_cls.transitions:
             if (
                 transition.action_name == action_name
-                and getattr(transition, 'is_background', False)
+                and transition.is_background
             ):
                 if proc_path == owning_path:
                     return transition

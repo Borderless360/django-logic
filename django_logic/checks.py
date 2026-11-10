@@ -15,9 +15,9 @@ def _process_tree_has_background_transition(process_class) -> bool:
     from django_logic.process import _iter_process_tree
 
     return any(
-        getattr(transition, 'is_background', False)
+        transition.is_background
         for process_cls in _iter_process_tree(process_class)
-        for transition in process_cls.transitions or []
+        for transition in process_cls.transitions
     )
 
 
