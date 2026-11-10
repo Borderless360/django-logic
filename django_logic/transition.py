@@ -56,7 +56,7 @@ from django_logic.state import State
 
 #: Refuse argument names that collide with engine parameters before taking locks.
 #: ``state`` collides during side-effect execution; ``exception`` collides during failure handling.
-#: Trace and process identifiers are forwarded separately and documented as reserved names.
+#: The README's "Run a transition" section lists engine-managed arguments.
 _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception'})
 
 #: Every keyword a ``Transition`` declaration reads. Anything else raises at
@@ -192,15 +192,8 @@ class Transition:
                 f"{self.in_progress_state!r} after the work is done."
             )
         if self.in_progress_state and self.in_progress_state not in self.sources:
-            # Treat the in-progress state as a valid source of the same
-            # transition so the worker / retry paths can look the
-            # transition up from an already-running instance. Visible
-            # consequence: while a background transition is in progress
-            # (instance in in_progress_state, enqueue lock already
-            # released), the action still shows up in
-            # get_available_actions() — the one-uncompleted-row gate is
-            # enforced at invocation time (AlreadyInProgress), not at
-            # listing time.
+            # Allow the action to be submitted again from its in-progress state.
+            # The unfinished-job check still refuses conflicting submissions.
             self.sources.append(self.in_progress_state)
         self.failed_state = kwargs.get('failed_state')
         if self.failed_state and not self.lock:

@@ -85,7 +85,10 @@ def _queue_is_served(queue_name: str, now, window_minutes: int) -> bool:
 
 
 def retry_pending() -> int:
-    """Run every claimable row inline. Returns how many ran cleanly.
+    """Run every claimable row inline. Count calls that return without raising.
+
+    Outside sync mode, that count also includes failed attempts.
+    It does not establish that their business work succeeded.
 
     A failing side-effect re-raises out of ``run_background_transition``
     in sync mode; the failure is already recorded on its row, so the scan

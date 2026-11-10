@@ -886,9 +886,8 @@ def _find_transition(process, transition_message: TransitionMessage):
     supplies the cycle guard — A nesting B nesting A is legal). A
     transition is a candidate when its ``action_name`` matches and it is
     a background one. Only background transitions: the worker never
-    restores a synchronous transition, and the lookup skips state
-    membership on purpose — the instance sits in ``in_progress_state``,
-    which is not in the transition's declared ``sources``.
+    restores a synchronous transition. This lookup does not check sources;
+    the runner checks the persisted state separately before running side effects.
 
     Enqueue records the process class that declared the transition on
     ``transition_message.owning_process_class``. A candidate declared on

@@ -9,6 +9,9 @@ state lock. This lets an application distinguish a temporary wait from a busines
 rule that forbids an action. The default continues to hide actions that need a
 held lock.
 
+Inside `DatabaseTransition`, the lock is visible only within the current call.
+Other connections can list those actions, but calls still wait for the PostgreSQL row lock or refuse after its timeout.
+
 These queries do not acquire or release locks, save a request, or guarantee that
 an action can run immediately. Calling the action still acquires its normal
 locks, checks the latest persisted state and rejects conflicting unfinished
@@ -146,9 +149,9 @@ exact retry count. These records cannot establish total runtime or utilization.
 `dl_transitions --stats --since 7d --json` exposes the same report without
 changing jobs. Cleanup limits the available history.
 
-Essential side-effect error logs identify the failing callable, action,
-model record and exception type. This separates business work failures from
-best-effort callback failures without logging the callable's arguments.
+Synchronous side-effect errors identify the failing callable, action, model record and exception type.
+Background failure logs identify the action, model record, saved job and exception type; the traceback locates the failure.
+These logs exclude callable arguments and distinguish required work failures from best-effort callback failures.
 
 ## Required follow-up
 
@@ -200,6 +203,8 @@ Default atomic execution suits required database work whose external publication
 
 Inline execution of `atomic=False` work requires autocommit.
 Tests of transactional submission must submit in pull mode, commit, then call `retry_pending()` to execute saved jobs inline.
+Its return value counts calls without raised exceptions, including failed attempts in pull mode.
+Check saved job and business results to establish success.
 Use `TransactionTestCase` for those real commits.
 Do not add an empty production job just to make transactional submission run inside a synchronous test.
 

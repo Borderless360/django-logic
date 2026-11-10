@@ -3,9 +3,8 @@
 The committed ``TransitionMessage`` row is the signal. A worker asks the
 database for one claimable row, runs the shared execute path on it, and
 asks again. Nothing is sent to a broker, so nothing can be lost,
-duplicated, or published to a queue nobody consumes — the defect class
-recorded in the design record (``docs/design/PULL_WORKERS.md``, issue
-#217).
+duplicated, or published to a queue nobody consumes.
+See ``docs/design/PULL_WORKERS.md`` for the worker design.
 
 The claim's WHERE clause is the retry rule:
 
@@ -96,9 +95,11 @@ def claim_next(queues: list[str], *, exclude_pks=()) -> int | None:
 
     The lock taken by ``SKIP LOCKED`` is released when this short
     transaction ends; the runner then takes its own row lock for the
-    attempt. Two workers can race through that gap, and the loser exits
-    through the runner's existing skip-if-locked guard — wasteful once
-    in a while, never wrong.
+    attempt. Several workers can select the same row during that gap.
+    Competing starts are common when workers share queues with few client groups.
+    Non-atomic jobs expose another gap while the runner changes connections.
+    The runner's row lock prevents overlapping execution. A competing process
+    can record a start and exit without running the job's side effects.
 
     ``exclude_pks`` names the rows this worker already runs. One worker
     claims faster than its own attempt processes take their row locks, so
