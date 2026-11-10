@@ -166,12 +166,12 @@ class State:
 
     def lock(self):
         """
-        Atomically locks the state.
-        Returns True if the lock was acquired, False if already locked.
+        Return True after taking the lock, or False when already locked.
 
-        Stores a unique ownership token as the lock value, so a stale
-        holder whose lock TTL-expired cannot release a successor's lock
-        (see ``unlock``).
+        Cache locks store an ownership token so an expired holder cannot
+        deliberately release another caller's lock (see ``unlock``).
+        Inside DatabaseTransition, ownership is visible only within this call.
+        Other connections rely on the PostgreSQL row lock when they act.
         """
         if _database_lock_is_held(self):
             return False
@@ -191,7 +191,10 @@ class State:
         return False
 
     def unlock(self):
-        """Release the lock — but only if this State object still owns it.
+        """Release this State object's lock.
+
+        Inside DatabaseTransition, remove ownership recorded in the current call.
+        PostgreSQL keeps its row lock until the transaction ends.
 
         Compare-and-delete on the ownership token issued by ``lock()``:
         if this holder's lock TTL-expired and another caller acquired the
@@ -215,8 +218,10 @@ class State:
             cache.delete(key)
 
     def is_locked(self):
-        """Whether the lock key exists right now. Racy — a lock can appear
-        or expire between this read and the caller's next step; ``lock()``
-        is the only atomic gate."""
+        """Report a cache lock or DatabaseTransition ownership in this call.
+
+        Other connections cannot see DatabaseTransition ownership through this check.
+        Lock status can change before the caller acts; action calls take their own locks.
+        """
         return (_database_lock_is_held(self)
                 or cache.get(self._get_hash()) is not None)
