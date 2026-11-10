@@ -71,6 +71,22 @@ class LoggedFailureProcess(Process):
     ]
 
 
+class LoggedBackgroundFailureProcess(Process):
+    process_name = 'logged_background_failure'
+    transitions = [
+        BackgroundTransition('submit', sources=['draft'], target='done',
+                             side_effects=[bg_ok, reject_provider], queue=QUEUE),
+    ]
+
+
+class LoggedReceiptFailureProcess(Process):
+    process_name = 'logged_receipt_failure'
+    transitions = [
+        BackgroundTransition('submit', sources=['draft'], target='done',
+                             side_effects=[bg_ok, reject_provider], queue=QUEUE, atomic=False),
+    ]
+
+
 @override_settings(DJANGO_LOGIC=SETTINGS)
 class AttemptHistoryTests(TestCase):
     def setUp(self):
@@ -190,6 +206,28 @@ class AttemptHistoryTests(TestCase):
         self.assertIn('ValueError: provider rejected the request', messages)
         self.assertNotIn('do-not-log-this', messages)
 
+    def test_background_error_identifies_action_record_and_job_without_arguments(self):
+        LoggedBackgroundFailureProcess(field_name='status', instance=self.widget).submit(
+            private_input='do-not-log-this')
+        row = TransitionMessage.objects.get()
+
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
+            run_background_transition(row.pk)
+
+        self.assertEqual(len(logs.records), 1)
+        message = logs.records[0].getMessage()
+        self.assertIn('Fail action=submit', message)
+        self.assertIn(f'instance=bg_tests_widget-status-{self.widget.pk}', message)
+        self.assertIn(f'job={row.pk}', message)
+        self.assertIn('ValueError: provider rejected the request', message)
+        self.assertIn('reject_provider', '\n'.join(logs.output))
+        self.assertNotIn('do-not-log-this', '\n'.join(logs.output))
+        row.refresh_from_db()
+        self.widget.refresh_from_db()
+        self.assertEqual(row.errors_count, 1)
+        self.assertFalse(row.is_completed)
+        self.assertEqual(self.widget.se_log, '')
+
 
 @requires_postgres
 @override_settings(DJANGO_LOGIC=SETTINGS)
@@ -200,6 +238,28 @@ class AttemptHistoryPostgresTests(TransactionTestCase):
         cache.clear()
         self.addCleanup(cache.clear)
         self.widget = Widget.objects.create()
+
+    def test_non_atomic_error_identifies_action_record_and_job_without_arguments(self):
+        LoggedReceiptFailureProcess(field_name='status', instance=self.widget).submit(
+            private_input='do-not-log-this')
+        row = TransitionMessage.objects.get()
+
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
+            run_background_transition(row.pk)
+
+        self.assertEqual(len(logs.records), 1)
+        message = logs.records[0].getMessage()
+        self.assertIn('Fail action=submit', message)
+        self.assertIn(f'instance=bg_tests_widget-status-{self.widget.pk}', message)
+        self.assertIn(f'job={row.pk}', message)
+        self.assertIn('ValueError: provider rejected the request', message)
+        self.assertIn('reject_provider', '\n'.join(logs.output))
+        self.assertNotIn('do-not-log-this', '\n'.join(logs.output))
+        row.refresh_from_db()
+        self.widget.refresh_from_db()
+        self.assertEqual(row.errors_count, 1)
+        self.assertFalse(row.is_completed)
+        self.assertEqual(self.widget.se_log, 'ok,')
 
     def test_locked_job_does_not_count_a_start(self):
         HistoryProcess(field_name='status', instance=self.widget).submit()

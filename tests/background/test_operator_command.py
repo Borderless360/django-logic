@@ -13,6 +13,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from django_logic.background.models import TransitionMessage
+from django_logic.background.safety_nets import _claimable
 from django_logic.background.worker_presence import record_worker_presence
 from django_logic.testing import open_transition_message
 from tests.background.models import Widget
@@ -171,6 +172,31 @@ class SendOneRowTests(TestCase):
         self.assertEqual(row.errors_count, 1)
         # The claim is promised only once a worker serves the queue.
         self.assertIn("once one serves 'django_logic'", out.getvalue())
+
+    def test_send_lists_cleared_retry_wait_and_preserves_failure_history(self):
+        row = self._row(started_at=timezone.now(), start_attempt_count=1)
+        row.record_error(ValueError('the courier said no'))
+        before = TransitionMessage.objects.filter(pk=row.pk).values().get()
+        listing = StringIO()
+        call_command('dl_transitions', stdout=listing)
+        self.assertIn('waiting out the retry pause', listing.getvalue())
+        self.assertFalse(_claimable().filter(pk=row.pk).exists())
+
+        call_command('dl_transitions', send=row.pk, stdout=StringIO())
+
+        listing = StringIO()
+        call_command('dl_transitions', stdout=listing)
+        self.assertIn('retry wait cleared', listing.getvalue())
+        self.assertIn('the courier said no', listing.getvalue())
+        self.assertNotIn('may still be running', listing.getvalue())
+        self.assertNotIn('waiting out the retry pause', listing.getvalue())
+        after = TransitionMessage.objects.filter(pk=row.pk).values().get()
+        self.assertIsNone(after['last_error_dt'])
+        self.assertTrue(_claimable().filter(pk=row.pk).exists())
+        for field in ('last_error_dt', 'modified'):
+            before.pop(field)
+            after.pop(field)
+        self.assertEqual(after, before)
 
     def test_send_refuses_a_completed_row(self):
         row = self._row(is_completed=True)

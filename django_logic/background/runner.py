@@ -678,7 +678,9 @@ def _handle_failure(
     transition_message.save(using=using or transition_message._state.db, update_fields=['eligible_at', 'deferral_reason'])
     transition_message.record_error(error)
     transition_logger.error(
-        f'{kwargs.get("tr_id")} {TransitionEventType.FAIL.value}: '
+        f'{kwargs.get("tr_id")} {TransitionEventType.FAIL.value} '
+        f'action={transition.action_name} instance={state.instance_key} '
+        f'job={transition_message.pk}: '
         f'{type(error).__name__}: {error}',
         exc_info=(type(error), error, error.__traceback__),
     )

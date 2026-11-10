@@ -167,6 +167,11 @@ class Command(BaseCommand):
                 f'waiting out the retry pause after its last error: '
                 f'{row.last_error_message[:100]}'
             )
+        if row.errors_count and row.last_error_dt is None:
+            return (
+                'retry wait cleared; a worker may claim it; '
+                f'last recorded error: {row.last_error_message[:100]}'
+            )
         if (row.started_at is not None
                 and (row.last_error_dt is None or row.last_error_dt < row.started_at)
                 and (row.last_deferred_at is None or row.last_deferred_at < row.started_at)):
