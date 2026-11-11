@@ -89,7 +89,8 @@ class BackgroundTransition(Transition):
           and job completion still commit together. Provider calls need
           durable receipts or provider idempotency keys before enabling it.
           Only the default PostgreSQL database is supported. Inline sync
-          execution requires autocommit; pull enqueue may use a transaction.
+          execution requires autocommit, except in the test runtime, where
+          the job joins the caller's transaction; pull enqueue may use one.
         - ``queue`` — the queue name this transition's row carries.
           Defaults to ``DJANGO_LOGIC['DEFAULT_QUEUE']``
           (``'django_logic'``). Name queues per SLA (e.g. ``critical`` /
@@ -203,7 +204,9 @@ class BackgroundTransition(Transition):
         validate_effect_submission(self, state, kwargs)
         if not self.atomic:
             from django_logic.background.non_atomic import validate_non_atomic
-            validate_non_atomic(state.instance, require_autocommit=conf.sync_mode())
+            # The test runtime runs the job inside the caller's transaction.
+            validate_non_atomic(
+                state.instance, require_autocommit=conf.sync_mode() and not conf.sync_enabled())
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
         queue_name = self.get_queue_name()

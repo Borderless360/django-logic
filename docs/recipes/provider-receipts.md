@@ -48,9 +48,15 @@ A provider's idempotency key can also protect retries. The engine does not inven
 provider keys, interpret responses, or promise that external requests happen once.
 
 Only models and jobs reading and writing the default PostgreSQL database are
-supported. Other database routes are refused before enqueue. Inline sync execution
-requires autocommit; use `TransactionTestCase` for these tests. Pull enqueue may
+supported. Other database routes are refused before enqueue. Pull enqueue may
 run inside a caller transaction because execution starts after commit.
+
+A `sync_execution()` block in a deployment requires autocommit, because a caller
+rollback would discard the receipts. The test runtime (`enable_sync()`) is the
+exception: a job called inside a transaction runs in that transaction, on the
+caller's connection. A `TestCase` can run it and check that the receipt stays
+when a later step fails. Use `TransactionTestCase` when the test needs the
+separate job connection, real commits or two workers.
 
 Custom model saves and signal handlers must honor Django's `using` argument for
 writes that belong to the final state transaction. A custom `State.set_state`

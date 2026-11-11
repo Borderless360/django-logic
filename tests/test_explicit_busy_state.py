@@ -91,16 +91,17 @@ class ExplicitBusyStatePatternTests(TestCase):
         row = TransitionMessage.objects.get(instance_id=str(inv.pk))
         self.assertTrue(row.is_completed)
 
-    def test_a_swallowed_chained_failure_parks_at_busy(self):
-        """Chaining is best-effort. Inside an open transaction the chained
-        transition rolls back with its savepoint and the swallowed error leaves
-        the instance at ``busy`` — the same parked shape as the crash window
-        below, with the same recovery. In celery mode the chain enqueues on
-        commit and the worker contains the failure in ``work_failed``."""
+    def test_a_swallowed_chained_failure_keeps_its_failed_state(self):
+        """Chaining is best-effort: ``submit`` succeeds and its caller does not
+        see the chained error. The chained transition still contains its own
+        failure in ``work_failed``, inside an open transaction as on a worker."""
         inv = Invoice.objects.create(status='draft')
         inv.broken_busy_proc.submit()
         inv.refresh_from_db()
-        self.assertEqual(inv.status, 'busy')
+        self.assertEqual(inv.status, 'work_failed')
+        row = TransitionMessage.objects.get(instance_id=str(inv.pk))
+        self.assertTrue(row.is_completed)
+        self.assertTrue(row.ended_in_failure)
 
     def test_the_crash_window_recovery_recipe(self):
         """The pattern accepts one window: a crash between ``submit``'s commit

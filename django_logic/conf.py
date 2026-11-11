@@ -218,6 +218,7 @@ def sync_execution():
     Business code and tests can use this block when the caller needs an immediate result.
     Inline execution starts no retry loop. A committed unfinished job can still be claimed by workers serving its queue.
     Atomic work can join a caller transaction; ``atomic=False`` still requires PostgreSQL autocommit.
+    Only the test runtime (:func:`enable_sync`) runs ``atomic=False`` work inside a caller transaction.
     """
     token = _force_sync.set(True)
     try:

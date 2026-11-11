@@ -369,7 +369,8 @@ run_background_transition(transition_message.pk)   # one worker attempt for a sp
 
 Use `TransactionTestCase` (or `ProcessScenario`, which extends it) when your
 assertions depend on real transaction boundaries — e.g. proving a failed
-attempt's writes rolled back.
+attempt's writes rolled back. An `atomic=False` job runs inside `TestCase` too:
+in the test runtime it joins the test's transaction.
 
 ### An uncompleted row as a fixture
 
