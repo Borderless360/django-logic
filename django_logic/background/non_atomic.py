@@ -2,6 +2,7 @@
 
 The job row stays locked on a separate connection. Model work uses autocommit.
 The final state and job completion are written in the same transaction.
+In the test runtime a job called inside a transaction joins that transaction.
 """
 from contextlib import contextmanager
 from uuid import uuid4
@@ -9,8 +10,9 @@ from uuid import uuid4
 from django.core.exceptions import ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 
+from django_logic import conf
 from django_logic.background.models import TransitionMessage
-from django_logic.commands import _run_in_savepoint
+from django_logic.commands import _run_in_savepoint, _run_keeping_writes
 from django_logic.logger import TransitionEventType, transition_logger
 from django_logic.process import _transition_context
 
@@ -77,6 +79,21 @@ def _job_connection():
 
 def run_non_atomic(transition_message_id):
     """Keep provider receipts when a later operation or final state write fails."""
+    if connections[DEFAULT_DB_ALIAS].get_autocommit():
+        with _job_connection() as alias, transaction.atomic(using=alias):
+            return _run_attempt(transition_message_id, alias)
+    if conf.sync_enabled() and conf.sync_mode():
+        # A test holds a transaction, and no second connection can see its
+        # uncommitted job row. The job joins that transaction instead.
+        with transaction.atomic():
+            return _run_attempt(transition_message_id, DEFAULT_DB_ALIAS)
+    raise ImproperlyConfigured(
+        'BackgroundTransition(atomic=False) cannot execute inside a caller transaction.'
+    )
+
+
+def _run_attempt(transition_message_id, alias):
+    """Run one attempt. ``alias`` is the connection that holds the job row."""
     from django_logic.background.runner import (
         _decode_kwargs,
         _handle_failure,
@@ -88,85 +105,95 @@ def run_non_atomic(transition_message_id):
         _superseded_outcome,
     )
 
-    if not connections[DEFAULT_DB_ALIAS].get_autocommit():
-        raise ImproperlyConfigured(
-            'BackgroundTransition(atomic=False) cannot execute inside a caller transaction.'
-        )
-    with _job_connection() as alias, transaction.atomic(using=alias):
-        transition_message = _lock_uncompleted_row(transition_message_id, using=alias)
-        job_connection = connections[alias]
-        raw_job_connection = job_connection.connection
-        job_transaction_id = _job_transaction_id(job_connection)
-        kwargs, decode_error = _decode_kwargs(transition_message)
-        restored, restore_error = _restore_for_attempt(transition_message)
-        if restore_error is not None:
-            return _handle_restore_failure(transition_message, restore_error)
-        instance, process, transition = restored
-        state = process.state
-        try:
-            validate_non_atomic(instance, require_autocommit=True)
-        except ImproperlyConfigured as error:
-            return _handle_restore_failure(transition_message, error)
-        superseded = _superseded_outcome(transition_message, transition, state, kwargs)
-        if superseded is not None:
-            return superseded
-        token = _transition_context.set({
-            'root_id': kwargs.get('root_id'),
-            'tr_id': kwargs.get('tr_id'),
-        })
-        original_alias = instance._state.db
-        try:
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} Execute Start {transition.action_name} '
-                f'{state.instance_key} queue={transition_message.queue_name}'
-            )
-            error = decode_error
-            if error is None:
-                try:
-                    for command in transition.side_effects.commands:
-                        # Refuse another operation if this connection lost its job lock.
-                        # An external request already in progress still needs a saved receipt.
-                        _check_job_transaction(job_connection, raw_job_connection, job_transaction_id)
-                        transition_logger.info(
-                            f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
-                            f'{getattr(command, "__name__", repr(command))}'
-                        )
-                        command(instance, **kwargs)
-                except Exception as exception:
-                    error = exception
+    own_connection = alias != DEFAULT_DB_ALIAS
+    transition_message = _lock_uncompleted_row(transition_message_id, using=alias)
+    job_connection = connections[alias]
+    raw_job_connection = job_connection.connection
+    job_transaction_id = _job_transaction_id(job_connection) if own_connection else None
 
-            # The state guard and final writes use the connection that still holds the job.
-            # Provider writes used the normal connection and have already committed.
+    def check_job_transaction():
+        if own_connection:
             _check_job_transaction(job_connection, raw_job_connection, job_transaction_id)
-            instance._state.db = alias
-            if error is not None:
-                return _handle_failure(
-                    transition_message, transition, state, kwargs, error, using=alias,
-                )
 
-            def complete():
-                with _protect_completion_state(transition, state):
-                    superseded = _superseded_outcome(
-                        transition_message, transition, state, kwargs, after_side_effects=True,
-                    )
-                    if superseded is not None:
-                        return superseded
-                    if transition.target is not None:
-                        state.set_state(transition.target, using=alias)
-                        transition_logger.info(
-                            f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                            f'{transition.target}'
-                        )
-                    return _handle_success(transition_message, transition, state, kwargs)
+    kwargs, decode_error = _decode_kwargs(transition_message)
+    restored, restore_error = _restore_for_attempt(transition_message)
+    if restore_error is not None:
+        return _handle_restore_failure(transition_message, restore_error)
+    instance, process, transition = restored
+    state = process.state
+    try:
+        validate_non_atomic(instance, require_autocommit=own_connection)
+    except ImproperlyConfigured as error:
+        return _handle_restore_failure(transition_message, error)
+    superseded = _superseded_outcome(transition_message, transition, state, kwargs)
+    if superseded is not None:
+        return superseded
+    token = _transition_context.set({
+        'root_id': kwargs.get('root_id'),
+        'tr_id': kwargs.get('tr_id'),
+    })
+    original_alias = instance._state.db
 
+    def run_side_effects():
+        for command in transition.side_effects.commands:
+            # Refuse another operation if this connection lost its job lock.
+            # An external request already in progress still needs a saved receipt.
+            check_job_transaction()
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
+                f'{getattr(command, "__name__", repr(command))}'
+            )
+            command(instance, **kwargs)
+
+    try:
+        transition_logger.info(
+            f'{kwargs.get("tr_id")} Execute Start {transition.action_name} '
+            f'{state.instance_key} queue={transition_message.queue_name}'
+        )
+        error = decode_error
+        if error is None:
             try:
-                return _run_in_savepoint(alias, complete, require_commit=True)
+                if own_connection:
+                    run_side_effects()
+                else:
+                    # Inside the caller's transaction a database error must not
+                    # break it; any other error keeps the writes made so far.
+                    _run_keeping_writes(alias, run_side_effects)
             except Exception as exception:
-                transition_message.refresh_from_db(using=alias)
-                instance.refresh_from_db(using=alias, fields=[state.field_name])
-                return _handle_failure(
-                    transition_message, transition, state, kwargs, exception, using=alias,
+                error = exception
+
+        # The state guard and final writes use the connection that still holds the job.
+        # Provider writes used the normal connection and have already committed.
+        check_job_transaction()
+        instance._state.db = alias
+        if error is not None:
+            return _handle_failure(
+                transition_message, transition, state, kwargs, error, using=alias,
+            )
+
+        def complete():
+            with _protect_completion_state(transition, state):
+                superseded = _superseded_outcome(
+                    transition_message, transition, state, kwargs, after_side_effects=True,
                 )
-        finally:
-            instance._state.db = original_alias
-            _transition_context.reset(token)
+                if superseded is not None:
+                    return superseded
+                if transition.target is not None:
+                    state.set_state(transition.target, using=alias)
+                    transition_logger.info(
+                        f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
+                        f'{transition.target}'
+                    )
+                return _handle_success(transition_message, transition, state, kwargs)
+
+        try:
+            return _run_in_savepoint(alias, complete, require_commit=True)
+        except Exception as exception:
+            transition_message.refresh_from_db(using=alias)
+            instance.refresh_from_db(using=alias, fields=[state.field_name])
+            return _handle_failure(
+                transition_message, transition, state, kwargs, exception, using=alias,
+            )
+    finally:
+        instance._state.db = original_alias
+        _transition_context.reset(token)

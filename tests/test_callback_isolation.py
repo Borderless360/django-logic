@@ -54,6 +54,55 @@ def _process(invoice):
     return _HookProcess(field_name='status', instance=invoice)
 
 
+def _save_then_fail(instance, **kwargs):
+    Invoice.objects.create(status='saved_first')
+    raise ValueError('the callback failed after it saved')
+
+
+def _save_then_break_the_database(instance, **kwargs):
+    Invoice.objects.create(status='discarded')
+    Invoice.objects.create(status=None)
+
+
+def _note_failure(instance, **kwargs):
+    Invoice.objects.create(status='failure_noted')
+
+
+class _NestedFailureProcess(Process):
+    process_name = 'nested_failure_process'
+    transitions = [
+        Transition('explode', sources=['draft'], target='done',
+                   failed_state='failed',
+                   side_effects=[_boom],
+                   failure_callbacks=[_note_failure]),
+    ]
+
+
+def _fail_another_invoice(instance, **kwargs):
+    other = Invoice.objects.create(status='draft', customer_received=True)
+    _NestedFailureProcess(field_name='status', instance=other).explode()
+
+
+class _KeepWritesProcess(Process):
+    process_name = 'keep_writes_process'
+    transitions = [
+        Transition('approve', sources=['draft'], target='approved',
+                   callbacks=[_save_then_fail, _record]),
+        Transition('explode', sources=['draft'], target='done',
+                   failed_state='failed',
+                   side_effects=[_boom],
+                   failure_callbacks=[_save_then_fail, _record]),
+        Transition('approve_with_database_error', sources=['draft'], target='approved',
+                   callbacks=[_save_then_break_the_database, _record]),
+        Transition('start_another', sources=['draft'], target='approved',
+                   callbacks=[_fail_another_invoice, _record]),
+    ]
+
+
+def _keep_writes_process(invoice):
+    return _KeepWritesProcess(field_name='status', instance=invoice)
+
+
 class CallbackIsolationInTransactionTests(TestCase):
     """TestCase wraps every test in an atomic block — exactly the
     poisoning scenario (ATOMIC_REQUESTS / service-layer atomics)."""
@@ -114,6 +163,52 @@ class CallbackIsolationInTransactionTests(TestCase):
             _process(self.invoice).approve()
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'approved')
+
+
+class CallbackKeepsItsWritesInTransactionTests(TestCase):
+    """A callback that fails keeps what it saved, as it does outside a
+    transaction. Only a database error discards its writes."""
+
+    def setUp(self):
+        super().setUp()
+        RECORDED.clear()
+        self.invoice = Invoice.objects.create(status='draft')
+
+    def test_success_callback_keeps_the_row_it_saved_before_it_failed(self):
+        _keep_writes_process(self.invoice).approve()
+
+        self.assertTrue(Invoice.objects.filter(status='saved_first').exists())
+        self.assertEqual(RECORDED, ['record'])
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'approved')
+
+    def test_failure_callback_keeps_the_row_it_saved_before_it_failed(self):
+        with self.assertRaises(ValueError):
+            _keep_writes_process(self.invoice).explode()
+
+        self.assertTrue(Invoice.objects.filter(status='saved_first').exists())
+        self.assertEqual(RECORDED, ['record'])
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'failed')
+
+    def test_transition_started_by_a_callback_keeps_its_failed_state(self):
+        _keep_writes_process(self.invoice).start_another()
+
+        other = Invoice.objects.get(customer_received=True)
+        self.assertEqual(other.status, 'failed')
+        self.assertTrue(Invoice.objects.filter(status='failure_noted').exists())
+        self.assertEqual(RECORDED, ['record'])
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'approved')
+
+    def test_database_error_still_discards_the_callback_writes(self):
+        _keep_writes_process(self.invoice).approve_with_database_error()
+
+        self.assertFalse(Invoice.objects.filter(status='discarded').exists())
+        self.assertEqual(RECORDED, ['record'])
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'approved')
+        Invoice.objects.create(status='healthy')
 
 
 class CallbackIsolationAutocommitTests(TransactionTestCase):

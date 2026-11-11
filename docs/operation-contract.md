@@ -201,7 +201,8 @@ Retries preserve confirmed child progress and resume only unfinished work.
 The order reaches `completed` only after every required result is verified.
 Default atomic execution suits required database work whose external publication waits for commit.
 
-Inline execution of `atomic=False` work requires autocommit.
+Inline execution of `atomic=False` work requires autocommit, except in the test runtime.
+There, a job called inside a transaction runs in that transaction and keeps its writes when a later step fails.
 Tests of transactional submission must submit in pull mode, commit, then call `retry_pending()` to execute saved jobs inline.
 Its return value counts calls without raised exceptions, including failed attempts in pull mode.
 Check saved job and business results to establish success.
@@ -273,7 +274,7 @@ runs none. Every effect is attempted even when an earlier effect fails; effect
 errors remain on the child jobs and do not raise an error for the successful
 parent. Explicitly running a child in sync mode retains the normal exception
 behavior. `TestCase` callers can use `captureOnCommitCallbacks(execute=True)`;
-non-atomic tests should use `TransactionTestCase` and PostgreSQL.
+non-atomic tests need PostgreSQL, and `TransactionTestCase` when they need real commits.
 
 `background_effect_names` freezes the parent's effect names when it is submitted.
 Adding a declaration later does not add work to an existing job. Removing a
@@ -333,6 +334,7 @@ The shared cache lock also prevents overlapping external calls while its timeout
 remains valid, including after a lost database connection. PostgreSQL protects
 database state; neither lock can undo an external request already sent.
 For a lock-taking synchronous `Transition`, callbacks and `next_transition` also run inside the PostgreSQL transaction, before the outermost commit.
+Each one runs in a savepoint. A database error discards its writes; any other error keeps the writes made before it, including the failed state of a transition it started.
 The cache lock is released first, so callbacks can call another transition on the same instance.
 Other connections still see the prior committed state. An interruption can discard the target and side-effect writes before commit.
 Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.

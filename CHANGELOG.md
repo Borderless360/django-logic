@@ -1,5 +1,27 @@
 # Changelog
 
+## [4.3.0] — 2026-11-11
+
+- A callback or follow-up transition that fails with an ordinary error keeps what it saved before the error,
+  also inside a transaction. Before, every error rolled back the callback's savepoint.
+  GV's order and fulfilment workflows start each other from callbacks: a fulfilment's callback moves its order.
+  When the order transition failed there, its failed state and the records of its failure callbacks were rolled back
+  with the savepoint. The order kept its old state and nothing recorded the failure.
+  A pull worker runs callbacks outside a transaction and already kept these writes, so tests and web requests
+  behaved differently from workers.
+  A database error still discards the callback's writes and keeps the caller's transaction usable.
+  The error is still logged and swallowed, and later callbacks still run.
+  Check callbacks that relied on their partial writes being discarded when they raise.
+- In the test runtime (`enable_sync()`), an `atomic=False` background transition called inside a transaction
+  runs in that transaction, on the caller's connection. Before, it refused, and such a test had to be a `TransactionTestCase`.
+  GV's courier label requests need `atomic=False`, and several hundred GV tests reach one inside `TestCase`.
+  An ordinary error keeps the writes made so far; a database error discards the attempt's writes.
+  The writes disappear if the test's own transaction rolls back.
+  Pull workers and inline execution with autocommit keep the separate job connection.
+  A `sync_execution()` block in a deployment that did not call `enable_sync()` keeps the refusal inside a transaction,
+  because a caller rollback would discard provider receipts.
+  No public name, setting, migration or worker configuration changes.
+
 ## [4.2.0] — 2026-11-11
 
 - Add explicit `atomic=True` support to synchronous `Transition` and `DatabaseTransition` declarations.

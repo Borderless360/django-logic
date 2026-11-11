@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
-from django.db import InterfaceError, OperationalError, connection, connections, transaction
+from django.db import IntegrityError, InterfaceError, OperationalError, connection, connections, transaction
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -18,6 +18,7 @@ from django_logic.background import BackgroundTransition, Defer, PermanentFailur
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import claim_next, run_once
 from django_logic.background.runner import run_background_transition
+from django_logic.conf import sync_execution
 from tests import dl_settings
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres
@@ -381,14 +382,57 @@ class NonAtomicProviderTests(TransactionTestCase):
         self.assertEqual(self.widget.status, 'submitted')
         self.assertEqual(self.widget.cb_log, 'callback,')
 
-    def test_inline_mode_refuses_caller_transaction_before_enqueue(self):
-        with override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='sync')):
+    def test_sync_execution_block_refuses_caller_transaction_before_enqueue(self):
+        # A deployment that did not opt into the test runtime keeps the refusal.
+        with patch('django_logic.conf._sync_enabled', False), sync_execution():
             with transaction.atomic(), self.assertRaisesMessage(ImproperlyConfigured, 'caller transaction'):
                 self.enqueue()
         self.assertFalse(TransitionMessage.objects.exists())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')
         self.assertEqual(self.request_count(), 0)
+
+    def test_test_runtime_runs_the_job_inside_the_caller_transaction(self):
+        transition = ReceiptProcess.transitions[0]
+        with override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='sync')), \
+                patch.object(transition.callbacks, '_commands', []), transaction.atomic():
+            transition_message = self.enqueue()
+            self.widget.refresh_from_db()
+            self.assertTrue(transition_message.is_completed)
+            self.assertEqual(self.widget.status, 'submitted')
+            self.assertEqual(self.widget.se_log, 'confirmed')
+        self.assertEqual(self.request_count(), 1)
+
+    def test_test_runtime_keeps_the_receipt_when_a_later_step_fails(self):
+        transition = ReceiptProcess.transitions[0]
+        settings = dl_settings(BACKGROUND_EXECUTION='sync', TRANSITION_MESSAGE_MAX_ERRORS=1)
+        with override_settings(DJANGO_LOGIC=settings), \
+                patch.object(transition.side_effects, '_commands', [submit_provider, fail_report]), \
+                patch.object(transition.failure_callbacks, '_commands', []), transaction.atomic():
+            with self.assertRaisesMessage(ValueError, 'report failed'):
+                self.enqueue()
+            self.widget.refresh_from_db()
+            transition_message = TransitionMessage.objects.get(instance_id=str(self.widget.pk))
+            self.assertEqual(self.widget.se_log, 'confirmed')
+            self.assertEqual(self.widget.status, 'failed')
+            self.assertTrue(transition_message.is_completed)
+            self.assertTrue(transition_message.ended_in_failure)
+        self.assertEqual(self.request_count(), 1)
+
+    def test_test_runtime_database_error_keeps_the_caller_transaction_usable(self):
+        def break_the_database(instance, **kwargs):
+            Widget.objects.create(status=None)
+
+        transition = ReceiptProcess.transitions[0]
+        settings = dl_settings(BACKGROUND_EXECUTION='sync', TRANSITION_MESSAGE_MAX_ERRORS=1)
+        with override_settings(DJANGO_LOGIC=settings), \
+                patch.object(transition.side_effects, '_commands', [break_the_database]), \
+                patch.object(transition.failure_callbacks, '_commands', []), transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                self.enqueue()
+            self.widget.refresh_from_db()
+            self.assertEqual(self.widget.status, 'failed')
+            Widget.objects.create()
 
     def test_pull_enqueue_inside_transaction_runs_after_commit(self):
         with transaction.atomic():

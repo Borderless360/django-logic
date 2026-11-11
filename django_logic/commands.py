@@ -67,31 +67,32 @@ def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
     return result
 
 
-def _run_side_effects_in_savepoint(using: str, fn):
-    """Run the side effects of a transition whose caller holds an open transaction.
+def _run_keeping_writes(using: str, fn):
+    """Run hooks whose caller holds an open transaction, and keep what they saved.
 
     A database error aborts that transaction. The savepoint discards the
-    side effects' writes and keeps the connection usable, so the failed
-    state and the failure callbacks can still be written. Any other error
-    keeps the writes made so far, as it does for a caller outside a
-    transaction.
+    hooks' writes and keeps the connection usable, so the failed state and
+    the failure callbacks can still be written. Any other error keeps the
+    writes made so far, as it does for a caller outside a transaction.
+    A nested transition that failed keeps its failed state this way.
     """
     connection = transaction.get_connection(using)
     error = None
     with transaction.atomic(using=using):
         try:
-            fn()
+            result = fn()
         except Exception as exc:
             if isinstance(exc, DatabaseError) or connection.needs_rollback:
                 raise
             error = exc
         if error is None and connection.needs_rollback:
             raise _SilentRollback(
-                'a side effect raised a database error and suppressed it, so '
-                'every write the side effects made is discarded.'
+                'a hook raised a database error and suppressed it, so '
+                'every write the hooks made is discarded.'
             )
     if error is not None:
         raise error
+    return result
 
 
 def write_failed_state(state, failed_state, *, prefix, consequence, using=None):
@@ -289,7 +290,7 @@ class SideEffects(BaseCommand):
             if atomic_sync:
                 _run_in_savepoint(using, run_required_changes, require_commit=True)
             elif in_transaction:
-                _run_side_effects_in_savepoint(using, run_commands)
+                _run_keeping_writes(using, run_commands)
             else:
                 run_commands()
         except Exception as error:
@@ -326,9 +327,10 @@ class Callbacks(BaseCommand):
     a database error would otherwise mark the whole outer transaction
     rollback-only, so the swallow left every later ORM call broken
     (``TransactionManagementError``) and could roll back the transition's
-    own state write. Outside a transaction there is nothing to poison and
-    no savepoint is taken (a failing callback's earlier autocommit writes
-    persist, as before).
+    own state write. Only a database error discards the callback's writes.
+    Any other error keeps what the callback saved before it failed, inside
+    a transaction and outside one. A transition that a callback starts
+    keeps its failed state when it fails.
     """
 
     def execute(self, state: State, **kwargs):
@@ -351,7 +353,7 @@ class Callbacks(BaseCommand):
                     f'{command_name}'
                 )
                 if in_transaction:
-                    _run_in_savepoint(
+                    _run_keeping_writes(
                         using, lambda: command(state.instance, **kwargs))
                 else:
                     command(state.instance, **kwargs)
@@ -412,7 +414,7 @@ class NextTransition:
             # Guard checks can also fail in the database. Protect the completed
             # action and the caller's transaction before resolving the follow-up.
             if in_transaction:
-                return _run_in_savepoint(using, run_followup)
+                return _run_keeping_writes(using, run_followup)
             return run_followup()
         except Exception as error:
             _log_hook_error(
