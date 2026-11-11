@@ -29,6 +29,7 @@ class BackgroundTestsConfig(AppConfig):
             ScenarioNonAtomicProcess,
             SharedActionConversationProcess,
             Widget,
+            EmptyStatusProcess,
             WidgetAmbiguousConditionProcess,
             WidgetAmbiguousNextProcess,
             WidgetAuditProcess,
@@ -45,6 +46,7 @@ class BackgroundTestsConfig(AppConfig):
         )
 
         ProcessManager.bind_model_process(Widget, WidgetProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, EmptyStatusProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, WidgetAuditProcess, state_field='audit_status')
         ProcessManager.bind_model_process(Widget, WidgetParentProcess, state_field='status')
         ProcessManager.bind_model_process(ArchivableWidget, ArchivableProcess, state_field='status')

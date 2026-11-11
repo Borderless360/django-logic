@@ -156,6 +156,26 @@ def _log_hook_error(message: str, error: BaseException, **log_kwargs) -> None:
     transition_logger.log(level, message, **log_kwargs)
 
 
+def reload_after_rollback(state, *, prefix):
+    """Do not pass discarded model values to failure callbacks."""
+    using = state.instance._state.db or DEFAULT_DB_ALIAS
+    try:
+        _run_in_savepoint(
+            using, lambda: state.instance.refresh_from_db(using=using),
+            require_commit=True,
+        )
+    except Exception as refresh_error:
+        _log_hook_error(
+            f'{prefix} could not reload {state.instance_key} after rollback; '
+            'skipping further failure writes and callbacks. The original '
+            'required-work error is re-raised. Reload error: '
+            f'{type(refresh_error).__name__}: {refresh_error}',
+            refresh_error,
+        )
+        return False
+    return True
+
+
 class BaseCommand:
     """Base class for command bundles (Pattern: Command)."""
 
@@ -240,6 +260,8 @@ class SideEffects(BaseCommand):
 
     def execute(self, state: State, **kwargs):
         command_name = 'before the first side effect'
+        atomic_sync = self._transition.atomic and not self._transition.is_background
+        previous_state = state.get_state()
 
         def run_commands():
             nonlocal command_name
@@ -252,26 +274,47 @@ class SideEffects(BaseCommand):
                 )
                 command(state.instance, **kwargs)
 
+        def run_required_changes():
+            nonlocal previous_state, command_name
+            previous_state = state.get_persisted_state()
+            run_commands()
+            command_name = 'target-state save'
+            self._transition._write_target_state(state, **kwargs)
+
         try:
             transition_logger.info(
                 f'{kwargs.get("tr_id")} SideEffects {len(self.commands)}'
             )
             using, in_transaction = _in_open_transaction(state.instance)
-            if in_transaction:
+            if atomic_sync:
+                _run_in_savepoint(using, run_required_changes, require_commit=True)
+            elif in_transaction:
                 _run_side_effects_in_savepoint(using, run_commands)
             else:
                 run_commands()
         except Exception as error:
+            if atomic_sync:
+                # The database has undone the required writes. Failure hooks
+                # must not observe a target that was saved and then undone.
+                setattr(state.instance, state.field_name, previous_state)
             _log_hook_error(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                 f'{command_name} failed action={self._transition.action_name} '
                 f'instance={state.instance_key}: {type(error).__name__}: {error}',
                 error,
             )
+            if atomic_sync:
+                if not reload_after_rollback(state, prefix=kwargs.get('tr_id')):
+                    if self._transition.lock:
+                        self._transition._release_lock(state, **kwargs)
+                    raise
             self._transition.fail_transition(state, error, **kwargs)
             raise
         else:
-            self._transition.complete_transition(state, **kwargs)
+            if atomic_sync:
+                self._transition._complete_after_target(state, **kwargs)
+            else:
+                self._transition.complete_transition(state, **kwargs)
 
 
 class Callbacks(BaseCommand):

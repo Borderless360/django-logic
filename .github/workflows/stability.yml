@@ -101,6 +101,7 @@ jobs:
           REDIS_URL: redis://localhost:6380/0
         run: |
           python tests/manage.py test tests.background tests.test_scenario tests.test_row_lock tests.test_refusal_messages tests.test_database_transition tests.test_next_transition_outcome --verbosity=2
+          DJANGO_SETTINGS_MODULE=tests.settings python tests/manage.py test tests.test_empty_target tests.test_sync_atomic --verbosity=2
 
       - name: Run stability tests
         env:

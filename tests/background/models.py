@@ -1159,3 +1159,15 @@ class ScenarioNonAtomicProcess(Process):
             atomic=False,
         ),
     ]
+
+
+class EmptyStatusProcess(Process):
+    process_name = 'empty_status_proc'
+    transitions = [
+        Transition('reset', sources=['draft'], target=''),
+        Transition('touch', sources=['draft'], target=None, side_effects=[bg_ok]),
+        BackgroundTransition(
+            'reset_later', sources=['draft'], target='', in_progress_state='resetting',
+            side_effects=[bg_ok],
+        ),
+    ]

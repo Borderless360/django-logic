@@ -26,7 +26,7 @@ runs it.
 
 ## Install
 
-The current release is **4.1.1**. See the [changelog](CHANGELOG.md) for its fixes.
+The current release is **4.2.0**. See the [changelog](CHANGELOG.md) for its fixes.
 Before upgrading to 4.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
 
 
@@ -51,7 +51,7 @@ Running no background transitions? The same entry. The PostgreSQL and
 shared-cache rules below apply only when a background transition is
 bound — `manage.py check` tells you the moment one is — so a
 synchronous-only project runs on SQLite with Django's default cache.
-On other databases, a synchronous transition takes its cache lock but opens no transaction.
+By default, a synchronous transition on other databases takes its cache lock but opens no transaction.
 Without a caller transaction, earlier writes survive an interruption, and swallowed database errors may not be detected.
 Use PostgreSQL to verify the transaction and concurrent-state guarantees described below.
 
@@ -169,6 +169,44 @@ Use `transaction.on_commit()` for best-effort work that needs committed data; it
 Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.
 Inline background execution can still be inside a caller's outer transaction.
 
+Declare `Transition(..., atomic=True)` when its required database changes and
+final target save must succeed together. A side-effect error or a target save
+error discards both, including writes made by model save overrides and signals.
+The transaction uses the bound instance's database. This option also works with
+`DatabaseTransition`; its default remains unchanged.
+
+After rollback, the engine reloads the bound instance, writes `failed_state`
+when declared, releases its lock, runs failure callbacks, and re-raises the
+original error. Failure callbacks therefore see the restored persisted fields.
+If reloading fails, the engine releases its lock and reports the original error
+without running failure writes or callbacks on an unverified object. A failed
+failure-state save also preserves the original error. An atomic transition may
+declare `failed_state` without side effects because its target save can fail.
+An error saving `failed_state` triggers another reload before failure callbacks.
+
+The synchronous default is `atomic=False`, preserving existing failure behavior.
+It differs from `BackgroundTransition`, whose `atomic=True` default is unchanged.
+The new option does not make external requests reversible, change permissions or
+locking, or make optional callbacks required. Success callbacks and
+`next_transition` run after the required transaction block and retain their
+best-effort behavior. Use `transaction.on_commit(..., robust=True)` for optional
+publication that must wait for the containing transaction to commit.
+An exception from a non-robust commit callback still reaches the caller after
+commit; it does not undo the completed action or run its failure callbacks.
+
+The atomic option separates the target save from optional completion. A subclass
+that overrides `complete_transition` is refused with `atomic=True`, because the
+engine cannot place arbitrary completion code on the correct side of that
+transaction. Existing subclasses remain supported with the default `atomic=False`.
+Use the declared `side_effects` and `callbacks` for the atomic option.
+
+Nested required actions share the containing database transaction. If an outer
+action fails, successful nested state changes and their commit callbacks are
+discarded too. A nested failed-state write can also be discarded by its outer
+action's rollback. Django does not restore other Python instances after that
+rollback; reload related objects before retrying. Writes to another database
+and external effects are outside this guarantee.
+
 Use `DatabaseTransition` for changes that PostgreSQL can roll back completely.
 It takes the same declaration arguments as `Transition` and requires PostgreSQL.
 It keeps row locks, permissions, conditions, source checks, pending-job checks,
@@ -195,6 +233,10 @@ permissions and side-effects but writes no state on success. It follows
 the same rules as every transition: it takes the state lock, it is
 refused while a background transition is uncompleted, and it runs
 `next_transition`.
+
+An explicit `target=''` saves an empty state. Use `target=None` to leave the state unchanged.
+Before upgrading, change declarations that used `target=''` to mean no state change.
+An empty target keeps the usual source checks and state locks, including for background transitions.
 
 Add `lock=False` when the unit of work is not the bound row. A store
 process that posts one parcel's tracking is the example: the row is the

@@ -28,9 +28,11 @@ worker runs the side-effects and writes the final state). Definitions
 live in ``django_logic.background.transitions`` (enqueue) and
 ``django_logic.background.runner`` (execute).
 """
+from contextlib import ExitStack
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
+from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.commands import (
     Callbacks,
@@ -38,6 +40,7 @@ from django_logic.commands import (
     NextTransition,
     Permissions,
     SideEffects,
+    reload_after_rollback,
     write_failed_state,
 )
 from django_logic.exceptions import (
@@ -108,6 +111,12 @@ class Transition:
     On PostgreSQL, a locked synchronous call keeps database changes inside a transaction through its callbacks and ``next_transition``.
     An interruption before that transaction commits discards its changes.
     Other databases and ``lock=False`` do not open this transaction; the caller must supply one when needed.
+
+    ``atomic=True`` is an explicit synchronous option: required side effects
+    and the final state save succeed or roll back together on the instance's
+    database. After rollback, failure handling sees the reloaded instance.
+    Failure-state writes and callbacks happen after that rollback. The default
+    ``atomic=False`` retains the existing partial-write failure behavior.
     """
 
     #: ``True`` on ``BackgroundTransition``. A public, stable attribute
@@ -120,17 +129,28 @@ class Transition:
 
     def __init__(
         self, action_name: str, sources: list, target: str | None = None,
-        *, lock: bool = True, **kwargs,
+        *, lock: bool = True, atomic: bool = False, **kwargs,
     ):
         if isinstance(action_name, str) and action_name.startswith('django-logic:effect:'):
             raise ImproperlyConfigured('The django-logic:effect: action prefix is reserved for background effects.')
         self.action_name = action_name
         self.refusal_messages = kwargs.get('refusal_messages', {})
-        # None (or '') means: write no state on success. Everything else
+        # None means: write no state on success. An empty string is a state. Everything else
         # about the contract — lock, gate, chaining, failed_state — is
         # identical to a state-writing transition, unless lock=False.
-        self.target = target or None
+        self.target = target
         self.lock = bool(lock)
+        if type(atomic) is not bool:
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: atomic must be True or False."
+            )
+        self.atomic = atomic
+        if atomic and not self.is_background and type(self).complete_transition is not Transition.complete_transition:
+            raise ImproperlyConfigured(
+                f"Transition {action_name!r}: atomic=True does not support a "
+                'complete_transition override. Put required work in '
+                'side_effects and optional follow-ups in callbacks.'
+            )
         if not self.lock and self.is_background:
             raise ImproperlyConfigured(
                 f"BackgroundTransition {action_name!r}: lock=False is not "
@@ -139,7 +159,7 @@ class Transition:
                 f"callers could enqueue the same work. Declare the lock-free "
                 f"step as a Transition."
             )
-        if not self.lock and self.target:
+        if not self.lock and self.target is not None:
             raise ImproperlyConfigured(
                 f"Transition {action_name!r}: lock=False needs target=None. "
                 f"A transition that writes {self.target!r} must serialise on "
@@ -150,9 +170,9 @@ class Transition:
             # A keyword the engine does not read was accepted and ignored,
             # so a misspelt or not-yet-supported option looked like it
             # worked. Name it at declaration time instead.
-            takes = sorted(_DECLARATION_KWARGS | {'lock'})
+            takes = sorted(_DECLARATION_KWARGS | {'lock', 'atomic'})
             if self.is_background:
-                takes += ['queue', 'timeout', 'no_retry_on', 'atomic', 'fairness_key', 'background_effects', 'submission_context']
+                takes += ['queue', 'timeout', 'no_retry_on', 'fairness_key', 'background_effects', 'submission_context']
             raise ImproperlyConfigured(
                 f"{type(self).__name__} {action_name!r} does not take "
                 f"{', '.join(sorted(unknown))}. It takes: {', '.join(takes)}."
@@ -182,7 +202,7 @@ class Transition:
                 f"explicit transition into it, or make this transition a "
                 f"BackgroundTransition."
             )
-        if self.in_progress_state and not self.target:
+        if self.in_progress_state and self.target is None:
             # Success writes no state, so nothing would ever move the
             # instance out of the in-progress state.
             raise ImproperlyConfigured(
@@ -203,7 +223,7 @@ class Transition:
                 f"state write, and a state write must serialise on the lock. "
                 f"Record the failure in a failure_callback instead."
             )
-        if self.failed_state and not self.is_background and not kwargs.get('side_effects'):
+        if self.failed_state and not self.is_background and not self.atomic and not kwargs.get('side_effects'):
             # Nothing can raise between the lock and the target write, so
             # the state is never written and the declaration reads as if a
             # failure path existed. A background transition keeps it: the
@@ -267,10 +287,19 @@ class Transition:
         return valid
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
-        if not self.lock:
+        atomic_sync = self.atomic and not self.is_background
+        if not self.lock and not atomic_sync:
             return self._change_state(state, **kwargs)
         error = None
-        with state.protected():
+        with ExitStack() as protection:
+            if atomic_sync:
+                # Keep commit callbacks outside required-work failure handling,
+                # including on SQLite and on a lock-free action. An exception
+                # after commit cannot be reported as a rolled-back decision.
+                using = state.instance._state.db or DEFAULT_DB_ALIAS
+                protection.enter_context(transaction.atomic(using=using))
+            if self.lock:
+                protection.enter_context(state.protected())
             try:
                 result = self._change_state(state, **kwargs)
             except Exception as exception:
@@ -372,21 +401,26 @@ class Transition:
         ``State.unlock()`` with no token of its own deletes the key
         outright — which would free a lock another transition holds.
         """
+        try:
+            self._write_target_state(state, **kwargs)
+        except Exception:
+            transition_logger.error(
+                f'{kwargs.get("tr_id")} target-state write failed for '
+                f'{state.instance_key}; releasing the lock before re-raising.'
+            )
+            self._release_lock(state, **kwargs)
+            raise
+        self._complete_after_target(state, **kwargs)
+
+    def _write_target_state(self, state: State, **kwargs):
         if self.target is not None:
-            try:
-                state.set_state(self.target)
-            except Exception:
-                transition_logger.error(
-                    f'{kwargs.get("tr_id")} target-state write failed for '
-                    f'{state.instance_key}; releasing the lock before re-raising.'
-                )
-                self._release_lock(state, **kwargs)
-                raise
+            state.set_state(self.target)
             transition_logger.info(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                 f'{self.target}'
             )
 
+    def _complete_after_target(self, state: State, **kwargs):
         if self.lock:
             self._release_lock(state, **kwargs)
 
@@ -404,11 +438,14 @@ class Transition:
                 # docstring above promised "the original exception keeps
                 # propagating either way"; without this the write's own
                 # exception won and the real cause was lost.
-                write_failed_state(
+                write_error = write_failed_state(
                     state, self.failed_state,
                     prefix=f'{kwargs.get("tr_id")}',
                     consequence='The original failure is re-raised unchanged.',
                 )
+                if write_error is not None and self.atomic and not self.is_background:
+                    if not reload_after_rollback(state, prefix=kwargs.get('tr_id')):
+                        return
         finally:
             if self.lock:
                 self._release_lock(state, **kwargs)
