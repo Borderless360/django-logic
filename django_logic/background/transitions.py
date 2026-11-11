@@ -177,7 +177,7 @@ class BackgroundTransition(Transition):
         self.timeout = timeout
         self.no_retry_on = no_retry_on
         super().__init__(
-            action_name=action_name, sources=sources, target=target, **kwargs
+            action_name=action_name, sources=sources, target=target, atomic=atomic, **kwargs
         )
 
     def get_queue_name(self) -> str:

@@ -1,5 +1,25 @@
 # Changelog
 
+## [4.2.0] — 2026-11-11
+
+- Add explicit `atomic=True` support to synchronous `Transition` and `DatabaseTransition` declarations.
+  Required database changes and the final state save now succeed or roll back together when this option is enabled.
+  GV's claim acceptance test reproduced retained claim and credit writes after a failed final state save.
+  GV receipt completion and integration results also need this guarantee.
+  The paired django-logic-test change enables this option for `OrderProcess.reconcile_atomic`.
+  Its final-state-save fault test checks rollback of required writes and a successful retry.
+  Consumer declarations must explicitly enable the option and verify their rollback behavior before deployment.
+  The synchronous default remains `False`; background defaults do not change.
+  After rollback, failure callbacks receive reloaded model values, and the original error reaches the caller.
+  Optional callbacks, writes to another database and external effects remain outside this guarantee.
+  Subclasses that override `complete_transition` cannot enable the option; existing subclasses retain their default behavior.
+- Save an explicitly empty target state. `target=None` still leaves the state unchanged;
+  callers using `target=''` for that purpose must change it to `None`.
+  GV's tracking reset tests require a saved empty status.
+  Empty-state resets retain state protection, stale-state checks and transaction rollback.
+  Background work can finish in the empty state after an in-progress state.
+  No database migration or worker configuration change is required.
+
 ## [4.1.2] — 2026-11-10
 
 - Release a status check's temporary job-row lock before returning, even inside a caller's transaction.
