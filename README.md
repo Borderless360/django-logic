@@ -26,7 +26,7 @@ runs it.
 
 ## Install
 
-The current release is **4.2.0**. See the [changelog](CHANGELOG.md) for its fixes.
+The current release is **4.3.0**. See the [changelog](CHANGELOG.md) for its fixes.
 Before upgrading to 4.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
 
 
@@ -157,6 +157,9 @@ Each declaration slot has one job:
   writes `failed_state` when you declare one.
 - `callbacks` — functions that run after the object reaches the target state.
   They are best-effort: django-logic swallows ordinary exceptions they raise.
+  A callback that fails keeps what it saved before the error. Only a database
+  error discards its writes. A transition that a callback starts keeps its
+  failed state when it fails.
   Put required work in `side_effects`.
 - `failure_callbacks` — functions that run after a side-effect fails. They
   receive `exception=`. Put cleanup and compensation here.
@@ -627,7 +630,9 @@ For deployment-wide inline tests, call `django_logic.conf.enable_sync()` in test
 Production deployments normally use `pull`. Business code can use `django_logic.background.sync_execution()` for one block that needs an immediate result.
 That block runs in the caller's process and starts no retry loop.
 A committed unfinished job can still be claimed by workers serving its queue.
-An atomic background transition can join a caller transaction. `atomic=False` still requires PostgreSQL autocommit.
+An atomic background transition can join a caller transaction. Outside the test runtime, `atomic=False` still requires PostgreSQL autocommit.
+In the test runtime, an `atomic=False` job called inside a transaction runs in that transaction, so `TestCase` can run it.
+Its writes stay when a later step fails, unless the test's own transaction rolls back.
 [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) has the test setup and scenario catalog.
 
 ## More documentation
