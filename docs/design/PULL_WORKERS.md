@@ -90,6 +90,18 @@ database plan's cap, or under the pgbouncer pool size. A worker that
 cannot connect logs and retries; a database at its cap refuses the web
 processes too, so leave headroom for them.
 
+## Stopping a worker
+
+A platform sends SIGTERM before it replaces a worker, for example when it
+deploys. `dl_worker` then takes no new job, waits for its running jobs, and
+exits with code 0. A job process ignores SIGTERM, because some platforms send
+the signal to every process.
+
+The platform ends the wait at its own limit: 30 seconds on Heroku, and
+`terminationGracePeriodSeconds` on Kubernetes. A job that still runs at that
+limit stops there, and the next worker runs it again from its first step. Set
+the limit above the longest provider request of the worker's jobs.
+
 ## Knowing a worker stopped
 
 The worker starts one safety-net process once a minute. It stops that
