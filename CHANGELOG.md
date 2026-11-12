@@ -13,6 +13,8 @@
   The pod worked for its whole grace period and then stopped at once.
   The platform still ends the wait at its own limit: 30 seconds on Heroku, `terminationGracePeriodSeconds` on Kubernetes.
   A job that still runs at that limit stops there, as before.
+  A job that the worker claimed at the moment of the signal does not start; it stays ready for another worker.
+  A safety-net pass that still runs gets five seconds, then the worker stops it. The next pass repeats its work.
   `run_worker` takes an optional `stop_requested` callable for the same purpose.
   No setting, migration or queue changes.
 

@@ -9,13 +9,14 @@ import signal
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.db import connections
 from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process
-from django_logic.background import BackgroundTransition
+from django_logic.background import BackgroundTransition, pull
 from django_logic.background.models import TransitionMessage
 from tests import dl_settings
 from tests.background.models import Widget
@@ -135,3 +136,39 @@ class WorkerStopTests(TransactionTestCase):
         os.killpg(worker_pid, signal.SIGTERM)
 
         self.assertEqual(self._exit_code(worker_pid, seconds=10), 0)
+
+    def test_job_claimed_while_the_stop_request_arrives_does_not_start(self):
+        widget, marker = self._enqueue('claimed', seconds=0)
+        stop = []
+        claim = pull.claim_next
+
+        def claim_and_get_the_stop_request(*args, **kwargs):
+            pk = claim(*args, **kwargs)
+            stop.append(True)
+            return pk
+
+        with patch.object(pull, 'claim_next', claim_and_get_the_stop_request):
+            pull.run_worker([_QUEUE], concurrency=1, stop_requested=lambda: bool(stop))
+
+        self.assertFalse(marker.exists())
+        job = self._job(widget)
+        self.assertEqual((job.is_completed, job.start_attempt_count), (False, 0))
+
+    def test_safety_net_pass_that_still_runs_does_not_hold_the_stop(self):
+        started = self.directory / 'pass'
+
+        def blocked_pass(queues=()):
+            started.touch()
+            time.sleep(60)
+
+        began = time.monotonic()
+        with patch.object(pull, '_run_safety_nets', blocked_pass), \
+                patch.object(pull, 'SAFETY_NET_STOP_SECONDS', 0.2), \
+                self.assertLogs('django-logic', level='WARNING') as logs:
+            pull.run_worker([_QUEUE], concurrency=1, stop_requested=started.exists)
+
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertTrue(
+            any('safety nets exceeded their 0.2s limit and were stopped' in line for line in logs.output),
+            logs.output,
+        )

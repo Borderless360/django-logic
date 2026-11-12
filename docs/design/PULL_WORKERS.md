@@ -99,6 +99,11 @@ the signal to every process. A program that the job starts inherits this, so
 `terminate()` does not stop it unless the program handles SIGTERM itself. Stop
 such a program with `kill()`.
 
+A job that the worker claimed at the moment of the signal does not start. It
+stays ready for another worker. A safety-net pass that still runs gets five
+seconds. Then the worker stops it, and the next pass of any worker repeats
+its work.
+
 The platform ends the wait at its own limit: 30 seconds on Heroku, and
 `terminationGracePeriodSeconds` on Kubernetes. A job that still runs at that
 limit stops there, and the next worker runs it again from its first step. Set
