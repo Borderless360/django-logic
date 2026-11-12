@@ -95,7 +95,9 @@ processes too, so leave headroom for them.
 A platform sends SIGTERM before it replaces a worker, for example when it
 deploys. `dl_worker` then takes no new job, waits for its running jobs, and
 exits with code 0. A job process ignores SIGTERM, because some platforms send
-the signal to every process.
+the signal to every process. A program that the job starts inherits this, so
+`terminate()` does not stop it unless the program handles SIGTERM itself. Stop
+such a program with `kill()`.
 
 The platform ends the wait at its own limit: 30 seconds on Heroku, and
 `terminationGracePeriodSeconds` on Kubernetes. A job that still runs at that

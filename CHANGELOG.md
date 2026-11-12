@@ -4,6 +4,7 @@
 
 - `dl_worker` handles SIGTERM. It takes no new job, waits for its running jobs, and exits with code 0.
   A job process ignores SIGTERM, because Heroku sends the signal to every process of a dyno.
+  A program that the job starts inherits this: stop such a program with `kill()`, not `terminate()`.
   Before, the worker and its job processes stopped at once. The next worker ran each job again from its first step.
   GV reproduced the cost with real worker processes and a mock courier.
   A stop came during a courier label request that the courier had accepted.
