@@ -44,6 +44,34 @@ def _database_only_scope(state):
         _database_scope.reset(scope_token)
 
 
+@contextmanager
+def _enqueue_lock(state):
+    """Lock a record while the engine saves its background job.
+
+    On PostgreSQL the caller holds the business row until its transaction ends.
+    The lock then refuses an existing lock and writes no cache key.
+    A process that dies during the save leaves no lock on the record.
+    Yield False when the record is already locked.
+    """
+    using = state.instance._state.db or DEFAULT_DB_ALIAS
+    if _database_scope.get() or connections[using].vendor != 'postgresql':
+        locked = state.lock()
+        try:
+            yield locked
+        finally:
+            if locked:
+                state.unlock()
+        return
+    if state.is_locked():
+        yield False
+        return
+    token = _database_locks.set((*_database_locks.get(), state))
+    try:
+        yield True
+    finally:
+        _database_locks.reset(token)
+
+
 class State:
     def __init__(self, instance, field_name: str, process_name=None):
         self.instance = instance

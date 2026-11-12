@@ -102,6 +102,8 @@ Its corollaries, each pinned by a shipped mistake:
   State changes take the business-row lock and wait at most two seconds for
   another transaction to commit before they refuse. The shared cache lock also
   prevents overlapping external calls while its timeout remains valid.
+  Saving a background job writes no cache lock on PostgreSQL. A process killed
+  during that save once left the record locked until the lock timeout.
   Workers separately lock their job row. Finalization takes
   the job lock before the business row. Enqueue must not wait for an unfinished
   job while holding its business row. Allow for a separate connection when

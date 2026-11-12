@@ -536,6 +536,8 @@ connection budget.
 
 A worker that dies releases its row lock with its database connection, and the
 next claim takes the row.
+A job process can stop while it saves another background job. On PostgreSQL that
+save holds the business row and writes no cache lock, so the record is not left locked.
 
 ### See what is not moving
 
