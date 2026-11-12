@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.3.1] — 2026-11-12
+
+- On PostgreSQL, saving a background job no longer writes a cache lock. The business-row lock protects the save.
+  Before, a process killed during the save left the cache lock on the record until `LOCK_TIMEOUT`, two hours by default.
+  Every transition on that record was refused with "State is locked" for that time.
+  GV reproduced it. Its order import completion saves one shipping job for each order.
+  A GV test kills the job process right after it saves that row. The retry was refused, because the order stayed locked.
+  The save still refuses a record that has a cache lock, and it still refuses a nested call for the same record.
+  Other databases keep the cache lock for the save. Synchronous transitions keep their cache lock.
+  No public name, setting, migration or worker configuration changes.
+
 ## [4.3.0] — 2026-11-11
 
 - A callback or follow-up transition that fails with an ordinary error keeps what it saved before the error,

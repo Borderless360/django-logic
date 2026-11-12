@@ -333,6 +333,8 @@ Inside this transaction, synchronous side effects run in a savepoint. A database
 The shared cache lock also prevents overlapping external calls while its timeout
 remains valid, including after a lost database connection. PostgreSQL protects
 database state; neither lock can undo an external request already sent.
+Saving a background job calls no provider. On PostgreSQL that save holds the business row and writes no cache lock.
+It still refuses a record that has a cache lock. A process that stops during the save leaves no lock on the record.
 For a lock-taking synchronous `Transition`, callbacks and `next_transition` also run inside the PostgreSQL transaction, before the outermost commit.
 Each one runs in a savepoint. A database error discards its writes; any other error keeps the writes made before it, including the failed state of a transition it started.
 The cache lock is released first, so callbacks can call another transition on the same instance.

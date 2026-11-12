@@ -94,10 +94,16 @@ class CachedProcess(Process):
                    BackgroundTransition('pending_done', sources=['done'], queue='database-followup')]
 
 
+def submit_job_for_another_record(instance, nested_id, **kwargs):
+    Order.objects.get(pk=nested_id).database_process.pending()
+
+
 class CompletionProcess(Process):
     process_name = 'completion_process'
     transitions = [BackgroundTransition('complete', sources=['draft'], queue='database-test',
-                   background_effects=[BackgroundEffect('local_completion', run_local_completion)])]
+                   background_effects=[BackgroundEffect('local_completion', run_local_completion)]),
+                   BackgroundTransition('submit', sources=['draft'], queue='database-test',
+                                        side_effects=[submit_job_for_another_record])]
 
 
 @requires_postgres
@@ -181,6 +187,31 @@ class DatabaseTransitionTests(TransactionTestCase):
         for row in (outer, nested):
             row.refresh_from_db()
             self.assertEqual(row.status, 'done')
+
+    def test_job_killed_while_it_saves_another_job_leaves_no_cache_lock(self):
+        outer, nested = Order.objects.create(), Order.objects.create()
+        outer.completion_process.submit(nested_id=nested.pk)
+        job = TransitionMessage.objects.get(instance_id=str(outer.pk), transition_name='submit')
+        marker = Path(self.directory.name) / 'submission-killed'
+        original = TransitionMessage.save
+
+        def kill_after_job_save(current, *args, **kwargs):
+            result = original(current, *args, **kwargs)
+            if current.transition_name == 'pending' and not marker.exists():
+                marker.touch()
+                os.kill(os.getpid(), signal.SIGKILL)
+            return result
+
+        with patch.object(TransitionMessage, 'save', kill_after_job_save):
+            self.assertTrue(run_once(['database-test'], isolate=True))
+        self.assertTrue(marker.exists())
+        self.assertFalse(TransitionMessage.objects.filter(transition_name='pending').exists())
+        self.assertFalse(State(nested, 'status').is_locked())
+        run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.assertTrue(job.is_completed, job.last_error_message)
+        self.assertFalse(job.ended_in_failure)
+        self.assertEqual(TransitionMessage.objects.filter(transition_name='pending').count(), 1)
 
     def test_failed_state_survives_database_failure(self):
         row = Order.objects.create()

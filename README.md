@@ -26,7 +26,7 @@ runs it.
 
 ## Install
 
-The current release is **4.3.0**. See the [changelog](CHANGELOG.md) for its fixes.
+The current release is **4.3.1**. See the [changelog](CHANGELOG.md) for its fixes.
 Before upgrading to 4.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
 
 
@@ -536,6 +536,8 @@ connection budget.
 
 A worker that dies releases its row lock with its database connection, and the
 next claim takes the row.
+A job process can stop while it saves another background job. On PostgreSQL that
+save holds the business row and writes no cache lock, so the record is not left locked.
 
 ### See what is not moving
 

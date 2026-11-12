@@ -6,7 +6,7 @@
 * acquire the state lock for the critical section and revalidate the
   persisted state under it (on PostgreSQL the business row is locked
   before that read and stays locked until the caller's transaction
-  commits, so it is the one check),
+  commits, so it is the one check and the step writes no cache key),
 * atomically write ``in_progress_state`` (when declared)
   and create a ``TransitionMessage`` row,
 * release the lock — from here on the uncompleted ``TransitionMessage``
@@ -41,7 +41,7 @@ from django_logic.logger import (
     transition_logger,
     TransitionEventType,
 )
-from django_logic.state import State
+from django_logic.state import State, _enqueue_lock
 from django_logic.transition import Transition, _refuse_engine_param_kwargs
 
 
@@ -223,16 +223,13 @@ class BackgroundTransition(Transition):
         # one. The guard that matters runs under the lock below:
         # _ensure_db_state_in_sources.
 
-        # The cache lock guards only this critical section (validate →
-        # create the TransitionMessage → write in_progress_state). It is
-        # released in the finally below; from then on the uncompleted
-        # TransitionMessage row is what gates concurrent transitions.
-        # Holding the cache lock for the whole worker run would leak it if
-        # a caller's surrounding transaction rolled back (a cache write
-        # does not roll back with the database), and a DB row needs no TTL
-        # refresh across long retries.
-        with state.protected():
-            if not state.lock():
+        # The lock covers only this step: check the source state, save the
+        # TransitionMessage, write in_progress_state. After it, the
+        # uncompleted TransitionMessage refuses concurrent transitions.
+        # On PostgreSQL the business row is the lock and the step writes no
+        # cache key, so a process that dies here leaves no lock behind.
+        with state.protected(), _enqueue_lock(state) as locked:
+            if not locked:
                 # Logged before the raise, at INFO, with the instance key — a
                 # frozen instance must not read as "the transition starts and
                 # the worker drops it".
@@ -256,7 +253,7 @@ class BackgroundTransition(Transition):
                     # Nothing is retrying a stranded row, so "try again shortly"
                     # would be wrong forever. Queried here, after
                     # _enqueue_atomic's rolled-back atomic, so the connection is
-                    # healthy; still under the cache lock. A row that completed
+                    # healthy; still under the lock. A row that completed
                     # in the window keeps AlreadyInProgress — it just finished,
                     # so retrying is exactly right.
                     if TransitionMessage.retry_status(
@@ -275,7 +272,6 @@ class BackgroundTransition(Transition):
                         )
                     raise
             finally:
-                state.unlock()
                 transition_logger.info(
                     f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
                     f'{state.instance_key}'
