@@ -1,6 +1,6 @@
 # Changelog
 
-## [5.0.0] — Unreleased
+## [5.0.0] — 2026-11-13
 
 - Keep temporary errors while constructing a saved job's Process or State retryable.
   Invalid recorded identities remain permanent failures; a database error must not
