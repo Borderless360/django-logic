@@ -30,9 +30,6 @@ def set_sentry_context(transition_message) -> None:
         scope.set_tag('dl.app', app_label)
         scope.set_tag('dl.model', model_name)
         scope.set_tag('dl.transition', transition_message.operation_name)
-        if transition_message.effect_name:
-            scope.set_tag('dl.effect', transition_message.effect_name)
-            scope.set_tag('dl.parent_job_id', transition_message.parent_job_id)
         scope.set_tag('dl.instance_id', transition_message.instance_id)
         scope.set_tag('dl.queue', transition_message.queue_name)
     except Exception:

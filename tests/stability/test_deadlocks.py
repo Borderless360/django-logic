@@ -50,7 +50,7 @@ class TestNestedTransitionLockContention(StabilityTestCase):
         the state. So a callback that triggers another transition on
         the same instance will actually succeed (the lock is free).
 
-        This is the correct behavior: unlock -> callbacks -> next_transition.
+        This is the correct behavior: unlock -> callbacks.
         The GV bug happened during SIDE EFFECTS (while lock was held),
         not during callbacks.
         """

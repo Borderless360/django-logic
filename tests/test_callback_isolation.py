@@ -1,7 +1,6 @@
 """Best-effort hooks vs the caller's database transaction (#138).
 
-Callbacks (success and failure), failure side-effects, and
-``next_transition`` all swallow exceptions by contract. Swallowing a
+Success and failure callbacks contain their own exceptions. Swallowing a
 *database* error inside an open ``transaction.atomic()`` block does not
 heal the connection — Django marks it rollback-only, so every later ORM
 call raised ``TransactionManagementError`` and the transition's own state
@@ -34,6 +33,10 @@ def _boom(instance, **kwargs):
     raise ValueError('side effect failed')
 
 
+def _run_poisoned_followup(instance, **kwargs):
+    instance.hook_process.poisoned_followup(**kwargs)
+
+
 class _HookProcess(Process):
     process_name = 'hook_process'
     transitions = [
@@ -44,7 +47,7 @@ class _HookProcess(Process):
                    side_effects=[_boom],
                    failure_callbacks=[_poison_db, _record]),
         Transition('chain', sources=['draft'], target='approved',
-                   next_transition='poisoned_followup'),
+                   callbacks=[_run_poisoned_followup]),
         Transition('poisoned_followup', sources=['approved'], target='done',
                    side_effects=[_poison_db]),
     ]
@@ -134,9 +137,8 @@ class CallbackIsolationInTransactionTests(TestCase):
         self.assertEqual(self.invoice.status, 'failed')
         self._assert_connection_healthy()
 
-    def test_failing_next_transition_does_not_poison_the_transaction(self):
-        # next_transition resolves the process from the bound model
-        # attribute, so this one test needs a real binding.
+    def test_failing_callback_transition_does_not_poison_the_transaction(self):
+        # This callback uses the bound process attribute, so it needs a real binding.
         ProcessManager.bind_model_process(
             Invoice, _HookProcess, state_field='status')
         try:

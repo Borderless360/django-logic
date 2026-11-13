@@ -68,22 +68,17 @@ class ProxyRowKeyTests(TestCase):
                     TransitionMessage.in_flight_for(instance, 'process').exists()
                 )
 
-    def test_a_row_written_before_the_column_still_restores_the_proxy(self):
-        """A pre-0.18 row carries the proxy's own name in the key columns
-        and no ``proxy_model_label``. The worker must restore it exactly
-        as before."""
+    def test_proxy_name_in_the_concrete_key_is_refused(self):
         row = TransitionMessage.objects.create(
-            app_label='bg_tests',
-            model_name='widgetproxya',
-            instance_id=str(self.widget.pk),
-            process_name='process',
-            field_name='status',
-            transition_name='audit_via_proxy',
-            queue_name='django_logic',
-            kwargs={},
+            app_label='bg_tests', model_name='widgetproxya',
+            instance_id=str(self.widget.pk), process_name='process', field_name='status',
+            transition_name='audit_via_proxy', queue_name='django_logic',
+            owning_process_class='tests.background.models.ProxyWidgetProcess',
+            kwargs={'process_class': 'tests.background.models.ProxyWidgetProcess'},
         )
         run_background_transition(row.pk)
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.se_log, 'WidgetProxyA,')
+        self.assertEqual(self.widget.se_log, '')
         row.refresh_from_db()
-        self.assertTrue(row.is_completed)
+        self.assertTrue(row.ended_in_failure)
+        self.assertIn('concrete model', row.last_error_message)

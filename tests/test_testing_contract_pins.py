@@ -6,7 +6,7 @@
   dicts and lists, and return an instance whose attributes carry the database
   field types.
 * Tracking instruments the whole process tree, so hooks that run through a
-  ``next_transition`` follow-up are visible to the side-effect assertions.
+  callback follow-up are visible to the side-effect assertions.
 """
 from django.test import override_settings
 
@@ -34,7 +34,7 @@ class InjectionMustFireTests(ProcessScenario):
         with self.assertRaises(AssertionError) as ctx:
             self.background_transition(
                 widget, 'fulfil',
-                fail_side_effect='renamed_hook_that_does_not_exist',
+                expect_raises=False, fail_side_effect='renamed_hook_that_does_not_exist',
                 fail_with=RuntimeError('x'))
         self.assertIn('never fired', str(ctx.exception))
 
@@ -45,21 +45,21 @@ class InjectionMustFireTests(ProcessScenario):
         widget = self.create_instance()
         with self.assertRaises(AssertionError) as ctx:
             self.transition(widget, 'cancel',
-                            fail_side_effect='bg_ok',
+                            expect_raises=False, fail_side_effect='bg_ok',
                             fail_with=RuntimeError('x'))
         self.assertIn('never fired', str(ctx.exception))
 
     def test_injection_that_fires_still_works(self):
         widget = self.create_instance()
         self.background_transition(widget, 'fulfil',
-                                   fail_side_effect='bg_ok',
+                                   expect_raises=RuntimeError, fail_side_effect='bg_ok',
                                    fail_with=RuntimeError('boom'))
         self.assert_state(widget, 'fulfilling')
         self.assert_error_recorded(widget, 'boom')
 
 
-class TrackingCoversNextTransitionTests(ProcessScenario):
-    """Hooks that run through next_transition are tracked."""
+class TrackingCoversCallbackTransitionsTests(ProcessScenario):
+    """Hooks called by a callback transition are tracked."""
 
     process_class = WidgetChainProcess
     model = Widget
@@ -141,7 +141,7 @@ class FailureHookAssertionsTests(ProcessScenario):
         # MAX_ERRORS=1 makes the first attempt terminal, so the callback runs.
         widget = self.create_instance()
         self.background_transition(widget, 'crash',
-                                   fail_side_effect='bg_boom',
+                                   expect_raises=ValueError, fail_side_effect='bg_boom',
                                    fail_with=ValueError('kaput'))
         self.assert_state(widget, 'crash_failed')
         self.assert_failure_callbacks_ran(['bg_failure_callback'])

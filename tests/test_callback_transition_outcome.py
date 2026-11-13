@@ -27,15 +27,27 @@ def invalid_database_check(instance, **kwargs):
     Invoice.objects.create(status=None)
 
 
+def check_related_after_approval(instance, **kwargs):
+    instance.followup_outcome.check_related(**kwargs)
+
+
+def check_permission_after_approval(instance, **kwargs):
+    instance.followup_outcome.check_permission(**kwargs)
+
+
+def check_database_after_approval(instance, **kwargs):
+    instance.followup_outcome.check_database(**kwargs)
+
+
 class FollowupOutcomeProcess(Process):
     process_name = 'followup_outcome'
     transitions = [
         Transition('approve', sources=['draft'], target='approved',
-                   callbacks=[record_approval], next_transition='check_related'),
+                   callbacks=[record_approval, check_related_after_approval]),
         Transition('approve_with_user', sources=['draft'], target='approved',
-                   callbacks=[record_approval], next_transition='check_permission'),
+                   callbacks=[record_approval, check_permission_after_approval]),
         Transition('approve_with_database_check', sources=['draft'], target='approved',
-                   callbacks=[record_approval], next_transition='check_database'),
+                   callbacks=[record_approval, check_database_after_approval]),
         Transition('check_related', sources=['approved'], target='done',
                    conditions=[missing_related_record]),
         Transition('check_permission', sources=['approved'], target='done',
@@ -45,7 +57,7 @@ class FollowupOutcomeProcess(Process):
     ]
 
 
-class NextTransitionOutcomeTests(TransactionTestCase):
+class CallbackTransitionOutcomeTests(TransactionTestCase):
     def setUp(self):
         CALLBACKS.clear()
         ProcessManager.bind_model_process(
@@ -71,7 +83,7 @@ class NextTransitionOutcomeTests(TransactionTestCase):
             self.invoice.followup_outcome.approve()
 
         self.assert_approval_completed()
-        self.assertIn("'check_related' failed", '\n'.join(logs.output))
+        self.assertIn('check_related_after_approval', '\n'.join(logs.output))
         self.assertIn('missing related record', '\n'.join(logs.output))
 
     def test_raising_followup_permission_does_not_report_approval_as_failed(self):
@@ -80,7 +92,7 @@ class NextTransitionOutcomeTests(TransactionTestCase):
             self.invoice.followup_outcome.approve_with_user(user=user)
 
         self.assert_approval_completed()
-        self.assertIn("'check_permission' failed", '\n'.join(logs.output))
+        self.assertIn('check_permission_after_approval', '\n'.join(logs.output))
         self.assertIn('missing permission record', '\n'.join(logs.output))
 
     def test_database_guard_failure_preserves_approval_and_caller_transaction(self):
@@ -91,4 +103,4 @@ class NextTransitionOutcomeTests(TransactionTestCase):
 
         self.assert_approval_completed()
         self.assertTrue(Invoice.objects.filter(pk=saved_after_failure.pk).exists())
-        self.assertIn("'check_database' failed", '\n'.join(logs.output))
+        self.assertIn('check_database_after_approval', '\n'.join(logs.output))

@@ -105,9 +105,8 @@ class KwargsRoundTripTests(TestCase):
         self.assertEqual(seen['pair'], (1, 'two'))
         self.assertEqual(seen['tags'], {'a', 'b'})
 
-    def test_untagged_row_from_an_older_release_still_runs(self):
-        # A row written before the typed encoding carries plain ISO strings.
-        # The worker passes them through unchanged instead of crashing.
+    def test_plain_json_strings_pass_through_unchanged(self):
+        # Plain JSON strings remain strings; only tagged values are decoded.
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
         transition_message = TransitionMessage.objects.create(
@@ -115,9 +114,11 @@ class KwargsRoundTripTests(TestCase):
             model_name='widget',
             instance_id=str(self.widget.pk),
             process_name='process',
+            field_name='status',
+            owning_process_class='tests.background.models.WidgetProcess',
             transition_name='fulfil',
             queue_name='django_logic.critical',
-            kwargs={'when': _WHEN.isoformat(), 'some_uuid': str(_UUID)},
+            kwargs={'process_class': 'tests.background.models.WidgetProcess', 'when': _WHEN.isoformat(), 'some_uuid': str(_UUID)},
         )
         run_background_transition(transition_message.pk)
         seen = bg_models.LAST_KWARGS
@@ -136,9 +137,11 @@ class KwargsRoundTripTests(TestCase):
             model_name='widget',
             instance_id=str(self.widget.pk),
             process_name='process',
+            field_name='status',
+            owning_process_class='tests.background.models.WidgetProcess',
             transition_name='fulfil',
             queue_name='django_logic.critical',
-            kwargs={'when': bad},
+            kwargs={'process_class': 'tests.background.models.WidgetProcess', 'when': bad},
         )
         with self.assertLogs('django-logic.transition', level='WARNING'):
             run_background_transition(transition_message.pk)
@@ -158,9 +161,11 @@ class KwargsRoundTripTests(TestCase):
             model_name='widget',
             instance_id=str(self.widget.pk),
             process_name='process',
+            field_name='status',
+            owning_process_class='tests.background.models.WidgetProcess',
             transition_name='fulfil',
             queue_name='django_logic.critical',
-            kwargs={'user_id': ['not', 'a', 'pk']},
+            kwargs={'process_class': 'tests.background.models.WidgetProcess', 'user_id': ['not', 'a', 'pk']},
         )
         with self.assertRaises(TypeError):
             run_background_transition(transition_message.pk)
@@ -191,9 +196,11 @@ class KwargsRoundTripTests(TestCase):
             model_name='widget',
             instance_id=str(self.widget.pk),
             process_name='process',
+            field_name='status',
+            owning_process_class='tests.background.models.WidgetProcess',
             transition_name='fulfil',
             queue_name='django_logic.critical',
-            kwargs={'user_id': 9_999_999},
+            kwargs={'process_class': 'tests.background.models.WidgetProcess', 'user_id': 9_999_999},
         )
         run_background_transition(transition_message.pk)
         self.assertIn('user', bg_models.LAST_KWARGS)

@@ -1,17 +1,14 @@
-"""The worker restores the process that enqueued the transition.
+"""Saved jobs restore the exact recorded process, owner and state field."""
+from unittest.mock import patch
 
-Every Process defaults to ``process_name='process'``, so the worker's
-attribute lookup can resolve a different class than the one that enqueued
-the row: a directly instantiated process that collides with the bound one,
-or a rename between two deploys. The worker therefore checks the resolved
-class against the recorded ``process_class`` and prefers the recorded one.
-"""
+from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase, override_settings
 
 from django_logic import Process
 from django_logic.background import BackgroundTransition, sync_execution
 from django_logic.background.models import TransitionMessage
-from django_logic.background.runner import run_background_transition
+from django_logic.background.runner import _restore, _RestoreError, run_background_transition
+from django_logic.state import State
 from tests.background.models import Widget
 from tests import dl_settings
 
@@ -52,16 +49,14 @@ class RestoreVerificationTests(TestCase):
         # process_name with the bound WidgetProcess, so only the recorded
         # process_class tells the worker which side-effects to run.
         process = RogueProcess(field_name='status', instance=self.widget)
-        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
-            with sync_execution():
-                process.fulfil()
+        with sync_execution():
+            process.fulfil()
 
         self.widget.refresh_from_db()
         # The rogue transition ran, not the bound one.
         self.assertEqual(self.widget.status, 'rogue_fulfilled')
         self.assertEqual(RAN, ['rogue_side_effect'])
         self.assertEqual(self.widget.se_log, '')
-        self.assertTrue(any('using the recorded class' in line for line in logs.output))
 
         transition_message = TransitionMessage.objects.get(
             instance_id=str(self.widget.pk))
@@ -106,12 +101,8 @@ class RestoreVerificationTests(TestCase):
             any('could not be loaded' in line for line in logs.output)
         )
 
-    def test_unimportable_path_through_the_attribute_fallback_terminates(self):
-        # The instance has no attribute for the recorded process_name, so
-        # restore falls back to process_class — which is also unimportable.
-        # The row must terminate here. Earlier the ImportError escaped, the
-        # attempt rolled back with errors_count still 0, and the periodic
-        # starter sent the row to the queue again forever.
+    def test_unimportable_recorded_path_terminates(self):
+        # A missing recorded class cannot select a different process.
         from django_logic.background.safety_nets import retry_pending
 
         self.widget.status = 'fulfilling'
@@ -157,10 +148,7 @@ class RestoreVerificationTests(TestCase):
         self.assertEqual(transition_message.field_name, 'status')
 
     def test_row_without_field_name_fails_closed(self):
-        # Enqueue has recorded field_name since 0.4. A row without one is
-        # unrestorable: guessing 'state' could drive the wrong machine on a
-        # model with several processes, so it terminates instead of running
-        # hooks.
+        # A missing field must not select another state on the same model.
         self.widget.status = 'rogue_fulfilling'
         self.widget.save(update_fields=['status'])
         transition_message = TransitionMessage.objects.create(
@@ -186,3 +174,45 @@ class RestoreVerificationTests(TestCase):
         # Completed, so the retry loop stops.
         self.assertTrue(transition_message.is_completed)
         self.assertIn('[unrestorable]', transition_message.last_error_message)
+
+    def test_missing_root_class_does_not_use_the_bound_process(self):
+        message = TransitionMessage(
+            app_label='bg_tests', model_name='widget', instance_id=str(self.widget.pk),
+            process_name='process', field_name='status', transition_name='fulfil',
+            owning_process_class='tests.background.models.WidgetProcess', kwargs={},
+        )
+        with self.assertRaisesMessage(_RestoreError, 'process_class and field_name'):
+            _restore(message)
+        self.assertEqual(RAN, [])
+
+    def test_direct_submission_without_process_identity_changes_nothing(self):
+        transition = RogueProcess.transitions[0]
+        with self.assertRaisesMessage(ImproperlyConfigured, 'through its Process'):
+            transition.change_state(State(self.widget, 'status', 'process'))
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'draft')
+        self.assertFalse(TransitionMessage.objects.exists())
+
+    def test_direct_submission_with_complete_identity_runs(self):
+        path = f'{__name__}.RogueProcess'
+        RogueProcess.transitions[0].change_state(
+            State(self.widget, 'status', 'process'),
+            process_class=path, owning_process_class=path,
+        )
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'rogue_fulfilled')
+        self.assertEqual(RAN, ['rogue_side_effect'])
+
+    def test_class_alias_and_changed_owner_are_refused_before_submission(self):
+        path = f'{__name__}.RogueProcess'
+        with patch(f'{__name__}.RogueAlias', RogueProcess, create=True):
+            for root, owner in ((f'{__name__}.RogueAlias', path), (path, 'gone.OtherProcess')):
+                with self.subTest(root=root, owner=owner):
+                    with self.assertRaisesMessage(ImproperlyConfigured, 'identity cannot be restored'):
+                        RogueProcess.transitions[0].change_state(
+                            State(self.widget, 'status', 'process'),
+                            process_class=root, owning_process_class=owner,
+                        )
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'draft')
+        self.assertFalse(TransitionMessage.objects.exists())

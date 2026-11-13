@@ -100,7 +100,6 @@ def _run_attempt(transition_message_id, alias):
         _handle_restore_failure,
         _handle_success,
         _lock_uncompleted_row,
-        _protect_completion_state,
         _restore_for_attempt,
         _superseded_outcome,
     )
@@ -172,7 +171,7 @@ def _run_attempt(transition_message_id, alias):
             )
 
         def complete():
-            with _protect_completion_state(transition, state):
+            with state.protected():
                 superseded = _superseded_outcome(
                     transition_message, transition, state, kwargs, after_side_effects=True,
                 )

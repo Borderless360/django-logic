@@ -1,5 +1,42 @@
 # Changelog
 
+## [5.0.0] — 2026-11-13
+
+- Keep temporary errors while constructing a saved job's Process or State retryable.
+  Invalid recorded identities remain permanent failures; a database error must not
+  silently complete the job without its work.
+- Bound worker database waits while reading a job's timeout and recording a stopped
+  job's error. A queued table lock no longer prevents the worker from checking the
+  deadlines of its other running jobs.
+- Remove `BackgroundEffect` and `background_effects`. GV imports, label completion,
+  shipping, client integration work and notifications use ordinary business jobs
+  or required functions within an existing job. No replacement scheduling API is added.
+- Migration 0018 refuses unfinished effect work and nonempty request keys before
+  dropping the five effect-related columns. Compatible ordinary pending jobs remain.
+  Back up completed history first; reversing the migration cannot recover those column values.
+- Simplify paged imports to one saved job with committed page progress and `Defer`.
+  Tests cover a stopped job process, failed final completion, rollback and cancellation.
+- Show interactive and automatic transitions sharing business functions with separate
+  worker queues. Immediate and queued business failures retain their recorded failure states.
+
+- Remove `next_transition` and `NextTransition`. Unsupported declarations fail at
+  startup. Use explicit callbacks for optional work and saved jobs for required work.
+- Require explicit `expect_raises` when injecting a failure with `ProcessScenario`.
+  Tests can no longer pass by silently absorbing their injected exception.
+- A process action now replaces forwarded `process_class` with its actual bound
+  root, as it already does for the declaring class. Supplying a different path
+  cannot select or import that class; direct callers must not rely on that value
+  causing an action refusal. Application request validation remains separate.
+- Restore jobs only through their recorded process class, owning class, field and
+  action. Remove model-attribute and action-name guesses. Reject background
+  submissions without the identity needed by workers before saving a job.
+- Migration 0017 checks unfinished work, then removes the unused physical
+  `request_fingerprint` and `required_next` columns. It refuses unsupported jobs
+  instead of discarding their work. Historical migrations remain available.
+- Upgrade from 4.3.2 with old producers and workers stopped. Mixed versions are
+  unsupported. Finish jobs affected by application renames or removals first.
+  See [upgrade and rollback](docs/operation-contract.md#upgrade-and-rollback).
+
 ## [4.3.2] — 2026-11-13
 
 - `dl_worker` handles SIGTERM. It takes no new job, waits for its running jobs, and exits with code 0.

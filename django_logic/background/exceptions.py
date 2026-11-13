@@ -29,10 +29,10 @@ class AlreadyInProgress(TransitionTemporarilyUnavailable):
         started. If the worker is already executing — has already read
         its inputs — that run commits a result computed from pre-update
         data and **the update's signal is lost**: nothing re-runs.
-        Consumers whose side-effects derive data from mutable rows need
-        a recheck: persist a dirty flag / version before dispatching,
-        clear it inside the side-effect, and dispatch again from a
-        success callback when it is still set.
+        Consumers whose work reads mutable rows need a saved business version.
+        The ordinary job must compare that version before completing its work.
+        It must keep required newer work pending instead of discarding its request.
+        A success callback can be lost, so it cannot guarantee that check.
     """
 
 

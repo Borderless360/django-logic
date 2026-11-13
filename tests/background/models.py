@@ -602,7 +602,7 @@ class ScenarioGuardProcess(Process):
     ]
 
 
-# `approve` chains into `notify` through next_transition. The follow-up's
+# An optional approval callback starts `notify`. The follow-up's
 # side-effect must be tracked even though the test only drives `approve`.
 # ``RAN`` records the call order.
 
@@ -617,6 +617,10 @@ def chain_followup(instance, **kwargs):
     RAN.append('chain_followup')
 
 
+def notify_after_approval(instance, **kwargs):
+    instance.chain_process.notify(**kwargs)
+
+
 class WidgetChainProcess(Process):
     process_name = 'chain_process'
     transitions = [
@@ -625,7 +629,7 @@ class WidgetChainProcess(Process):
             sources=['draft'],
             target='approved',
             side_effects=[chain_first],
-            next_transition='notify',
+            callbacks=[notify_after_approval],
         ),
         Transition(
             action_name='notify',
@@ -639,7 +643,7 @@ class WidgetChainProcess(Process):
 # --- Fixtures for ProcessScenario behaviour tests ---------------------------
 # These processes cover the synchronous transitions, with and without a
 # target, and the
-# background-to-background next_transition chain. Every side-effect appends a
+# background-to-background callback sequence. Every side-effect appends a
 # marker to se_log or cb_log, so a test asserts on how the object changed
 # rather than on a return value.
 
@@ -738,11 +742,15 @@ def _is_staff_user(instance, user=None, **kwargs):
     return bool(user and getattr(user, 'is_staff', False))
 
 
+def notify_after_sync_approval(instance, **kwargs):
+    instance.sync_proc.notify(**kwargs)
+
+
 class WidgetSyncProcess(Process):
     """The synchronous transitions on Widget.status, with and without a
     target, bound as ``sync_proc``.
 
-    It covers ordered side-effects, next_transition chaining, the failure path,
+    It covers ordered side-effects, callback follow-ups, the failure path,
     a synchronous Transition, a swallowed callback exception, two transitions with
     one action_name split by a condition, a permission gate, and kwargs
     forwarding into the failure hooks.
@@ -752,8 +760,7 @@ class WidgetSyncProcess(Process):
     transitions = [
         Transition('approve', sources=['draft'], target='approved',
                    side_effects=[_se('a'), _se('b')],
-                   callbacks=[_cb('after_approve')],
-                   next_transition='notify'),
+                   callbacks=[_cb('after_approve'), notify_after_sync_approval]),
         Transition('notify', sources=['approved'], target='notified',
                    side_effects=[_se('c')]),
         Transition('reject', sources=['draft'], target='rejected',
@@ -793,16 +800,20 @@ class WidgetSyncProcess(Process):
     ]
 
 
+def run_child_action(instance, **kwargs):
+    instance.ctx_proc.child_act(**kwargs)
+
+
 class WidgetContextProcess(Process):
     """A two-step synchronous chain on Widget.status, bound as ``ctx_proc``. It
-    lets a test check that next_transition gives the follow-up a new tr_id and
+    lets a test check that a callback gives the follow-up a new tr_id and
     carries root_id and parent_id across. The follow-up records its kwargs in
     SYNC_LAST_KWARGS."""
 
     process_name = 'ctx_proc'
     transitions = [
         Transition('parent_act', sources=['draft'], target='parent_done',
-                   side_effects=[_se('parent')], next_transition='child_act'),
+                   side_effects=[_se('parent')], callbacks=[run_child_action]),
         Transition('child_act', sources=['parent_done'], target='child_done',
                    side_effects=[sync_capture]),
     ]
@@ -826,15 +837,19 @@ class WidgetNestedSyncProcess(Process):
     nested_processes = [InnerSyncProcess]
 
 
-class WidgetAmbiguousNextProcess(Process):
+def call_ambiguous_followup(instance, **kwargs):
+    instance.ambig_callback.follow(**kwargs)
+
+
+class WidgetAmbiguousCallbackProcess(Process):
     """``start`` chains into ``follow``, but two ``follow`` transitions are
     available from ``started`` and no condition separates them. The engine must
     refuse the follow-up and run neither, instead of picking one."""
 
-    process_name = 'ambig_next'
+    process_name = 'ambig_callback'
     transitions = [
         Transition('start', sources=['draft'], target='started',
-                   side_effects=[_se('start')], next_transition='follow'),
+                   side_effects=[_se('start')], callbacks=[call_ambiguous_followup]),
         Transition('follow', sources=['started'], target='a_done',
                    side_effects=[_se('follow_a')]),
         Transition('follow', sources=['started'], target='b_done',
@@ -842,8 +857,12 @@ class WidgetAmbiguousNextProcess(Process):
     ]
 
 
+def request_optional_export(instance, **kwargs):
+    instance.bg_chain.bg_export(**kwargs)
+
+
 class WidgetBgChainProcess(Process):
-    """A background-to-background next_transition chain on Widget.status,
+    """A background callback that starts an optional export on Widget.status,
     bound as ``bg_chain``.
 
     ``bg_fulfil`` chains into ``bg_export``. The follow-up row must record its
@@ -859,7 +878,7 @@ class WidgetBgChainProcess(Process):
                              failed_state='chain_fulfil_failed',
                              queue='django_logic.critical',
                              side_effects=[_se('bg_fulfil_se')],
-                             next_transition='bg_export'),
+                             callbacks=[request_optional_export]),
         BackgroundTransition('bg_export', sources=['fulfilled'], target='exported',
                              in_progress_state='chain_exporting',
                              failed_state='chain_export_failed',
@@ -903,6 +922,10 @@ def chain_dummy_report(instance, **kwargs):
     instance.save(update_fields=['se_log'])
 
 
+def request_optional_report(instance, **kwargs):
+    instance.chain_conv.report(**kwargs)
+
+
 class GmailChainProcess(Process):
     process_name = 'gmail_chain'
     transitions = [
@@ -912,7 +935,7 @@ class GmailChainProcess(Process):
                              conditions=[chain_is_gmail],
                              queue='django_logic.critical',
                              side_effects=[chain_gmail_send],
-                             next_transition='report'),
+                             callbacks=[request_optional_report]),
         BackgroundTransition('report', sources=['open'], target='reported',
                              in_progress_state='gmail_chain_reporting',
                              failed_state='gmail_chain_report_failed',
@@ -931,7 +954,7 @@ class DummyChainProcess(Process):
                              conditions=[chain_is_dummy],
                              queue='django_logic.critical',
                              side_effects=[chain_dummy_send],
-                             next_transition='report'),
+                             callbacks=[request_optional_report]),
         BackgroundTransition('report', sources=['open'], target='reported',
                              in_progress_state='dummy_chain_reporting',
                              failed_state='dummy_chain_report_failed',

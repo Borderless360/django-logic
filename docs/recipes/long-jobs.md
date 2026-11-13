@@ -1,76 +1,83 @@
-# Long jobs: one row per chunk
+# Long imports: save progress after each page
 
-## The problem
+A large import must keep its finished pages when a later attempt fails.
+One ordinary background job can own the whole import.
+Each attempt processes one page and saves its records and cursor together.
+The job remains pending while another page remains.
 
-By default, `BackgroundTransition` runs its whole side-effect inside one attempt,
-and the attempt is all-or-nothing: its database writes run in a savepoint
-and roll back together when the attempt fails, is killed at its
-`timeout=` budget, or dies with its worker. That rule is what lets a
-retry run the side-effect again from scratch.
-
-For a long job — importing a page of orders one by one — all-or-nothing
-has two costs:
-
-* an interrupted attempt loses every row it already wrote, so a job that
-  cannot finish inside one attempt's budget never completes;
-* nothing the job writes is visible to the rest of the system until the
-  whole job commits, so downstream work waits for the last record.
-
-For a bulk import, split the job into chunks so each attempt stays small.
-Keep the default atomic behavior when a chunk must succeed or fail together.
-
-Provider requests have another requirement: their saved confirmations must
-survive a later local failure. Even one request can succeed before its receipt
-rolls back. Use the explicit `atomic=False` option for that case, with durable
-protection against repeated requests. See [provider receipts](provider-receipts.md).
-
-## The shape
-
-Give each chunk its own background transition. Each chunk is then its own
-`TransitionMessage` row, its own attempt, its own savepoint, its own
-retries, and its own commit:
-
-* an interruption loses one chunk, not the job — the chunk's row stays
-  uncompleted and a later claim retries it;
-* every finished chunk is committed and visible at once;
-* every engine guarantee holds unchanged, because no attempt is long.
-
-Store the cursor on the instance (or on the rows the job imports), and
-make each chunk idempotent against it — the same rule every background
-side-effect already follows.
+Use `atomic=False` so an attempt can commit a finished page before postponing itself.
+Put each page's database changes inside an explicit transaction.
+Do not put the entire import inside one transaction.
 
 ```python
+from datetime import timedelta
+
+from django.db import transaction
+from django.utils import timezone
+from django_logic import Process
+from django_logic.background import BackgroundTransition, Defer
+
+from imports.models import ImportRun
+
+
 def import_next_page(instance, **kwargs):
-    """One chunk: fetch one page, import it, advance the cursor."""
-    page = fetch_page(instance.import_cursor)
-    for record in page.records:
-        import_record(instance, record)      # idempotent per record
-    instance.import_cursor = page.next_cursor
-    instance.save(update_fields=['import_cursor'])
+    cursor = instance.import_cursor
+    if cursor is None:
+        return
+    page = fetch_page(cursor)
+    with transaction.atomic():
+        current = ImportRun.objects.select_for_update().get(pk=instance.pk)
+        if current.status != 'importing':
+            return
+        for record in page.records:
+            import_record(current, record)
+        current.import_cursor = page.next_cursor
+        current.save(update_fields=['import_cursor'])
+    if page.next_cursor is not None:
+        raise Defer(
+            until=timezone.now() + timedelta(seconds=1),
+            reason='The import has another page.',
+        )
 
 
-def continue_if_more_pages(instance, **kwargs):
-    """Callback: chain the next chunk after this row completes."""
-    if instance.import_cursor:
-        instance.process.import_page()
-
-
-BackgroundTransition(
-    action_name='import_page',
-    sources=['importing'],
-    side_effects=[import_next_page],
-    callbacks=[continue_if_more_pages],
-)
+class ImportProcess(Process):
+    transitions = [
+        BackgroundTransition(
+            action_name='import_pages',
+            sources=['pending'],
+            in_progress_state='importing',
+            target='imported',
+            failed_state='failed',
+            atomic=False,
+            side_effects=[import_next_page],
+        ),
+    ]
 ```
 
-The callback runs after the row completes, so the next enqueue never
-collides with the one-uncompleted-row-per-instance-per-process
-constraint. A crash between the completion and the callback loses only
-the *chaining*, not the work — cover that window with a small periodic
-check on instances left in the importing state, the same backstop the
-nested-processes recipe uses for its parent re-check.
+This example uses the default PostgreSQL database and a process bound to `status`.
+The application calls `import_pages()` once.
+That call saves the job and the `importing` state together.
+`ImportRun` is the application's import record; only this workflow changes its cursor.
+`None` means there are no more pages.
 
-For a job whose chunks are independent of each other (per-child work
-rather than a cursor), fan out to one background transition per child
-instead of chaining — that is the
-[nested-processes recipe](nested-processes.md).
+The page transaction rolls back imported records and the cursor if any page write fails.
+After that transaction commits, `Defer` keeps the same job available for another attempt.
+A stopped job process also leaves that job available.
+Its next attempt reads the saved cursor and continues from the next unfinished page.
+No completion callback needs to submit another job.
+
+When the last page commits, the worker records `imported` and job completion together.
+If that final write fails, the saved cursor remains `None`.
+The next attempt completes the job without importing a page again.
+The worker checks the current state before recording completion, so cancellation cannot become a successful import.
+
+Keep provider requests outside the page's database transaction.
+External changes still need saved confirmations or provider request keys that prevent duplicates.
+See [provider receipts](provider-receipts.md).
+Choose a measured attempt timeout and a bounded page size.
+An import that reaches its error limit needs an explicit business recovery decision.
+
+Use one import record per run.
+A new import uses a new record, so an old attempt cannot change a restarted import.
+For independent records, submit one ordinary background job per record and save the parent check with those submissions.
+See [parent and child processes](nested-processes.md).

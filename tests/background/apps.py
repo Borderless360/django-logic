@@ -31,7 +31,7 @@ class BackgroundTestsConfig(AppConfig):
             Widget,
             EmptyStatusProcess,
             WidgetAmbiguousConditionProcess,
-            WidgetAmbiguousNextProcess,
+            WidgetAmbiguousCallbackProcess,
             WidgetAuditProcess,
             WidgetBgChainProcess,
             WidgetChainProcess,
@@ -64,7 +64,7 @@ class BackgroundTestsConfig(AppConfig):
         ProcessManager.bind_model_process(Widget, WidgetBgChainProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, WidgetContextProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, WidgetNestedSyncProcess, state_field='status')
-        ProcessManager.bind_model_process(Widget, WidgetAmbiguousNextProcess, state_field='status')
+        ProcessManager.bind_model_process(Widget, WidgetAmbiguousCallbackProcess, state_field='status')
         ProcessManager.bind_model_process(Conversation, ChainConversationProcess, state_field='status')
         # Contract fixtures: resolve-time ambiguity, process-level guards, and
         # the cross-machine failure cascade (fundamental problem.md §3).

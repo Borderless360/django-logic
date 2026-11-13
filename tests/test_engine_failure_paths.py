@@ -98,7 +98,9 @@ class SupersedeParityTests(_BindCleanup, TestCase):
         fields = dict(
             app_label='tests', model_name='invoice',
             instance_id=str(invoice.pk),
-            process_name='supersede_parity_proc', transition_name='go',
+            process_name='supersede_parity_proc', transition_name='go', field_name='status',
+            owning_process_class=f'{__name__}.SupersedeParityProcess',
+            kwargs={'process_class': f'{__name__}.SupersedeParityProcess'},
             queue_name='django_logic', errors_count=3, timeout_seconds=60,
         )
         fields.update(overrides)
@@ -392,7 +394,9 @@ class UnclassifiedRestoreFailureTests(_BindCleanup, TestCase):
         fields = dict(
             app_label='tests', model_name='invoice',
             instance_id='not-an-integer',
-            process_name='restore_fail_proc', transition_name='go',
+            process_name='restore_fail_proc', transition_name='go', field_name='status',
+            owning_process_class=f'{__name__}.UnclassifiedRestoreFailureProcess',
+            kwargs={'process_class': f'{__name__}.UnclassifiedRestoreFailureProcess'},
             queue_name='django_logic',
         )
         fields.update(overrides)
@@ -466,7 +470,6 @@ class RunnerTreeWalkCycleTests(TestCase):
 
         return SimpleNamespace(
             pk=1, transition_name=action_name, owning_process_class=owner,
-            effect_name='', parent_transition_name='',
         )
 
     def test_owner_lookup_terminates_on_a_cycle(self):
@@ -480,21 +483,16 @@ class RunnerTreeWalkCycleTests(TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found.action_name, 'inner')
 
-    def test_gone_owner_falls_back_to_the_unambiguous_name(self):
-        from django_logic.background.runner import _find_transition
+    def test_gone_owner_does_not_select_another_declaration(self):
+        from django_logic.background.runner import _find_transition, _RestoreError
 
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        found = _find_transition(root, self._row('inner', 'gone.RenamedProcess'))
-        self.assertIsNotNone(found)
-        self.assertEqual(found.action_name, 'inner')
+        with self.assertRaises(_RestoreError):
+            _find_transition(root, self._row('inner', 'gone.RenamedProcess'))
 
-    def test_name_lookup_terminates_on_a_cycle_and_counts_shared_once(self):
-        from django_logic.background.runner import _find_transition
+    def test_missing_action_lookup_terminates_on_a_cycle(self):
+        from django_logic.background.runner import _find_transition, _RestoreError
 
         root = CycleRootProcess(field_name='status', instance=Invoice())
-        # 'inner' is reachable through the cycle twice, but it is one shared
-        # object: one match, not an ambiguity refusal.
-        found = _find_transition(root, self._row('inner'))
-        self.assertIsNotNone(found)
-        self.assertEqual(found.action_name, 'inner')
-        self.assertIsNone(_find_transition(root, self._row('nope')))
+        with self.assertRaises(_RestoreError):
+            _find_transition(root, self._row('nope', f'{__name__}.CycleBackProcess'))

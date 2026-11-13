@@ -15,7 +15,7 @@ from django.core.exceptions import ImproperlyConfigured
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic import DatabaseTransition
-from django_logic.background import BackgroundEffect, BackgroundTransition
+from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import run_once, run_worker
 from django_logic.background.runner import run_background_transition
@@ -86,11 +86,15 @@ def simulate_external_call(instance, **kwargs):
         raise TimeoutError('External test did not release the first call.')
 
 
+def submit_optional_pending_job(instance, **kwargs):
+    instance.cached_process.pending_done(**kwargs)
+
+
 class CachedProcess(Process):
     process_name = 'cached_process'
     transitions = [Transition('finish', sources=['draft'], target='done', side_effects=[save_local_work]),
                    Transition('external', sources=['draft'], target='done', side_effects=[simulate_external_call]),
-                   Transition('finish_next', sources=['draft'], target='done', next_transition='pending_done'),
+                   Transition('finish_next', sources=['draft'], target='done', callbacks=[submit_optional_pending_job]),
                    BackgroundTransition('pending_done', sources=['done'], queue='database-followup')]
 
 
@@ -100,8 +104,8 @@ def submit_job_for_another_record(instance, nested_id, **kwargs):
 
 class CompletionProcess(Process):
     process_name = 'completion_process'
-    transitions = [BackgroundTransition('complete', sources=['draft'], queue='database-test',
-                   background_effects=[BackgroundEffect('local_completion', run_local_completion)]),
+    transitions = [BackgroundTransition('complete', sources=['draft', 'done'], queue='database-test',
+                                        side_effects=[run_local_completion]),
                    BackgroundTransition('submit', sources=['draft'], queue='database-test',
                                         side_effects=[submit_job_for_another_record])]
 
@@ -123,9 +127,7 @@ class DatabaseTransitionTests(TransactionTestCase):
         outer, nested = Order.objects.create(), Order.objects.create()
         marker = str(Path(self.directory.name) / 'killed')
         outer.completion_process.complete(marker=marker, nested_id=nested.pk)
-        parent = TransitionMessage.objects.get(instance_id=str(outer.pk), process_name='completion_process')
-        run_background_transition(parent.pk)
-        job = TransitionMessage.objects.get(parent_job_id=parent.pk)
+        job = TransitionMessage.objects.get(instance_id=str(outer.pk), process_name='completion_process')
         self.assertTrue(run_once(['database-test'], isolate=True))
         job.refresh_from_db()
         self.assertEqual(job.errors_count, 1)
@@ -158,9 +160,7 @@ class DatabaseTransitionTests(TransactionTestCase):
     def test_killed_nested_background_submission_rolls_back_and_is_saved_once(self):
         outer, nested = Order.objects.create(), Order.objects.create()
         outer.completion_process.complete(nested_id=nested.pk, enqueue=True)
-        parent = TransitionMessage.objects.get(instance_id=str(outer.pk), effect_name='')
-        run_background_transition(parent.pk)
-        job = TransitionMessage.objects.get(parent_job_id=parent.pk)
+        job = TransitionMessage.objects.get(instance_id=str(outer.pk), process_name='completion_process')
         marker = Path(self.directory.name) / 'enqueue-killed'
         original = TransitionMessage.save
 
@@ -286,9 +286,7 @@ class DatabaseTransitionTests(TransactionTestCase):
         row = Order.objects.create()
         marker = str(Path(self.directory.name) / 'whole-worker')
         row.completion_process.complete(marker=marker, wait=True)
-        parent = TransitionMessage.objects.get(instance_id=str(row.pk), effect_name='')
-        run_background_transition(parent.pk)
-        job = TransitionMessage.objects.get(parent_job_id=parent.pk)
+        job = TransitionMessage.objects.get(instance_id=str(row.pk), process_name='completion_process')
         connections.close_all()
         worker_pid = os.fork()
         if worker_pid == 0:

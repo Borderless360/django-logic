@@ -1,20 +1,16 @@
 """The business-row lock waits briefly, refuses a long holder, keeps the
-failed state after a database error in a side effect, and lets a producer
-on an earlier version insert job rows."""
+failed state after a database error in a side effect."""
 from tests import unbind_model_process
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Timer
 from unittest.mock import patch
 
 from django.db import IntegrityError, connection, connections, transaction
-from django.db.migrations.executor import MigrationExecutor
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
-from django_logic.background.fairness import FairnessGroup
 from django_logic.background.models import TransitionMessage
-from django_logic.background.pull import claim_next
 from django_logic.background.runner import finalize_stuck_attempt, run_background_transition
 from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
 from tests import dl_settings
@@ -299,123 +295,3 @@ class BackgroundTerminalRowLockTests(TransactionTestCase):
         self.assertIn('division by zero', message.failure_side_effect_error)
         self.assertEqual(self.invoice.status, 'working')
         self.assertFalse(Invoice.objects.filter(status='cb-ran').exists())
-
-
-class EarlierProducerInsertTests(TestCase):
-    def test_33_producer_and_reader_work_after_unused_fields_leave_the_model(self):
-        old_state = MigrationExecutor(connection).loader.project_state([
-            ('django_logic_background', '0015_background_effects'),
-        ])
-        old_message = old_state.apps.get_model('django_logic_background', 'TransitionMessage')
-        fields = dict(app_label='tests', model_name='invoice', instance_id='1',
-                      process_name='p', field_name='status', transition_name='go',
-                      queue_name='q', kwargs={}, is_completed=True)
-        earlier = old_message.objects.create(**fields)
-        self.assertEqual(TransitionMessage.objects.get(pk=earlier.pk).transition_name, 'go')
-        current = TransitionMessage.objects.create(**fields)
-        read_by_earlier_worker = old_message.objects.get(pk=current.pk)
-        self.assertEqual(read_by_earlier_worker.required_next, '')
-        self.assertEqual(read_by_earlier_worker.request_fingerprint, '')
-
-    def test_a_row_without_the_new_columns_gets_the_database_defaults(self):
-        """A producer on 2.4 names none of the columns 3.0 added."""
-        original = TransitionMessage.objects.create(
-            app_label='tests', model_name='invoice', instance_id='1', process_name='p',
-            field_name='status', transition_name='go', queue_name='q', kwargs={}, is_completed=True,
-        )
-        added = {'request_key', 'request_fingerprint', 'fairness_key', 'eligible_at',
-                 'deferral_reason', 'completion_kind', 'required_next'}
-        quote = connection.ops.quote_name
-        columns = ', '.join(quote(field.column) for field in TransitionMessage._meta.concrete_fields
-                            if field.column not in added and field.column != 'id')
-        table = quote(TransitionMessage._meta.db_table)
-        with connection.cursor() as cursor:
-            cursor.execute(f'INSERT INTO {table} ({columns}) SELECT {columns} FROM {table} WHERE id = %s',
-                           [original.pk])
-        copy = TransitionMessage.objects.exclude(pk=original.pk).get()
-        self.assertEqual(
-            (copy.request_key, copy.fairness_key, copy.eligible_at,
-             copy.deferral_reason, copy.completion_kind),
-            (None, '', None, '', ''),
-        )
-
-
-@requires_postgres
-@override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='pull'))
-class EarlierProducerUpgradeTests(TransactionTestCase):
-    app_label = 'django_logic_background'
-    queue = 'django_logic.critical'
-
-    def setUp(self):
-        executor = MigrationExecutor(connection)
-        self.latest = executor.loader.graph.leaf_nodes(self.app_label)
-        self.addCleanup(self.migrate, self.latest)
-        old_state = self.migrate([(self.app_label, '0001_squashed_0010_proxy_model_label')])
-        # This model generates the INSERT an earlier producer would send. It
-        # knows none of the new columns, even after this test upgrades the schema.
-        self.older_message = old_state.apps.get_model(self.app_label, 'TransitionMessage')
-        self.widget = Widget.objects.create(status='fulfilling')
-
-    def migrate(self, targets):
-        executor = MigrationExecutor(connection)
-        executor.migrate(targets)
-        return executor.loader.project_state(targets)
-
-    def enqueue_from_earlier_producer(self):
-        return self.older_message.objects.create(
-            app_label='bg_tests', model_name='widget', instance_id=str(self.widget.pk),
-            process_name='process', field_name='status', transition_name='fulfil',
-            queue_name=self.queue, kwargs={},
-        ).pk
-
-    def assert_new_worker_completes(self, pk):
-        message = TransitionMessage.objects.get(pk=pk)
-        self.assertEqual(
-            (message.request_key, message.fairness_key, message.eligible_at,
-             message.deferral_reason, message.completion_kind),
-            (None, '', None, '', ''),
-        )
-        self.assertEqual(claim_next([self.queue]), pk)
-        run_background_transition(pk)
-        self.widget.refresh_from_db()
-        message.refresh_from_db()
-        self.assertEqual(self.widget.status, 'fulfilled')
-        self.assertEqual(self.widget.se_log, 'ok,')
-        self.assertEqual(self.widget.cb_log, 'cb,')
-        self.assertTrue(message.is_completed)
-        self.assertEqual(message.errors_count, 0)
-        self.assertEqual(message.completion_kind, 'succeeded')
-        self.assertIsNone(claim_next([self.queue]))
-
-    def test_earlier_producer_inserts_after_0011_before_the_remaining_migrations(self):
-        self.migrate([(self.app_label, '0011_operation_contract')])
-        pk = self.enqueue_from_earlier_producer()
-        self.migrate(self.latest)
-
-        self.assertTrue(FairnessGroup.objects.filter(key='').exists())
-        self.assert_new_worker_completes(pk)
-
-    def test_earlier_producer_inserts_after_the_upgrade_without_a_fairness_group(self):
-        self.migrate(self.latest)
-        self.assertFalse(FairnessGroup.objects.exists())
-        pk = self.enqueue_from_earlier_producer()
-        self.assertFalse(FairnessGroup.objects.exists())
-
-        self.assert_new_worker_completes(pk)
-        self.assertTrue(FairnessGroup.objects.filter(key='').exists())
-
-    def test_0013_repairs_published_300_defaults_before_the_new_worker_runs(self):
-        self.migrate([(self.app_label, '0012_fairness_groups')])
-        quote = connection.ops.quote_name
-        table = quote(TransitionMessage._meta.db_table)
-        # The published 3.0.0 migration dropped all five defaults. Reproduce that
-        # schema without replacing the checked-in migration or its recorded state.
-        with connection.cursor() as cursor:
-            for column in ['request_fingerprint', 'fairness_key', 'deferral_reason',
-                           'completion_kind', 'required_next']:
-                cursor.execute(f'ALTER TABLE {table} ALTER COLUMN {quote(column)} DROP DEFAULT')
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            self.enqueue_from_earlier_producer()
-
-        self.migrate(self.latest)
-        self.assert_new_worker_completes(self.enqueue_from_earlier_producer())

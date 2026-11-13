@@ -164,7 +164,7 @@ def test_validation_failure_voids_the_order(self):
 `expect_raises` is what makes this a journey test rather than a mirror:
 without it the harness absorbs the injected exception, so the test would pass
 whether the engine re-raised or silently swallowed. The full contract:
-`side_effects` re-raise to the caller; `callbacks` and `next_transition`
+`side_effects` re-raise to the caller; `callbacks`
 are swallowed (best-effort).
 
 ### 3. Background failure → in-progress + recorded error
@@ -243,7 +243,7 @@ def test_reproduce_stuck_order_12345(self):
 
 The five scenarios above are the canonical shapes; every other case
 (condition/permission gating, retry-to-success, the one-in-flight gate,
-superseded rows, next_transition chains, nested processes, the caller
+superseded rows, callback follow-ups, nested processes, the caller
 boundary, the cross-machine cascade) follows the same pattern and is
 pinned in the library's own suite under `tests/` — copy from there when
 you need one.
@@ -270,9 +270,9 @@ Class attributes: `process_class`, `model`, `state_field` (default
   (unexpected) exception fails the test loudly.
 - `expect_raises=` — pin the caller boundary. An **exception type** (or tuple)
   asserts it propagated to the caller (the `SideEffects` re-raise contract);
-  **`False`** asserts nothing propagated (the swallow contract). When omitted,
-  an injected failure is absorbed so you can assert on the
-  *recorded* error instead.
+  **`False`** asserts nothing propagated. Injecting a failure requires an explicit
+  expectation; omitting it raises `ValueError` before the action runs. Without
+  injection, omitting the option asserts that no exception propagated.
   On a `background_transition` drive the caller boundary is a sync-mode
   artefact: the runner re-raises the hook's exception to the inline caller,
   but a production caller in pull mode returns once the row is committed and
@@ -307,7 +307,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 
 | Assertion | Checks |
 |---|---|
-| `assert_side_effects_ran(names)` / `assert_side_effects_not_ran(names)` | Which side-effects executed in the last tracked drive (by function `__name__` — tracked, not mocked: the real code ran). Tracking covers the whole process tree, including `next_transition` follow-ups. |
+| `assert_side_effects_ran(names)` / `assert_side_effects_not_ran(names)` | Which side-effects executed in the last tracked drive (by function `__name__` — tracked, not mocked: the real code ran). Tracking covers the whole process tree, including callback follow-ups. |
 | `assert_callbacks_ran(names)` | Which callbacks executed. |
 | `assert_failure_callbacks_ran(names)` | Which failure hooks executed (for failure-path scenarios). |
 

@@ -122,7 +122,7 @@ class Process:
             # _get_transition_method's first parameter and raise "multiple
             # values for argument 'action_name'". No engine path forwards it;
             # only a hand-built kwargs dict does. The reserved engine names
-            # stay, because next_transition forwards tr_id, root_id,
+            # stay, because callbacks can forward tr_id, root_id,
             # parent_id and process_class through this same path.
             kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
@@ -163,10 +163,9 @@ class Process:
         kwargs['root_id'] = kwargs.get('root_id', tr_id)
         kwargs['parent_id'] = kwargs.get('tr_id', tr_id)
         kwargs['tr_id'] = tr_id
-        if 'process_class' not in kwargs:
-            kwargs['process_class'] = (
-                f"{self.__class__.__module__}.{self.__class__.__name__}"
-            )
+        kwargs['process_class'] = (
+            f"{self.__class__.__module__}.{self.__class__.__name__}"
+        )
         if transition.is_background:
             # Record the process class that DECLARES this transition. For a
             # nested transition this differs from ``process_class`` (the bound
@@ -175,7 +174,7 @@ class Process:
             # (runner._find_transition) uses it to pick the exact background
             # transition when an ``action_name`` is shared across
             # condition-disambiguated nested processes. Overwrite, never
-            # setdefault: a chained next_transition forwards the previous
+            # setdefault: a callback can forward the previous
             # transition's kwargs, and that owner is not this transition's.
             kwargs['owning_process_class'] = (
                 f"{type(owning_process).__module__}."

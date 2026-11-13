@@ -26,4 +26,3 @@ class TransitionEventType(Enum):
     SET_STATE = 'Set State'
     LOCK = 'Lock'
     UNLOCK = 'Unlock'
-    NEXT_TRANSITION = 'Next Transition'

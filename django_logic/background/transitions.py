@@ -128,7 +128,6 @@ class BackgroundTransition(Transition):
         no_retry_on: tuple = (),
         atomic: bool = True,
         fairness_key=None,
-        background_effects=(),
         submission_context=None,
         **kwargs,
     ):
@@ -164,14 +163,6 @@ class BackgroundTransition(Transition):
         if submission_context is not None and not callable(submission_context):
             raise ImproperlyConfigured('submission_context must be callable.')
         self.submission_context = submission_context
-        self.background_effects = tuple(background_effects)
-        if self.background_effects:
-            from django_logic.background.effects import BackgroundEffect
-            if any(not isinstance(effect, BackgroundEffect) for effect in self.background_effects):
-                raise ImproperlyConfigured('background_effects must contain BackgroundEffect declarations.')
-            names = [effect.name for effect in self.background_effects]
-            if len(set(names)) != len(names):
-                raise ImproperlyConfigured('Background effect names must be unique within a transition.')
         self.fairness_key = fairness_key
         self.atomic = atomic
         self.queue = queue
@@ -190,18 +181,27 @@ class BackgroundTransition(Transition):
         """
         return self.queue or conf.default_queue()
 
-    def get_background_effect(self, name):
-        for effect in self.background_effects:
-            if effect.name == name:
-                return effect
-        raise ImproperlyConfigured(f'Background effect {name!r} is not declared on {self.action_name!r}.')
-
     def change_state(self, state: State, **kwargs) -> UUID | None:
         # Before the lock, and before the kwargs are serialized into a row
         # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
-        from django_logic.background.effects import validate_effect_submission
-        validate_effect_submission(self, state, kwargs)
+        if not all(isinstance(kwargs.get(key), str) and kwargs[key]
+                   for key in ('process_class', 'owning_process_class')) or not state.field_name:
+            raise ImproperlyConfigured(
+                'Submit a background transition through its Process so the saved job '
+                'records process_class, owning_process_class and field_name.'
+            )
+        from django_logic.background.runner import _find_transition, _load_process_from_path
+        identity = TransitionMessage(
+            process_name=state.process_name, field_name=state.field_name,
+            transition_name=self.action_name, owning_process_class=kwargs['owning_process_class'],
+        )
+        try:
+            recorded_process = _load_process_from_path(state.instance, kwargs['process_class'], identity)
+            if _find_transition(recorded_process, identity) is not self:
+                raise ValueError('The recorded class declares a different transition.')
+        except Exception as error:
+            raise ImproperlyConfigured(f'The background job identity cannot be restored: {error}') from error
         if not self.atomic:
             from django_logic.background.non_atomic import validate_non_atomic
             # The test runtime runs the job inside the caller's transaction.
@@ -306,7 +306,7 @@ class BackgroundTransition(Transition):
         with transaction.atomic(using=using):
             # Do not wait on a job while holding its business row.
             if TransitionMessage.objects.using(using).filter(
-                **TransitionMessage.instance_key(state.instance, state.process_name), is_completed=False, effect_name='',
+                **TransitionMessage.instance_key(state.instance, state.process_name), is_completed=False,
             ).exists():
                 raise AlreadyInProgress(f"Another background transition is already in progress for process '{state.process_name}'.",
                                         reason=RefusalReason.BACKGROUND_IN_FLIGHT)
@@ -340,9 +340,8 @@ class BackgroundTransition(Transition):
                     field_name=state.field_name,
                     transition_name=self.action_name,
                     # Nested processes can declare the same action name.
-                    owning_process_class=kwargs.get('owning_process_class', ''),
+                    owning_process_class=kwargs['owning_process_class'],
                     fairness_key=resolved_fairness,
-                    background_effect_names=[effect.name for effect in self.background_effects],
                     queue_name=queue_name,
                     timeout_seconds=self.timeout,
                     kwargs=serialized,

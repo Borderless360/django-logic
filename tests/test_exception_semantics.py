@@ -2,14 +2,12 @@
 
 This is the contract the ``0.1.6 -> 0.2.0`` upgrade silently flipped (see
 ``fundamental problem.md`` §3 and the process-testing report §4.1). The engine
-deliberately treats the four hook families asymmetrically at the *caller
+deliberately treats required work and callbacks differently at the *caller
 boundary*:
 
 * ``SideEffects`` — on failure, run ``fail_transition``, then **RE-RAISE** so
   the caller observes the failure (``commands.py`` ``SideEffects.execute``).
 * ``Callbacks`` — best-effort; exceptions are **swallowed**.
-* ``NextTransition`` — a follow-up's failure is **swallowed** (it must not
-  bubble into the transition that triggered it).
 
 Every test drives a real object through the real entrypoint and pins what
 reaches the caller via ``expect_raises`` / ``assert_raised`` /
@@ -59,7 +57,7 @@ class SideEffectReRaiseContract(ProcessScenario):
 
 
 class SwallowContract(ProcessScenario):
-    """Callbacks / NextTransition swallow: a best-effort failure must NOT
+    """Callbacks contain errors: a best-effort failure must NOT
     reach the caller, and the object keeps the state it legitimately reached."""
 
     process_class = WidgetSyncProcess
@@ -75,10 +73,10 @@ class SwallowContract(ProcessScenario):
         self.assert_not_raised()
         self.assert_state(widget, 'boom_done')
 
-    def test_next_transition_failure_is_swallowed_and_parent_kept(self):
+    def test_callback_transition_failure_is_swallowed_and_parent_kept(self):
         # approve completes (target 'approved') then chains into notify. Inject
         # a failure into notify's side-effect (se_c): the follow-up fails, but
-        # NextTransition swallows it — the parent keeps 'approved' and the
+        # The callback contains it — the parent keeps 'approved' and the
         # caller sees no exception.
         widget = self.create_instance(status='draft')
         self.transition(

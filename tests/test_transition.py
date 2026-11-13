@@ -9,7 +9,7 @@ re-stated the implementation and prevented nothing.
 The replacements drive a real object through the real entrypoint and
 assert on the observable transformation: the state the object landed in,
 the ordered side-effects/callbacks that mutated it, the failure path's
-``failed_state`` + cleanup, the lock discipline, and the ``next_transition``
+``failed_state`` + cleanup, the lock discipline, and the callback
 context contract. Fixtures live in tests/background/models.py; binding in
 tests/background/apps.py.
 """
@@ -27,7 +27,7 @@ from tests.background.models import (
     SYNC_LAST_KWARGS,
     SYNC_ORDER,
     Widget,
-    WidgetAmbiguousNextProcess,
+    WidgetAmbiguousCallbackProcess,
     WidgetContextProcess,
     WidgetSyncProcess,
 )
@@ -51,7 +51,7 @@ class TransitionSideEffectsScenario(StateTraceMixin, ProcessScenario):
     def test_side_effects_run_in_order_and_write_target(self):
         widget = self.create_instance(status='draft')
         self.transition(widget, 'approve')
-        self.assert_state(widget, 'notified')  # approve -> notify (next_transition)
+        self.assert_state(widget, 'notified')  # approve -> notify (callback)
         self.assert_side_effects_ran(['se_a', 'se_b', 'se_c'])
         widget.refresh_from_db()
         # se_log records the declaration order verbatim.
@@ -87,7 +87,7 @@ class TransitionSideEffectsScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(
             widget, 'reject',
-            fail_side_effect='se_reject_attempt', fail_with=ValueError('reject broke'),
+            expect_raises=ValueError, fail_side_effect='se_reject_attempt', fail_with=ValueError('reject broke'),
         )
         self.assert_state(widget, 'rejection_failed')
         self.assert_state_trace(['rejection_failed'])
@@ -104,7 +104,7 @@ class TransitionSideEffectsScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(
             widget, 'reject',
-            fail_side_effect='se_reject_attempt', fail_with=ValueError('boom'),
+            expect_raises=ValueError, fail_side_effect='se_reject_attempt', fail_with=ValueError('boom'),
         )
         self.assertFalse(self._process(widget).state.is_locked())
 
@@ -128,7 +128,7 @@ class ActionScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(
             widget, 'poke_fail',
-            fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
+            expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
         )
         self.assert_state(widget, 'poked_failed')
         self.assert_state_trace(['poked_failed'])
@@ -169,7 +169,7 @@ class ActionScenario(StateTraceMixin, ProcessScenario):
                                side_effect=observing):
             self.transition(
                 widget, 'poke_fail',
-                fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
+                expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
             )
         self.assert_state(widget, 'poked_failed')
         self.assertEqual(
@@ -201,7 +201,7 @@ class ActionScenario(StateTraceMixin, ProcessScenario):
                                side_effect=racing):
             self.transition(
                 widget, 'poke_fail',
-                fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
+                expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
             )
         self.assertEqual(
             rival_lock_results, [False],
@@ -214,7 +214,7 @@ class ActionScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(
             widget, 'poke_fail',
-            fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
+            expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
         )
         self.assert_state(widget, 'poked_failed')
         self.assertFalse(self._process(widget).state.is_locked())
@@ -256,7 +256,7 @@ class KwargsAndFailureContractScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(
             widget, 'capture_fail',
-            fail_side_effect='sync_boom', fail_with=ValueError('captured boom'),
+            expect_raises=ValueError, fail_side_effect='sync_boom', fail_with=ValueError('captured boom'),
             foo='bar',
         )
         self.assert_state(widget, 'capture_failed')
@@ -266,8 +266,8 @@ class KwargsAndFailureContractScenario(StateTraceMixin, ProcessScenario):
         self.assertEqual(SYNC_LAST_KWARGS.get('foo'), 'bar')
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class NextTransitionScenario(StateTraceMixin, ProcessScenario):
-    """``next_transition`` behavior — the follow-up runs through the entrypoint
+class CallbackTransitionScenario(StateTraceMixin, ProcessScenario):
+    """Callback follow-up behavior — the follow-up runs through the entrypoint
     with a fresh ``tr_id`` and chained ``root_id``/``parent_id``, only on
     success, and is refused when ambiguous."""
 
@@ -298,8 +298,8 @@ class NextTransitionScenario(StateTraceMixin, ProcessScenario):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class NextTransitionFailureScenario(StateTraceMixin, ProcessScenario):
-    """``next_transition`` must NOT fire when the parent transition fails."""
+class CallbackTransitionFailureScenario(StateTraceMixin, ProcessScenario):
+    """Success callbacks must NOT run when the parent transition fails."""
 
     process_class = WidgetSyncProcess
     model = Widget
@@ -328,22 +328,17 @@ class NextTransitionFailureScenario(StateTraceMixin, ProcessScenario):
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
-class AmbiguousNextTransitionScenario(StateTraceMixin, ProcessScenario):
-    """An ambiguous ``next_transition`` (two same-name follow-ups both
-    available, no disambiguating condition) is refused — neither runs —
-    rather than picking arbitrarily. The parent still completes.
+class AmbiguousCallbackTransitionScenario(StateTraceMixin, ProcessScenario):
+    """A callback cannot choose between two available follow-up transitions.
 
-    Note: this pins the observable BEHAVIOUR ('runs neither'), which is
-    enforced by two independent layers — ``NextTransition.execute``'s own
-    ambiguity guard and the entrypoint's ``_resolve_transition_with_owner``
-    refusal (whose exception NextTransition swallows). It therefore does not
-    isolate either guard on its own; removing just one still leaves the object
-    in ``started``. That defence-in-depth is intended."""
+    The process entrypoint refuses the ambiguous action. The callback contains
+    that refusal, so the completed parent keeps its target state.
+    """
 
-    process_class = WidgetAmbiguousNextProcess
+    process_class = WidgetAmbiguousCallbackProcess
     model = Widget
     state_field = 'status'
-    process_name = 'ambig_next'
+    process_name = 'ambig_callback'
 
     def test_ambiguous_follow_up_runs_neither(self):
         widget = self.create_instance(status='draft')

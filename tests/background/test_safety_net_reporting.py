@@ -23,6 +23,9 @@ def make_message(*, created, queue='reporting', status='fulfilling',
     message = TransitionMessage.objects.create(
         app_label='bg_tests', model_name='widget', instance_id=str(widget.pk),
         process_name='process', transition_name=transition_name,
+        field_name='status',
+        owning_process_class='tests.background.models.WidgetProcess',
+        kwargs={'process_class': 'tests.background.models.WidgetProcess'},
         queue_name=queue, **fields,
     )
     TransitionMessage.objects.filter(pk=message.pk).update(created=created)

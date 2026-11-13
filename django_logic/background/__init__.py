@@ -25,7 +25,6 @@ from __future__ import annotations
 
 
 _PUBLIC = {
-    'BackgroundEffect': ('django_logic.background.effects', 'BackgroundEffect'),
     'Defer': ('django_logic.background.exceptions', 'Defer'),
     'BackgroundTransition': ('django_logic.background.transitions', 'BackgroundTransition'),
     'sync_execution': ('django_logic.conf', 'sync_execution'),

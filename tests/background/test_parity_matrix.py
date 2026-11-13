@@ -19,7 +19,7 @@ Pinned for every shape:
 * hook order — side-effects run while the persisted state is still the source,
   and callbacks run only after the target write is readable. On terminal
   failure, failed_state is written first and the failure callbacks second;
-* ``next_transition`` — the same background follow-up runs with the same typed
+* callback follow-ups — the same background transition runs with the same typed
   kwargs and a live ``user`` whether the parent is synchronous or background,
   with a target or without one, and never sees ``request``.
 """
@@ -89,6 +89,10 @@ def record_hop_kwargs(instance, **kwargs):
     HOP_SEEN.update(kwargs)
 
 
+def request_optional_hop(instance, **kwargs):
+    instance.parity_process.chain_hop(**kwargs)
+
+
 class ParityProcess(Process):
     process_name = 'parity_process'
     transitions = [
@@ -113,13 +117,13 @@ class ParityProcess(Process):
         # parents change no state, and 'chained_src' because the
         # state-writing parents write it.
         Transition('sync_transition_chain', sources=['draft'],
-                   target='chained_src', next_transition='chain_hop'),
+                   target='chained_src', callbacks=[request_optional_hop]),
         Transition('sync_action_chain', sources=['draft'],
-               next_transition='chain_hop'),
+               callbacks=[request_optional_hop]),
         BackgroundTransition('bg_transition_chain', sources=['draft'],
-                             target='chained_src', next_transition='chain_hop'),
+                             target='chained_src', callbacks=[request_optional_hop]),
         BackgroundTransition('bg_action_chain', sources=['draft'],
-                         next_transition='chain_hop'),
+                         callbacks=[request_optional_hop]),
         BackgroundTransition('chain_hop', sources=['draft', 'chained_src'],
                              target='chained', side_effects=[record_hop_kwargs]),
     ]
@@ -269,7 +273,7 @@ class ParityMatrixTests(TestCase):
             self.assertEqual(order, [('failure_callback', 'failed')], action)
         FAIL['on'] = False
 
-    def test_next_transition_chains_equivalently_across_all_four_shapes(self):
+    def test_callback_followups_work_equivalently_across_all_four_shapes(self):
         # The parent's shape must not change what the follow-up receives:
         # the same typed kwargs and a live user. Every shape chains — a
         # transition with no target included.

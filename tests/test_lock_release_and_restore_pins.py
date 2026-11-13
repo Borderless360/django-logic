@@ -103,6 +103,8 @@ class BaseManagerRestoreTests(TestCase):
             process_name='process',
             field_name='status',
             transition_name='finish',
+            owning_process_class='tests.background.models.ArchivableProcess',
+            kwargs={'process_class': 'tests.background.models.ArchivableProcess'},
             queue_name='django_logic.critical',
         )
         # The instance is archived between enqueue and execute. It disappears

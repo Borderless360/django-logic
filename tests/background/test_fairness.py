@@ -92,7 +92,7 @@ class FairClaimTests(TransactionTestCase):
             claimed.append(pk)
         self.assertIsNone(claim_next(['fair-test'], exclude_pks=claimed))
 
-    def test_unkeyed_legacy_rows_keep_fifo_and_share_capacity(self):
+    def test_unkeyed_rows_keep_fifo_and_share_capacity(self):
         rows = self.rows(['', '', 'new-client'])
         claimed = [self.take().pk for _ in range(3)]
         self.assertEqual(claimed, [rows[0].pk, rows[2].pk, rows[1].pk])

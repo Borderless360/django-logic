@@ -30,6 +30,10 @@ def deny_permission(instance, user, **kwargs):
     return False
 
 
+class BackgroundRefusalProcess(Process):
+    transitions = [Transition('go', sources=['draft']), BackgroundTransition('work', sources=['draft'])]
+
+
 class RefusalMessageTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -311,13 +315,12 @@ class RefusalMessageTests(TestCase):
 
     @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_RETRY_MINUTES=2))
     def test_background_runtime_refusals_keep_types_and_default_wording(self):
-        class Workflow(Process):
-            transitions = [Transition('go', sources=['draft']), BackgroundTransition('work', sources=['draft'])]
-
-        process = self.process(Workflow)
+        process = self.process(BackgroundRefusalProcess)
         pending = TransitionMessage.objects.create(
             **TransitionMessage.instance_key(self.invoice, process.process_name),
-            field_name='status', transition_name='work', kwargs={},
+            field_name='status', transition_name='work',
+            owning_process_class=f'{__name__}.BackgroundRefusalProcess',
+            kwargs={'process_class': f'{__name__}.BackgroundRefusalProcess'},
         )
         error = self.refused(process.go)
         self.assertIs(type(error), TransitionTemporarilyUnavailable)
