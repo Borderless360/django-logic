@@ -1,6 +1,6 @@
 # Changelog
 
-## [4.3.2] — 2026-11-12
+## [4.3.2] — 2026-11-13
 
 - `dl_worker` handles SIGTERM. It takes no new job, waits for its running jobs, and exits with code 0.
   A job process ignores SIGTERM, because Heroku sends the signal to every process of a dyno.
