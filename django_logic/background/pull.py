@@ -41,6 +41,7 @@ import signal
 import time
 from collections import deque
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
@@ -163,6 +164,20 @@ class _Attempt:
     work_exit_code: int | None = None
 
 
+@contextmanager
+def _supervisor_transaction(alias):
+    """Bound database waits so the worker can keep checking job deadlines."""
+    with transaction.atomic(using=alias):
+        if connections[alias].vendor == 'postgresql':
+            with connections[alias].cursor() as cursor:
+                for name, limit in [('statement_timeout', 1000), ('lock_timeout', 100)]:
+                    cursor.execute(
+                        "SELECT set_config(name, LEAST(NULLIF(setting::int, 0), %s)::text, true) "
+                        "FROM pg_settings WHERE name = %s", [limit, name],
+                    )
+        yield
+
+
 def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) -> None:
     """Fork one attempt or safety-net pass and track its deadline.
 
@@ -176,12 +191,11 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) 
     from django_logic.conf import job_process_finish
 
     finish = job_process_finish()
-    timeout_seconds = SAFETY_NET_TIMEOUT_SECONDS if pk is None else (
-        TransitionMessage.objects
-        .filter(pk=pk)
-        .values_list('timeout_seconds', flat=True)
-        .first()
-    )
+    timeout_seconds = SAFETY_NET_TIMEOUT_SECONDS
+    if pk is not None:
+        rows = TransitionMessage.objects.filter(pk=pk)
+        with _supervisor_transaction(rows.db):
+            timeout_seconds = rows.values_list('timeout_seconds', flat=True).first()
     connections.close_all()
     read_fd = write_fd = None
     if finish is not None:
@@ -378,8 +392,8 @@ def _try_account(attempt: _Attempt) -> bool:
                          or now - attempt.last_deferred_warning >= ACCOUNTING_WARNING_REPEAT_SECONDS)):
                 logger.warning(
                     'pull: recording the failure for TransitionMessage#%s has waited %.1fs '
-                    'for a row lock. The worker retains the error and retries; '
-                    'check the PostgreSQL row holder if the wait continues.',
+                    'for a database lock. The worker retains the error and retries; '
+                    'check the PostgreSQL lock holder if the wait continues.',
                     attempt.pk, waited,
                     extra={'transition_message_pk': attempt.pk, 'wait_seconds': waited},
                 )
@@ -453,7 +467,7 @@ def _record_attempt_error(pk: int, message: str) -> None:
 
     alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
     rows = TransitionMessage.objects.using(alias).filter(pk=pk)
-    with transaction.atomic(using=alias):
+    with _supervisor_transaction(alias):
         rows.select_for_update(nowait=True).values_list('pk', flat=True).first()
         now = timezone.now()
         updated = rows.filter(is_completed=False).update(

@@ -27,11 +27,9 @@ Deliberate handling:
 
 .. note::
 
-    Rows written before the typed encoding (plain ISO strings) still
-    decode — absence of a tag means passthrough. The inverse is not true:
-    a worker running an older version passes the tagged dicts through
-    verbatim, so deploy web and workers together when upgrading across
-    this boundary.
+    Plain JSON values retain their types. An untagged ISO-looking string stays
+    a string; only a recognized type tag requests conversion. All producers
+    and workers must run the same supported release.
 """
 from __future__ import annotations
 

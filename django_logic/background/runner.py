@@ -817,12 +817,7 @@ def _restore(transition_message: TransitionMessage):
 
     recorded_path = (transition_message.kwargs.get('process_class')
                      if isinstance(transition_message.kwargs, dict) else None)
-    try:
-        process = _load_process_from_path(instance, recorded_path, transition_message)
-    except Exception as exc:
-        raise _RestoreError(
-            f'recorded process_class {recorded_path!r} could not be loaded: {exc}'
-        ) from exc
+    process = _load_process_from_path(instance, recorded_path, transition_message)
 
     transition = _find_transition(process, transition_message)
     if transition_message.effect_name:
@@ -834,19 +829,26 @@ def _restore(transition_message: TransitionMessage):
 
 
 def _load_process_from_path(instance, dotted: str, transition_message: TransitionMessage):
+    from django.core.exceptions import FieldDoesNotExist
     from django_logic.process import Process
 
-    if not isinstance(dotted, str) or not dotted or not transition_message.field_name:
-        raise ValueError('A saved job requires process_class and field_name.')
-    module_path, class_name = dotted.rsplit('.', 1)
-    process_class = getattr(importlib.import_module(module_path), class_name)
-    if not isinstance(process_class, type) or not issubclass(process_class, Process):
-        raise ValueError('process_class must name a Process class.')
-    if f'{process_class.__module__}.{process_class.__name__}' != dotted:
-        raise ValueError('process_class must name the declared class, not an alias.')
-    if process_class.process_name != transition_message.process_name:
-        raise ValueError('The recorded process_name does not match process_class.')
-    instance._meta.get_field(transition_message.field_name)
+    try:
+        if not isinstance(dotted, str) or not dotted or not transition_message.field_name:
+            raise ValueError('A saved job requires process_class and field_name.')
+        module_path, class_name = dotted.rsplit('.', 1)
+        process_class = getattr(importlib.import_module(module_path), class_name)
+        if not isinstance(process_class, type) or not issubclass(process_class, Process):
+            raise ValueError('process_class must name a Process class.')
+        if f'{process_class.__module__}.{process_class.__name__}' != dotted:
+            raise ValueError('process_class must name the declared class, not an alias.')
+        if process_class.process_name != transition_message.process_name:
+            raise ValueError('The recorded process_name does not match process_class.')
+        instance._meta.get_field(transition_message.field_name)
+    except (AttributeError, FieldDoesNotExist, ImportError, TypeError, ValueError) as error:
+        raise _RestoreError(
+            f'recorded process_class {dotted!r} could not be loaded: {error}'
+        ) from error
+    # A valid constructor can fail temporarily; keep those errors eligible for retry.
     return process_class(field_name=transition_message.field_name, instance=instance)
 
 

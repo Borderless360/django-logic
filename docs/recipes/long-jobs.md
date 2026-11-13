@@ -33,42 +33,76 @@ retries, and its own commit:
 * an interruption loses one chunk, not the job — the chunk's row stays
   uncompleted and a later claim retries it;
 * every finished chunk is committed and visible at once;
-* every engine guarantee holds unchanged, because no attempt is long.
+* a timeout or failure concerns one chunk; the application must still choose
+  bounded page work and handle uncertain external outcomes.
 
 Store the cursor on the instance (or on the rows the job imports), and
 make each chunk idempotent against it — the same rule every background
 side-effect already follows.
 
 ```python
+from django_logic import DatabaseTransition, Process
+from django_logic.background import BackgroundEffect, BackgroundTransition
+
+
 def import_next_page(instance, **kwargs):
-    """One chunk: fetch one page, import it, advance the cursor."""
+    if instance.import_cursor is None:
+        return
     page = fetch_page(instance.import_cursor)
     for record in page.records:
-        import_record(instance, record)      # idempotent per record
+        import_record(instance, record)  # Application code that safely repeats a record.
     instance.import_cursor = page.next_cursor
     instance.save(update_fields=['import_cursor'])
 
 
-def continue_if_more_pages(instance, **kwargs):
-    """Callback: chain the next chunk after this row completes."""
-    if instance.import_cursor:
+def continue_import(instance, **kwargs):
+    if instance.status != 'importing':
+        return
+    if instance.import_cursor is None:
+        instance.process.finish_import()
+    else:
         instance.process.import_page()
 
 
-BackgroundTransition(
-    action_name='import_page',
-    sources=['importing'],
-    side_effects=[import_next_page],
-    callbacks=[continue_if_more_pages],
-)
+def no_more_pages(instance, **kwargs):
+    return instance.import_cursor is None
+
+
+class ImportProcess(Process):
+    transitions = [
+        BackgroundTransition(
+            action_name='import_page',
+            sources=['importing'],
+            side_effects=[import_next_page],
+            background_effects=[BackgroundEffect('continue_import', continue_import)],
+        ),
+        DatabaseTransition(
+            action_name='finish_import',
+            sources=['importing'],
+            target='imported',
+            conditions=[no_more_pages],
+        ),
+    ]
 ```
 
-The callback runs after the row completes, so the next enqueue never
-collides with the one-uncompleted-row-per-instance-per-process
-constraint. A crash between the completion and the callback loses only
-the *chaining*, not the work — cover that window with a small periodic
-check on instances left in the importing state, the same backstop the
-nested-processes recipe uses for its parent re-check.
+This PostgreSQL example uses the default database and a process bound to `status`.
+The application starts with state `importing` and an initial cursor; `None` means
+there are no more pages. It calls `import_page()` once to begin. Only this workflow
+changes the cursor. Use one record per import run and a new record for another
+import, so a delayed effect from a cancelled run cannot act on a restarted run.
+
+Completing a page saves its cursor and the `continue_import` effect job together.
+That effect either submits the next page or records the completed import. Its
+atomic transaction saves that decision together with its own completion. If the
+job process stops before commit, a retry repeats the decision; if it stops after
+commit, the next page or final state is already saved. A temporarily refused
+submission raises normally and leaves the effect available for retry.
+
+Optional callbacks cannot provide this guarantee. Do not schedule required chunks
+from a callback and rely on a periodic scan to recreate missing work. Keep the
+continuation as a saved job, and monitor failed parent and effect jobs separately.
+Use measured timeouts for page work and its continuation, and handle permanently
+failed imports through an explicit application recovery action.
 
 For a job whose chunks are independent of each other (per-child work
 rather than a cursor), fan out to one background transition per child

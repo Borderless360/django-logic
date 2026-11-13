@@ -53,9 +53,13 @@ At 1,000 unsaved records, it stops starting jobs until that count falls.
 Already running jobs can still finish, adding at most the configured
 concurrency to that bound. Other workers continue to claim work normally.
 
-A database row-lock wait stays quiet for five seconds. The worker then logs
+A database lock wait stays quiet for five seconds. The worker then logs
 its message ID and elapsed wait, repeating at most once a minute per record.
-Inspect the PostgreSQL row holder if the wait continues. This warning does
+Reading a job deadline and recording a job failure each allow at most 100 milliseconds
+for a PostgreSQL lock and one second for a statement, while preserving stricter
+database settings. A queued table lock therefore cannot block these worker checks
+indefinitely. The worker keeps an unrecorded failure and retries the write later.
+Inspect the PostgreSQL lock holder if the wait continues. This warning does
 not mean that the job currently running against that row has failed.
 
 `--concurrency=N` says how many attempts one worker runs at a time

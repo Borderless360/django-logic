@@ -83,7 +83,7 @@ def save_effect_jobs(parent, transition, state, kwargs):
             **parent.kwargs, 'parent_id': parent.kwargs.get('tr_id'), 'tr_id': str(uuid4()),
         }
         request_key = f'django-logic:effect:{parent.pk}:{name}'
-        # Old workers cannot mistake this row for the parent's state-changing action.
+        # The reserved identity distinguishes an effect from its parent's action.
         transition_name = 'django-logic:effect:' + sha256(name.encode()).hexdigest()
         rows.create(request_key=request_key, **{
             **TransitionMessage.instance_key(state.instance, parent.process_name),

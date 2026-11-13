@@ -2,10 +2,23 @@
 
 ## [5.0.0] — Unreleased
 
+- Keep temporary errors while constructing a saved job's Process or State retryable.
+  Invalid recorded identities remain permanent failures; a database error must not
+  silently complete the job without its work.
+- Bound worker database waits while reading a job's timeout and recording a stopped
+  job's error. A queued table lock no longer prevents the worker from checking the
+  deadlines of its other running jobs.
+- Save required import continuation as a `BackgroundEffect` in the long-job recipe.
+  Optional callbacks cannot guarantee that the next chunk will be submitted.
+
 - Remove `next_transition` and `NextTransition`. Unsupported declarations fail at
   startup. Use explicit callbacks for optional work and saved jobs for required work.
 - Require explicit `expect_raises` when injecting a failure with `ProcessScenario`.
   Tests can no longer pass by silently absorbing their injected exception.
+- A process action now replaces forwarded `process_class` with its actual bound
+  root, as it already does for the declaring class. Supplying a different path
+  cannot select or import that class; direct callers must not rely on that value
+  causing an action refusal. Application request validation remains separate.
 - Restore jobs only through their recorded process class, owning class, field and
   action. Remove model-attribute and action-name guesses. Reject background
   submissions without the identity needed by workers before saving a job.

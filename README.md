@@ -316,7 +316,10 @@ order.process.approve(user=request.user)
 ```
 
 The engine manages `tr_id`, `root_id`, `parent_id`, `process_class` and
-`owning_process_class`. Use other names for business data.
+`owning_process_class`. Use other names for business data. A process action
+always records its actual bound root and declaring class, replacing forwarded
+`process_class` and `owning_process_class` values. These arguments cannot select
+a different process. Validate request fields at the application boundary.
 Background transitions rebuild `context`; they do not save a caller's `context`.
 They also refuse `user_id`; pass `user=` instead.
 Calls refuse `state` and `exception` because hooks receive these from the engine.
@@ -504,8 +507,9 @@ The worker completes the job as `superseded` and skips its side effects.
   exception type you do not own, list it in `no_retry_on=(CustomsRefusal,)`.
 - While a row is uncompleted, a second background transition on the same
   instance and process raises `AlreadyInProgress`, and a synchronous transition
-  on it raises `TransitionTemporarilyUnavailable`. Start follow-up work from a
-  callback, which runs after django-logic completes the row.
+  on it raises `TransitionTemporarilyUnavailable`. Use `BackgroundEffect` for
+  required independent follow-up work; it is saved with completion. Callbacks
+  run after completion and are suitable only for optional work.
 
 [docs/design/PULL_WORKERS.md](docs/design/PULL_WORKERS.md) explains how a
 worker claims a row and what happens when one dies.
