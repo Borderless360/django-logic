@@ -40,14 +40,13 @@ def run_background_sync(instance, process_name, action_name, kwargs):
 
 
 def _messages(instance, process_name, **filters):
-    """Parent transition rows for one bound process, excluding independent effects,
-    newest first. Scoping is mandatory: two processes on different state
+    """Transition rows for one bound process, newest first.
+    Scoping is mandatory: two processes on different state
     fields of the same model are independent state machines and their rows
     must not be confused."""
     from django_logic.background.models import TransitionMessage
     return (
         TransitionMessage.for_instance(instance, process_name)
-        .filter(effect_name='')
         .filter(**filters)
         .order_by('-id')
     )

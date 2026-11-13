@@ -193,10 +193,8 @@ def detect_stuck_transitions() -> int:
 def cleanup_completed_transitions() -> int:
     """Delete completed rows older than ``CLEANUP_DAYS``.
 
-    A failed state-changing job can explain an instance in its
-    ``failed_state``, so cleanup keeps the newest such row per instance and
-    process. Independent effects cannot change that state; their failures
-    expire after the normal retention period.
+    Cleanup keeps the newest failed job per instance and process.
+    Its recorded failure explains which business work still needs attention.
 
     Each batch commits separately, so a stopped maintenance process keeps
     earlier progress. A caller's outer transaction still controls its commit.
@@ -210,7 +208,7 @@ def cleanup_completed_transitions() -> int:
     # the count cannot tell them apart. Every terminal-failure path sets
     # the flag; a superseded row does not — the external state change won
     # and the instance did not enter its failed state.
-    failed = Q(ended_in_failure=True, effect_name='')
+    failed = Q(ended_in_failure=True)
     alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
     rows = TransitionMessage.objects.using(alias)
     newest_failed = (

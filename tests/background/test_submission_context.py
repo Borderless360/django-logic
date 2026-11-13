@@ -12,7 +12,7 @@ from django.db import IntegrityError, connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process, ProcessManager
-from django_logic.background import BackgroundEffect, BackgroundTransition, Defer
+from django_logic.background import BackgroundTransition, Defer
 from django_logic.background.models import TransitionMessage
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.runner import run_background_transition
@@ -27,7 +27,7 @@ def change_nested_argument(instance, **kwargs):
     kwargs['snapshot']['members'].append('changed during execution')
 
 
-def save_effect_argument(instance, **kwargs):
+def save_execution_argument(instance, **kwargs):
     instance.kwargs_seen = kwargs['snapshot']['members']
     instance.save(update_fields=['kwargs_seen'])
 
@@ -75,18 +75,15 @@ class SubmissionContextTests(SubmissionTestSetup, TransactionTestCase):
         self.assertEqual(events, ['accepted'])
         self.assertEqual(TransitionMessage.objects.get().kwargs['snapshot'], {'members': ['original']})
 
-    def test_effect_uses_saved_parent_inputs_when_required_action_mutates_its_copy(self):
-        self.declaration(side_effects=[change_nested_argument], background_effects=[
-            BackgroundEffect('copy', save_effect_argument),
-        ])
+    def test_execution_mutation_does_not_change_saved_inputs(self):
+        self.declaration(side_effects=[change_nested_argument, save_execution_argument])
         self.widget.submission.finish(snapshot={'members': ['original']})
-        parent = TransitionMessage.objects.get()
-        run_background_transition(parent.pk)
-        child = TransitionMessage.objects.get(parent_job_id=parent.pk)
-        self.assertEqual(child.kwargs['snapshot'], {'members': ['original']})
-        run_background_transition(child.pk)
+        job = TransitionMessage.objects.get()
+        run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.kwargs['snapshot'], {'members': ['original']})
         self.widget.refresh_from_db()
-        self.assertEqual(self.widget.kwargs_seen, ['original'])
+        self.assertEqual(self.widget.kwargs_seen, ['original', 'changed during execution'])
 
     def test_context_failure_before_or_after_yield_rolls_back_everything(self):
         for when in ('before', 'after'):

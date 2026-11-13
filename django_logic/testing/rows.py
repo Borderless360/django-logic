@@ -62,7 +62,6 @@ def open_transition_message(
         field_name=process.state.field_name,
         transition_name=transition_name,
         owning_process_class=owner_path,
-        background_effect_names=[effect.name for effect in transition.background_effects],
         timeout_seconds=transition.timeout,
         queue_name=queue_name or transition.get_queue_name(),
         errors_count=errors_count,

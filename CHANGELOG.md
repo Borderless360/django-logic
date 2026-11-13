@@ -8,8 +8,16 @@
 - Bound worker database waits while reading a job's timeout and recording a stopped
   job's error. A queued table lock no longer prevents the worker from checking the
   deadlines of its other running jobs.
-- Save required import continuation as a `BackgroundEffect` in the long-job recipe.
-  Optional callbacks cannot guarantee that the next chunk will be submitted.
+- Remove `BackgroundEffect` and `background_effects`. GV imports, label completion,
+  shipping, client integration work and notifications use ordinary business jobs
+  or required functions within an existing job. No replacement scheduling API is added.
+- Migration 0018 refuses unfinished effect work and nonempty request keys before
+  dropping the five effect-related columns. Compatible ordinary pending jobs remain.
+  Back up completed history first; reversing the migration cannot recover those column values.
+- Simplify paged imports to one saved job with committed page progress and `Defer`.
+  Tests cover a stopped job process, failed final completion, rollback and cancellation.
+- Show interactive and automatic transitions sharing business functions with separate
+  worker queues. Immediate and queued business failures retain their recorded failure states.
 
 - Remove `next_transition` and `NextTransition`. Unsupported declarations fail at
   startup. Use explicit callbacks for optional work and saved jobs for required work.

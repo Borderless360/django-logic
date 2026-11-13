@@ -507,9 +507,9 @@ The worker completes the job as `superseded` and skips its side effects.
   exception type you do not own, list it in `no_retry_on=(CustomsRefusal,)`.
 - While a row is uncompleted, a second background transition on the same
   instance and process raises `AlreadyInProgress`, and a synchronous transition
-  on it raises `TransitionTemporarilyUnavailable`. Use `BackgroundEffect` for
-  required independent follow-up work; it is saved with completion. Callbacks
-  run after completion and are suitable only for optional work.
+  on it raises `TransitionTemporarilyUnavailable`. Keep required functions in
+  the owning job, or save ordinary business jobs with the result that requests them.
+  Callbacks run after completion and are suitable only for optional work.
 
 [docs/design/PULL_WORKERS.md](docs/design/PULL_WORKERS.md) explains how a
 worker claims a row and what happens when one dies.
@@ -649,6 +649,7 @@ Its writes stay when a later step fails, unless the test's own transaction rolls
   parent drives many children without cascading their failures.
 - [docs/recipes/long-jobs.md](docs/recipes/long-jobs.md) — how to split work
   that runs for a long time.
+- [docs/recipes/interactive-and-automatic.md](docs/recipes/interactive-and-automatic.md) — shared business functions with separate worker queues.
 - [docs/logger.md](docs/logger.md) — the loggers and the events they write.
 - [CHANGELOG.md](CHANGELOG.md) — what each release changed, and every upgrade
   step.

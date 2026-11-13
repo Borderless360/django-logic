@@ -1,54 +1,50 @@
-"""The long-job recipe saves each required continuation with its result."""
+"""A saved import job keeps its progress between bounded page attempts."""
+from datetime import timedelta
+import os
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.db import transaction
 from django.test import TransactionTestCase, override_settings
+from django.utils import timezone
 
-from django_logic import DatabaseTransition, Process, ProcessManager
-from django_logic.background import BackgroundEffect, BackgroundTransition
+from django_logic import Process, ProcessManager
+from django_logic.background import BackgroundTransition, Defer
 from django_logic.background.models import TransitionMessage
+from django_logic.background.pull import run_once
 from django_logic.background.runner import run_background_transition
 from tests import dl_settings, unbind_model_process
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres
 
 
-def import_next_page(instance, **kwargs):
-    cursor = instance.kwargs_seen['cursor']
-    if cursor is None:
-        return
-    instance.se_log += f'page:{cursor},'
-    instance.kwargs_seen = {'cursor': 1 if cursor == 0 else None}
-    instance.save(update_fields=['se_log', 'kwargs_seen'])
-
-
-def continue_import(instance, **kwargs):
-    if instance.status != 'importing':
-        return
-    if instance.kwargs_seen['cursor'] is None:
-        instance.chunk_import.finish_import()
-    else:
-        instance.chunk_import.import_page()
-
-
-def no_more_pages(instance, **kwargs):
-    return instance.kwargs_seen['cursor'] is None
+def import_next_page(instance, stop_after_page=False, **kwargs):
+    with transaction.atomic():
+        current = Widget.objects.select_for_update().get(pk=instance.pk)
+        if current.status != 'importing':
+            return
+        cursor = current.kwargs_seen['cursor']
+        if cursor is None:
+            return
+        current.se_log += f'page:{cursor},'
+        current.kwargs_seen = {'cursor': 1 if cursor == 0 else None}
+        current.save(update_fields=['se_log', 'kwargs_seen'])
+    if stop_after_page and cursor == 0:
+        os._exit(17)
+    if current.kwargs_seen['cursor'] is not None:
+        raise Defer(until=timezone.now() + timedelta(seconds=1), reason='The import has another page.')
 
 
 class ChunkImportProcess(Process):
     process_name = 'chunk_import'
     transitions = [
         BackgroundTransition(
-            action_name='import_page',
-            sources=['importing'],
-            side_effects=[import_next_page],
-            background_effects=[BackgroundEffect('continue_import', continue_import)],
-        ),
-        DatabaseTransition(
-            action_name='finish_import',
+            action_name='import_pages',
             sources=['importing'],
             target='imported',
-            conditions=[no_more_pages],
+            queue='chunk-import',
+            atomic=False,
+            side_effects=[import_next_page],
         ),
     ]
 
@@ -70,93 +66,92 @@ class ChunkContinuationTests(TransactionTestCase):
         self.assertEqual(self.widget.status, status)
         self.assertFalse(self.widget.chunk_import.state.is_locked())
 
-    def test_page_and_continuation_decisions_commit_together(self):
-        self.widget.chunk_import.import_page()
-        first_page = TransitionMessage.objects.get(effect_name='')
-        save = TransitionMessage.save
+    def resume(self, job):
+        TransitionMessage.objects.filter(pk=job.pk).update(eligible_at=timezone.now() - timedelta(seconds=1))
+        run_background_transition(job.pk)
 
-        def fail_after_saving_effect(message, *args, **kwargs):
-            result = save(message, *args, **kwargs)
-            if message.effect_name == 'continue_import':
-                raise RuntimeError('effect save failed')
+    def test_page_failure_rolls_back_the_page_and_cursor(self):
+        self.widget.chunk_import.import_pages()
+        job = TransitionMessage.objects.get()
+        save = Widget.save
+
+        def fail_after_saving_page(instance, *args, **kwargs):
+            result = save(instance, *args, **kwargs)
+            if kwargs.get('update_fields') == ['se_log', 'kwargs_seen']:
+                raise RuntimeError('The page could not finish.')
             return result
 
-        with patch.object(TransitionMessage, 'save', fail_after_saving_effect):
-            run_background_transition(first_page.pk)
-        first_page.refresh_from_db()
-        self.assertFalse(first_page.is_completed)
-        self.assertEqual(first_page.errors_count, 1)
+        with patch.object(Widget, 'save', fail_after_saving_page):
+            run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.assertFalse(job.is_completed)
+        self.assertEqual(job.errors_count, 1)
         self.assert_progress(0, '')
-        self.assertFalse(TransitionMessage.objects.filter(parent_job_id=first_page.pk).exists())
 
-        run_background_transition(first_page.pk)
-        first_page.refresh_from_db()
-        self.assertTrue(first_page.is_completed)
-        self.assertFalse(first_page.ended_in_failure)
+        run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.assertFalse(job.is_completed)
+        self.assertEqual(job.deferral_count, 1)
         self.assert_progress(1, 'page:0,')
-        continuation = TransitionMessage.objects.get(parent_job_id=first_page.pk)
-        self.assertFalse(continuation.is_completed)
-        self.assertEqual(continuation.effect_name, 'continue_import')
-        self.assertEqual(continuation.process_name, 'chunk_import')
-        self.assertEqual(continuation.owning_process_class, first_page.owning_process_class)
 
+        self.resume(job)
+        job.refresh_from_db()
+        self.assertTrue(job.is_completed)
+        self.assertFalse(job.ended_in_failure)
+        self.assert_progress(None, 'page:0,page:1,', status='imported')
+        self.assertEqual(TransitionMessage.objects.count(), 1)
+
+    def test_completed_page_survives_a_stopped_job_process(self):
+        self.widget.chunk_import.import_pages(stop_after_page=True)
+        job = TransitionMessage.objects.get()
+
+        run_once(['chunk-import'], isolate=True)
+
+        job.refresh_from_db()
+        self.assertFalse(job.is_completed)
+        self.assertEqual(job.errors_count, 1)
+        self.assert_progress(1, 'page:0,')
+        run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.assertTrue(job.is_completed)
+        self.assertFalse(job.ended_in_failure)
+        self.assert_progress(None, 'page:0,page:1,', status='imported')
+        self.assertEqual(TransitionMessage.objects.count(), 1)
+
+    def test_failed_final_completion_does_not_repeat_saved_pages(self):
+        self.widget.chunk_import.import_pages()
+        job = TransitionMessage.objects.get()
+        run_background_transition(job.pk)
         complete = TransitionMessage.mark_as_completed
 
-        def fail_after_completing_effect(message, *args, **kwargs):
-            result = complete(message, *args, **kwargs)
-            if message.effect_name == 'continue_import':
-                raise RuntimeError('effect completion failed')
-            return result
+        def fail_after_completing(message, *args, **kwargs):
+            complete(message, *args, **kwargs)
+            raise RuntimeError('The final completion could not finish.')
 
-        with patch.object(TransitionMessage, 'mark_as_completed', fail_after_completing_effect):
-            run_background_transition(continuation.pk)
-        continuation.refresh_from_db()
-        self.assertFalse(continuation.is_completed)
-        self.assertEqual(continuation.errors_count, 1)
-        self.assertEqual(TransitionMessage.objects.filter(effect_name='').count(), 1)
-        self.assert_progress(1, 'page:0,')
-
-        run_background_transition(continuation.pk)
-        continuation.refresh_from_db()
-        self.assertTrue(continuation.is_completed)
-        self.assertFalse(continuation.ended_in_failure)
-        second_page = TransitionMessage.objects.get(effect_name='', is_completed=False)
-        self.assertEqual(second_page.process_name, 'chunk_import')
-        self.assertEqual(second_page.transition_name, 'import_page')
-        self.assertEqual(second_page.kwargs['parent_id'], continuation.kwargs['tr_id'])
-        self.assertEqual(second_page.kwargs['root_id'], first_page.kwargs['root_id'])
-
-        run_background_transition(second_page.pk)
-        self.assert_progress(None, 'page:0,page:1,')
-        final_continuation = TransitionMessage.objects.get(parent_job_id=second_page.pk)
-        with patch.object(TransitionMessage, 'mark_as_completed', fail_after_completing_effect):
-            run_background_transition(final_continuation.pk)
-        final_continuation.refresh_from_db()
-        self.assertFalse(final_continuation.is_completed)
-        self.assertEqual(final_continuation.errors_count, 1)
+        with patch.object(TransitionMessage, 'mark_as_completed', fail_after_completing):
+            self.resume(job)
+        job.refresh_from_db()
+        self.assertFalse(job.is_completed)
+        self.assertEqual(job.errors_count, 1)
         self.assert_progress(None, 'page:0,page:1,')
 
-        run_background_transition(final_continuation.pk)
+        run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.assertTrue(job.is_completed)
+        self.assertFalse(job.ended_in_failure)
         self.assert_progress(None, 'page:0,page:1,', status='imported')
-        self.assertEqual(TransitionMessage.objects.count(), 4)
-        self.assertFalse(TransitionMessage.objects.filter(is_completed=False).exists())
-        self.assertFalse(TransitionMessage.objects.filter(ended_in_failure=True).exists())
-        run_background_transition(continuation.pk)
-        run_background_transition(final_continuation.pk)
-        self.assertEqual(TransitionMessage.objects.count(), 4)
-        self.assert_progress(None, 'page:0,page:1,', status='imported')
+        self.assertEqual(TransitionMessage.objects.count(), 1)
 
-    def test_delayed_continuation_leaves_cancelled_import_unchanged(self):
-        self.widget.chunk_import.import_page()
-        first_page = TransitionMessage.objects.get(effect_name='')
-        run_background_transition(first_page.pk)
-        continuation = TransitionMessage.objects.get(parent_job_id=first_page.pk)
+    def test_waiting_job_leaves_cancelled_import_unchanged(self):
+        self.widget.chunk_import.import_pages()
+        job = TransitionMessage.objects.get()
+        run_background_transition(job.pk)
         Widget.objects.filter(pk=self.widget.pk).update(status='cancelled')
 
-        run_background_transition(continuation.pk)
+        self.resume(job)
 
-        continuation.refresh_from_db()
-        self.assertTrue(continuation.is_completed)
-        self.assertFalse(continuation.ended_in_failure)
+        job.refresh_from_db()
+        self.assertTrue(job.is_completed)
+        self.assertFalse(job.ended_in_failure)
         self.assert_progress(1, 'page:0,', status='cancelled')
-        self.assertEqual(TransitionMessage.objects.count(), 2)
+        self.assertEqual(TransitionMessage.objects.count(), 1)

@@ -91,12 +91,11 @@ class Command(BaseCommand):
         for note in notes:
             self.stdout.write(note)
         for group in groups:
-            action = (f"{group['parent_transition_name']}/{group['effect_name']}"
-                      if group['effect_name'] else group['transition_name'])
+            action = group['transition_name']
             self.stdout.write(
                 f"queue={group['queue_name']} process_class={group['owning_process_class']} "
                 f"{group['app_label']}.{group['model_name']}.{group['process_name']}.{action} "
-                f"effect={group['effect_name'] or '-'} jobs={group['jobs']} pending={group['pending']} "
+                f"jobs={group['jobs']} pending={group['pending']} "
                 f"succeeded={group['succeeded']} failed={group['failed']} "
                 f"other_completed={group['other_completed']} errors={group['errors']} "
                 f"recorded_starts={group['recorded_starts']} repeated_starts={group['repeated_starts']} "
@@ -137,12 +136,10 @@ class Command(BaseCommand):
             why = self._why(
                 row, claimable, max_errors, report_after, age_minutes,
                 queue_is_served, queue_has_worker)
-            parent = f'parent_job={row.parent_job_id} ' if row.effect_name else ''
             self.stdout.write(
                 f'#{row.pk} {row.recorded_model_label}'
                 f'#{row.instance_id} {row.process_name}.{row.operation_name} '
                 f'queue={row.queue_name} errors={row.errors_count} '
-                f'{parent}'
                 f'start_attempts={row.start_attempt_count} deferrals={row.deferral_count} '
                 f'age={age_minutes}m — {why}'
             )
@@ -155,9 +152,6 @@ class Command(BaseCommand):
         if row.eligible_at is not None and row.eligible_at > timezone.now():
             return f'waiting until {row.eligible_at.isoformat()}: {row.deferral_reason}'
         if row.errors_count >= max_errors:
-            if row.effect_name:
-                return (f'at MAX_ERRORS ({max_errors}) — the next worker check records '
-                        'the effect failure without changing the parent state')
             return (
                 f'at MAX_ERRORS ({max_errors}) — the stuck finalizer ends it '
                 f'in its failed_state on the next pass of any running worker'

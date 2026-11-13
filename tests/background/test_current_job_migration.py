@@ -91,6 +91,8 @@ class CurrentJobMigrationTests(TransactionTestCase):
             {'owning_process_class': 'tests.background.models.RemovedProcess'},
             {'transition_name': 'removed_action'},
             {'background_effect_names': ['removed_effect']},
+            {'effect_name': 'removed_effect', 'parent_transition_name': 'fulfil'},
+            {'request_key': 'old-operation-key'},
             {'model_name': 'widgetproxya'},
         ):
             with self.subTest(changes=changes):
@@ -134,6 +136,93 @@ class CurrentJobMigrationTests(TransactionTestCase):
                     self.migrate(self.latest)
                 self.assertLess(time.monotonic() - started, 8)
                 self.assertTrue({'required_next', 'request_fingerprint'} <= self.columns())
+                job.refresh_from_db()
+                self.assertFalse(job.is_completed)
+            finally:
+                release.set()
+                held.result(timeout=5)
+
+
+class BackgroundEffectRemovalMigrationTests(TransactionTestCase):
+    app_label = 'django_logic_background'
+    removed_columns = {
+        'request_key', 'background_effect_names', 'effect_name', 'parent_transition_name', 'parent_job_id',
+    }
+    migrate = CurrentJobMigrationTests.migrate
+    restore_latest = CurrentJobMigrationTests.restore_latest
+    job = CurrentJobMigrationTests.job
+    columns = CurrentJobMigrationTests.columns
+
+    def setUp(self):
+        self.latest = MigrationExecutor(connection).loader.graph.leaf_nodes(self.app_label)
+        old_state = self.migrate([(self.app_label, '0017_remove_legacy_job_columns')])
+        self.jobs = old_state.apps.get_model(self.app_label, 'TransitionMessage')
+        self.addCleanup(self.restore_latest)
+        self.widget = Widget.objects.create(status='fulfilling')
+
+    def test_unfinished_effect_metadata_refuses_without_changing_work_or_schema(self):
+        for metadata in (
+            {'background_effect_names': ['notify']},
+            {'effect_name': 'notify'},
+            {'parent_transition_name': 'fulfil'},
+            {'parent_job_id': 123},
+            {'request_key': 'django-logic:effect:123:notify'},
+            {'request_key': 'old-operation-key'},
+        ):
+            with self.subTest(metadata=metadata):
+                job = self.job(**metadata)
+                before = self.jobs.objects.values().get(pk=job.pk)
+                with self.assertRaisesMessage(RuntimeError, f'unfinished job #{job.pk}'):
+                    self.migrate(self.latest)
+                self.assertEqual(self.jobs.objects.values().get(pk=job.pk), before)
+                self.assertTrue(self.removed_columns <= self.columns())
+                self.widget.refresh_from_db()
+                self.assertEqual((self.widget.status, self.widget.se_log), ('fulfilling', ''))
+                job.delete()
+
+    def test_compatible_pending_jobs_and_completed_history_are_preserved(self):
+        pending = self.job(request_key='')
+        history = self.job(
+            is_completed=True, effect_name='notify', parent_transition_name='fulfil', parent_job_id=123,
+            background_effect_names=['archive'], request_key='django-logic:effect:123:notify',
+        )
+        before = self.jobs.objects.values().get(pk=history.pk)
+
+        self.migrate(self.latest)
+
+        self.assertFalse(self.removed_columns & self.columns())
+        self.assertEqual(
+            TransitionMessage.objects.values().get(pk=history.pk),
+            {key: value for key, value in before.items() if key not in self.removed_columns},
+        )
+        self.assertFalse(TransitionMessage.objects.get(pk=pending.pk).is_completed)
+        run_background_transition(pending.pk)
+        self.widget.refresh_from_db()
+        self.assertEqual((self.widget.status, self.widget.se_log), ('fulfilled', 'ok,'))
+
+    @requires_postgres
+    def test_effect_column_removal_has_a_bounded_schema_lock_wait(self):
+        job = self.job()
+        locked, release = Event(), Event()
+
+        def hold_job():
+            try:
+                with transaction.atomic():
+                    self.jobs.objects.select_for_update().get(pk=job.pk)
+                    locked.set()
+                    release.wait(15)
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            held = executor.submit(hold_job)
+            try:
+                self.assertTrue(locked.wait(5))
+                started = time.monotonic()
+                with self.assertRaises(OperationalError):
+                    self.migrate(self.latest)
+                self.assertLess(time.monotonic() - started, 8)
+                self.assertTrue(self.removed_columns <= self.columns())
                 job.refresh_from_db()
                 self.assertFalse(job.is_completed)
             finally:

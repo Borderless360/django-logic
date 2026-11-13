@@ -80,8 +80,9 @@ out of submission preparation; it must contain only reversible database changes.
 
 ## Completion notifications
 
-Use callbacks for optional notifications. If a child's success must start additional
-independent work, declare a `BackgroundEffect` so that work is saved with completion.
+Use callbacks for optional notifications.
+Keep required functions in the child's ordinary job when they share its completion result.
+Otherwise save a separate business job with the result that requests it, inside one database transaction.
 A required parent check must remain independently retryable. Catching every
 `TransitionNotAllowed` and returning success can lose the check when another
 transaction temporarily holds the parent record.

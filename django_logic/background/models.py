@@ -6,7 +6,7 @@ atomically with the ``in_progress_state`` write on the target instance. The work
 a successful execution.
 
 The partial unique constraint ``(app_label, model_name, instance_id,
-process_name)`` for unfinished non-effect rows is the concurrency guard —
+process_name)`` for unfinished rows is the concurrency guard —
 only one uncompleted message can exist per instance *per process* at a
 time. Two processes bound to different state fields of the same model,
 under distinct process names, are independent state machines and may
@@ -54,7 +54,6 @@ def db_safe_text(value: str) -> str:
 
 
 class TransitionMessage(TimeStampedModel):
-    request_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
     fairness_key = models.CharField(max_length=255, blank=True, default='', db_default='', db_index=True)
     eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
     deferral_reason = models.TextField(blank=True, default='', db_default='')
@@ -64,12 +63,6 @@ class TransitionMessage(TimeStampedModel):
     last_deferred_until = models.DateTimeField(blank=True, null=True)
     last_deferral_reason = models.TextField(blank=True, default='', db_default='')
     completion_kind = models.CharField(max_length=16, blank=True, default='', db_default='')
-    # Names are frozen when the parent is submitted.
-    background_effect_names = models.JSONField(default=list, db_default=[])
-    effect_name = models.CharField(max_length=100, blank=True, default='', db_default='')
-    parent_transition_name = models.CharField(max_length=100, blank=True, default='', db_default='')
-    # Keep the parent identity even if normal cleanup removes its completed row.
-    parent_job_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
     is_completed = models.BooleanField(default=False)
     errors_count = models.PositiveIntegerField(default=0)
     last_error_dt = models.DateTimeField(blank=True, null=True)
@@ -161,7 +154,7 @@ class TransitionMessage(TimeStampedModel):
             # ``payment_status``) would falsely conflict.
             models.UniqueConstraint(
                 fields=['app_label', 'model_name', 'instance_id', 'process_name'],
-                condition=models.Q(is_completed=False, effect_name=''),
+                condition=models.Q(is_completed=False),
                 name='dl_bg_one_uncompleted_per_process',
             ),
         ]
@@ -184,7 +177,7 @@ class TransitionMessage(TimeStampedModel):
 
     @property
     def operation_name(self):
-        return f'{self.parent_transition_name}/{self.effect_name}' if self.effect_name else self.transition_name
+        return self.transition_name
 
     @classmethod
     def instance_key(cls, instance, process_name: str) -> dict:
@@ -217,8 +210,8 @@ class TransitionMessage(TimeStampedModel):
 
     @classmethod
     def in_flight_for(cls, instance, process_name: str):
-        """Unfinished parent transitions; independent effects do not block the process."""
-        return cls.for_instance(instance, process_name).filter(is_completed=False, effect_name='')
+        """Unfinished jobs for this instance and bound process."""
+        return cls.for_instance(instance, process_name).filter(is_completed=False)
 
     RETRYING = 'retrying'
     STRANDED = 'stranded'

@@ -8,6 +8,9 @@ from django.db import migrations
 def _check_identity(job):
     from django_logic.process import Process
 
+    if (job.effect_name or job.background_effect_names or job.request_key
+            or job.parent_transition_name or job.parent_job_id is not None):
+        raise ValueError('saved background effects and request keys are no longer supported')
     path = job.kwargs.get('process_class') if isinstance(job.kwargs, dict) else None
     if not isinstance(path, str) or not path or not job.owning_process_class or not job.field_name:
         raise ValueError('process_class, owning_process_class and field_name are required')
@@ -25,7 +28,7 @@ def _check_identity(job):
     if (job.app_label, job.model_name) != (concrete.app_label, concrete.model_name):
         raise ValueError('the saved model key must name the concrete model')
     model._meta.get_field(job.field_name)
-    action = job.parent_transition_name if job.effect_name else job.transition_name
+    action = job.transition_name
     pending, seen = [root], set()
     while pending:
         owner = pending.pop()
@@ -38,10 +41,6 @@ def _check_identity(job):
         for transition in owner.transitions:
             if transition.action_name != action or not transition.is_background:
                 continue
-            names = [job.effect_name] if job.effect_name else job.background_effect_names
-            declared = {effect.name for effect in transition.background_effects}
-            if any(name not in declared for name in names):
-                raise ValueError('a recorded background effect is no longer declared')
             return
     raise ValueError('the recorded owner no longer declares this background action')
 

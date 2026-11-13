@@ -130,8 +130,6 @@ class Transition:
         self, action_name: str, sources: list, target: str | None = None,
         *, lock: bool = True, atomic: bool = False, **kwargs,
     ):
-        if isinstance(action_name, str) and action_name.startswith('django-logic:effect:'):
-            raise ImproperlyConfigured('The django-logic:effect: action prefix is reserved for background effects.')
         self.action_name = action_name
         self.refusal_messages = kwargs.get('refusal_messages', {})
         # None means: write no state on success. An empty string is a state. Everything else
@@ -171,7 +169,7 @@ class Transition:
             # worked. Name it at declaration time instead.
             takes = sorted(_DECLARATION_KWARGS | {'lock', 'atomic'})
             if self.is_background:
-                takes += ['queue', 'timeout', 'no_retry_on', 'fairness_key', 'background_effects', 'submission_context']
+                takes += ['queue', 'timeout', 'no_retry_on', 'fairness_key', 'submission_context']
             raise ImproperlyConfigured(
                 f"{type(self).__name__} {action_name!r} does not take "
                 f"{', '.join(sorted(unknown))}. It takes: {', '.join(takes)}."

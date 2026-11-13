@@ -59,16 +59,16 @@ class TransitionStatisticsTests(TestCase):
     def test_window_queue_and_operation_filters_do_not_mix_distinct_work(self):
         self._row()
         self._row(is_completed=True, ended_in_failure=True, errors_count=2)
-        effect = self._row(effect_name='tags', parent_transition_name='fulfil')
+        notification = self._row(transition_name='notify')
         self._row(queue_name='elsewhere')
         old = self._row()
         TransitionMessage.objects.filter(pk=old.pk).update(created=_NOW - timedelta(days=3))
         groups = transition_statistics(since=_NOW - timedelta(days=2), queues=['diagnostics'])
         self.assertEqual(len(groups), 2)
-        regular, effect_group = groups
+        regular, notification_group = groups
         self.assertEqual((regular['jobs'], regular['pending'], regular['failed'], regular['errors']), (2, 1, 1, 2))
-        self.assertEqual((effect_group['effect_name'], effect_group['jobs']), ('tags', 1))
-        self.assertTrue(TransitionMessage.objects.filter(pk=effect.pk, is_completed=False).exists())
+        self.assertEqual((notification_group['transition_name'], notification_group['jobs']), ('notify', 1))
+        self.assertTrue(TransitionMessage.objects.filter(pk=notification.pk, is_completed=False).exists())
         self.assertEqual(transition_statistics(since=_NOW - timedelta(days=2), queues=[]), [])
 
     def test_command_reports_machine_readable_counts_without_running_or_changing_jobs(self):
@@ -86,19 +86,18 @@ class TransitionStatisticsTests(TestCase):
             call_command('dl_transitions', stats=True, send=message.pk)
         self.assertEqual(list(TransitionMessage.objects.values()), before)
 
-    def test_same_named_effects_from_different_parent_actions_stay_separate(self):
-        for parent, duration in (('submit', 10), ('cancel', 90)):
+    def test_same_named_actions_from_different_business_processes_stay_separate(self):
+        for process, duration in (('shipping', 10), ('returns', 90)):
             self._row(
-                transition_name='django-logic:effect:' + 'f' * 64,
-                parent_transition_name=parent, effect_name='notify',
+                transition_name='notify', process_name=process,
                 is_completed=True, completion_kind='succeeded', duration_ms=duration,
             )
         before = list(TransitionMessage.objects.order_by('pk').values())
         groups = transition_statistics(since=_NOW - timedelta(days=2))
         self.assertEqual(
-            [(group['parent_transition_name'], group['effect_name'], group['jobs'],
+            [(group['process_name'], group['transition_name'], group['jobs'],
               group['last_attempt_duration_ms']['p50']) for group in groups],
-            [('cancel', 'notify', 1, 90), ('submit', 'notify', 1, 10)],
+            [('returns', 'notify', 1, 90), ('shipping', 'notify', 1, 10)],
         )
         for as_json in (False, True):
             output = StringIO()
@@ -107,9 +106,8 @@ class TransitionStatisticsTests(TestCase):
             if as_json:
                 self.assertEqual(json.loads(output.getvalue())['groups'], groups)
             else:
-                self.assertIn('.process.submit/notify effect=notify jobs=1 ', output.getvalue())
-                self.assertIn('.process.cancel/notify effect=notify jobs=1 ', output.getvalue())
-                self.assertNotIn('django-logic:effect:', output.getvalue())
+                self.assertIn('.shipping.notify jobs=1 ', output.getvalue())
+                self.assertIn('.returns.notify jobs=1 ', output.getvalue())
         self.assertEqual(list(TransitionMessage.objects.order_by('pk').values()), before)
 
     def test_text_statistics_distinguish_same_named_provider_process_classes(self):

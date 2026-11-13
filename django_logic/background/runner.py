@@ -108,9 +108,6 @@ def run_background_transition(transition_message_id: int) -> None:
     # Best-effort hooks after the transaction commits.
     if outcome.terminal and outcome.succeeded and outcome.transition is not None:
         _run_success_hooks(outcome)
-        if outcome.transition.background_effects:
-            from django_logic.background.effects import dispatch_effect_jobs
-            dispatch_effect_jobs(transition_message_id)
     elif outcome.terminal and not outcome.succeeded and outcome.transition is not None:
         _run_failure_callbacks(
             outcome.transition, outcome.state_obj,
@@ -272,7 +269,7 @@ def _complete_terminal_failure(
     """
     try:
         # A failed business-row check must not discard the job's recorded error.
-        with transaction.atomic(using=using or state.instance._state.db or DEFAULT_DB_ALIAS), _protect_completion_state(transition, state):
+        with transaction.atomic(using=using or state.instance._state.db or DEFAULT_DB_ALIAS), state.protected():
             matches, expected, current = _state_guard_matches(transition, state)
             write_error = None
             if matches and transition.failed_state:
@@ -399,7 +396,7 @@ def _run_atomic_state(transition_message, transition, state, instance, kwargs, d
             )
         def execute_and_complete():
             _execute_attempt(instance, transition, state, kwargs)
-            with _protect_completion_state(transition, state):
+            with state.protected():
                 if transition.target is None:
                     superseded = _superseded_outcome(
                         transition_message, transition, state, kwargs, after_side_effects=True,
@@ -631,9 +628,6 @@ def _handle_success(
 ) -> _Outcome:
     # The caller writes the target in the same transaction as this completion.
     transition_message.mark_as_completed()
-    if transition_message.background_effect_names:
-        from django_logic.background.effects import save_effect_jobs
-        save_effect_jobs(transition_message, transition, state, kwargs)
     transition_logger.info(
         f'{kwargs.get("tr_id")} {TransitionEventType.COMPLETE.value}'
     )
@@ -766,8 +760,6 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
 
     Returns ``(matches, expected_description, current_state)``.
     """
-    if getattr(transition, 'is_independent_effect', False):
-        return True, 'independent background effect', ''
     current = state.get_persisted_state()
     if transition.in_progress_state:
         return (
@@ -780,11 +772,6 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
         f'one of sources {transition.sources!r}',
         current,
     )
-
-
-def _protect_completion_state(transition, state):
-    # Independent effects only complete their job; they never write business state.
-    return nullcontext() if getattr(transition, 'is_independent_effect', False) else state.protected()
 
 
 def _restore(transition_message: TransitionMessage):
@@ -820,11 +807,6 @@ def _restore(transition_message: TransitionMessage):
     process = _load_process_from_path(instance, recorded_path, transition_message)
 
     transition = _find_transition(process, transition_message)
-    if transition_message.effect_name:
-        try:
-            transition = transition.get_background_effect(transition_message.effect_name).as_transition()
-        except Exception as error:
-            raise _RestoreError(f'background effect declaration cannot be restored: {error}') from error
     return instance, process, transition
 
 
@@ -854,8 +836,7 @@ def _load_process_from_path(instance, dotted: str, transition_message: Transitio
 
 def _find_transition(process, transition_message: TransitionMessage):
     """Resolve the recorded declaring class and background action exactly."""
-    action_name = (transition_message.parent_transition_name if transition_message.effect_name
-                   else transition_message.transition_name)
+    action_name = transition_message.transition_name
     owning_path = transition_message.owning_process_class
     if not owning_path:
         raise _RestoreError('A saved job requires owning_process_class; refusing to guess.')

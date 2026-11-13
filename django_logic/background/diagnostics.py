@@ -7,7 +7,7 @@ from django_logic.background.models import TransitionMessage
 
 _GROUP_FIELDS = (
     'queue_name', 'app_label', 'model_name', 'process_name',
-    'owning_process_class', 'transition_name', 'parent_transition_name', 'effect_name',
+    'owning_process_class', 'transition_name',
 )
 
 

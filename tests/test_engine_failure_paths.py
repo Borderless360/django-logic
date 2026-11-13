@@ -470,7 +470,6 @@ class RunnerTreeWalkCycleTests(TestCase):
 
         return SimpleNamespace(
             pk=1, transition_name=action_name, owning_process_class=owner,
-            effect_name='', parent_transition_name='',
         )
 
     def test_owner_lookup_terminates_on_a_cycle(self):
