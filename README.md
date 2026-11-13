@@ -26,7 +26,7 @@ runs it.
 
 ## Install
 
-The current release is **4.3.1**. See the [changelog](CHANGELOG.md) for its fixes.
+The current release is **4.3.2**. See the [changelog](CHANGELOG.md) for its fixes.
 Before upgrading to 4.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
 
 

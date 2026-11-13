@@ -4,9 +4,12 @@
 
 One process per SLA group. ``--concurrency`` says how many attempts the
 process runs at a time. The loop also runs the safety nets (stuck
-report, cleanup), so pull mode needs no beat schedule. See
+report, cleanup), so pull mode needs no beat schedule. On SIGTERM the
+worker takes no new job, waits for its running jobs and exits. See
 docs/design/PULL_WORKERS.md.
 """
+import signal
+
 from django.core.management.base import BaseCommand, CommandError
 
 from django_logic import conf
@@ -40,4 +43,6 @@ class Command(BaseCommand):
         concurrency = options['concurrency']
         if concurrency < 1:
             raise CommandError('--concurrency must be 1 or more.')
-        run_worker(queues, forever=True, concurrency=concurrency)
+        stop = []
+        signal.signal(signal.SIGTERM, lambda *_: stop.append(True))
+        run_worker(queues, forever=True, concurrency=concurrency, stop_requested=lambda: bool(stop))

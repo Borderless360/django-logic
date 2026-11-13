@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.3.2] — 2026-11-13
+
+- `dl_worker` handles SIGTERM. It takes no new job, waits for its running jobs, and exits with code 0.
+  A job process ignores SIGTERM, because Heroku sends the signal to every process of a dyno.
+  A program that the job starts inherits this: stop such a program with `kill()`, not `terminate()`.
+  Before, the worker and its job processes stopped at once. The next worker ran each job again from its first step.
+  GV reproduced the cost with real worker processes and a mock courier.
+  A stop came during a courier label request that the courier had accepted.
+  The next run sent the request again, and the courier held the order twice.
+  On Kubernetes the worker is the first process of its container, and it did not get SIGTERM without a handler.
+  The pod worked for its whole grace period and then stopped at once.
+  The platform still ends the wait at its own limit: 30 seconds on Heroku, `terminationGracePeriodSeconds` on Kubernetes.
+  A job that still runs at that limit stops there, as before.
+  A job that the worker claimed at the moment of the signal does not start; it stays ready for another worker.
+  A safety-net pass that still runs gets five seconds, then the worker stops it. The next pass repeats its work.
+  `run_worker` takes an optional `stop_requested` callable for the same purpose.
+  No setting, migration or queue changes.
+
 ## [4.3.1] — 2026-11-12
 
 - On PostgreSQL, saving a background job no longer writes a cache lock. The business-row lock protects the save.

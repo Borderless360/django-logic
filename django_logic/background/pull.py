@@ -40,6 +40,7 @@ import select
 import signal
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
@@ -75,6 +76,8 @@ ACCOUNTING_WARNING_REPEAT_SECONDS = 60.0
 #: How often the loop runs the safety nets (stuck report, cleanup).
 SAFETY_NET_SECONDS = 60.0
 SAFETY_NET_TIMEOUT_SECONDS = 60.0
+# A pass that still runs when the worker is asked to stop gets this long.
+SAFETY_NET_STOP_SECONDS = 5.0
 
 
 def notify_workers() -> None:
@@ -192,6 +195,9 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) 
             os.close(write_fd)
         raise
     if attempt_pid == 0:
+        # A platform can send its stop signal to every process. The worker then
+        # waits for this job; only the platform's kill ends it early.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         if read_fd is not None:
             os.close(read_fd)
         for running in attempts.values():
@@ -563,6 +569,7 @@ def _wait_for_work(timeout: float) -> None:
 
 def run_worker(
     queues: list[str], *, forever: bool = True, concurrency: int = 1,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> None:
     """The worker loop: fill the free attempt slots from the claimable
     rows, account for the attempts that end, run the safety nets on
@@ -581,6 +588,12 @@ def run_worker(
     ``forever=False`` drains what is claimable now, waits for the
     attempts it started, runs the safety nets, and returns — for tests
     and for a one-off catch-up command.
+
+    ``stop_requested`` is a callable that the loop asks before it takes
+    new work. Once it returns true, the worker starts nothing new, waits
+    for its running jobs, and returns. A safety-net pass that still runs
+    gets ``SAFETY_NET_STOP_SECONDS``; the next pass repeats its work.
+    ``dl_worker`` sets it from SIGTERM, so a deploy lets a running job finish.
     """
     logger.info(
         'pull worker starting: queues=%s, attempts at a time=%s',
@@ -589,10 +602,26 @@ def run_worker(
     attempts: dict[int, _Attempt] = {}
     pending: deque[_Attempt] = deque()
     last_safety_net = None
+    stop_requested = stop_requested or (lambda: False)
     while True:
+        if stop_requested():
+            logger.info(
+                'pull worker stopping: it takes no new job and waits for %s running job(s)',
+                sum(attempt.pk is not None for attempt in attempts.values()),
+            )
+            limit = time.monotonic() + SAFETY_NET_STOP_SECONDS
+            for attempt in attempts.values():
+                if attempt.pk is None and attempt.deadline > limit:
+                    attempt.deadline = limit
+                    attempt.timeout_seconds = SAFETY_NET_STOP_SECONDS
+            while attempts or pending:
+                _harvest(attempts, pending, block=True, max_wait=BUSY_POLL_SECONDS)
+            logger.info('pull worker stopped')
+            return
         claimed_any = False
         try:
-            while (sum(attempt.pk is not None for attempt in attempts.values()) < concurrency
+            while (not stop_requested()
+                   and sum(attempt.pk is not None for attempt in attempts.values()) < concurrency
                    and len(pending) < MAX_PENDING_ACCOUNTING):
                 # A large capacity setting must not postpone checks on jobs
                 # already running while the worker fills its other slots.
@@ -602,7 +631,9 @@ def run_worker(
                     exclude_pks=[attempt.pk for attempt in attempts.values()
                                  if attempt.pk is not None] + [attempt.pk for attempt in pending],
                 )
-                if pk is None:
+                # A stop request can arrive during the claim. The job stays
+                # ready for another worker.
+                if pk is None or stop_requested():
                     break
                 _start_attempt(pk, attempts)
                 claimed_any = True
@@ -616,6 +647,8 @@ def run_worker(
                 'already running are still accounted for.',
                 type(exc).__name__, exc,
             )
+        if stop_requested():
+            continue
         # A full worker still checks deadlines and schedules safety nets.
         before_harvest = len(attempts) + len(pending)
         before_children = len(attempts)
@@ -624,7 +657,7 @@ def run_worker(
                      or len(attempts) + len(pending) < before_harvest)
         now = time.monotonic()
         safety_net_running = any(attempt.pk is None for attempt in attempts.values())
-        if (not safety_net_running
+        if (not stop_requested() and not safety_net_running
                 and (last_safety_net is None or forever or claimed_any)
                 and (last_safety_net is None or now - last_safety_net >= SAFETY_NET_SECONDS)):
             try:
