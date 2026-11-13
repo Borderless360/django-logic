@@ -1,4 +1,4 @@
-"""One background transition chained to another with ``next_transition``.
+"""A callback starting an optional background transition.
 
 A follow-up forwards the kwargs of the transition before it, so
 ``Process._get_transition_method`` must resolve the owner again from the
@@ -17,7 +17,10 @@ the follow-up row must record the nested class and not the bound parent.
 from tests import StateTraceMixin
 from django.test import TestCase, override_settings
 
+from django_logic import Process, Transition
+from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
+from django_logic.process import ProcessManager
 from django_logic.testing import ProcessScenario
 from tests.background.models import (
     ChainConversationProcess,
@@ -37,8 +40,8 @@ _DUMMY_CHAIN = 'tests.background.models.DummyChainProcess'
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class BgToBgChainScenario(StateTraceMixin, ProcessScenario):
-    """A background transition whose ``next_transition`` is another
-    background transition, driven end-to-end through the entrypoint."""
+    """A background callback starts another background transition,
+    driven end-to-end through the entrypoint."""
 
     process_class = WidgetBgChainProcess
     model = Widget
@@ -81,7 +84,7 @@ class BgToBgChainScenario(StateTraceMixin, ProcessScenario):
         # state for the retry.
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'bg_fulfil', fail_side_effect='se_bg_fulfil_se',
+            widget, 'bg_fulfil', expect_raises=ValueError, fail_side_effect='se_bg_fulfil_se',
             fail_with=ValueError('fulfil broke'),
         )
         self.assert_state(widget, 'chain_fulfilling')
@@ -97,13 +100,13 @@ class BgToBgChainScenario(StateTraceMixin, ProcessScenario):
         # The follow-up still never runs.
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'bg_fulfil', fail_side_effect='se_bg_fulfil_se',
+            widget, 'bg_fulfil', expect_raises=ValueError, fail_side_effect='se_bg_fulfil_se',
             fail_with=ValueError('persistent'),
         )
         # Retry until the row is terminal.
         for _ in range(2):  # MAX_ERRORS is 3: the first attempt plus 2 retries
             self.retry_transition(
-                widget, fail_side_effect='se_bg_fulfil_se',
+                widget, expect_raises=ValueError, fail_side_effect='se_bg_fulfil_se',
                 fail_with=ValueError('persistent'),
             )
         self.assert_state(widget, 'chain_fulfil_failed')
@@ -179,42 +182,48 @@ def _record_chain_kwargs(instance, **kwargs):
     _CHAIN_SEEN.update(kwargs)
 
 
+def request_background_finish(instance, **kwargs):
+    instance.request_chain_process.bg_finish()
+
+
+def request_sync_finish(instance, **kwargs):
+    instance.request_chain_process.sync_finish()
+
+
+def request_audit(instance, **kwargs):
+    instance.audit_process.audit(**kwargs)
+
+
+class RequestChainProcess(Process):
+    process_name = 'request_chain_process'
+    transitions = [
+        Transition('kick', sources=['draft'], target='kicked',
+                   callbacks=[request_background_finish]),
+        BackgroundTransition('bg_finish', sources=['kicked'], target='done',
+                             side_effects=[_record_chain_kwargs]),
+        Transition('kick_sync', sources=['draft'], target='kicked',
+                   callbacks=[request_sync_finish]),
+        Transition('sync_finish', sources=['kicked'], target='done',
+                   side_effects=[_record_chain_kwargs]),
+        Transition('kick_audit', sources=['draft'], target='kicked',
+                   callbacks=[request_audit]),
+    ]
+
+
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class SyncToBackgroundRequestChainTests(TestCase):
-    """Every transition refuses ``request`` at the call. ``user_id`` is
-    ordinary data on a synchronous transition, so the hop into a
-    BACKGROUND follow-up strips it — the follow-up's refusal at enqueue
-    is swallowed by NextTransition, silently killing the chain."""
+    """Callbacks use explicit arguments when starting another transition."""
+
+    process_class = RequestChainProcess
 
     @classmethod
     def setUpClass(cls):
-        from django_logic import Process, Transition
-        from django_logic.background import BackgroundTransition
-        from django_logic.process import ProcessManager
-
         super().setUpClass()
-
-        class RequestChainProcess(Process):
-            process_name = 'request_chain_process'
-            transitions = [
-                Transition('kick', sources=['draft'], target='kicked',
-                           next_transition='bg_finish'),
-                BackgroundTransition('bg_finish', sources=['kicked'], target='done',
-                                     side_effects=[_record_chain_kwargs]),
-                Transition('kick_sync', sources=['draft'], target='kicked',
-                           next_transition='sync_finish'),
-                Transition('sync_finish', sources=['kicked'], target='done',
-                           side_effects=[_record_chain_kwargs]),
-            ]
-
-        cls.process_class = RequestChainProcess
         ProcessManager.bind_model_process(Widget, RequestChainProcess,
                                           state_field='status')
 
     @classmethod
     def tearDownClass(cls):
-        from django_logic.process import ProcessManager
-
         if 'request_chain_process' in vars(Widget):
             delattr(Widget, 'request_chain_process')
         ProcessManager.bindings = [
@@ -233,11 +242,8 @@ class SyncToBackgroundRequestChainTests(TestCase):
         self.assertEqual(self.widget.status, 'draft')
         self.assertEqual(_CHAIN_SEEN, {})
 
-    def test_background_follow_up_runs_despite_user_id(self):
-        # user_id is refused at a direct enqueue (it is the engine's wire
-        # form for user), but it is ordinary data on the synchronous
-        # transition that chains — so the hop strips it instead of
-        # silently killing the chain.
+    def test_callback_does_not_forward_unrelated_caller_arguments(self):
+        # The callback chooses which inputs the next transition receives.
         self.widget.request_chain_process.kick(user_id=42)
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'done')
@@ -248,3 +254,17 @@ class SyncToBackgroundRequestChainTests(TestCase):
             self.widget.request_chain_process.kick_sync(request=object())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')
+
+    def test_callback_to_another_process_records_the_process_it_calls(self):
+        parent_id = self.widget.request_chain_process.kick_audit(root_id='root')
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'kicked')
+        self.assertEqual(self.widget.audit_status, 'audited')
+        row = TransitionMessage.objects.get()
+        self.assertEqual(row.kwargs['process_class'],
+                         'tests.background.models.WidgetAuditProcess')
+        self.assertEqual(row.owning_process_class,
+                         'tests.background.models.WidgetAuditProcess')
+        self.assertEqual(row.kwargs['root_id'], 'root')
+        self.assertEqual(row.kwargs['parent_id'], str(parent_id))
+        self.assertNotEqual(row.kwargs['tr_id'], str(parent_id))

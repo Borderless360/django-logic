@@ -24,7 +24,7 @@ The callable returns a string, for example `f"client:{instance.client_id}"`.
 The engine saves the key with the job and preserves it across retries.
 Workers take turns between eligible fairness groups using shared database records.
 A single group can use every free worker slot. Existing running work is not interrupted when another group arrives.
-The empty key groups legacy submissions together. Queues still select which workers may run a job.
+The empty key groups submissions without an application fairness key together. Queues still select which workers may run a job.
 Fair selection does not enforce provider request limits or guarantee equal completion times.
 
 The existing one-unfinished-job rule per object and process remains.
@@ -133,10 +133,8 @@ still measures only the last attempt and excludes completion callbacks.
 
 These measurements begin with the first attempt on an upgraded worker.
 Migration 0014 leaves old start and wait history unknown instead of guessing.
-Apply the migration before starting upgraded workers. Its nullable timestamps
-and database defaults let older 3.x producers continue inserting jobs.
-Older workers do not update these measurements, so mixed-worker totals are
-incomplete. Existing retention rules still apply to the job records.
+Existing retention rules still apply to the job records. Missing historical
+measurements remain unknown; they are not reconstructed at upgrade.
 
 `transition_statistics(since=cutoff, queues=None, using=None)` groups retained
 jobs by queue, model, process class, action, parent action and effect. Counts describe each
@@ -155,7 +153,7 @@ These logs exclude callable arguments and distinguish required work failures fro
 
 ## Required follow-up
 
-`callbacks` and `next_transition` are best-effort. A crash can lose them.
+`callbacks` are best-effort. A crash can lose them.
 Keep required work in a job's side effects, or submit application-owned jobs
 and record their completion in business records.
 
@@ -191,7 +189,7 @@ Bind this process to the order's `shipping_completion_state` in `AppConfig.ready
 In pull mode, save the accepted shipping change and submit `order.shipping_completion_process.complete()` in one transaction.
 The worker runs the saved job after that transaction commits.
 The required callable ships fulfilments, verifies their results and applies shipping rates.
-Required failures must raise errors; legacy helpers that swallow errors need explicit result checks.
+Required failures must raise errors; application helpers that swallow errors need explicit result checks.
 `completed` then records business success even after normal job cleanup.
 Absence of an unfinished job does not establish success.
 
@@ -285,8 +283,8 @@ until outstanding jobs finish. Callables are resolved from deployed code, not
 serialized; compatible code fixes apply to pending jobs.
 
 Effect rows expose `effect_name`, `parent_transition_name` and `parent_job_id`.
-Their reserved `transition_name` cannot resolve to the parent's action in an
-older worker. `operation_name`, `dl_transitions` and monitoring show the readable
+Their reserved `transition_name` distinguishes an effect from its parent's action.
+`operation_name`, `dl_transitions` and monitoring show the readable
 parent-action/effect name. `for_instance()` returns parents and effects;
 `in_flight_for()` and `in_flight()` concern only state-owning parent jobs.
 Find effects with `TransitionMessage.objects.filter(parent_job_id=parent.pk)`.
@@ -305,22 +303,14 @@ assertions concern the parent's essential callables. Inspect effect jobs
 separately. Model snapshots capture the model fields only. Use explicit job
 fixtures to reproduce pending work; snapshots do not copy background job history.
 
-### Upgrading to independent effects
+### Changing required effects
 
-Apply migration 0015 before new producers or workers start. Stop all earlier
-workers before code can create effects, then start only upgraded workers.
-Earlier producers can still insert parent rows using database defaults, but
-those rows have an empty effect-name snapshot. When replacing an old callback,
-keep an explicit compatibility path for those outstanding parents; otherwise
-their old follow-up work would disappear. Do not run both that legacy submission
-and a new declared effect for the same operation.
-
-The reserved child action prevents an earlier worker from replaying parent
-side effects; it does not make mixed worker versions supported. An earlier
-worker could mark an effect failed as an unknown action. Before rolling back to
-earlier workers, stop new submissions and finish or explicitly resolve every
-pending effect. Do not reverse migration 0015 while independent jobs remain
-unfinished. This feature reuses the existing workers and introduces no scheduler.
+Finish outstanding jobs before changing their action, process or effect names.
+The worker uses the exact recorded identity; it does not substitute a similarly
+named declaration. A callback-to-effect migration must finish parents submitted
+without that effect before switching the application. Version 5 does not provide
+an old-callback compatibility path. Do not reverse effect migrations while
+independent jobs remain unfinished.
 
 ## State protection
 
@@ -335,7 +325,7 @@ remains valid, including after a lost database connection. PostgreSQL protects
 database state; neither lock can undo an external request already sent.
 Saving a background job calls no provider. On PostgreSQL that save holds the business row and writes no cache lock.
 It still refuses a record that has a cache lock. A process that stops during the save leaves no lock on the record.
-For a lock-taking synchronous `Transition`, callbacks and `next_transition` also run inside the PostgreSQL transaction, before the outermost commit.
+For a lock-taking synchronous `Transition`, callbacks also run inside the PostgreSQL transaction, before the outermost commit.
 Each one runs in a savepoint. A database error discards its writes; any other error keeps the writes made before it, including the failed state of a transition it started.
 The cache lock is released first, so callbacks can call another transition on the same instance.
 Other connections still see the prior committed state. An interruption can discard the target and side-effect writes before commit.
@@ -370,24 +360,44 @@ It does not interrupt a provider request already running or cancel independent e
 
 ## Upgrade and rollback
 
-Version 4 removes unused public request keys, required successors and pending-job
-cancellation. Applications must remove calls to these APIs before upgrading.
-Verify that unfinished jobs have empty `required_next` values. Applications that
-used public request keys must resolve their duplicate-protection policy first.
+Version 5 is a breaking release. Its supported upgrade baseline is 4.3.2.
+Earlier installations must complete their earlier upgrade steps first, using
+the corresponding release documentation. Historical migration files remain so
+Django can recognize applied migrations; they do not provide an older runtime.
 
-Migration 0016 changes Django's model state only. The physical columns and their
-defaults remain, so 3.3 processes can insert and read jobs during deployment.
-The saved arguments, fairness keys, deferral times and independent effects keep
-their existing format. Applications must preserve their own callable names and
-saved inputs while old and new processes overlap.
+Before upgrading:
 
-For a 3.3 application that meets these conditions, apply migrations and deploy
-compatible producers and workers through the normal rolling release. Check the
-installed version, queue coverage and completion of previously queued jobs.
-Rollback to 3.3 preserves this schema and these job formats. Application changes
-still need their own rollback review.
+1. Remove every `next_transition` declaration and `NextTransition` import.
+   Put required work in saved jobs. Use an ordinary callback only when its
+   failure or loss is acceptable; replacing the name alone does not make work durable.
+   Before replacing a callback or chain with a new `BackgroundEffect`, finish
+   existing parents that were submitted without its frozen effect name.
+2. Make injected `ProcessScenario` failures explicit with `expect_raises=ErrorType`
+   or `expect_raises=False`. Omitting it no longer absorbs the injected exception.
+3. Keep root process classes importable and preserve their `process_name`, bound
+   field, owning class, action and effect names while jobs using them remain unfinished.
+   Submit background jobs through a `Process` to record all identity fields.
+   Low-level `change_state` calls must supply the same complete, valid identity. Attribute lookup, renamed-class and action-name fallbacks are removed.
+4. Finish or explicitly resolve unsupported unfinished jobs on 4.3.2, including
+   jobs with `required_next` instructions or incomplete identity. Do not mark work
+   complete merely to pass the migration. When application declarations are removed,
+   finish their jobs and independent effects before installing that application change.
+5. Stop all job producers, scheduled submissions and old workers. Confirm that no
+   old job process remains. Back up the database, install the new application and
+   run `migrate` before starting any 5.0 process.
 
-Databases on 0.17.x or earlier must first run `migrate` with Django Logic 3.2.
-The current package keeps the squashed migration's replacement history.
-Upgrades from before 3.0 require different worker ordering; follow the
-[earlier upgrade sequence](https://github.com/Borderless360/django-logic/blob/v3.0.1/docs/operation-contract.md#upgrade-and-rollback).
+Migration 0017 checks unfinished work before removing the physical
+`request_fingerprint` and `required_next` columns. A failed check leaves the
+columns and jobs intact. Resolve the reported work using the previous application,
+then retry. The migration does not call providers, replay jobs or rewrite identities.
+A bounded PostgreSQL lock wait can also stop the migration; retry after the holder
+finishes, with producers still stopped.
+
+Start only 5.0 producers and workers. Verify the installed package, queue coverage
+and completion of retained jobs. Mixing earlier workers or producers with 5.0 is
+unsupported. This release is not a normal rolling upgrade.
+
+Before rollback, stop new submissions and workers and review every unfinished job
+against the previous application's declarations. Reversing 0017 can recreate empty
+obsolete columns; it cannot restore removed values or reverse application changes.
+Do not start the previous application until its schema and saved jobs are compatible.

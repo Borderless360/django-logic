@@ -464,6 +464,11 @@ class ConcurrentReasonTests(SimpleTestCase):
         self.assertEqual(reasons, [RefusalReason.PERMISSION, RefusalReason.CONDITION])
 
 
+class ExecutionGateProcess(Process):
+    transitions = [Transition('touch', sources=['draft']),
+                   BackgroundTransition('work', sources=['draft'])]
+
+
 @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_RETRY_MINUTES=2))
 class ExecutionGateReasonTests(TestCase):
     def setUp(self):
@@ -471,16 +476,14 @@ class ExecutionGateReasonTests(TestCase):
         self.addCleanup(cache.clear)
         self.invoice = Invoice.objects.create(status='draft')
 
-        class Workflow(Process):
-            transitions = [Transition('touch', sources=['draft']),
-                           BackgroundTransition('work', sources=['draft'])]
-
-        self.process = Workflow(instance=self.invoice, field_name='status')
+        self.process = ExecutionGateProcess(instance=self.invoice, field_name='status')
 
     def pending(self):
         return TransitionMessage.objects.create(
             **TransitionMessage.instance_key(self.invoice, self.process.process_name),
-            field_name='status', transition_name='work', kwargs={},
+            field_name='status', transition_name='work',
+            owning_process_class=f'{__name__}.ExecutionGateProcess',
+            kwargs={'process_class': f'{__name__}.ExecutionGateProcess'},
         )
 
     def test_lock_refusals_preserve_plain_class_and_message_on_both_paths(self):

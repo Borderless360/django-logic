@@ -54,8 +54,6 @@ def db_safe_text(value: str) -> str:
 
 
 class TransitionMessage(TimeStampedModel):
-    # The database defaults let a producer on an earlier version keep
-    # inserting rows during a rolling upgrade.
     request_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
     fairness_key = models.CharField(max_length=255, blank=True, default='', db_default='', db_index=True)
     eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
@@ -66,7 +64,7 @@ class TransitionMessage(TimeStampedModel):
     last_deferred_until = models.DateTimeField(blank=True, null=True)
     last_deferral_reason = models.TextField(blank=True, default='', db_default='')
     completion_kind = models.CharField(max_length=16, blank=True, default='', db_default='')
-    # Names are frozen when the parent is submitted. Earlier producers leave [].
+    # Names are frozen when the parent is submitted.
     background_effect_names = models.JSONField(default=list, db_default=[])
     effect_name = models.CharField(max_length=100, blank=True, default='', db_default='')
     parent_transition_name = models.CharField(max_length=100, blank=True, default='', db_default='')
@@ -100,7 +98,7 @@ class TransitionMessage(TimeStampedModel):
     # the worker never ran.
     started_at = models.DateTimeField(blank=True, null=True)
     # Two workers can record starts before only one obtains the execution lock.
-    # These count recorded starts, beginning with upgraded workers, not provider requests.
+    # These count recorded starts, not provider requests.
     first_started_at = models.DateTimeField(blank=True, null=True)
     start_attempt_count = models.PositiveIntegerField(default=0, db_default=0)
     completed_at = models.DateTimeField(blank=True, null=True)
@@ -123,19 +121,11 @@ class TransitionMessage(TimeStampedModel):
     # methods and overrides stay visible to side-effects and callbacks.
     proxy_model_label = models.CharField(max_length=201, blank=True, default='')
     process_name = models.CharField(max_length=100)
-    # The model field the process is bound to. Lets the worker reconstruct
-    # the process from the recorded ``process_class`` without guessing
-    # the field name when the model property has been renamed or rebound
-    # between enqueue and execute. Blank on rows created before 0.4.0.
+    # The field recorded at submission determines which state the worker changes.
     field_name = models.CharField(max_length=100, blank=True, default='')
     transition_name = models.CharField(max_length=100)
-    # Dotted path of the (possibly nested) Process class that declared the
-    # transition. Restore selects the exact background transition by this
-    # class plus ``transition_name``. Blank on rows from before the column
-    # existed (or enqueued outside the Process entrypoint); restore then
-    # resolves by name alone, only when the name is unambiguous.
-    # TextField: a deeply-namespaced dotted path must never overflow and
-    # abort enqueue. Never indexed — read by pk, compared for equality.
+    # Exact class that declared the background action, including nested processes.
+    # A dotted path can exceed a CharField limit; it is compared after loading by pk.
     owning_process_class = models.TextField(blank=True, default='')
     queue_name = models.CharField(max_length=100)
 

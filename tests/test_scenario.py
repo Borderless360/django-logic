@@ -38,7 +38,7 @@ class WidgetFulfilmentScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.background_transition(
             widget, 'fulfil',
-            fail_side_effect='bg_ok', fail_with=ValueError('courier down'))
+            expect_raises=ValueError, fail_side_effect='bg_ok', fail_with=ValueError('courier down'))
 
         self.assert_state(widget, 'fulfilling')
         self.assert_error_recorded(widget, 'courier down')
@@ -49,7 +49,7 @@ class WidgetFulfilmentScenario(StateTraceMixin, ProcessScenario):
         """A transient failure is recovered by the retry path."""
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'fulfil', fail_side_effect='bg_ok', fail_with=ValueError('blip'))
+            widget, 'fulfil', expect_raises=ValueError, fail_side_effect='bg_ok', fail_with=ValueError('blip'))
         self.assert_state(widget, 'fulfilling')
 
         self.retry_transition(widget)  # no injected failure this time
@@ -61,10 +61,10 @@ class WidgetFulfilmentScenario(StateTraceMixin, ProcessScenario):
         max_errors = settings.DJANGO_LOGIC['TRANSITION_MESSAGE_MAX_ERRORS']
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'fulfil', fail_side_effect='bg_ok', fail_with=ValueError('persistent'))
+            widget, 'fulfil', expect_raises=ValueError, fail_side_effect='bg_ok', fail_with=ValueError('persistent'))
         for _ in range(max_errors - 1):
             self.retry_transition(
-                widget, fail_side_effect='bg_ok', fail_with=ValueError('persistent'))
+                widget, expect_raises=ValueError, fail_side_effect='bg_ok', fail_with=ValueError('persistent'))
 
         self.assert_state(widget, 'fulfilment_failed')
         self.assert_error_count(widget, max_errors)
@@ -89,7 +89,7 @@ class WidgetFulfilmentScenario(StateTraceMixin, ProcessScenario):
         """Capture a stuck instance, rebuild it from the snapshot, retry it."""
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'fulfil', fail_side_effect='bg_ok', fail_with=ValueError('snap'))
+            widget, 'fulfil', expect_raises=ValueError, fail_side_effect='bg_ok', fail_with=ValueError('snap'))
 
         snap = self.snapshot(widget)
         self.assertEqual(snap['state'], 'fulfilling')
@@ -168,7 +168,7 @@ class NonAtomicScenario(StateTraceMixin, ProcessScenario):
     def test_retry_records_the_final_state_after_a_side_effect_fails(self):
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'fulfil', fail_side_effect='bg_record_kwargs',
+            widget, 'fulfil', expect_raises=ValueError, fail_side_effect='bg_record_kwargs',
             fail_with=ValueError('report unavailable'),
         )
         self.assert_state(widget, 'fulfilling')
@@ -187,7 +187,7 @@ class NonAtomicScenario(StateTraceMixin, ProcessScenario):
 
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'fulfil', fail_side_effect='bg_record_kwargs',
+            widget, 'fulfil', expect_raises=PermanentFailure, fail_side_effect='bg_record_kwargs',
             fail_with=PermanentFailure('report refused'),
         )
         self.assert_state(widget, 'fulfilment_failed')

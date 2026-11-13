@@ -400,10 +400,13 @@ class AtomicSynchronousTests(TransactionTestCase):
         def later_callback(instance, **kwargs):
             self.observed.append(instance.status)
 
+        def follow_after_success(instance, **kwargs):
+            instance.sync_atomic_test.follow(**kwargs)
+
         self.bind(
             Transition('go', sources=['draft'], target='done', atomic=True,
-                       side_effects=[save_required_work], callbacks=[broken_callback, later_callback],
-                       next_transition='follow'),
+                       side_effects=[save_required_work],
+                       callbacks=[broken_callback, later_callback, follow_after_success]),
             Transition('follow', sources=['done'], target='followed', atomic=True,
                        side_effects=[save_then_fail]),
         )

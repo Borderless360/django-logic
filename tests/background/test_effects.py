@@ -232,12 +232,13 @@ class BackgroundEffectTests(EffectTestSetup, TestCase):
         self.widget.refresh_from_db()
         self.assertEqual((self.widget.status, self.widget.cb_log), ('ready', ''))
 
-    def test_old_worker_lookup_cannot_restore_effect_as_parent(self):
-        from django_logic.background.runner import _find_transition
+    def test_effect_identity_cannot_restore_as_parent(self):
+        from django_logic.background.runner import _find_transition, _RestoreError
         parent, children = self.finish()
         child = children[0]
-        child.effect_name = ''  # A pre-3.1 worker cannot read this field.
-        self.assertIsNone(_find_transition(self.widget.effects, child))
+        child.effect_name = ''
+        with self.assertRaises(_RestoreError):
+            _find_transition(self.widget.effects, child)
 
     def test_old_parent_snapshot_does_not_pick_up_new_declarations(self):
         parent = self.enqueue()

@@ -200,6 +200,23 @@ class BackgroundTransition(Transition):
         # Before the lock, and before the kwargs are serialized into a row
         # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
+        if not all(isinstance(kwargs.get(key), str) and kwargs[key]
+                   for key in ('process_class', 'owning_process_class')) or not state.field_name:
+            raise ImproperlyConfigured(
+                'Submit a background transition through its Process so the saved job '
+                'records process_class, owning_process_class and field_name.'
+            )
+        from django_logic.background.runner import _find_transition, _load_process_from_path
+        identity = TransitionMessage(
+            process_name=state.process_name, field_name=state.field_name,
+            transition_name=self.action_name, owning_process_class=kwargs['owning_process_class'],
+        )
+        try:
+            recorded_process = _load_process_from_path(state.instance, kwargs['process_class'], identity)
+            if _find_transition(recorded_process, identity) is not self:
+                raise ValueError('The recorded class declares a different transition.')
+        except Exception as error:
+            raise ImproperlyConfigured(f'The background job identity cannot be restored: {error}') from error
         from django_logic.background.effects import validate_effect_submission
         validate_effect_submission(self, state, kwargs)
         if not self.atomic:
@@ -340,7 +357,7 @@ class BackgroundTransition(Transition):
                     field_name=state.field_name,
                     transition_name=self.action_name,
                     # Nested processes can declare the same action name.
-                    owning_process_class=kwargs.get('owning_process_class', ''),
+                    owning_process_class=kwargs['owning_process_class'],
                     fairness_key=resolved_fairness,
                     background_effect_names=[effect.name for effect in self.background_effects],
                     queue_name=queue_name,

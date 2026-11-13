@@ -213,11 +213,7 @@ class FindTransitionDisambiguationTests(TestCase):
         self.assertEqual(found.in_progress_state, 'dummy_sending')
 
     def test_blank_owner_ambiguous_name_refuses_to_guess(self):
-        # An owner-less row (legacy / in flight across the deploy that first
-        # shared this background action_name across nested processes) whose name
-        # is AMBIGUOUS must NOT be resolved by first-match — that would be a coin
-        # flip between condition-disambiguated siblings. Restore refuses and
-        # raises _RestoreError so the row is finalized without side-effects.
+        # Missing identity must never select an arbitrary sibling or run a provider.
         conv = Conversation.objects.create(
             status='open', source_integration='dummy'
         )
@@ -239,26 +235,16 @@ class FindTransitionDisambiguationTests(TestCase):
         with self.assertRaises(_RestoreError):
             _find_transition(process, transition_message)
 
-    def test_blank_owner_unique_name_still_resolves(self):
-        # Backward compatibility for the COMMON legacy case: a row with no
-        # recorded owner whose action_name is UNIQUE across the tree resolves
-        # cleanly by name (this is what every pre-discriminator row relied on).
-        # nested_fulfil exists only on NestedBgChildProcess under parent_process.
+    def test_unique_name_requires_the_exact_owner(self):
         widget = Widget.objects.create(status='draft')
         process = widget.parent_process
-        transition_message = TransitionMessage.objects.create(
-            app_label='bg_tests',
-            model_name='widget',
-            instance_id=str(widget.pk),
-            process_name='parent_process',
-            transition_name='nested_fulfil',
-            owning_process_class='',
-            queue_name='django_logic.critical',
-            is_completed=True,
-        )
-        found = _find_transition(process, transition_message)
-        self.assertEqual(found.action_name, 'nested_fulfil')
-        self.assertEqual(found.in_progress_state, 'nested_fulfilling')
+        for owner in ('', 'tests.background.models.GoneProcess'):
+            with self.subTest(owner=owner):
+                message = TransitionMessage(
+                    transition_name='nested_fulfil', owning_process_class=owner,
+                )
+                with self.assertRaisesMessage(_RestoreError, 'refusing to guess'):
+                    _find_transition(process, message)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
@@ -347,7 +333,8 @@ class SafetyNetDisambiguationTests(TestCase):
             app_label='bg_tests',
             model_name='conversation',
             instance_id=str(conv.pk),
-            process_name='process',
+            process_name='process', field_name='status',
+            kwargs={'process_class': 'tests.background.models.ConversationProcess'},
             transition_name='send_message_via_integration',
             owning_process_class=owner,
             queue_name='django_logic.critical',
@@ -385,13 +372,10 @@ class SafetyNetDisambiguationTests(TestCase):
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class OwnerlessAmbiguousContainmentTests(TestCase):
-    """The worst case the deeper review flagged: a row that has LOST its owner
-    (blank — legacy/pre-discriminator, or in flight across the deploy that first
-    shared the name) for an ambiguous BackgroundTransition. Both nested actions
-    share sources and have no in_progress_state, so the worker's state guard
-    CANNOT tell them apart — first-match would silently run the wrong
-    integration's external side-effects. Execute must instead refuse and contain
-    the row (finalize, no side-effects), never running act_a OR act_b.
+    """Missing owner metadata cannot select one of two matching actions.
+
+    Both actions share their source state, so state alone cannot identify which
+    provider should run. The worker records the restoration failure instead.
     """
 
     def test_ownerless_ambiguous_background_action_runs_nothing(self):
@@ -416,24 +400,20 @@ class OwnerlessAmbiguousContainmentTests(TestCase):
         transition_message.refresh_from_db()
         self.assertTrue(transition_message.is_completed)   # finalized so retries stop
 
-    def test_ownerless_unique_background_action_still_runs(self):
-        # Control: the same owner-less row, but for a UNIQUE action name, still
-        # resolves and runs — only AMBIGUOUS owner-less rows are refused.
+    def test_ownerless_unique_background_action_runs_nothing(self):
         widget = Widget.objects.create(status='fulfilled')
-        transition_message = TransitionMessage.objects.create(
-            app_label='bg_tests',
-            model_name='widget',
-            instance_id=str(widget.pk),
-            process_name='process',
-            transition_name='sync_inventory',   # unique BackgroundTransition
-            owning_process_class='',
-            queue_name='django_logic.fast',
+        message = TransitionMessage.objects.create(
+            app_label='bg_tests', model_name='widget', instance_id=str(widget.pk),
+            process_name='process', field_name='status', transition_name='sync_inventory',
+            owning_process_class='', queue_name='django_logic.fast',
+            kwargs={'process_class': 'tests.background.models.WidgetProcess'},
         )
-        run_background_transition(transition_message.pk)
+        run_background_transition(message.pk)
         widget.refresh_from_db()
-        self.assertIn('ok,', widget.se_log)
-        transition_message.refresh_from_db()
-        self.assertTrue(transition_message.is_completed)
+        self.assertEqual(widget.se_log, '')
+        message.refresh_from_db()
+        self.assertTrue(message.ended_in_failure)
+        self.assertIn('requires owning_process_class', message.last_error_message)
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

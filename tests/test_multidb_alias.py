@@ -180,6 +180,9 @@ class StuckFinalizerAliasTests(TestCase):
             model_name='invoice',
             instance_id=str(invoice.pk),
             process_name='routed_bg_proc',
+            field_name='status',
+            owning_process_class=f'{__name__}.RoutedBgProcess',
+            kwargs={'process_class': f'{__name__}.RoutedBgProcess'},
             transition_name='go',
             queue_name='django_logic',
             started_at=timezone.now() - timedelta(seconds=120),
@@ -190,7 +193,7 @@ class StuckFinalizerAliasTests(TestCase):
         'BACKGROUND_EXECUTION': 'sync',
         'TRANSITION_MESSAGE_MAX_ERRORS': 2,
     })
-    def test_terminal_failed_state_lands_on_the_instance_alias(self):
+    def test_terminal_failed_state_is_saved_on_the_instance_alias(self):
         invoice = Invoice.objects.using('other').create(status='running')
         transition_message = self._stale_transition_message(invoice)
 
@@ -208,7 +211,7 @@ class StuckFinalizerAliasTests(TestCase):
         'TRANSITION_MESSAGE_MAX_ERRORS': 2,
     })
     def test_vetoed_terminal_write_rolls_back_on_the_instance_alias(self):
-        # A landed write proves nothing here: set_state routes by instance
+        # A successful write proves nothing here: set_state routes by instance
         # whichever connection the savepoint guards. Only a rolled-back write
         # tells the aliases apart, because a savepoint opened on 'default'
         # leaves both writes standing on 'other'.

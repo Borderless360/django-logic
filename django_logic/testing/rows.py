@@ -25,22 +25,48 @@ def open_transition_message(
     """Create and return an uncompleted ``TransitionMessage`` for ``instance``.
 
     The row is keyed exactly as enqueue keys it, so the sync gate, the
-    enqueue constraint, and ``retry_status`` all see it. With
+    enqueue constraint, and ``retry_status`` all see it. Its saved process and
+    declaring class come from the bound process and named background declaration,
+    so the worker can restore it without guessing. With
     ``started_minutes_ago`` the row reads as an attempt that started that
     long ago — ``started_at`` and ``modified`` both move back, so the
     retry-window classification answers for that age.
     """
-    from django_logic import conf
+    from django_logic import Process
     from django_logic.background.models import TransitionMessage
+    from django_logic.process import _iter_process_tree
 
+    process = getattr(instance, process_name)
+    if not isinstance(process, Process):
+        raise ValueError(f'{process_name!r} must be a bound Process.')
+    matches = [
+        (process_class, transition)
+        for process_class in _iter_process_tree(type(process))
+        for transition in process_class.transitions
+        if transition.is_background and transition.action_name == transition_name
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            'open_transition_message requires exactly one declared background '
+            f'transition named {transition_name!r} in {type(process).__name__}. '
+            'Submit through the process to test condition-selected transitions.'
+        )
+    owner, transition = matches[0]
+    if field_name and field_name != process.state.field_name:
+        raise ValueError('field_name must match the bound process state field.')
+    process_path = f'{type(process).__module__}.{type(process).__name__}'
+    owner_path = f'{owner.__module__}.{owner.__name__}'
     row = TransitionMessage.objects.create(
         **TransitionMessage.instance_key(instance, process_name),
         proxy_model_label=TransitionMessage.proxy_label_for(instance),
-        field_name=field_name,
+        field_name=process.state.field_name,
         transition_name=transition_name,
-        queue_name=queue_name or conf.default_queue(),
+        owning_process_class=owner_path,
+        background_effect_names=[effect.name for effect in transition.background_effects],
+        timeout_seconds=transition.timeout,
+        queue_name=queue_name or transition.get_queue_name(),
         errors_count=errors_count,
-        kwargs={},
+        kwargs={'process_class': process_path, 'owning_process_class': owner_path},
     )
     if started_minutes_ago is not None:
         past = timezone.now() - timedelta(minutes=started_minutes_ago)

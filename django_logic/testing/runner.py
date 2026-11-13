@@ -20,9 +20,8 @@ def transitions_for(process_class, action_name) -> list:
 def all_transitions(process_class) -> list:
     """Every class-level ``Transition`` reachable from ``process_class``
     (including nested processes) — the full instrumentation surface for one
-    drive. A drive can execute more than the named action (``next_transition``
-    follow-ups, callback-triggered transitions), so tracking must cover the
-    whole tree for the side-effect assertions to be truthful."""
+    drive. A callback can start another transition, so tracking covers the
+    whole tree to include those side-effects."""
     from django_logic.process import _iter_process_tree
 
     return [
@@ -70,8 +69,8 @@ def message_for(instance, transition_name, process_name):
     """The bound process's most recent ``TransitionMessage`` for one action.
 
     Used by ``assert_transition_owner`` to pin the recorded
-    ``owning_process_class`` of a specific transition in a chained/next-
-    transition workflow, where several TransitionMessage rows exist for one instance.
+    ``owning_process_class`` when a workflow saves several TransitionMessage
+    rows for one instance.
     """
     return _messages(instance, process_name,
                      transition_name=transition_name).first()

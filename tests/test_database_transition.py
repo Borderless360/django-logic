@@ -86,11 +86,15 @@ def simulate_external_call(instance, **kwargs):
         raise TimeoutError('External test did not release the first call.')
 
 
+def submit_optional_pending_job(instance, **kwargs):
+    instance.cached_process.pending_done(**kwargs)
+
+
 class CachedProcess(Process):
     process_name = 'cached_process'
     transitions = [Transition('finish', sources=['draft'], target='done', side_effects=[save_local_work]),
                    Transition('external', sources=['draft'], target='done', side_effects=[simulate_external_call]),
-                   Transition('finish_next', sources=['draft'], target='done', next_transition='pending_done'),
+                   Transition('finish_next', sources=['draft'], target='done', callbacks=[submit_optional_pending_job]),
                    BackgroundTransition('pending_done', sources=['done'], queue='database-followup')]
 
 

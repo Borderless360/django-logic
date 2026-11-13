@@ -1,5 +1,21 @@
 # Changelog
 
+## [5.0.0] — Unreleased
+
+- Remove `next_transition` and `NextTransition`. Unsupported declarations fail at
+  startup. Use explicit callbacks for optional work and saved jobs for required work.
+- Require explicit `expect_raises` when injecting a failure with `ProcessScenario`.
+  Tests can no longer pass by silently absorbing their injected exception.
+- Restore jobs only through their recorded process class, owning class, field and
+  action. Remove model-attribute and action-name guesses. Reject background
+  submissions without the identity needed by workers before saving a job.
+- Migration 0017 checks unfinished work, then removes the unused physical
+  `request_fingerprint` and `required_next` columns. It refuses unsupported jobs
+  instead of discarding their work. Historical migrations remain available.
+- Upgrade from 4.3.2 with old producers and workers stopped. Mixed versions are
+  unsupported. Finish jobs affected by application renames or removals first.
+  See [upgrade and rollback](docs/operation-contract.md#upgrade-and-rollback).
+
 ## [4.3.2] — 2026-11-13
 
 - `dl_worker` handles SIGTERM. It takes no new job, waits for its running jobs, and exits with code 0.

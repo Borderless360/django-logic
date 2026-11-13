@@ -27,7 +27,7 @@ runs it.
 ## Install
 
 The current release is **4.3.2**. See the [changelog](CHANGELOG.md) for its fixes.
-Before upgrading to 4.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
+Before upgrading to 5.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
 
 
 ```bash
@@ -73,14 +73,14 @@ CACHES = {
 Every `DJANGO_LOGIC` key has a default, so you need no other configuration to
 start.
 
-### Upgrading older installations
+### Upgrading to 5.0
 
-Databases on 0.17.x or earlier must first run `migrate` using Django Logic 3.2.
-The current package retains the squashed migration and its replacement history.
-
-When upgrading from before 3.0, stop old workers before upgraded producers
-submit work. Finish the application upgrade before starting the new workers.
-See the [earlier upgrade sequence](https://github.com/Borderless360/django-logic/blob/v3.0.1/docs/operation-contract.md#upgrade-and-rollback).
+Version 5 removes obsolete APIs and saved-job restoration fallbacks. Start from
+4.3.2, update application declarations, and finish jobs whose action or process
+names will change before stopping the old producers and workers. Apply migrations
+with the new application installed, then start only 5.0 processes. Migration 0017
+refuses unresolved jobs that the new code cannot restore; it does not discard them.
+Mixed versions are unsupported. See the [upgrade checklist](docs/operation-contract.md#upgrade-and-rollback).
 
 ## Declare a process
 
@@ -164,7 +164,7 @@ Each declaration slot has one job:
 - `failure_callbacks` — functions that run after a side-effect fails. They
   receive `exception=`. Put cleanup and compensation here.
 
-On PostgreSQL, a lock-taking synchronous `Transition` runs callbacks and `next_transition` inside its transaction, before the target state commits.
+On PostgreSQL, a lock-taking synchronous `Transition` runs callbacks inside its transaction, before the target state commits.
 
 Other connections see the prior committed state until the outermost transaction commits, including any transaction opened by the caller.
 A process interruption during callbacks can therefore discard the state and side-effect writes too.
@@ -190,8 +190,7 @@ An error saving `failed_state` triggers another reload before failure callbacks.
 The synchronous default is `atomic=False`, preserving existing failure behavior.
 It differs from `BackgroundTransition`, whose `atomic=True` default is unchanged.
 The new option does not make external requests reversible, change permissions or
-locking, or make optional callbacks required. Success callbacks and
-`next_transition` run after the required transaction block and retain their
+locking, or make optional callbacks required. Success callbacks run after the required transaction block and retain their
 best-effort behavior. Use `transaction.on_commit(..., robust=True)` for optional
 publication that must wait for the containing transaction to commit.
 An exception from a non-robust commit callback still reaches the caller after
@@ -213,7 +212,7 @@ and external effects are outside this guarantee.
 Use `DatabaseTransition` for changes that PostgreSQL can roll back completely.
 It takes the same declaration arguments as `Transition` and requires PostgreSQL.
 It keeps row locks, permissions, conditions, source checks, pending-job checks,
-targets, failure handling, callbacks and `next_transition`.
+targets, failure handling and callbacks.
 It refuses reentry without creating a persistent cache lock. A killed process
 therefore leaves no cache lock that delays a saved completion job's retry.
 
@@ -234,8 +233,7 @@ Its notifications and shipping requests run as separately saved background jobs.
 Declare a `Transition` with no `target` for work that needs conditions,
 permissions and side-effects but writes no state on success. It follows
 the same rules as every transition: it takes the state lock, it is
-refused while a background transition is uncompleted, and it runs
-`next_transition`.
+refused while a background transition is uncompleted, and it runs callbacks after success.
 
 An explicit `target=''` saves an empty state. Use `target=None` to leave the state unchanged.
 Before upgrading, change declarations that used `target=''` to mean no state change.
@@ -246,9 +244,8 @@ process that posts one parcel's tracking is the example: the row is the
 store, the work is the parcel, and two parcels must not wait for each
 other. A `lock=False` transition takes no state lock and is not refused
 while a background transition is uncompleted. It keeps `conditions`,
-`permissions`, `side_effects`, `callbacks`, `failure_callbacks` and
-`next_transition` — a follow-up is best-effort, so one that takes the lock
-is skipped while the row is locked. It cannot declare a `target` or a
+`permissions`, `side_effects`, `callbacks` and `failure_callbacks`.
+A callback is best-effort; a transition it starts can be refused while the row is locked. It cannot declare a `target` or a
 `failed_state` — a state write must serialise on that state — and
 `BackgroundTransition` refuses it. `get_available_actions()` lists it
 while the row is locked, because it can be called.
@@ -483,10 +480,10 @@ completes the row.
 
 `in_progress_state` is available only on background transitions with a target.
 Several transitions may share it; each saved job records its exact transition.
-A synchronous transition cannot declare it. For synchronous preparation, first
-save a real busy state, then start a background transition with `next_transition`.
-Provide a periodic task to restart records left in that busy state if the
-caller stops before saving the background job.
+A synchronous transition cannot declare it. Use `submission_context` for required
+database preparation that must commit together with the background job and its
+in-progress state. A failed submission rolls all of them back. See the
+[submission contract](docs/operation-contract.md#preparing-a-submission).
 
 If another action changes the model's state while a job waits, that change wins.
 The worker completes the job as `superseded` and skips its side effects.

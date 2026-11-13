@@ -165,7 +165,7 @@ class SyncProcessDrivingScenario(StateTraceMixin, ProcessScenario):
     state_field = 'status'
     process_name = 'sync_proc'
 
-    def test_approve_chains_into_notify_via_next_transition(self):
+    def test_approval_callback_starts_notify(self):
         widget = self.create_instance(status='draft')
         self.transition(widget, 'approve')
         # The object passed through both states; the follow-up's side-effect
@@ -190,7 +190,7 @@ class SyncProcessDrivingScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(
             widget, 'reject',
-            fail_side_effect='se_reject_attempt', fail_with=ValueError('reject broke'),
+            expect_raises=ValueError, fail_side_effect='se_reject_attempt', fail_with=ValueError('reject broke'),
         )
         # Failure writes failed_state; the failure hooks ran; the success
         # side-effect did NOT complete.
@@ -211,7 +211,7 @@ class SyncProcessDrivingScenario(StateTraceMixin, ProcessScenario):
         widget = self.create_instance(status='draft')
         self.transition(
             widget, 'poke_fail',
-            fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
+            expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
         )
         self.assert_state(widget, 'poked_failed')
         self.assert_failure_callbacks_ran(['fcb_on_poke_fail'])

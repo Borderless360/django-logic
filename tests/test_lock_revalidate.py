@@ -11,6 +11,7 @@ front, so a foreign holder refuses it before any side-effect runs.
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 
+from django_logic import Process
 from django_logic.background import BackgroundTransition, sync_execution
 from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import TransitionNotAllowed
@@ -28,6 +29,13 @@ def record_side_effect(instance, **kwargs):
 
 def raise_boom(instance, **kwargs):
     raise ValueError('boom')
+
+
+class ApprovalProcess(Process):
+    transitions = [
+        BackgroundTransition('approve', sources=['draft'], target='approved',
+                             side_effects=[record_side_effect]),
+    ]
 
 
 class TransitionLockRevalidationTests(TestCase):
@@ -67,13 +75,10 @@ class TransitionLockRevalidationTests(TestCase):
         # before it saves the TransitionMessage row.
         Invoice.objects.filter(pk=self.invoice.pk).update(status='void')
 
-        transition = BackgroundTransition(
-            'approve', sources=['draft'], target='approved',
-            side_effects=[record_side_effect],
-        )
+        process = ApprovalProcess(instance=self.invoice, field_name='status')
         with sync_execution():
             with self.assertRaises(TransitionNotAllowed) as cm:
-                transition.change_state(self.state)
+                process.approve()
 
         self.assertIn('persisted state', str(cm.exception))
         # No uncompleted row may survive the refusal.

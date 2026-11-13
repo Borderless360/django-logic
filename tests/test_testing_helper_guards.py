@@ -25,7 +25,7 @@ from tests.background.models import (
     Conversation,
     MixedSyncBgProcess,
     Widget,
-    WidgetAmbiguousNextProcess,
+    WidgetAmbiguousCallbackProcess,
     WidgetBgChainProcess,
     WidgetProcess,
     WidgetSyncProcess,
@@ -105,6 +105,40 @@ class ExpectRaisesMismatchTests(ProcessScenario):
         message = str(ctx.exception)
         self.assertIn('ValueError', message)
         self.assertIn('KeyError', message)
+
+
+class InjectedFailureExpectationTests(ProcessScenario):
+    process_class = WidgetProcess
+    model = Widget
+    state_field = 'status'
+
+    def test_missing_expectation_is_rejected_before_a_transition_runs(self):
+        for method, action in ((self.transition, 'cancel'),
+                               (self.background_transition, 'fulfil')):
+            for injection in ({'fail_side_effect': 'bg_ok'},
+                              {'fail_with': ValueError('boom')},
+                              {'fail_side_effect': 'bg_ok', 'expect_raises': None}):
+                with self.subTest(action=action, injection=injection):
+                    widget = self.create_instance(status='draft')
+                    with self.assertRaisesMessage(ValueError, 'require expect_raises='):
+                        method(widget, action, **injection)
+                    self.assert_state(widget, 'draft')
+                    self.assertFalse(TransitionMessage.objects.exists())
+                    self.assertEqual(widget.se_log, '')
+
+    def test_missing_retry_expectation_does_not_run_another_attempt(self):
+        widget = self.create_instance(status='draft')
+        self.background_transition(
+            widget, 'fulfil', fail_side_effect='bg_ok',
+            fail_with=ValueError('first attempt failed'), expect_raises=ValueError)
+        row = TransitionMessage.objects.get()
+        attempts = row.start_attempt_count
+        with self.assertRaisesMessage(ValueError, 'require expect_raises='):
+            self.retry_transition(widget, fail_side_effect='bg_ok')
+        row.refresh_from_db()
+        self.assertEqual(row.start_attempt_count, attempts)
+        self.assertEqual(row.errors_count, 1)
+        self.assert_state(widget, 'fulfilling')
 
 
 class SnapshotRestoreGuardTests(ProcessScenario):
@@ -225,15 +259,15 @@ class InjectionNeverFiredTests(ProcessScenario):
 
 class DerivedProcessNameSyncTests(ProcessScenario):
     """No ``process_name`` here on purpose: it must derive from
-    ``process_class.process_name`` ('ambig_next'). Every other scenario in the
+    ``process_class.process_name`` ('ambig_callback'). Every other scenario in the
     suite declares one, so the derivation was unpinned."""
 
-    process_class = WidgetAmbiguousNextProcess
+    process_class = WidgetAmbiguousCallbackProcess
     model = Widget
     state_field = 'status'
 
     def test_derived_accessor_drives_the_right_machine(self):
-        self.assertEqual(self._process_name, 'ambig_next')
+        self.assertEqual(self._process_name, 'ambig_callback')
         widget = self.create_instance(status='draft')
         self.transition(widget, 'start')
         self.assert_state(widget, 'started')
@@ -253,7 +287,7 @@ class DerivedProcessNameBackgroundTests(ProcessScenario):
         self.assertEqual(self._process_name, 'bg_chain')
         widget = self.create_instance(status='draft')
         self.background_transition(
-            widget, 'bg_fulfil', fail_side_effect='se_bg_fulfil_se',
+            widget, 'bg_fulfil', expect_raises=ValueError, fail_side_effect='se_bg_fulfil_se',
             fail_with=ValueError('courier down'))
         self.assert_state(widget, 'chain_fulfilling')
         self.assert_error_recorded(widget, 'courier down')

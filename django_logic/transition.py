@@ -8,14 +8,14 @@ the caller's call frame — validate, lock, run, write the target state.
 ``target=None`` declares a transition that writes no state on success.
 It runs under the same contract as every other transition: it takes the
 state lock, it is refused while a background transition is uncompleted
-(``TransitionTemporarilyUnavailable``), and it runs ``next_transition``.
+(``TransitionTemporarilyUnavailable``), and it runs callbacks after success.
 
 ``lock=False`` declares a transition that also takes no state lock. It
 is for a side effect whose unit of work is not the bound row — a store
 posting one parcel's tracking, where the row is the store and the work
 is the parcel. Several may run at once on one instance, and one runs
 while a background transition on that instance is uncompleted. It keeps
-conditions, permissions, side effects, callbacks, failure callbacks and ``next_transition``.
+conditions, permissions, side effects, callbacks and failure callbacks.
 It may not declare a ``target`` or a ``failed_state``: a state write must
 serialise on that state. It is refused on ``BackgroundTransition``, whose
 enqueue writes a row and a busy state under that lock.
@@ -37,7 +37,6 @@ from django.db import DEFAULT_DB_ALIAS, transaction
 from django_logic.commands import (
     Callbacks,
     Conditions,
-    NextTransition,
     Permissions,
     SideEffects,
     reload_after_rollback,
@@ -68,7 +67,7 @@ _ENGINE_PARAM_KWARGS = frozenset({'state', 'exception'})
 _DECLARATION_KWARGS = frozenset({
     'conditions', 'permissions', 'side_effects', 'callbacks',
     'failure_callbacks', 'failed_state', 'in_progress_state',
-    'next_transition', 'refusal_messages',
+    'refusal_messages',
 })
 
 
@@ -103,12 +102,12 @@ class Transition:
          source AND no background transition is in flight on this
          process (uncompleted ``TransitionMessage``)
       3. run side-effects
-      4. on success: set ``target``, release the cache lock, run callbacks and ``next_transition``
+      4. on success: set ``target``, release the cache lock, run callbacks
       5. on failure: set ``failed_state`` (so failure hooks observe the
          contained state), release the cache lock, run ``failure_callbacks`` (and re-raise)
 
     ``in_progress_state`` belongs to background submissions and is saved with their job.
-    On PostgreSQL, a locked synchronous call keeps database changes inside a transaction through its callbacks and ``next_transition``.
+    On PostgreSQL, a locked synchronous call keeps database changes inside a transaction through its callbacks.
     An interruption before that transaction commits discards its changes.
     Other databases and ``lock=False`` do not open this transaction; the caller must supply one when needed.
 
@@ -264,7 +263,6 @@ class Transition:
         self.conditions = Conditions(
             kwargs.get('conditions', [])
         )
-        self.next_transition = NextTransition(kwargs.get('next_transition'))
 
     def __str__(self):
         if not self.lock:
@@ -387,7 +385,7 @@ class Transition:
         """Write the target, release the cache lock, then run callbacks.
 
         Releasing the cache lock lets a callback call another transition on this instance.
-        A locked PostgreSQL call still holds its database lock and transaction through callbacks and ``next_transition``.
+        A locked PostgreSQL call still holds its database lock and transaction through callbacks.
         Other connections see the prior state until the outermost transaction commits.
         A process interruption during callbacks can discard the state write too.
         Background jobs use separate success hooks after their execution block.
@@ -425,7 +423,6 @@ class Transition:
             self._release_lock(state, **kwargs)
 
         self.callbacks.execute(state, **kwargs)
-        self.next_transition.execute(state, **kwargs)
 
     def fail_transition(self, state: State, exception: Exception, **kwargs):
         # try/finally: a failed failed_state write must still release the

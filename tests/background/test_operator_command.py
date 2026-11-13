@@ -156,7 +156,7 @@ class ListUncompletedTests(TestCase):
 class SendOneRowTests(TestCase):
     def _row(self, **updates):
         widget = Widget.objects.create(status='fulfilling')
-        row = open_transition_message(widget, 'process', 'fulfil')
+        row = open_transition_message(widget, 'process', 'fulfil', queue_name='django_logic')
         if updates:
             TransitionMessage.objects.filter(pk=row.pk).update(**updates)
             row.refresh_from_db()

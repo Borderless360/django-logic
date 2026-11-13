@@ -30,7 +30,7 @@ Default atomic execution:
 
 2. After the atomic block (best-effort):
 
-   * success callbacks + ``next_transition`` (success path), or
+   * success callbacks (success path), or
    * failure callbacks (terminal-failure path).
 
 ``atomic=False`` declarations use :mod:`django_logic.background.non_atomic`
@@ -748,16 +748,6 @@ def _run_success_hooks(outcome: _Outcome) -> None:
             f'(best-effort, swallowed): {e}',
             exc_info=True,
         )
-    try:
-        outcome.transition.next_transition.execute(
-            outcome.state_obj, **(outcome.kwargs or {})
-        )
-    except Exception as e:
-        transition_logger.error(
-            f'{(outcome.kwargs or {}).get("tr_id")} next_transition failed '
-            f'(best-effort, swallowed): {e}',
-            exc_info=True,
-        )
 
 
 class _RestoreError(Exception):
@@ -802,13 +792,15 @@ def _restore(transition_message: TransitionMessage):
     # The key columns name the concrete model; recorded_model_label names
     # the class that recorded the row. Restore that class, so proxy
     # methods and overrides stay visible to side-effects and callbacks.
-    # Rows written before proxy_model_label existed record that class in
-    # model_name, so the same read restores them unchanged.
     recorded_model = transition_message.recorded_model_label
     try:
         model = apps.get_model(recorded_model)
     except LookupError as exc:
         raise _RestoreError(f'model {recorded_model} not installed') from exc
+
+    concrete = model._meta.concrete_model._meta
+    if (transition_message.app_label, transition_message.model_name) != (concrete.app_label, concrete.model_name):
+        raise _RestoreError('The saved model key must name the concrete model.')
 
     try:
         # _base_manager, not objects. A filtered default manager, such as one
@@ -823,49 +815,16 @@ def _restore(transition_message: TransitionMessage):
             f'{transition_message.app_label}.{transition_message.model_name}#{transition_message.instance_id} not found'
         ) from exc
 
-    recorded_path = (transition_message.kwargs or {}).get('process_class')
+    recorded_path = (transition_message.kwargs.get('process_class')
+                     if isinstance(transition_message.kwargs, dict) else None)
     try:
-        process = getattr(instance, transition_message.process_name)
-    except AttributeError:
-        # Fall back to process_class stored in kwargs, if any.
-        if not recorded_path:
-            raise _RestoreError(
-                f'instance has no process named {transition_message.process_name!r} and '
-                f'no process_class stored on the message'
-            )
-        process = None
-    else:
-        # Check that the attribute resolved to the class enqueue recorded.
-        # Every Process defaults to process_name='process', so two processes
-        # can share the name and the worker would restore the wrong class and
-        # run side-effects the caller never asked for. The recorded class wins.
-        if recorded_path:
-            resolved_path = f'{type(process).__module__}.{type(process).__name__}'
-            if resolved_path != recorded_path:
-                transition_logger.warning(
-                    f'TransitionMessage#{transition_message.pk}: process_name '
-                    f'{transition_message.process_name!r} resolved to {resolved_path}, but '
-                    f'the message was enqueued by {recorded_path}; using '
-                    f'the recorded class.'
-                )
-                process = None
-    if process is None:
-        try:
-            process = _load_process_from_path(instance, recorded_path, transition_message)
-        except Exception as exc:
-            # A missing recorded process completes the job without side effects or state changes.
-            # Other restoration errors count toward the normal retry limit.
-            raise _RestoreError(
-                f'recorded process_class {recorded_path!r} could not be '
-                f'loaded: {exc}'
-            ) from exc
+        process = _load_process_from_path(instance, recorded_path, transition_message)
+    except Exception as exc:
+        raise _RestoreError(
+            f'recorded process_class {recorded_path!r} could not be loaded: {exc}'
+        ) from exc
 
     transition = _find_transition(process, transition_message)
-    if transition is None:
-        raise _RestoreError(
-            f'transition {transition_message.transition_name!r} not found on process '
-            f'{type(process).__module__}.{type(process).__name__}'
-        )
     if transition_message.effect_name:
         try:
             transition = transition.get_background_effect(transition_message.effect_name).as_transition()
@@ -875,77 +834,36 @@ def _restore(transition_message: TransitionMessage):
 
 
 def _load_process_from_path(instance, dotted: str, transition_message: TransitionMessage):
+    from django_logic.process import Process
+
+    if not isinstance(dotted, str) or not dotted or not transition_message.field_name:
+        raise ValueError('A saved job requires process_class and field_name.')
     module_path, class_name = dotted.rsplit('.', 1)
-    module = importlib.import_module(module_path)
-    process_class = getattr(module, class_name)
+    process_class = getattr(importlib.import_module(module_path), class_name)
+    if not isinstance(process_class, type) or not issubclass(process_class, Process):
+        raise ValueError('process_class must name a Process class.')
+    if f'{process_class.__module__}.{process_class.__name__}' != dotted:
+        raise ValueError('process_class must name the declared class, not an alias.')
+    if process_class.process_name != transition_message.process_name:
+        raise ValueError('The recorded process_name does not match process_class.')
+    instance._meta.get_field(transition_message.field_name)
     return process_class(field_name=transition_message.field_name, instance=instance)
 
 
 def _find_transition(process, transition_message: TransitionMessage):
-    """Resolve the exact background transition a ``TransitionMessage`` names.
-
-    One walk over the ``nested_processes`` tree (``_iter_process_tree``
-    supplies the cycle guard — A nesting B nesting A is legal). A
-    transition is a candidate when its ``action_name`` matches and it is
-    a background one. Only background transitions: the worker never
-    restores a synchronous transition. This lookup does not check sources;
-    the runner checks the persisted state separately before running side effects.
-
-    Enqueue records the process class that declared the transition on
-    ``transition_message.owning_process_class``. A candidate declared on
-    that class wins at once — that is how an ``action_name`` shared by
-    nested processes resolves to the one enqueue chose. The owner is
-    blank only for rows enqueued before the column existed, or for the
-    rare row created outside the Process entrypoint.
-
-    When the owner is blank or did not match (the class was renamed or
-    removed, or no longer declares the transition), the name decides —
-    but only when it matches exactly one background transition in the
-    whole tree. For an ambiguous name we refuse to guess and raise
-    ``_RestoreError``: running a random sibling could run the wrong
-    integration's side-effects or strand the instance. The row is
-    finalized, retries stop, and no side-effects run.
-    """
+    """Resolve the recorded declaring class and background action exactly."""
     action_name = (transition_message.parent_transition_name if transition_message.effect_name
                    else transition_message.transition_name)
-    owning_path = (transition_message.owning_process_class or '').strip()
-    seen, matches = set(), []
+    owning_path = transition_message.owning_process_class
+    if not owning_path:
+        raise _RestoreError('A saved job requires owning_process_class; refusing to guess.')
     for process_cls in _iter_process_tree(type(process)):
-        proc_path = f'{process_cls.__module__}.{process_cls.__name__}'
+        if f'{process_cls.__module__}.{process_cls.__name__}' != owning_path:
+            continue
         for transition in process_cls.transitions:
-            if (
-                transition.action_name == action_name
-                and transition.is_background
-            ):
-                if proc_path == owning_path:
-                    return transition
-                if id(transition) not in seen:
-                    # By identity: a Process class reached through two
-                    # nested paths shares its class-level transition
-                    # objects, and a shared object is one match, not two.
-                    seen.add(id(transition))
-                    matches.append(transition)
-    if transition_message.effect_name:
-        raise _RestoreError('The background effect declaring process no longer matches; refusing another process.')
-    if owning_path:
-        transition_logger.warning(
-            f'TransitionMessage#{transition_message.pk}: recorded process class '
-            f'{owning_path!r} does not declare background transition '
-            f'{transition_message.transition_name!r} (class renamed or removed, '
-            f'or the transition moved); attempting name-based fallback.'
-        )
-    if len(matches) == 1:
-        # One match, so the name is enough: the common case for older rows.
-        return matches[0]
-    if len(matches) > 1:
-        raise _RestoreError(
-            f'background transition {transition_message.transition_name!r} matches '
-            f'{len(matches)} transitions across the process tree and the '
-            f'message has no resolvable owning_process_class '
-            f'(recorded={transition_message.owning_process_class!r}); refusing to guess which '
-            f'one to run. The row was enqueued before the owner column '
-            f'existed, or its nested process class was renamed or removed '
-            f'while the row was pending. Let pending rows complete before you '
-            f'move a background action_name onto shared nested processes.'
-        )
-    return None  # zero matches -> generic not-found _RestoreError in _restore
+            if transition.action_name == action_name and transition.is_background:
+                return transition
+    raise _RestoreError(
+        f'recorded owning_process_class {owning_path!r} does not declare '
+        f'background transition {action_name!r} in the recorded process tree; refusing to guess.'
+    )

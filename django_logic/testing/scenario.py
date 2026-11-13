@@ -111,10 +111,9 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
           the caller (the SideEffects re-raise contract). Works for both an
           injected failure and a hook that genuinely raises.
         * ``False`` — assert NO exception propagated even though a failure
-          occurred (the Callbacks / NextTransition
-          swallow contract).
-        * ``None`` (default) — legacy: an injected failure is absorbed
-          silently; any other exception fails the test loudly.
+          occurred (the callback contract).
+        * ``None`` (default) — assert that no exception reached the caller.
+          Injected failures require an explicit exception type or ``False``.
         """
         return self._drive(instance, action, background=False,
                            fail_side_effect=fail_side_effect, fail_with=fail_with,
@@ -126,9 +125,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
         ``fail_side_effect`` / ``fail_with`` make the named side-effect raise,
         exercising the real failure path. ``expect_raises`` pins the
-        caller-boundary contract exactly as for :meth:`transition`; by default
-        the injected exception is absorbed so you can assert on the recorded
-        error."""
+        caller-boundary contract exactly as for :meth:`transition`; an injected
+        failure requires an explicit exception type or ``False``."""
         return self._drive(instance, action, background=True,
                            fail_side_effect=fail_side_effect, fail_with=fail_with,
                            expect_raises=expect_raises, kwargs=kwargs)
@@ -137,6 +135,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                          expect_raises=None):
         """Re-run the instance's uncompleted transition inline — what a
         worker's next claim would do."""
+        self._require_failure_expectation(fail_side_effect, fail_with, expect_raises)
         transition_message = uncompleted_message(instance, process_name=self._process_name)
         if transition_message is None:
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
@@ -150,7 +149,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                        f'{self.process_class.__name__}.', instance=instance)
         before = self._state(instance)
         # Track the WHOLE process tree, not just the retried action — the
-        # retry can run follow-up transitions (next_transition, callbacks)
+        # retry can run follow-up transitions from callbacks
         # whose hooks the assertions must see.
         with track(all_transitions(self.process_class),
                    fail_side_effect=fail_side_effect,
@@ -164,6 +163,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
 
     def _drive(self, instance, action, *, background, fail_side_effect, fail_with,
                expect_raises, kwargs):
+        self._require_failure_expectation(fail_side_effect, fail_with, expect_raises)
         declared = transitions_for(self.process_class, action)
         if not declared:
             self._record(f'{"background_" if background else ""}transition({action!r})',
@@ -190,9 +190,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                 instance=instance)
         before = self._state(instance)
         # Track the WHOLE process tree, not just the named action — one drive
-        # can also execute next_transition follow-ups and callback-triggered
-        # transitions, and their hooks must be visible to the side-effect
-        # assertions.
+        # can also execute transitions through callbacks. The assertions
+        # must include their hooks.
         with track(all_transitions(self.process_class),
                    fail_side_effect=fail_side_effect,
                    fail_with=fail_with) as tracker:
@@ -208,11 +207,21 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         return instance
 
     @staticmethod
+    def _require_failure_expectation(fail_side_effect, fail_with, expect_raises):
+        if ((fail_side_effect is not None or fail_with is not None)
+                and expect_raises is None):
+            raise ValueError(
+                'Injected failures require expect_raises=<exception type> when '
+                'the caller should receive the error, or expect_raises=False '
+                'when the transition should contain it.'
+            )
+
+    @staticmethod
     def _call(fn):
         try:
             fn()
             return None
-        # Broad on purpose: re-raised below unless the test injected it.
+        # Broad on purpose: re-raised below unless the test expects it.
         except Exception as exc:
             return exc
 
@@ -228,7 +237,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         if tracker.failed_side_effect:
             detail += f'; failed={tracker.failed_side_effect}'
         # The re-raise/swallow contract: side-effects re-raise to the
-        # caller; callbacks and next_transition swallow. assert_raised /
+        # caller; callbacks swallow. assert_raised /
         # assert_not_raised own the predicates; only the timeline record
         # is local, because it carries the drive label.
         if expect_raises is not None and expect_raises is not False:
@@ -245,11 +254,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                              f'{type(raised).__name__} propagated (expected swallow)')
             self.assert_not_raised()
         else:
-            # Legacy default: an injected exception is expected (absorbed
-            # silently); anything else is a real, unexpected failure and fails
-            # the test loudly. Prefer expect_raises= in new failure tests so
-            # the caller-boundary contract is pinned explicitly.
-            if raised is not None and raised is not tracker.injected_exception:
+            if raised is not None:
                 self._record(label, 'FAILED', f'{type(raised).__name__}: {raised}')
                 self._fail(f'{label} raised unexpectedly: '
                            f'{type(raised).__name__}: {raised}', instance=instance)

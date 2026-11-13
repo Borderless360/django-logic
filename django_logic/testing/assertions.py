@@ -286,7 +286,7 @@ class ScenarioAssertions:
 
     def assert_not_raised(self):
         """Assert the last drive did NOT propagate an exception to the caller
-        — the swallow contract (Callbacks / NextTransition). A regression
+        — the swallow contract (callbacks). A regression
         that starts re-raising a best-effort
         failure makes this assertion fail."""
         raised = self._last_raised

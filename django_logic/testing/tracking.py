@@ -80,7 +80,7 @@ def track(transitions, *, fail_side_effect=None, fail_with=None):
     ``transitions`` is the list of class-level ``Transition`` objects to
     instrument — the scenario passes every transition reachable from the
     process class (a single drive can execute more than the named
-    action via ``next_transition`` and callback-triggered transitions, and
+    action through callbacks, and
     those hooks must be visible to the assertions too). Yields an
     :class:`ExecutionTracker`. Injection only targets ``side_effects`` hooks.
 

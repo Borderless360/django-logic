@@ -62,10 +62,10 @@ class SerializeKwargsTests(SimpleTestCase):
         original = {'payload': {'__dl_type__': 'not-ours', 'value': 1}}
         self.assertEqual(decode_value(_roundtrip(dict(original))), original)
 
-    def test_legacy_untagged_rows_pass_through(self):
-        # A row written before the typed encoding: plain strings stay strings.
-        legacy = {'when': '2024-01-02T03:04:05+00:00', 'some_id': 'abc', 'n': 1}
-        self.assertEqual(decode_value(dict(legacy)), legacy)
+    def test_plain_json_strings_remain_strings(self):
+        # Ordinary JSON strings do not acquire a Python date or UUID type.
+        payload = {'when': '2024-01-02T03:04:05+00:00', 'some_id': 'abc', 'n': 1}
+        self.assertEqual(decode_value(dict(payload)), payload)
 
     def test_unknown_tag_passes_through_with_a_warning(self):
         row = {'v': {'__dl_type__': 'from_the_future', 'value': 'x'}}

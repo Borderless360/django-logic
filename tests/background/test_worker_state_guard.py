@@ -36,10 +36,11 @@ def _make_transition_message(widget, transition_name='fulfil',
         model_name='widget',
         instance_id=str(widget.pk),
         process_name='process',
+        owning_process_class='tests.background.models.WidgetProcess',
         transition_name=transition_name,
         queue_name=queue_name,
         field_name='status',
-        kwargs={},
+        kwargs={'process_class': 'tests.background.models.WidgetProcess', },
         errors_count=errors,
     )
 

@@ -7,7 +7,7 @@ from django_logic.exceptions import (
     TransitionTemporarilyUnavailable,
 )
 from django_logic.testing import open_transition_message
-from tests.background.models import Widget
+from tests.background.models import Conversation, Widget
 from tests import dl_settings
 
 
@@ -47,3 +47,37 @@ class OpenTransitionMessageTests(TestCase):
             TransitionMessage.retry_status(widget, 'process'),
             TransitionMessage.STRANDED,
         )
+
+    def test_the_row_records_current_identity_and_runs_on_retry(self):
+        from django_logic.background.runner import run_background_transition
+
+        widget = Widget.objects.create(status='fulfilling')
+        row = open_transition_message(widget, 'process', 'fulfil')
+        self.assertEqual(row.field_name, 'status')
+        self.assertEqual(row.owning_process_class, 'tests.background.models.WidgetProcess')
+        self.assertEqual(row.kwargs['process_class'], 'tests.background.models.WidgetProcess')
+        run_background_transition(row.pk)
+        widget.refresh_from_db()
+        row.refresh_from_db()
+        self.assertEqual(widget.status, 'fulfilled')
+        self.assertTrue(row.is_completed)
+
+    def test_a_wrong_state_field_is_rejected_before_saving(self):
+        widget = Widget.objects.create(status='fulfilling')
+        with self.assertRaisesMessage(ValueError, 'field_name must match'):
+            open_transition_message(widget, 'process', 'fulfil', field_name='audit_status')
+        self.assertFalse(TransitionMessage.objects.exists())
+
+    def test_unknown_or_synchronous_transition_is_rejected_before_saving(self):
+        widget = Widget.objects.create(status='draft')
+        for action in ('missing', 'cancel'):
+            with self.subTest(action=action):
+                with self.assertRaisesMessage(ValueError, 'exactly one declared background'):
+                    open_transition_message(widget, 'process', action)
+        self.assertFalse(TransitionMessage.objects.exists())
+
+    def test_ambiguous_nested_owner_is_not_guessed(self):
+        conversation = Conversation.objects.create(status='open', source_integration='gmail')
+        with self.assertRaisesMessage(ValueError, 'exactly one declared background'):
+            open_transition_message(conversation, 'chain_conv', 'send')
+        self.assertFalse(TransitionMessage.objects.exists())

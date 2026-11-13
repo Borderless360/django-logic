@@ -41,7 +41,7 @@ class ProcessScopedMessageScenario(ProcessScenario):
         status stays at 'fulfilling'."""
         self.background_transition(
             widget, 'fulfil',
-            fail_side_effect='bg_ok', fail_with=ValueError(message))
+            expect_raises=ValueError, fail_side_effect='bg_ok', fail_with=ValueError(message))
 
     @staticmethod
     def _fail_audit(widget, message='audit down'):
@@ -164,7 +164,7 @@ class ProcessScopedMessageScenario(ProcessScenario):
         self._fail_fulfil(widget)
         # Fail the retry too, so the 'process' row reaches errors_count=2.
         self.retry_transition(
-            widget, fail_side_effect='bg_ok', fail_with=ValueError('fulfil down'))
+            widget, expect_raises=ValueError, fail_side_effect='bg_ok', fail_with=ValueError('fulfil down'))
         self._fail_audit(widget)  # newest row, errors_count=1
 
         self.assert_error_count(widget, 2)  # its own row, not the newer one
