@@ -242,6 +242,11 @@ It also applies when periodic maintenance completes an exhausted job and when `a
 The adapter must restore the previous ambient context when its block exits, including after an error.
 Jobs without saved context call `restore(None)`; the adapter must clear attribution instead of inheriting the worker's ambient user.
 
+If context setup fails, the worker records the error and applies the normal retry allowance.
+After that allowance, the job completes as failed with `[unrestorable]`.
+Business functions and callbacks do not run when context setup fails.
+Context cleanup cannot suppress a business error or cause committed work to run again.
+
 ```python
 from contextlib import contextmanager
 from contextvars import ContextVar

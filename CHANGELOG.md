@@ -1,5 +1,46 @@
 # Changelog
 
+## [5.1.0] — 2026-11-16
+
+### Added
+
+- Preserve application audit context with the project-level `JOB_CONTEXT` adapter.
+  Capture trusted context when accepting a job and restore it for attempts, retries and completion hooks.
+  The context has its own nullable field; business declarations and arguments do not carry it.
+- Add `ProcessScenario.assert_deferred()` to check a saved wait. A premature `retry_transition()` now fails instead of reporting an unexecuted attempt as successful.
+
+### Changed
+
+- Declare synchronous transition options explicitly and keep background-only validation in `BackgroundTransition`.
+  Unknown options raise `TypeError`. Every process binding requires the installed `django_logic` app.
+- Keep business arguments named `action_name` instead of silently dropping them.
+  Both synchronous and background hooks receive the actual declaring process class.
+- Organize current documentation into declarations, jobs, transactions, refusals, workers and upgrades.
+  Preserve release notes before version 4 in a separate historical archive.
+- Require PostgreSQL and Redis tests on every supported Django version before publishing.
+  Validate a dated changelog entry before uploading package files.
+
+### Fixed
+
+- A state object without its own lock token cannot release another object's cache lock.
+- Reject reserved action arguments before waiting for a lock, and refuse unknown or malformed saved type tags.
+- Preserve trace identifiers through background success and failure callbacks.
+- Complete unrestorable jobs through one failure path that clears current waiting metadata.
+- Complete jobs as failed after repeated application-context setup errors, without running work under incorrect attribution.
+  Context cleanup cannot suppress required-work errors or retry already committed success.
+- Log unexpected job-process exceptions before exit so the recorded crash can be investigated.
+- Export `AlreadyInProgress` from `django_logic.background` and reject conflicting `dl_transitions --send` and `--queues` options.
+
+### Upgrade
+
+- Apply migration 0019. It adds nullable application context and removes six database defaults used by older producers; model defaults remain.
+- Use Django 5.2 or later. Tested versions are 5.2, 6.0 and 6.1.
+  PostgreSQL workers require psycopg 3.2 or later, or Django's supported psycopg2 driver.
+  The `postgres` extra installs psycopg 3; install `redis` when using Django's Redis cache.
+- Adapters must clear missing context with `restore(None)` and restore ambient context when their scope exits.
+- Concurrent production state guarantees require PostgreSQL. SQLite remains suitable for single-process business tests.
+- See [upgrading and rollback](docs/upgrading.md) and the [API reference](docs/reference.md).
+
 ## [5.0.0] — 2026-11-13
 
 ### Removed

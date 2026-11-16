@@ -231,8 +231,9 @@ The same report is available as
 `queue_worker_presence(queue_name)` returns `True` for recent presence, `False`
 for no retained observation, or `None` when the cache cannot answer.
 
-`--send <pk>` clears the retry wait on one row and wakes the workers, so the
-next claim takes it. The command runs no side-effects itself.
+`--send <pk>` clears the retry wait on one job and wakes its workers.
+The job can then run when a worker has capacity. The command runs no business functions itself.
+It cannot override a saved deferral or be combined with `--queues`.
 
 ### Periodic maintenance
 

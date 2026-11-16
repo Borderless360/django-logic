@@ -13,7 +13,7 @@ Business rules belong in application functions. Worker configuration belongs in 
 | `from django_logic.background import Defer, PermanentFailure` | Wait until a specified time, or report a failure that retrying cannot fix. |
 | `from django_logic.background import sync_execution` | Run background work inline within one block. |
 | `from django_logic.background import in_flight, transition_statistics, queue_worker_presence` | Read job and worker observations. |
-| `from django_logic.background.exceptions import AlreadyInProgress` | Handle a refused duplicate submission. |
+| `from django_logic.background import AlreadyInProgress` | Handle a refused duplicate submission. |
 | `from django_logic.exceptions import TransitionNotAllowed, TransitionTemporarilyUnavailable, RefusalReason` | Handle unavailable actions. |
 | `from django_logic.commands import StrictPermissions, NoUserPermissions, refusal_message` | Require a person, require automation, or explain a failed business check. |
 | `from django_logic.testing import ProcessScenario` | Test a business process inline. |
@@ -164,7 +164,7 @@ Run `python manage.py check --tag django_logic` after configuring the applicatio
 
 | Error marker | Meaning |
 | --- | --- |
-| `[unrestorable]` | The saved model, process or action cannot be restored. Check deployed code and recorded identity. |
+| `[unrestorable]` | The saved model, process, action or application context cannot be restored. Check the recorded error and deployed configuration. |
 | `[superseded]` | The record's state changed, so the saved action no longer applies. |
 | `[timeout]` | The job exceeded its declared attempt timeout. |
 | `[crashed]` | The job process stopped before it recorded a result. Inspect the worker log for its exit or signal. |
