@@ -70,7 +70,17 @@ Its notifications and shipping requests run as separately saved background jobs.
 ## State protection
 
 On PostgreSQL, lock-taking transitions acquire the physical business-row lock.
-They wait at most two seconds for another transaction that holds the row.
+The engine uses `FOR NO KEY UPDATE`. Other transactions cannot update or delete the protected row until the transaction ends.
+Related records can complete foreign-key checks without waiting for that row's state transition.
+This avoids an unnecessary conflict when one transaction holds a related record and another needs to change it.
+See PostgreSQL's [row-lock rules](https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
+
+Protecting one row does not freeze the set of related records.
+Applications must coordinate collection changes when business rules require a fixed set.
+Explicit application locks still apply; a stronger `FOR UPDATE` lock on the same row can retain the reference-check conflict.
+Application writes that change referenced keys still acquire PostgreSQL's required stronger lock.
+
+Transitions wait at most two seconds for another transaction that holds the row.
 A holder that outlasts the wait causes `TransitionTemporarilyUnavailable` before application work starts, and the engine logs a warning that names the record.
 A background job that meets this refusal records an error and retries after the normal pause. It does not wait quietly.
 The database retains the lock through the actual outer commit or rollback.

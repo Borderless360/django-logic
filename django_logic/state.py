@@ -80,7 +80,7 @@ class State:
 
     @contextmanager
     def protected(self):
-        """Keep PostgreSQL state protection until the caller's transaction commits."""
+        """Prevent concurrent changes while allowing references from related rows."""
         using = self.instance._state.db or DEFAULT_DB_ALIAS
         if connections[using].vendor != 'postgresql':
             yield
@@ -92,7 +92,7 @@ class State:
                 with transaction.atomic(using=using):
                     row = self.instance._meta.get_field(self.field_name).model._base_manager.using(using)
                     if ROW_LOCK_WAIT_SECONDS <= 0:
-                        row.select_for_update(nowait=True).get(pk=self.instance.pk)
+                        row.select_for_update(nowait=True, no_key=True).get(pk=self.instance.pk)
                     else:
                         with connections[using].cursor() as cursor:
                             # The wait applies to this savepoint only. A refused
@@ -102,7 +102,7 @@ class State:
                             previous = cursor.fetchone()[0]
                             cursor.execute("SELECT set_config('lock_timeout', %s, true)",
                                            [f'{int(ROW_LOCK_WAIT_SECONDS * 1000)}ms'])
-                        row.select_for_update().get(pk=self.instance.pk)
+                        row.select_for_update(no_key=True).get(pk=self.instance.pk)
                         with connections[using].cursor() as cursor:
                             cursor.execute("SELECT set_config('lock_timeout', %s, true)", [previous])
             except OperationalError as error:

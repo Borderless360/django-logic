@@ -1,5 +1,20 @@
 # Changelog
 
+## [5.1.2] — 2026-11-16
+
+### Fixed
+
+- Allow related records to complete foreign-key checks while a PostgreSQL transition protects the referenced row.
+  Use `FOR NO KEY UPDATE` for state protection. Concurrent updates, deletion and key changes still wait until the transaction ends.
+  This removes an unnecessary lock conflict reproduced during concurrent shipment completion and courier manifest preparation.
+
+### Upgrade
+
+- No new migration or declaration change is needed.
+- Review explicit application locks on the same records. Stronger application locks can retain the original conflict.
+  Protecting a state row does not freeze its related records; applications must coordinate changes to collections used by business rules.
+  See [locks and transactions](docs/transactions.md).
+
 ## [5.1.1] — 2026-11-16
 
 ### Fixed

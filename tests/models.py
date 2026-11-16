@@ -23,6 +23,10 @@ class InvoiceProxy(Invoice):
         proxy = True
 
 
+class InvoiceLine(models.Model):
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE)
+
+
 class MtiParent(models.Model):
     """Multi-table-inheritance parent. Exists so the binding collision check
     can be tested against a real MTI child, which is the shape that check
