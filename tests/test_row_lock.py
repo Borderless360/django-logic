@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Timer
 from unittest.mock import patch
 
-from django.db import IntegrityError, connection, connections, transaction
+from django.db import IntegrityError, OperationalError, connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process, ProcessManager, Transition
@@ -15,7 +15,7 @@ from django_logic.background.runner import finalize_stuck_attempt, run_backgroun
 from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
 from tests import dl_settings
 from tests.background.models import Widget
-from tests.models import Invoice
+from tests.models import Invoice, InvoiceLine
 from tests.stability.base import requires_postgres
 
 
@@ -105,6 +105,59 @@ class RowLockTests(TransactionTestCase):
             with connection.cursor() as cursor:
                 cursor.execute("SELECT current_setting('lock_timeout')")
                 self.assertEqual(cursor.fetchone()[0], '7s')
+
+    def test_related_insert_commits_before_the_transition_transaction(self):
+        def add_line():
+            try:
+                with transaction.atomic():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET LOCAL lock_timeout = '200ms'")
+                    return InvoiceLine.objects.create(invoice_id=self.invoice.pk).pk
+            finally:
+                connections.close_all()
+
+        for wait_seconds in (0, 2):
+            with self.subTest(wait_seconds=wait_seconds), \
+                    patch('django_logic.state.ROW_LOCK_WAIT_SECONDS', wait_seconds):
+                self.invoice = Invoice.objects.create(status='draft')
+                with transaction.atomic():
+                    self.invoice.row_lock_proc.approve()
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        line_id = executor.submit(add_line).result(timeout=5)
+                    self.assertTrue(InvoiceLine.objects.filter(pk=line_id, invoice=self.invoice).exists())
+                self.invoice.refresh_from_db()
+                self.assertEqual(self.invoice.status, 'approved')
+
+    def test_state_protection_still_blocks_updates_deletion_and_key_changes(self):
+        from django_logic.state import State
+
+        table = connection.ops.quote_name(Invoice._meta.db_table)
+
+        def change_row(statement):
+            try:
+                with transaction.atomic(), connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '200ms'")
+                    cursor.execute(statement, [self.invoice.pk])
+            finally:
+                connections.close_all()
+
+        statements = (
+            f"UPDATE {table} SET status = 'changed' WHERE id = %s",
+            f"DELETE FROM {table} WHERE id = %s",
+            f"UPDATE {table} SET id = id + 100000 WHERE id = %s",
+        )
+        for wait_seconds in (0, 2):
+            for statement in statements:
+                with self.subTest(wait_seconds=wait_seconds, statement=statement), \
+                        patch('django_logic.state.ROW_LOCK_WAIT_SECONDS', wait_seconds):
+                    with State(self.invoice, 'status').protected():
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            with self.assertRaises(OperationalError) as caught:
+                                executor.submit(change_row, statement).result(timeout=5)
+                        cause = caught.exception.__cause__
+                        self.assertEqual(getattr(cause, 'sqlstate', None) or getattr(cause, 'pgcode', None), '55P03')
+                    self.invoice.refresh_from_db()
+                    self.assertEqual(self.invoice.status, 'draft')
 
 
 class BackgroundRowLockProcess(Process):

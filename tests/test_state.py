@@ -35,4 +35,10 @@ class StateTestCase(TestCase):
         self.state.instance.refresh_from_db()
         self.assertEqual(self.state.instance.status, 'void')
 
+    def test_protected_state_write_uses_the_configured_database(self):
+        with self.state.protected():
+            self.state.set_state('void')
+        self.state.instance.refresh_from_db()
+        self.assertEqual(self.state.instance.status, 'void')
+
 

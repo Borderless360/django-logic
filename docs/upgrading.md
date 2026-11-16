@@ -1,5 +1,13 @@
 # Upgrading and rollback
 
+## From 5.1.1 to 5.1.2
+
+Version 5.1.2 changes PostgreSQL state protection to allow foreign-key checks from related records.
+It still prevents concurrent updates and deletion of the protected row. No new migration or declaration change is needed.
+Review explicit application locks and any business rules that depend on a fixed related-record collection.
+See [state protection](transactions.md#state-protection).
+Stop producers and workers before replacing their application version, then restart and verify retained jobs.
+
 ## From 5.1.0 to 5.1.1
 
 Version 5.1.1 fixes application-context error handling and removes the unused `TransitionMessage.operation_name` alias.
