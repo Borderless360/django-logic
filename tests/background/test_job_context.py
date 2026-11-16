@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import timedelta
+import os
+import unittest
 
 from django.core.cache import cache
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -9,6 +11,7 @@ from django.utils import timezone
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition, Defer, PermanentFailure
+from django_logic.background.pull import run_once
 from django_logic.background.context import JobContextError
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import finalize_stuck_attempt, run_background_transition
@@ -48,6 +51,16 @@ class BrokenExit(JobContext):
         with super().restore(value):
             yield
         raise ValueError('Application context cleanup failed')
+
+
+class AlwaysBrokenExit(JobContext):
+    @contextmanager
+    def restore(self, value):
+        with super().restore(value):
+            try:
+                yield
+            finally:
+                raise RuntimeError('Application context cleanup failed')
 
 
 class SuppressingRestore(JobContext):
@@ -273,14 +286,32 @@ class JobContextTests(TestCase):
         self.assertFalse(job.is_completed)
 
     @override_settings(DJANGO_LOGIC=dl_settings(
+        BACKGROUND_EXECUTION='sync', JOB_CONTEXT=f'{__name__}.AlwaysBrokenExit',
+        TRANSITION_MESSAGE_MAX_ERRORS=3,
+    ))
+    def test_cleanup_failure_preserves_the_original_inline_work_error(self):
+        widget = Widget.objects.create()
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
+            with self.assertRaisesMessage(ValueError, 'The test dependency failed'):
+                widget.context_process.work(fail=True)
+        self.assertTrue(any('JOB_CONTEXT cleanup failed' in line for line in logs.output))
+        job = TransitionMessage.objects.get(instance_id=str(widget.pk))
+        self.assertEqual(job.errors_count, 1)
+        self.assertIn('The test dependency failed', job.last_error_message)
+        self.assertNotIn('cleanup failed', job.last_error_message)
+        self.assertFalse(job.is_completed)
+        self.assertIsNone(current_origin.get())
+
+    @override_settings(DJANGO_LOGIC=dl_settings(
         BACKGROUND_EXECUTION='pull', JOB_CONTEXT=f'{__name__}.BrokenExit',
     ))
     def test_adapter_exit_failure_does_not_retry_completed_work(self):
         current_origin.set({'source': 'connector'})
         widget, job = self.submit()
         current_origin.set(None)
-        with self.assertRaisesMessage(ValueError, 'Application context cleanup failed'):
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
             run_background_transition(job.pk)
+        self.assertTrue(any('JOB_CONTEXT cleanup failed' in line for line in logs.output))
         job.refresh_from_db()
         widget.refresh_from_db()
         self.assertTrue(job.is_completed)
@@ -330,3 +361,39 @@ class NonAtomicJobContextTests(TransactionTestCase):
                 self.assertEqual([kind for kind, _, _ in observations], expected)
                 self.assertTrue(all(context == {'source': 'connector'} for _, context, _ in observations))
                 self.assertEqual(current_origin.get(), {'source': 'other-request'})
+
+
+@requires_postgres
+@unittest.skipUnless(hasattr(os, 'fork'), 'needs real job processes')
+@override_settings(DJANGO_LOGIC=dl_settings(
+    BACKGROUND_EXECUTION='pull', JOB_CONTEXT=f'{__name__}.AlwaysBrokenExit',
+    TRANSITION_MESSAGE_MAX_ERRORS=3, TRANSITION_MESSAGE_RETRY_MINUTES=0,
+))
+class WorkerContextCleanupTests(TransactionTestCase):
+    def setUp(self):
+        cache.clear()
+        for process in (ContextProcess, ContextNonAtomicProcess, ContextAudit):
+            ProcessManager.bind_model_process(Widget, process, state_field='status')
+            self.addCleanup(unbind_model_process, Widget, process)
+
+    def test_cleanup_failure_does_not_spend_a_second_error_in_atomic_job_process(self):
+        self._check_failure_count('context_process')
+
+    def test_cleanup_failure_does_not_spend_a_second_error_in_non_atomic_job_process(self):
+        self._check_failure_count('context_non_atomic')
+
+    def _check_failure_count(self, process_name):
+        widget = Widget.objects.create()
+        getattr(widget, process_name).work(fail=True)
+        job = TransitionMessage.objects.get(instance_id=str(widget.pk), process_name=process_name)
+        for attempt in range(1, 4):
+            self.assertTrue(run_once([job.queue_name], isolate=True))
+            job.refresh_from_db()
+            self.assertEqual(job.errors_count, attempt)
+            self.assertEqual(job.start_attempt_count, attempt)
+            self.assertEqual(job.is_completed, attempt == 3)
+            self.assertIn('The test dependency failed', job.last_error_message)
+            self.assertNotIn('cleanup failed', job.last_error_message)
+        self.assertTrue(job.ended_in_failure)
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'failed')
