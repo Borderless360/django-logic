@@ -28,6 +28,12 @@ RETIRED_WORDS = {
     r'owning process\b': 'the process that declares the transition',
     r'finishing flight': 'an attempt that is still running',
     r'\bTM-scoped\b': 'scoped to the TransitionMessage row',
+    r'\bsafety[ -]nets?\b': 'maintenance',
+    r'\battempt process(?:es)?\b': 'job process',
+    r'\bstuck finalizer\b': 'maintenance',
+    r'\bcleanup sweep\b': 'completed-job cleanup',
+    r'\bsync mode\b': 'inline execution',
+    r'\bowning (?:class|job)\b': 'the declaring class or the job that performs the work',
 }
 
 #: Text that must keep a retired word. Each entry is (path suffix, substring).

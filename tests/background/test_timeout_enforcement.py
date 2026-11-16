@@ -124,6 +124,16 @@ class HarvestTests(TransactionTestCase):
         self.assertIn('[crashed]', self.recorded()[0])
         self.assertIn('exit code 3', self.recorded()[0])
 
+    def test_a_signal_killed_job_records_the_signal_name(self):
+        attempt_pid = os.fork()
+        if attempt_pid == 0:
+            os.kill(os.getpid(), signal.SIGKILL)
+        attempts = self._attempt(attempt_pid)
+        _harvest(attempts, self.pending, block=True)
+        self.assertEqual(len(self.recorded()), 1)
+        self.assertIn('[crashed]', self.recorded()[0])
+        self.assertIn('signal 9 (SIGKILL)', self.recorded()[0])
+
     def test_a_process_that_ended_before_the_kill_is_charged_nothing(self):
         """``os.kill`` succeeds on a process that has exited and is
         waiting to be reaped, so the kill alone must not decide the

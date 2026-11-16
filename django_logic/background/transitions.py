@@ -1,6 +1,6 @@
 """BackgroundTransition — durable, queue-routed background work.
 
-``change_state`` enqueues the work (same steps in Pull and Sync mode):
+``change_state`` enqueues the work (same steps in Pull and inline execution):
 
 * validate conditions + permissions,
 * acquire the state lock for the critical section and revalidate the
@@ -12,7 +12,7 @@
 * release the lock — from here on the uncompleted ``TransitionMessage``
   row is what gates concurrent transitions,
 * hand off: notify the pull workers after commit (Pull mode), or execute
-  the worker path inline (Sync mode).
+  the worker path inline (inline execution).
 
 The worker path lives in :mod:`django_logic.background.runner` and is
 shared between both modes.
@@ -132,7 +132,9 @@ class BackgroundTransition(Transition):
         **kwargs,
     ):
         if not kwargs.get('lock', True):
-            raise ImproperlyConfigured('BackgroundTransition requires its state lock; remove lock=False.')
+            raise ImproperlyConfigured(
+                f"BackgroundTransition '{action_name}': requires its state lock; remove lock=False."
+            )
         if queue is not None and (not queue or not isinstance(queue, str)):
             raise ImproperlyConfigured(
                 f"BackgroundTransition '{action_name}': queue must be a "
@@ -161,9 +163,9 @@ class BackgroundTransition(Transition):
                 f"BackgroundTransition '{action_name}': atomic must be True or False."
             )
         if fairness_key is not None and not isinstance(fairness_key, str) and not callable(fairness_key):
-            raise ImproperlyConfigured('fairness_key must be a string or callable.')
+            raise ImproperlyConfigured(f"BackgroundTransition '{action_name}': fairness_key must be a string or callable.")
         if submission_context is not None and not callable(submission_context):
-            raise ImproperlyConfigured('submission_context must be callable.')
+            raise ImproperlyConfigured(f"BackgroundTransition '{action_name}': submission_context must be callable.")
         self.submission_context = submission_context
         self.fairness_key = fairness_key
         self.atomic = atomic
@@ -176,9 +178,14 @@ class BackgroundTransition(Transition):
 
         self.in_progress_state = in_progress_state
         if in_progress_state and self.target is None:
-            raise ImproperlyConfigured('in_progress_state requires a target so completed work leaves the busy state.')
+            raise ImproperlyConfigured(
+                f"BackgroundTransition '{action_name}': in_progress_state requires a target "
+                "so completed work leaves the busy state."
+            )
         if in_progress_state and self.failed_state == in_progress_state:
-            raise ImproperlyConfigured('failed_state and in_progress_state must be different states.')
+            raise ImproperlyConfigured(
+                f"BackgroundTransition '{action_name}': failed_state and in_progress_state must be different states."
+            )
         if in_progress_state and in_progress_state not in self.sources:
             self.sources.append(in_progress_state)
 

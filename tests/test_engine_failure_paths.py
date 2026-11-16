@@ -10,6 +10,7 @@ from datetime import timedelta
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
+from django.db.models.signals import pre_save
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -51,6 +52,41 @@ def _noop(instance, **kwargs):
 
 def _boom(instance, **kwargs):
     raise ValueError('boom')
+
+
+class NoBusyFailureProcess(Process):
+    process_name = 'no_busy_failure'
+    transitions = [BackgroundTransition(
+        'go', sources=['draft'], target='done', failed_state='failed', side_effects=[_boom],
+    )]
+
+
+@override_settings(DJANGO_LOGIC={**_SYNC, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
+class NoBusyFailureMessageTests(_BindCleanup, TestCase):
+    _bound = (NoBusyFailureProcess,)
+
+    def test_rejected_failure_state_reports_the_unchanged_business_state(self):
+        ProcessManager.bind_model_process(Invoice, NoBusyFailureProcess, state_field='status')
+        cache.clear()
+        invoice = Invoice.objects.create(status='draft')
+
+        def refuse_failed_state(sender, instance, **kwargs):
+            if instance.status == 'failed':
+                raise ValueError('Failure state was refused')
+
+        pre_save.connect(refuse_failed_state, sender=Invoice)
+        self.addCleanup(pre_save.disconnect, refuse_failed_state, sender=Invoice)
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
+            with self.assertRaisesMessage(ValueError, 'boom'):
+                invoice.no_busy_failure.go()
+        job = TransitionMessage.objects.get(instance_id=str(invoice.pk))
+        invoice.refresh_from_db()
+        self.assertTrue(job.is_completed)
+        self.assertTrue(job.ended_in_failure)
+        self.assertEqual(job.errors_count, 1)
+        self.assertEqual(invoice.status, 'draft')
+        self.assertTrue(any('business state is unchanged' in line for line in logs.output))
+        self.assertFalse(any('stays in None' in line for line in logs.output))
 
 
 # --- The safety-net finalizers respect a manual state fix ------------------

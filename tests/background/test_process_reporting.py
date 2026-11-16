@@ -276,6 +276,16 @@ class ProcessReportingTests(TransactionTestCase):
         self.assertTrue(any(row['text'] == 'job report' for row in self._reports()))
 
     @override_settings(DJANGO_LOGIC=_finish_settings())
+    def test_maintenance_exception_identifies_maintenance_in_its_traceback_log(self):
+        _, attempt = self._start(body=_raise_after_report)
+        self._wait()
+        self.assertEqual(attempt.exit_code, 1)
+        messages = [row['text'] for row in self._reports()]
+        self.assertTrue(any('Maintenance process failed' in message for message in messages))
+        self.assertFalse(any('job None' in message for message in messages))
+        self.record.assert_not_called()
+
+    @override_settings(DJANGO_LOGIC=_finish_settings())
     def test_hard_job_exit_does_not_claim_report_delivery(self):
         _, attempt = self._start(pk=1, body=lambda *args: os._exit(17))
         self._wait()

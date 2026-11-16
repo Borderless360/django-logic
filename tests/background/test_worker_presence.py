@@ -184,7 +184,7 @@ class WorkerPresenceProcessTests(TransactionTestCase):
                 patch.object(safety_nets, 'detect_stuck_transitions', side_effect=lambda: os._exit(17)), \
                 self.assertLogs('django-logic', level='WARNING') as captured:
             pull.run_worker(['presence.failed'], forever=False)
-        self.assertTrue(any('safety nets stopped with exit code 17' in text for text in captured.output))
+        self.assertTrue(any('maintenance stopped with exit code 17' in text for text in captured.output))
         self.assertTrue(queue_worker_presence('presence.failed'))
         deadline = time.monotonic() + 2
         while queue_worker_presence('presence.failed') and time.monotonic() < deadline:

@@ -4,6 +4,8 @@ from contextvars import ContextVar
 from datetime import timedelta
 import os
 import unittest
+from unittest.mock import patch
+from uuid import uuid4
 
 from django.core.cache import cache
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -23,6 +25,7 @@ from tests.stability.base import requires_postgres
 
 current_origin = ContextVar('test_job_origin', default=None)
 observations = []
+exit_errors = []
 
 
 class JobContext:
@@ -43,6 +46,19 @@ class BrokenRestore(JobContext):
     def restore(self, value):
         raise ValueError('Saved context cannot be restored')
         yield
+
+
+class RecordingExit(JobContext):
+    def restore(self, value):
+        self.value = value
+        return self
+
+    def __enter__(self):
+        self.token = current_origin.set(self.value)
+
+    def __exit__(self, error_type, error, traceback):
+        exit_errors.append((error_type, error, traceback))
+        current_origin.reset(self.token)
 
 
 class BrokenExit(JobContext):
@@ -122,6 +138,7 @@ class JobContextTests(TestCase):
     def setUp(self):
         cache.clear()
         observations.clear()
+        exit_errors.clear()
         self.token = current_origin.set(None)
         self.addCleanup(current_origin.reset, self.token)
         for process in (ContextProcess, ContextAudit):
@@ -209,13 +226,54 @@ class JobContextTests(TestCase):
         self.assertIsNone(current_origin.get())
 
     def test_unserializable_capture_rolls_back_submission(self):
-        current_origin.set(object())
+        current_origin.set({'request_id': uuid4()})
         widget = Widget.objects.create()
-        with self.assertRaises(TypeError):
+        with self.assertRaisesMessage(TypeError, 'JOB_CONTEXT capture() must return JSON-compatible data:'):
             widget.context_process.work()
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'draft')
         self.assertFalse(TransitionMessage.objects.exists())
+
+    def test_adapter_capture_error_keeps_its_type_and_identifies_the_setting(self):
+        error = LookupError('Request facts are unavailable')
+        widget = Widget.objects.create()
+        with patch.object(JobContext, 'capture', side_effect=error):
+            with self.assertRaises(LookupError) as raised:
+                widget.context_process.work()
+        self.assertIs(raised.exception, error)
+        self.assertTrue(any('JOB_CONTEXT capture()' in note for note in error.__notes__))
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'draft')
+        self.assertFalse(TransitionMessage.objects.exists())
+
+    @override_settings(DJANGO_LOGIC=dl_settings(
+        BACKGROUND_EXECUTION='sync', JOB_CONTEXT=f'{__name__}.RecordingExit',
+    ))
+    def test_inline_success_does_not_pass_the_callers_handled_error_to_cleanup(self):
+        widget = Widget.objects.create()
+        try:
+            raise KeyError('Unrelated caller error')
+        except KeyError:
+            widget.context_process.work()
+        self.assertEqual(exit_errors, [(None, None, None)])
+        widget.refresh_from_db()
+        self.assertEqual(widget.status, 'done')
+
+    @override_settings(DJANGO_LOGIC=dl_settings(
+        BACKGROUND_EXECUTION='sync', JOB_CONTEXT=f'{__name__}.RecordingExit',
+    ))
+    def test_inline_failure_passes_only_the_work_error_to_cleanup(self):
+        widget = Widget.objects.create()
+        try:
+            raise KeyError('Unrelated caller error')
+        except KeyError:
+            with self.assertRaisesMessage(ValueError, 'The test dependency failed') as raised:
+                widget.context_process.work(fail=True)
+        self.assertEqual(len(exit_errors), 1)
+        error_type, error, traceback = exit_errors[0]
+        self.assertIs(error_type, ValueError)
+        self.assertIs(error, raised.exception)
+        self.assertIsNotNone(traceback)
 
     @override_settings(DJANGO_LOGIC=dl_settings(
         BACKGROUND_EXECUTION='pull', JOB_CONTEXT=f'{__name__}.BrokenRestore',
@@ -248,6 +306,7 @@ class JobContextTests(TestCase):
         TransitionMessage.objects.filter(pk=job.pk).update(
             errors_count=2, eligible_at=timezone.now() + timedelta(minutes=10),
             deferral_reason='Waiting for a dependency',
+            last_error_message='ConnectionError: the provider refused the request',
         )
         self.assertTrue(finalize_stuck_attempt(job.pk))
         job.refresh_from_db()
@@ -256,6 +315,8 @@ class JobContextTests(TestCase):
         self.assertEqual(job.errors_count, 2)
         self.assertIsNone(job.eligible_at)
         self.assertEqual(job.deferral_reason, '')
+        self.assertIn('[unrestorable] JOB_CONTEXT', job.last_error_message)
+        self.assertIn('Earlier error: ConnectionError: the provider refused the request', job.last_error_message)
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'busy')
         self.assertEqual(observations, [])

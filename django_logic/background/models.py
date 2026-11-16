@@ -76,7 +76,7 @@ class TransitionMessage(TimeStampedModel):
     # True when the row completed as a failure — retries exhausted, a
     # permanent failure, a restore that could not run, an unrestorable row.
     # False for a success and for a superseded row (the external state
-    # change won; the instance is not parked). The cleanup sweep keeps the
+    # change won; the instance is not parked). The completed-job cleanup keeps the
     # newest failure row per instance and process, and this flag is what
     # tells it apart: ``errors_count`` cannot, because a permanent failure
     # completes at one error and a retried success can carry several.
@@ -122,7 +122,7 @@ class TransitionMessage(TimeStampedModel):
     queue_name = models.CharField(max_length=100)
 
     # Per-attempt budget configured on ``BackgroundTransition(timeout=N)``.
-    # Null = unbounded. The worker reads it and kills an attempt process
+    # Null = unbounded. The worker reads it and stops a job process
     # that runs past it.
     timeout_seconds = models.PositiveIntegerField(blank=True, null=True)
 
@@ -171,13 +171,9 @@ class TransitionMessage(TimeStampedModel):
         return (
             f'TransitionMessage#{self.pk} '
             f'{self.recorded_model_label}#{self.instance_id} '
-            f'{self.operation_name} '
+            f'{self.transition_name} '
             f'on {self.queue_name}'
         )
-
-    @property
-    def operation_name(self):
-        return self.transition_name
 
     @classmethod
     def instance_key(cls, instance, process_name: str) -> dict:
@@ -225,7 +221,7 @@ class TransitionMessage(TimeStampedModel):
         keeps a lock. On SQLite the clause is dropped, so the answer is
         always False there — pull mode refuses SQLite (the
         ``django_logic.pull_mode_needs_postgresql`` check, run by migrate, runserver and the
-        worker), and in sync mode the attempt runs in the caller's own
+        worker), and in inline execution the attempt runs in the caller's own
         thread.
         """
         try:
@@ -247,7 +243,7 @@ class TransitionMessage(TimeStampedModel):
     def retry_status(cls, instance, process_name: str):
         """``None`` (no uncompleted row), ``RETRYING``, or ``STRANDED``.
 
-        One classification shared by the sync gate, enqueue's constraint
+        One classification shared by the unfinished-job check, enqueue's constraint
         rejection, and ``in_flight()``, so they can never disagree about
         the same row.
 
@@ -310,7 +306,7 @@ class TransitionMessage(TimeStampedModel):
         * **Pull mode** — the worker is the top-level unit of work with
           no surrounding transaction, so this UPDATE autocommits and is
           visible to other connections immediately.
-        * **Sync mode inside a caller's ``atomic()``** — part of the
+        * **Inline execution inside a caller's ``atomic()``** — part of the
           caller's transaction, invisible until the caller commits.
           Harmless: the INSERT that created the row is in that same
           transaction, so the row and this stamp become visible (or roll
@@ -358,14 +354,14 @@ class TransitionMessage(TimeStampedModel):
         """Mark the row completed and (optionally) record ``duration_ms``.
 
         ``measure_duration`` must be ``False`` when the row is finalized by
-        the stuck finalizer rather than by an actual worker attempt. In that case ``started_at`` belongs to an abandoned
+        maintenance rather than a worker attempt. Here ``started_at`` belongs to an abandoned
         attempt that may be minutes or hours old, so ``now - started_at`` is
         the time-to-finalize, not an execution time — recording it as
         ``duration_ms`` would grossly inflate latency metrics. Leaving
         ``duration_ms`` null signals "no measured execution".
 
         ``ended_in_failure`` is True on every terminal-failure path, so the
-        cleanup sweep can keep the newest failure row per instance.
+        completed-job cleanup can keep the newest failure row per instance.
         """
         now = timezone.now()
         self.is_completed = True
@@ -405,8 +401,8 @@ class TransitionMessage(TimeStampedModel):
         self.last_error_dt = timezone.now()
         # Increment on the DB side (F expression) rather than a
         # read-modify-write on a possibly-stale in-memory errors_count, so
-        # two writers racing on the same row — e.g. the stuck finalizer
-        # and a reconnected zombie worker that lost its row lock — cannot
+        # two writers racing on the same row — e.g. maintenance
+        # and a reconnected worker that lost its row lock — cannot
         # lose an increment. .update() bypasses auto_now, so set ``modified`` here.
         type(self).objects.using(self._state.db).filter(pk=self.pk).update(
             errors_count=models.F('errors_count') + 1,

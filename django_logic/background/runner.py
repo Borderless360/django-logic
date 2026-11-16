@@ -4,7 +4,7 @@
 a durable background transition. It runs the same way in:
 
 * the pull worker loop (:mod:`django_logic.background.pull`), and
-* sync mode, directly after enqueue in the same process.
+* inline execution, directly after enqueue in the same process.
 
 Default atomic execution:
 
@@ -37,7 +37,7 @@ Default atomic execution:
 to preserve provider receipts without an enclosing model transaction.
 
 Side-effect exceptions re-raise out of ``run_background_transition``
-only in **sync mode**, so inline callers and tests can ``assertRaises``
+only in **inline execution**, so inline callers and tests can ``assertRaises``
 directly. In **Pull mode** the runner swallows them once it has
 recorded the outcome on the row (``errors_count`` + ``last_error``, or
 ``failed_state`` + completion). The claim's retry wait owns retries;
@@ -85,17 +85,12 @@ def run_background_transition(transition_message_id: int) -> None:
     Designed to be call-compatible from both the pull worker loop and an
     inline sync dispatcher.
     """
-    # Committed BEFORE the attempt's atomic block, and deliberately not rolled
-    # back with it (see TransitionMessage.stamp_attempt_started). The stuck
-    # report and the retry classification both read this stamp, and inside
-    # the atomic block it was invisible to them.
+    # Save the start before the attempt's transaction so reports and retry
+    # checks can read it even when the attempt later rolls back.
     if not TransitionMessage.stamp_attempt_started(transition_message_id):
-        # Another attempt holds the row, or the row is completed or gone. Both
-        # are exit-silently cases: the row stays claimable, so a later claim
-        # retries it and skipping loses nothing.
         transition_logger.info(
-            f'TransitionMessage#{transition_message_id}: another attempt holds '
-            f'the row (or it is already completed); skipping this dispatch.'
+            f'TransitionMessage#{transition_message_id}: skipping this dispatch '
+            f'because the job is locked, completed, missing, or waiting until its eligible_at time.'
         )
         return
     with ExitStack() as stack:
@@ -128,7 +123,7 @@ def _run_background_transition(transition_message_id):
         )
 
     if outcome.exception is not None:
-        # Sync mode propagates so the inline caller and tests can react.
+        # Inline execution raises the error so the caller and tests can react.
         # Pull mode must NOT re-raise. The outcome is already recorded on
         # the row and the claim's retry wait owns retries; re-raising out
         # of the worker loop would only add noise.
@@ -177,7 +172,7 @@ def _record_context_failure(transition_message_id, error, *, finalizing=False):
         except (TransitionMessage.DoesNotExist, OperationalError):
             return False
         if finalizing:
-            _complete_restore_failure(job, error)
+            _complete_restore_failure(job, error, earlier_error=job.last_error_message)
             return True
         return _handle_restore_failure(job, error).terminal
 
@@ -225,7 +220,7 @@ def _finalize_stuck_row(
     transition_message: TransitionMessage,
     exception: BaseException,
 ):
-    """The stuck finalizer's terminal path.
+    """Complete a failed job during maintenance.
 
     Must run inside the caller's atomic block, with the row already locked.
     It restores the transition, applies the state guard, and ends in the
@@ -261,7 +256,7 @@ def _finalize_stuck_row(
         )
     state = process.state
 
-    # A safety-net finalization is not a worker attempt. started_at belongs to
+    # A maintenance finalization is not a worker attempt. started_at belongs to
     # the abandoned attempt, so measuring from it would inflate duration_ms.
     return _complete_terminal_failure(
         transition_message, transition, state, kwargs, exception,
@@ -527,10 +522,8 @@ def _superseded_outcome(
 ) -> '_Outcome | None':
     """The state guard: stop if something else moved the instance.
 
-    The worker restores the transition by name and deliberately skips the
-    source-state check. Without this guard it would overwrite any state
-    change made while the row was pending, including a manual fix. Retries
-    span RETRY_MINUTES x MAX_ERRORS, so that clash happens in production.
+    The worker restores the transition by name. Check the saved business
+    state so pending work cannot overwrite a later change or manual correction.
 
     Returns the superseded ``_Outcome``, or ``None`` when the state still
     matches and the attempt should proceed.
@@ -560,20 +553,15 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
     """Run the side-effects, then the target write, in ONE savepoint, so an
     attempt writes everything or nothing. Raises whatever the attempt raised.
 
-    The savepoint does two jobs. A failed attempt rolls back every
-    side-effect write, and a DatabaseError from a side-effect breaks only the
-    savepoint, so record_error and mark_as_completed still work in the outer
-    transaction. Without it, a database error here made record_error itself
-    raise TransactionManagementError: the error was never recorded, the row
-    was sent to the queue forever, and it blocked every later background
-    transition on the instance.
+    A failed attempt rolls back every side-effect write. A DatabaseError
+    breaks only this savepoint, so the outer transaction can still record
+    the error and complete the job when its retries are exhausted.
 
     It runs through _run_in_savepoint on the INSTANCE's alias: set_state
     routes its write to the instance's connection, so a savepoint opened
     on DEFAULT would guard the wrong one.
 
-    require_commit, because the caller records the work as done. A
-    side-effect that raises a database error and swallows it
+    A side effect that raises a database error and swallows it
     (`try: obj.save() except IntegrityError: pass` with no nested atomic)
     makes Django discard the savepoint and nothing propagates. The attempt
     then returns as a success but committed none of its writes, so we count
@@ -587,13 +575,8 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
                 f'{getattr(command, "__name__", repr(command))}'
             )
             command(instance, **kwargs)
-        # The target write belongs INSIDE the attempt savepoint, because it
-        # is part of the attempt. A write the database rejects (a CHECK
-        # constraint, a pre_save receiver, a save() override, a column
-        # length) must roll the attempt back and count like any other
-        # failure. Outside the savepoint the exception escaped the outer
-        # atomic block and took record_error with it: errors_count stayed 0,
-        # so the row was retried forever and no safety net could stop it.
+        # A rejected target write rolls back the required work and counts
+        # toward the retry limit, like a side-effect failure.
         if transition.target is not None:
             state.set_state(transition.target)
             transition_logger.info(
@@ -628,10 +611,12 @@ def _handle_restore_failure(
     return _Outcome(terminal=True, succeeded=False, exception=error)
 
 
-def _complete_restore_failure(transition_message, error):
+def _complete_restore_failure(transition_message, error, *, earlier_error=None):
     note = str(error) or 'restore failed'
     if isinstance(error, (_RestoreError, JobContextError)):
         note = f'{UNRESTORABLE_MARKER} {note}'
+    if earlier_error:
+        note += f'. Earlier error: {earlier_error}'
     transition_message.last_error_message = db_safe_text(note)
     transition_message.last_error_dt = timezone.now()
     transition_message.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
@@ -720,9 +705,8 @@ def _handle_failure(
             transition_message, transition, state, kwargs, error,
             prefix=f'{kwargs.get("tr_id")}',
             consequence=(
-                f'Completing the row anyway so it stops retrying. The instance '
-                f'stays in {transition.in_progress_state!r}; run the transition '
-                f'again from there to move it on.'
+                'Completing the job so it stops retrying. The business state is unchanged; '
+                'correct the failed_state write and call the action again from the current state.'
             ),
             measure_duration=True,
             using=using,

@@ -1,7 +1,7 @@
-"""Client turn order shared by workers serving the same database.
+"""Fairness group turn order shared by workers serving the same database.
 
 The cursor is locked only while selecting a job. It does not limit how
-many jobs a client can run, and is never held while doing business work.
+many jobs a fairness group can run, and is never held while doing business work.
 """
 import time
 
@@ -20,11 +20,11 @@ class FairnessGroup(models.Model):
 
 
 def claim_fair(rows):
-    """Choose work ready earliest for the least recently served client.
+    """Choose work ready earliest for the least recently served fairness group.
 
     Unkeyed jobs share the empty group. New jobs keep submission order.
-    Postponed jobs follow work ready before their new due time.
-    Locked or postponed jobs cannot prevent another client from starting.
+    Deferred jobs follow work ready before their new due time.
+    Locked or deferred jobs cannot prevent another fairness group from starting.
     A bounded scan leaves the worker free to check running job deadlines.
     """
     alias = rows.db
@@ -44,7 +44,7 @@ def claim_fair(rows):
 
 
 def _claim_in_transaction(rows, groups, started):
-    # Workers create client turn records when they first select that client's queued work.
+    # Workers create fairness group turn records when they first select that fairness group's queued work.
     missing = list(rows.exclude(
         fairness_key__in=groups.values('key'),
     ).order_by().values_list('fairness_key', flat=True).distinct()[:128])

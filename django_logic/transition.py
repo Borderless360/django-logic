@@ -105,7 +105,7 @@ class Transition:
     and the final state save succeed or roll back together on the instance's
     database. After rollback, failure handling sees the reloaded instance.
     Failure-state writes and callbacks happen after that rollback. The default
-    ``atomic=False`` retains the existing partial-write failure behavior.
+    ``atomic=False`` allows a failed side effect to leave earlier writes saved.
     """
 
     #: ``True`` on ``BackgroundTransition``. A public, stable attribute
@@ -277,12 +277,8 @@ class Transition:
             f'{state.instance_key}'
         )
 
-        # Revalidate under the lock. The source/condition checks in
-        # the transition was resolved before the lock was acquired;
-        # by now a concurrent transition may have won the race and moved
-        # the state (validate-then-lock TOCTOU). One cheap query closes it.
-        # Any failure here must release the lock or the instance's FSM
-        # freezes until the lock TTL expires.
+        # The state may change between selecting the transition and taking
+        # its lock. Read it again under the lock and release on refusal.
         try:
             self._ensure_db_state_in_sources(state)
             self._ensure_no_background_in_flight(state)

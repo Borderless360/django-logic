@@ -117,7 +117,7 @@ class SafetyNetIsolationTests(TransactionTestCase):
         with self.assertLogs('django-logic', level='WARNING') as logs:
             pull.run_worker(['django_logic.safety_net_test'], forever=False, concurrency=2)
         self._assert_outcomes(timed, failed)
-        self.assertTrue(any('safety nets stopped with exit code 17' in line for line in logs.output))
+        self.assertTrue(any('maintenance stopped with exit code 17' in line for line in logs.output))
 
     def test_hanging_safety_nets_are_stopped_and_reaped(self):
         timed, failed = self._enqueue('hang')
@@ -126,7 +126,7 @@ class SafetyNetIsolationTests(TransactionTestCase):
                 pull.run_worker(['django_logic.safety_net_test'], forever=False, concurrency=2)
         self._assert_outcomes(timed, failed)
         self.assertFalse((self.directory / 'callback_finished').exists())
-        self.assertTrue(any('safety nets exceeded' in line for line in logs.output))
+        self.assertTrue(any('maintenance exceeded' in line for line in logs.output))
 
     def test_full_worker_checks_deadlines_without_overlapping_safety_passes(self):
         class StopWorker(BaseException):

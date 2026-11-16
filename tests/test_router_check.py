@@ -70,7 +70,7 @@ class RouterCheckTests(SimpleTestCase):
         tm_findings = [f for f in findings
                        if 'TransitionMessage' in f.obj]
         self.assertEqual(len(tm_findings), 1)
-        self.assertIn('atomic outbox', tm_findings[0].msg)
+        self.assertIn('business state and saved job must commit together', tm_findings[0].msg)
         self.assertIn("'other'", tm_findings[0].msg)
 
     @override_settings(
@@ -89,7 +89,7 @@ class RouterCheckTests(SimpleTestCase):
         widget_findings = [f for f in findings
                            if f.obj == 'bg_tests.Widget']
         self.assertEqual(len(widget_findings), 1)
-        self.assertIn('atomic outbox', widget_findings[0].msg)
+        self.assertIn('business state and saved job must commit together', widget_findings[0].msg)
         # TransitionMessage itself stayed on 'default' — no finding for it.
         self.assertEqual(
             [f for f in findings if 'TransitionMessage' in f.obj], [])

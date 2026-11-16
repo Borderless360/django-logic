@@ -145,7 +145,7 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
         if transition_message.eligible_at is not None and transition_message.eligible_at > timezone.now():
             self._record('retry_transition', 'FAILED', f'waiting until {transition_message.eligible_at}')
             self._fail('retry_transition(): the job is deferred. Assert the wait with assert_deferred(), '
-                       'then advance its due time before retrying.', instance=instance)
+                       'then advance the test clock past its saved deadline before retrying.', instance=instance)
         if not transitions_for(self.process_class, transition_message.transition_name):
             self._record('retry_transition', 'FAILED',
                          f'no transition named {transition_message.transition_name!r}')
