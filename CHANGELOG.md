@@ -27,7 +27,7 @@
 - Preserve trace identifiers through background success and failure callbacks.
 - Complete unrestorable jobs through one failure path that clears current waiting metadata.
 - Complete jobs as failed after repeated application-context setup errors, without running work under incorrect attribution.
-  Context cleanup cannot suppress required-work errors or retry already committed success.
+  Context cleanup errors are logged separately. They cannot hide required-work errors, count a failure twice or retry committed success.
 - Log unexpected job-process exceptions before exit so the recorded crash can be investigated.
 - Export `AlreadyInProgress` from `django_logic.background` and reject conflicting `dl_transitions --send` and `--queues` options.
 

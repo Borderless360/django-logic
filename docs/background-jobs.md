@@ -246,6 +246,7 @@ If context setup fails, the worker records the error and applies the normal retr
 After that allowance, the job completes as failed with `[unrestorable]`.
 Business functions and callbacks do not run when context setup fails.
 Context cleanup cannot suppress a business error or cause committed work to run again.
+Cleanup errors are logged separately, including during inline execution; they do not consume another job retry.
 
 ```python
 from contextlib import contextmanager
