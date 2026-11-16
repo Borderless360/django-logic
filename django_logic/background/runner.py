@@ -58,7 +58,7 @@ from django.utils import timezone
 
 from django_logic import conf
 from django_logic.background.context import JobContextError, restored_job_context
-from django_logic.background.models import TransitionMessage, db_safe_text
+from django_logic.background.models import TransitionMessage, _TEXT_LIMIT, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
 from django_logic.background.transitions import BackgroundTransition
@@ -615,9 +615,12 @@ def _complete_restore_failure(transition_message, error, *, earlier_error=None):
     note = str(error) or 'restore failed'
     if isinstance(error, (_RestoreError, JobContextError)):
         note = f'{UNRESTORABLE_MARKER} {note}'
+    note = db_safe_text(note)
     if earlier_error:
-        note += f'. Earlier error: {earlier_error}'
-    transition_message.last_error_message = db_safe_text(note)
+        # Keep both causes visible even when either error contains a large response.
+        earlier_note = db_safe_text(f'. Earlier error: {earlier_error}')[:_TEXT_LIMIT // 2]
+        note = note[:_TEXT_LIMIT - len(earlier_note)] + earlier_note
+    transition_message.last_error_message = note
     transition_message.last_error_dt = timezone.now()
     transition_message.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
     transition_message.mark_as_completed(measure_duration=False, ended_in_failure=True)

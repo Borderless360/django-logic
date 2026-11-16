@@ -322,6 +322,28 @@ class JobContextTests(TestCase):
         self.assertEqual(observations, [])
 
     @override_settings(DJANGO_LOGIC=dl_settings(
+        BACKGROUND_EXECUTION='pull', JOB_CONTEXT=f'{__name__}.BrokenRestore',
+        TRANSITION_MESSAGE_MAX_ERRORS=2,
+    ))
+    def test_long_context_failure_keeps_the_earlier_business_error_visible(self):
+        for previous in ('ConnectionError: provider refused', 'ConnectionError: provider refused ' + 'p' * 12000):
+            with self.subTest(previous_length=len(previous)):
+                widget, job = self.submit()
+                TransitionMessage.objects.filter(pk=job.pk).update(errors_count=2, last_error_message=previous)
+                with patch.object(BrokenRestore, 'restore', side_effect=RuntimeError('adapter response ' + '\x00' * 12000)):
+                    self.assertTrue(finalize_stuck_attempt(job.pk))
+                job.refresh_from_db()
+                self.assertIn('[unrestorable] JOB_CONTEXT', job.last_error_message)
+                self.assertIn('adapter response', job.last_error_message)
+                self.assertIn('Earlier error: ConnectionError: provider refused', job.last_error_message)
+                self.assertNotIn('\x00', job.last_error_message)
+                self.assertLessEqual(len(job.last_error_message), 10000)
+                self.assertTrue(job.ended_in_failure)
+                self.assertEqual(job.errors_count, 2)
+                widget.refresh_from_db()
+                self.assertEqual(widget.status, 'busy')
+
+    @override_settings(DJANGO_LOGIC=dl_settings(
         BACKGROUND_EXECUTION='sync', JOB_CONTEXT=f'{__name__}.BrokenRestore',
         TRANSITION_MESSAGE_MAX_ERRORS=2,
     ))
