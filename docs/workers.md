@@ -1,9 +1,7 @@
-# Pull workers
+# Running workers
 
 The database stores each submitted job and its retry history.
 Workers select available jobs directly from that database.
-There is no second copy in a broker to lose or reconcile.
-Release tags and the changelog retain the history of the replaced design.
 
 ## Selecting and retrying jobs
 
@@ -78,17 +76,12 @@ slots absorbs the same peak out of one shared pool. Prefer fewer, larger
 workers with `--concurrency`. Keep separate workers where the queues
 need SLA isolation, not to buy parallelism.
 
-The first production day on 0.16.0 showed the cost of the other shape:
-three one-slot workers on 512 MB, two of them killed by the platform's
-memory quota, an import attempt peaking at 804 MB, and an hourly fan-out
-of 119 rows draining at 2.6 rows a minute across two swapping workers.
-
 **Connections.** Each running attempt normally holds one database connection.
 An `atomic=False` attempt uses two: one locks its job, while the other saves
 model writes independently. Applications may open additional connections. Budget
 `workers × (concurrency + 2)` connections per queue group for atomic jobs.
 For `atomic=False` jobs, budget `workers × (2 × concurrency + 2)`. The two extras
-are the worker's LISTEN connection and its separate safety-net process.
+are the worker's LISTEN connection and its separate maintenance process.
 Add any connections that consumer callbacks open. Keep the total under the
 database plan's cap, or under the pgbouncer pool size. A worker that
 cannot connect logs and retries; a database at its cap refuses the web
@@ -104,7 +97,7 @@ the signal to every process. A program that the job starts inherits this, so
 such a program with `kill()`.
 
 A job that the worker claimed at the moment of the signal does not start. It
-stays ready for another worker. A safety-net pass that still runs gets five
+stays ready for another worker. A maintenance pass that still runs gets five
 seconds. Then the worker stops it, and the next pass of any worker repeats
 its work.
 
@@ -115,22 +108,21 @@ the limit above the longest provider request of the worker's jobs.
 
 ## Knowing a worker stopped
 
-The worker starts one safety-net process once a minute. It stops that
+The worker starts one maintenance process once a minute. It stops that
 process after 60 seconds. This keeps failure callbacks outside the
 supervisor that enforces attempt timeouts. A stopped pass leaves
 uncompleted rows for the next pass. Callbacks for completed rows remain
 best-effort and are not retried.
 
 Completed-message cleanup commits groups of at most 1,000 rows. Earlier
-groups stay deleted if the safety-net process stops during a later group.
+groups stay deleted if the maintenance process stops during a later group.
 Each delete keeps the age filter and newest terminal-failure retention rule.
 An enclosing caller transaction still controls when its batches commit.
 The row limit does not bound database time: a blocked group can still
 reach the process deadline and must be retried on the next pass.
 
-A dead `dl_worker` therefore
-means no stuck finalizer and no cleanup sweep as well as no attempts —
-nothing else reports the backlog. Alert on the process, not on the rows:
+When `dl_worker` stops, jobs, failed-job completion and history cleanup all stop.
+Monitor the worker process directly:
 
 - a process supervisor that restarts the worker and reports the restart
   (on Heroku, dyno-crash alerts);
@@ -188,7 +180,7 @@ idle-transaction timeout must exceed the declared job timeout. Losing that
 connection releases its lock. An external request already running may continue;
 durable pending receipts or provider idempotency keys must prevent duplicate requests.
 The engine checks the connection before starting each subsequent side effect.
-See [provider receipts](../recipes/provider-receipts.md) for the consumer contract.
+See [provider receipts](recipes/provider-receipts.md) for the consumer contract.
 
 ## PostgreSQL connection pooling
 
@@ -202,3 +194,69 @@ A job keeps a transaction open while it holds its row lock. Set the database
 idle-transaction timeout above the declared job timeout. Budget the extra connection
 for `atomic=False` as described above. A session lost during an external request
 cannot stop that request; the application must prevent duplicate external changes.
+
+### See what is not moving
+
+```bash
+python manage.py dl_transitions
+python manage.py dl_transitions --send 1234
+python manage.py dl_transitions --stats --since 7d --queues django_logic --json
+```
+
+`dl_transitions` lists every uncompleted background transition and says why
+each one is not moving: it has spent every attempt, it waits out the retry
+pause, its last attempt has no recorded result, or it waits for worker capacity.
+The report also distinguishes recent worker presence from actual queue progress. `--queues` narrows the list.
+Workers take turns between eligible clients. Within a client, jobs run by when they became ready, then submission time and ID.
+A postponed older job can therefore follow newer work that was ready first.
+
+Workers record their served queues during each maintenance check, even when all
+job slots are full. This recent observation is separate from queue progress.
+A queue with no progress still reports an error when its worker is present.
+The message directs operators to check capacity and blocked jobs.
+
+`--stats` reports retained jobs created during the selected period, grouped by
+queue, model, process and transition. It includes outcomes, errors,
+recorded starts, repeated starts and deferrals. Initial waiting uses the first
+recorded start. Duration covers the last measured attempt, excluding completion
+callbacks. Each timing includes its sample count, median, 90th percentile and
+maximum in milliseconds. Missing history stays unknown. Repeated starts include
+deferrals and competing starts; they are not an exact retry count. The report
+cannot infer total runtime or worker utilization. It changes no job records.
+Use `--json` for machine-readable output. `--queue` also accepts the queue filter.
+
+The same report is available as
+`django_logic.background.transition_statistics(since=cutoff, queues=None, using=None)`.
+`cutoff` is a datetime; the optional database alias selects where to read jobs.
+`queue_worker_presence(queue_name)` returns `True` for recent presence, `False`
+for no retained observation, or `None` when the cache cannot answer.
+
+`--send <pk>` clears the retry wait on one row and wakes the workers, so the
+next claim takes it. The command runs no side-effects itself.
+
+### Periodic maintenance
+
+The worker starts maintenance checks once a minute in one separate process.
+Only one maintenance process runs per worker. Its time limit is 60 seconds.
+Nothing else needs a schedule.
+
+- `detect_stuck_transitions` completes a job that has spent every allowed error.
+  It writes `failed_state` and runs failure callbacks only when the saved state still applies and can be checked under its lock.
+  Otherwise it records why the state change was skipped. It also reports rows that waited past the retry window with no attempt, in one
+  line per queue. If a worker started a row from that queue inside the window,
+  or holds one now, the queue is behind, and the line is a WARNING. If not, no
+  worker has taken a row from the queue for the whole window, and the line is
+  an ERROR. Either no worker serves the queue, or work from other queues fills
+  every slot of the workers that do. Recent worker presence changes the
+  explanation, but does not reduce the severity of missing progress.
+- `cleanup_completed_transitions` deletes completed rows older than
+  `TRANSITION_MESSAGE_CLEANUP_DAYS`. It keeps the newest failed row per
+  instance and process, because that row is the only explanation for an
+  instance parked in its `failed_state`.
+
+Alert when the worker processes stop. Periodic maintenance stops with them.
+Reserve one extra database connection for the maintenance process, plus any
+connections your callbacks open. A slow or exiting callback cannot block
+the supervisor's attempt timeouts. If a pass stops, the next pass checks
+the remaining uncompleted rows. Callbacks for completed rows remain
+best-effort and are not retried.

@@ -20,7 +20,8 @@ Branch pushes do not publish packages.
    ```
 
    [The publish workflow](.github/workflows/publish.yml) checks the tag against
-   the package version, runs tests, builds the package, uploads it through
+   the package version, requires the PostgreSQL/Redis matrix and dated release notes,
+   runs SQLite tests, builds the package, uploads it through
    PyPI trusted publishing, and creates release notes from the changelog.
    Watch the workflow and verify that it succeeds.
 7. Install the published version in a clean virtual environment and import it.

@@ -5,8 +5,8 @@
 > 1. **You test your process, not the background machinery.** Delivery,
 >    retries, durability, crash recovery and queue routing are the library's
 >    job — guaranteed by its own regression suite, a PostgreSQL + Redis
->    stability suite, and a Heroku validation matrix.
->    Your tests run the *business process* **entirely without services**.
+>    stability suite and real-worker tests.
+>    Inline process tests need no worker; database-only transitions and non-atomic jobs still need PostgreSQL.
 > 2. **You test the object's journey, not the wiring.** Assert what the object
 >    *became* as it moved through the process — its state trajectory, the
 >    fields the side-effects changed, and what happens to the caller on failure
@@ -64,9 +64,9 @@ DJANGO_LOGIC = {
 }
 ```
 
-SQLite is fine for process tests (the library refuses SQLite only in pull
-mode, where the claim needs real row locking). No services, no worker
-processes.
+SQLite supports synchronous process tests and default atomic background jobs.
+`DatabaseTransition` and `BackgroundTransition(atomic=False)` require PostgreSQL, including inline tests.
+Inline tests start no worker process. Use PostgreSQL and a shared cache to verify concurrent behavior.
 
 If a specific test file needs sync mode while the global setting is
 `'pull'`, use the context manager instead:
@@ -162,8 +162,7 @@ def test_validation_failure_voids_the_order(self):
 ```
 
 `expect_raises` is what makes this a journey test rather than a mirror:
-without it the harness absorbs the injected exception, so the test would pass
-whether the engine re-raised or silently swallowed. The full contract:
+omitting it with an injected failure raises `ValueError` before the action runs. The full contract:
 `side_effects` re-raise to the caller; `callbacks`
 are swallowed (best-effort).
 
@@ -179,10 +178,11 @@ def test_courier_failure_is_recorded(self):
     self.background_transition(
         order, 'fulfil',
         fail_side_effect='call_courier',
-        fail_with=ConnectionError('Aramex timeout'))
+        fail_with=ConnectionError('Courier timeout'),
+        expect_raises=ConnectionError)
 
     self.assert_state(order, 'fulfilling')        # left in progress
-    self.assert_error_recorded(order, 'Aramex timeout')
+    self.assert_error_recorded(order, 'Courier timeout')
     self.assert_error_count(order, 1)
     self.assert_side_effects_not_ran(['call_courier'])
 ```
@@ -197,11 +197,12 @@ def test_failed_attempt_rolls_back_db_writes(self):
     order = self.create_instance(status='approved')
     self.background_transition(order, 'fulfil',
                                fail_side_effect='call_courier',
-                               fail_with=ConnectionError('boom'))
+                               fail_with=ConnectionError('boom'),
+                               expect_raises=ConnectionError)
     self.assertFalse(StockReservation.objects.filter(order=order).exists())
 ```
 
-### 4. Terminal failure at MAX_ERRORS → failed_state
+### 4. Terminal failure at TRANSITION_MESSAGE_MAX_ERRORS → failed_state
 
 ```python
 @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'sync',
@@ -210,10 +211,12 @@ def test_persistent_failure_reaches_failed_state(self):
     order = self.create_instance(status='approved')
     self.background_transition(order, 'fulfil',
                                fail_side_effect='call_courier',
-                               fail_with=ConnectionError('down'))
+                               fail_with=ConnectionError('down'),
+                          expect_raises=ConnectionError)
     self.retry_transition(order,                     # attempt 2 = terminal
                           fail_side_effect='call_courier',
-                          fail_with=ConnectionError('down'))
+                          fail_with=ConnectionError('down'),
+                          expect_raises=ConnectionError)
     self.assert_state(order, 'fulfilment_failed')
     self.assert_error_count(order, 2)
 ```

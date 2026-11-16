@@ -6,9 +6,7 @@ This file records contribution rules and reliability decisions.
 
 ## Voice — simplified English, everywhere
 
-This library was largely written by AI tools, and much of the prose became a
-private dialect: numbered "phases", "liveness", "retry horizon", ticket ids in
-comments. 0.14.0 removed it. **Do not bring it back.**
+Use ordinary language that describes who acts and what changes.
 
 Write simplified technical English, the way ASD-STE100 defines it:
 
@@ -31,7 +29,7 @@ Write simplified technical English, the way ASD-STE100 defines it:
 
 **Allowed words:** transition, background transition, `TransitionMessage`,
 source state, retry window, stranded (nothing is retrying it), enqueue (save
-the row and send it to the queue), execute (the worker runs the side-effects),
+the job for a worker), execute (the worker runs the side-effects),
 uncompleted, in progress.
 
 **Retired words, and what to write instead:**
@@ -91,23 +89,20 @@ never `getattr(process, action_name)` with the name held in a variable.
 One rule decides every reliability design here: **the cache may lie briefly
 (a lock key expires); the database row never lies (it is written atomically
 with the state change); everything recoverable recovers from a row.**
-Its corollaries, each pinned by a shipped mistake:
+Apply these rules:
 
 - **No durable busy marker without a durable owner.** A busy state written
   to the database with no row that owns its recovery parks the instance
-  forever when a worker is hard-killed. That design shipped once, grew a
-  sweeper whose defects dominated four review passes, and was cut in
-  0.12.0. Do not rebuild it.
+  without recovery when a job process stops. Save a recoverable job with the busy state.
 - **PostgreSQL protects state through the actual transaction commit.**
   State changes take the business-row lock and wait at most two seconds for
   another transaction to commit before they refuse. The shared cache lock also
   prevents overlapping external calls while its timeout remains valid.
-  Saving a background job writes no cache lock on PostgreSQL. A process killed
-  during that save once left the record locked until the lock timeout.
+  Saving a background job writes no cache lock on PostgreSQL.
   Workers separately lock their job row. Finalization takes
   the job lock before the business row. Enqueue must not wait for an unfinished
   job while holding its business row. Allow for a separate connection when
-  provider receipts use `atomic=False`. See `docs/operation-contract.md`.
+  provider receipts use `atomic=False`. See `docs/transactions.md`.
 - **The row names its transition.** Recovery re-runs work from
   `TransitionMessage` rows, never from broker messages, so the row records
   `transition_name` and `owning_process_class`. The row is also the queue:
@@ -117,10 +112,6 @@ Its corollaries, each pinned by a shipped mistake:
 
 ## Release policy (anti-spiral)
 
-Measured on 0.10.0 → 0.13.1: +1,263 net engine lines in 13 days, ~90% of it
-guarding the machinery's own failure modes; 68.9% of inserted lines fixed the
-same release's own fixes. Therefore:
-
 1. **No hardening without a consumer-reproduced failure.** A guard, knob,
    validator or doc lands only for a defect a consumer hit or reproduced —
    never because a review imagined one. Corollary: do not validate,
@@ -129,12 +120,10 @@ same release's own fixes. Therefore:
    from later passes become issues for the next consumer-driven release;
    they are not fixed in place.
 3. **A third fix on the same defect class triggers a design cut, not a
-   fourth fix.** Precedent: 0.12.0 removed the stranded sweep (−582) after
-   four passes kept finding defects there — the cut ended the incident
-   class where hardening had not.
+   fourth fix.** Simplify the design before adding another guard.
 4. **Ship new public options with the consumer change that uses them.**
-   This also applies to columns and settings. The CHANGELOG entry names
-   that consumer and explains what the change fixes.
+   This also applies to columns and settings. The CHANGELOG entry explains
+   the defect and the behavior that fixes it.
 
 ## Working IN this repo
 
@@ -147,7 +136,7 @@ same release's own fixes. Therefore:
   worker), `safety_nets.py`, `models.py` (`TransitionMessage`),
   `serializers.py` (kwargs round-trip). Settings readers live in
   `django_logic/conf.py`.
-- Read `docs/design/PULL_WORKERS.md` and
+- Read `docs/workers.md` and
   `docs/recipes/nested-processes.md` (the fan-out pattern and the
   cascading-failure anti-pattern it replaces) before changing the
   background engine. Release tags retain removed design records.

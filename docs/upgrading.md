@@ -1,0 +1,57 @@
+# Upgrading and rollback
+
+## From 5.0 to 5.1
+
+Migration 0019 adds nullable application job context and removes six database defaults used by older producers.
+Python model defaults remain. Existing jobs keep `job_context=None`; configured adapters must clear attribution for that value.
+Apply the migration with the coordinated application and worker version. No historical jobs are rewritten.
+
+## From 4.3.2 to version 5
+
+Version 5 is a breaking release. Its supported upgrade baseline is 4.3.2.
+Earlier installations must complete their earlier upgrade steps first, using
+the corresponding release documentation. Historical migration files remain so
+Django can recognize applied migrations; they do not provide an older runtime.
+
+Before upgrading:
+
+1. Remove every `next_transition` declaration and `NextTransition` import.
+   Put required work in saved jobs. Use an ordinary callback only when its
+   failure or loss is acceptable; replacing the name alone does not make work durable.
+   Remove `BackgroundEffect` and `background_effects` declarations too.
+   Move required functions into their owning job, or save ordinary business jobs with the result that requests them.
+2. Make injected `ProcessScenario` failures explicit with `expect_raises=ErrorType`
+   or `expect_raises=False`. Omitting it no longer absorbs the injected exception.
+3. Keep root process classes importable and preserve their `process_name`, bound
+   field, owning class and action names while jobs using them remain unfinished.
+   Submit background jobs through a `Process` to record all identity fields.
+   Low-level `change_state` calls must supply the same complete, valid identity. Attribute lookup, renamed-class and action-name fallbacks are removed.
+4. Finish or explicitly resolve unsupported unfinished jobs on 4.3.2, including
+   jobs with `required_next` instructions or incomplete identity. Do not mark work
+   complete merely to pass the migration. When application declarations are removed,
+   finish their jobs before installing that application change.
+   Finish all pending background effects and parents that still promise them using the installed version.
+5. Stop all job producers, scheduled submissions and old workers. Confirm that no
+   old job process remains. Install the new application and run `migrate` before
+   starting any 5.0 process. Preserve any removed metadata that the environment must retain.
+
+Migration 0017 checks unfinished work before removing the physical
+`request_fingerprint` and `required_next` columns. A failed check leaves the
+columns and jobs intact. Resolve the reported work using the previous application,
+then retry. The migration does not call providers, replay jobs or rewrite identities.
+A bounded PostgreSQL lock wait can also stop the migration; retry after the holder
+finishes, with producers still stopped.
+
+Migration 0018 refuses unfinished jobs with background-effect metadata or a nonempty request key.
+It then removes `request_key`, `background_effect_names`, `effect_name`, `parent_transition_name` and `parent_job_id`.
+Compatible ordinary pending jobs remain available and completed job rows remain in history.
+Reversing the migration cannot restore removed metadata. Preserve an archive if the environment requires that history.
+
+Start only 5.0 producers and workers. Verify the installed package, queue coverage
+and completion of retained jobs. Mixing earlier workers or producers with 5.0 is
+unsupported. This release is not a normal rolling upgrade.
+
+Before rollback, stop new submissions and workers and review every unfinished job
+against the previous application's declarations. Reversing 0017 and 0018 recreates empty
+obsolete columns; it cannot restore removed values or reverse application changes.
+Do not start the previous application until its schema and saved jobs are compatible.
