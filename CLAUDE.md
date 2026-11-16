@@ -46,6 +46,10 @@ uncompleted, in progress.
 | `owning process` | the process that declares the transition |
 | `finishing flight` | an attempt that is still running |
 | `TM`, `TM-scoped` | `TransitionMessage`, scoped to the row |
+| `safety nets`, `stuck finalizer`, `cleanup sweep` | maintenance or completed-job cleanup |
+| `attempt process` | job process |
+| `sync mode` | inline execution |
+| `owning class`, `owning job` | the declaring class or the job that performs the work |
 | `tm`, `msg`, `inst` | `transition_message`, `message`, `instance` |
 
 `tests/test_voice.py` checks selected retired phrases in the library and current
@@ -66,7 +70,7 @@ A summary, a pull-request description, a review reply, or a chat message must
 stand on its own. The reader did not watch the work happen.
 
 - Say the thing, not a name for the thing. Write "the two engine cleanups we
-  postponed", never a label from an earlier report.
+  deferred", never a label from an earlier report.
 - Do not coin labels for plans, findings, or work items. No letters, no code
   names, no wave or phase numbers. If a name is unavoidable, define it in the
   same message, every time it appears.
@@ -137,8 +141,7 @@ Apply these rules:
   `serializers.py` (kwargs round-trip). Settings readers live in
   `django_logic/conf.py`.
 - Read `docs/workers.md` and
-  `docs/recipes/nested-processes.md` (the fan-out pattern and the
-  cascading-failure anti-pattern it replaces) before changing the
+  `docs/recipes/related-records.md` (waiting for related records and handling their failures) before changing the
   background engine. Release tags retain removed design records.
 - `CHANGELOG.md` is the record of what shipped and why. Open GitHub issues
   hold what has not. Do not add a TODO.md or planning docs that duplicate

@@ -1,18 +1,22 @@
 # Background jobs
 
-## Fair progress
+A `BackgroundTransition` saves accepted work in the database. Workers run its functions and retry failed attempts.
+The business record shows the accepted, completed or failed state; the job records attempts and waiting.
+See the [declaration reference](reference.md#transition-declarations) for options and defaults.
 
-Declare `fairness_key="group"` or a callable accepting `instance, **kwargs`.
-The callable returns a string, for example `f"client:{instance.client_id}"`.
-The engine saves the key with the job and preserves it across retries.
-Workers take turns between eligible fairness groups using shared database records.
-A single group can use every free worker slot. Existing running work is not interrupted when another group arrives.
-The empty key groups submissions without an application fairness key together. Queues still select which workers may run a job.
-Fair selection does not enforce provider request limits or guarantee equal completion times.
+## Submitting a job
 
-The existing one-unfinished-job rule per object and process remains.
-`AlreadyInProgress` means the new request was **not accepted**.
-Applications that combine refresh requests must persist their own dirty flag or requested version.
+Call the declared action with business inputs and, for a person's request, `user=`:
+
+```python
+order.process.ship(parcel_ids=[10, 11], user=user)
+```
+
+The call validates the request and saves the job with any declared in-progress state.
+Accepted work is not completed work. A worker can start the job after its submission transaction commits.
+Only one unfinished job can exist for a record and process.
+`AlreadyInProgress` means the new request was not accepted.
+Applications that combine refresh requests must save their own requested version or dirty flag.
 
 ## Preparing a submission
 
@@ -76,7 +80,7 @@ raise Defer(
 )
 ```
 
-The worker saves `eligible_at` and `deferral_reason`, then frees its execution slot.
+The worker saves `eligible_at` and `deferral_reason`, then can start another job.
 The supplied deadline must include a timezone. With `USE_TZ=False`, the worker converts it to Django's default timezone for storage.
 It does not increment `errors_count`, write a failed state, or run completion callbacks.
 The next attempt starts from the beginning. With default atomic execution, the attempt's database writes roll back.
@@ -85,57 +89,16 @@ Direct execution and `retry_pending()` also respect `eligible_at`.
 The operator's `--send` command refuses to override a future deferral.
 `retry_status()` treats deferred jobs as waiting through `eligible_at`, with the normal retry window allowed for pickup afterward.
 
-## Measurements retained after completion
-
-Each job retains `first_started_at` and `start_attempt_count`. The worker saves them
-before trying to execute the job, together with the existing `started_at` value.
-They survive an attempt rollback or a job process crash. A job already locked
-at this check, or waiting for a future `eligible_at`, does not increase the count.
-The worker releases this short lock before taking the lock used during execution.
-Two workers can therefore record a start before only one executes the job.
-`start_attempt_count` counts these saved start markers, not executed side effects
-or provider requests. `first_started_at` is the first recorded start attempt,
-which can precede the worker that actually performs the work.
-
-Every recorded `Defer` increases `deferral_count` without increasing
-`errors_count`. The worker also saves `last_deferred_at`,
-`last_deferred_until` and `last_deferral_reason`. These remain after a retry
-or completion, while `eligible_at` and `deferral_reason` still describe only
-the current wait. The two retained times describe the last requested wait,
-not all elapsed waiting. Applications should use a short reason without
-credentials or request payloads.
-
-`first_started_at - created` measures
-the delay until the first recorded start attempt. That delay includes any initial
-application-specified eligibility time. `completed_at - created` includes
-execution, errors, deferrals and time waiting for a worker. `duration_ms`
-still measures only the last attempt and excludes completion callbacks.
-
-Missing historical measurements remain unknown. Cleanup limits the available job history.
-
-`transition_statistics(since=cutoff, queues=None, using=None)` groups retained
-jobs by queue, model, process class and action. Counts describe each
-selected job's recorded history, not events that happened within the window.
-`initial_wait_ms` uses only `first_started_at`; `last_attempt_duration_ms` uses
-only recorded `duration_ms` values. Each contains `samples`, `p50`, `p90` and
-`max`. Percentiles use the nearest rank. Missing measurements are excluded.
-`repeated_starts` includes deferrals and competing recorded starts. It is not an
-exact retry count. These records cannot establish total runtime or utilization.
-`dl_transitions --stats --since 7d --json` exposes the same report without
-changing jobs. Cleanup limits the available history.
-
-Synchronous side-effect errors identify the failing callable, action, model record and exception type.
-Background failure logs identify the action, model record, saved job and exception type; the traceback locates the failure.
-These logs exclude callable arguments and distinguish required work failures from best-effort callback failures.
-
 ## Required follow-up
 
 `callbacks` are best-effort. A crash can lose them.
-Keep required work in a job's side effects, or submit application-owned jobs
-and record their completion in business records.
+Keep functions in one job when they share a completion result.
+For a separate result, save its business record and required job in one database transaction.
+A stopped process then leaves both records committed, or neither.
 
 ### Required work on related records
 
+An order has one or more fulfilments. A manifest groups orders, and billing charges for their confirmed shipping.
 An order can reach `shipping` before all its fulfilments finish shipping.
 A manifest must not treat that state change as permission to finish billing.
 Required shipping work belongs in a durable order job with a separate completion state:
@@ -171,13 +134,7 @@ Retries preserve confirmed child progress and resume only unfinished work.
 The order reaches `completed` only after every required result is verified.
 Default atomic execution suits required database work whose external publication waits for commit.
 
-Inline execution of `atomic=False` work requires autocommit, except in the test runtime.
-There, a job called inside a transaction runs in that transaction and keeps its writes when a later step fails.
-Tests of transactional submission must submit in pull mode, commit, then call `retry_pending()` to execute saved jobs inline.
-Its return value counts calls without raised exceptions, including failed attempts in pull mode.
-Check saved job and business results to establish success.
-Use `TransactionTestCase` for those real commits.
-Do not add an empty production job just to make transactional submission run inside a synchronous test.
+See [tests with real commits](TESTING_GUIDE.md#tests-with-real-commits) for transactional submission and inline execution.
 
 The manifest submits bounded per-order jobs and lets workers process orders independently.
 It reads the saved completion states and required fulfilment results before billing.
@@ -187,45 +144,34 @@ An `atomic=False` manifest job can use short application transactions for each o
 Retries must recognize accepted or completed shipping work instead of submitting it again.
 Billing records completion only after its required charges succeed.
 
-Keep required work in one job's `side_effects` when it shares one unit of completion.
-Related models use their own ordinary background jobs and application-owned completion checks, as above.
-Required publication, notifications and refreshes use ordinary application jobs when they have their own completion result.
 Save computed values needed by later jobs in business records.
 Mutating execution arguments does not change inputs already saved for another job.
 
-## Separate business operations
+### Separate business results
 
-Declare a separate ordinary background transition when work has its own business result.
+Declare a separate background transition when work has its own business result.
 For example, completing an import and delivering an invoice email are named application operations.
 Their functions contain business rules. Their declarations choose queues, timeouts and transaction behavior.
 They use the same saved jobs and worker as every other background transition.
 
-Save a required job with the business result that requests it, inside one database transaction.
-A stopped process then leaves both records committed, or neither.
-Do not submit required work only from an optional callback.
 If a related job must wait for its parent, it checks the saved business result and raises `Defer` while that result remains incomplete.
-Its next attempt runs after its due time; inline test execution does not repeatedly run postponed jobs.
+Its next attempt runs after its due time; inline test execution does not repeatedly run deferred jobs.
 
 A required parent check must also have its own saved job.
 Submit that check with its child jobs before any child completion is needed.
-See [parent and child processes](recipes/nested-processes.md).
+See [work on related records](recipes/related-records.md).
 For work that can share one completion result, keep its functions in the same job.
-For paged work, one job can save progress and postpone its next attempt.
+For paged work, one job can save progress and defer its next attempt.
 See [long imports](recipes/long-jobs.md).
 
-An ordinary job checks its declared source state before each attempt and before completion.
+A job checks its declared source state before each attempt and before completion.
 A later business state can make old work unnecessary.
 Application functions must still verify accepted inputs and confirmed provider results before repeating external changes.
 A queue separates execution priority; it does not change these business rules.
 See [interactive and automatic requests](recipes/interactive-and-automatic.md).
 
-`ProcessScenario` selects ordinary jobs for the bound process.
-Model snapshots contain model fields, not job history.
-Use explicit job fixtures to reproduce pending work.
-
 Finish outstanding jobs before changing their recorded action, process or field.
 The worker uses the exact saved identity and never substitutes a similarly named declaration.
-
 
 ## Application context
 
@@ -235,6 +181,7 @@ Business functions and declarations need no additional arguments.
 
 The library constructs the adapter without arguments. `capture()` returns JSON-compatible data or `None` when a job is submitted.
 The library saves an independent JSON copy in `TransitionMessage.job_context`, separately from business arguments.
+Convert values such as UUIDs, dates and decimals in the adapter; capture does not use the broader saved-argument serializer.
 Capture failures refuse submission; retries use the originally saved context rather than the retrying person's context.
 
 For each attempt, `restore(value)` returns a context manager. Its scope includes required functions, optional callbacks and failure handling.
@@ -245,6 +192,11 @@ Jobs without saved context call `restore(None)`; the adapter must clear attribut
 If context setup fails, the worker records the error and applies the normal retry allowance.
 After that allowance, the job completes as failed with `[unrestorable]`.
 Business functions and callbacks do not run when context setup fails.
+The business record keeps its current state, including a declared in-progress state.
+Maintenance handles jobs that have already used their error allowance. A context setup error there completes the job immediately, without another retry allowance.
+The job retains its earlier attempt error alongside the context error.
+Inspect both errors, correct the adapter and reconcile any uncertain provider result before requesting the action again.
+A declared `in_progress_state` is also an allowed source for that action.
 Context cleanup cannot suppress a business error or cause committed work to run again.
 Cleanup errors are logged separately, including during inline execution; they do not consume another job retry.
 
@@ -274,3 +226,55 @@ DJANGO_LOGIC = {'JOB_CONTEXT': 'myapp.audit.JobContext'}
 The application validates and assigns trusted origin information before calling a business action.
 Do not copy an HTTP request, credentials or arbitrary client-provided identity into this context.
 Context supports attribution; it does not grant permission or replace saved business inputs.
+
+## Fair progress
+
+Declare `fairness_key="group"` or a callable accepting `instance, **kwargs`.
+The callable returns a string, for example `f"client:{instance.client_id}"`.
+The engine saves the key with the job and preserves it across retries.
+Workers take turns between eligible fairness groups using shared database records.
+A single group can use every free worker slot. Existing running work is not interrupted when another group arrives.
+The empty key groups submissions without an application fairness key together. Queues still select which workers may run a job.
+Fair selection does not enforce provider request limits or guarantee equal completion times.
+
+Use a small, stable set of keys, such as one key per account rather than one per record.
+The library retains fairness-group records; completed-job cleanup does not delete them.
+
+## Measurements retained after completion
+
+Each job retains `first_started_at` and `start_attempt_count`. The worker saves them
+before trying to execute the job, together with `started_at`.
+They survive an attempt rollback or a job process crash. A job already locked
+at this check, or waiting for a future `eligible_at`, does not increase the count.
+The worker releases this short lock before taking the lock used during execution.
+Two workers can therefore record a start before only one executes the job.
+`start_attempt_count` counts these saved start markers, not executed side effects
+or provider requests. `first_started_at` is the first recorded start attempt,
+which can precede the worker that actually performs the work.
+
+Every recorded `Defer` increases `deferral_count` without increasing
+`errors_count`. The worker also saves `last_deferred_at`,
+`last_deferred_until` and `last_deferral_reason`. These remain after a retry
+or completion, while `eligible_at` and `deferral_reason` still describe only
+the current wait. The two retained times describe the last requested wait,
+not all elapsed waiting. Applications should use a short reason without
+credentials or request payloads.
+
+`first_started_at - created` measures
+the delay until the first recorded start attempt. That delay includes any initial
+application-specified eligibility time. `completed_at - created` includes
+execution, errors, deferrals and time waiting for a worker. `duration_ms`
+measures only the last attempt and excludes completion callbacks.
+
+Missing historical measurements remain unknown. Cleanup limits the available job history.
+
+`transition_statistics(since=cutoff, queues=None, using=None)` groups retained
+jobs by queue, model, process class and action. Counts describe each
+selected job's recorded history, not events that happened within the window.
+`initial_wait_ms` uses only `first_started_at`; `last_attempt_duration_ms` uses
+only recorded `duration_ms` values. Each contains `samples`, `p50`, `p90` and
+`max`. Percentiles use the nearest rank. Missing measurements are excluded.
+`repeated_starts` includes deferrals and competing recorded starts. It is not an
+exact retry count. These records cannot establish total runtime or utilization.
+`dl_transitions --stats --since 7d --json` exposes the same report without
+changing jobs.

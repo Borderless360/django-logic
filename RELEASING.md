@@ -7,8 +7,9 @@ Branch pushes do not publish packages.
 2. Move the changelog's unreleased entries into a dated version section.
 3. Run `python tests/manage.py test`, including metadata consistency checks.
    Run the PostgreSQL and Redis checks used by CI as well.
-4. Run each consumer's validation against the candidate source. Include the
-   private `django-logic-test` qualification application's real-worker matrix.
+4. A release maintainer runs each consumer's validation against the candidate source,
+   including the private `django-logic-test` qualification application's real-worker matrix.
+   External contributors run the public repository checks above; the maintainer supplies private qualification evidence.
    Record the exact candidate commit and results. Do not publish while these checks fail.
 5. Merge the qualified release pull request into `master`. Verify the merged tree matches the tested candidate.
    Qualify any additional changes before tagging.

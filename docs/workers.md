@@ -7,11 +7,11 @@ Workers select available jobs directly from that database.
 
 A worker selects an eligible job from its queues using `SELECT FOR UPDATE SKIP LOCKED`.
 A running job holds its database row lock, so other workers skip that job.
-Client turn records let each client make progress without limiting its parallel jobs.
-Within a client, workers select jobs by when they became ready, then by submission order.
-A postponed job follows work ready before its new due time, even when the postponed job was submitted first.
+Fairness-group records let each group make progress without limiting its parallel jobs.
+Within a fairness group, workers select jobs by when they became ready, then by submission order.
+A deferred job follows work ready before its new due time, even when the deferred job was submitted first.
 This lets required newer work run before an older job checks its result again.
-Jobs without a postponement keep their submission order, including jobs without a client key.
+Jobs without a deferral keep their submission order, including jobs without a fairness key.
 A failed attempt waits until its retry time. The configured error limit stops repeated failures.
 Error retries keep their submission order once the retry wait ends.
 A lost database connection releases the lock, allowing another worker to try again.
@@ -34,35 +34,12 @@ One worker serves one group of queues. Set `--concurrency` to run several
 jobs in parallel. Several workers can serve the same queues.
 An unknown `BACKGROUND_EXECUTION` value fails at startup.
 
-When every job slot is busy, the worker checks completed job processes every
-10 milliseconds. It also checks job deadlines and starts periodic maintenance.
-When a job process finishes, the worker can start another job. When capacity
-is available, a PostgreSQL notification wakes the worker for newly submitted work.
-
-Once the worker detects that a job process has finished, it can start
-another job. If a database lock prevents it from recording the failure,
-it saves that information separately and tries again later. It keeps the
-message ID separately from the process ID, which the operating system may
-reuse. It does not claim that message again until the failure is recorded.
-
-The worker retries each failure record at most once a second. Each check
-retries at most 16 records and checks running jobs' deadlines between writes.
-At 1,000 unsaved records, it stops starting jobs until that count falls.
-Already running jobs can still finish, adding at most the configured
-concurrency to that bound. Other workers continue to claim work normally.
-
-A database lock wait stays quiet for five seconds. The worker then logs
-its message ID and elapsed wait, repeating at most once a minute per record.
-Reading a job deadline and recording a job failure each allow at most 100 milliseconds
-for a PostgreSQL lock and one second for a statement, while preserving stricter
-database settings. A queued table lock therefore cannot block these worker checks
-indefinitely. The worker keeps an unrecorded failure and retries the write later.
-Inspect the PostgreSQL lock holder if the wait continues. This warning does
-not mean that the job currently running against that row has failed.
-
-`--concurrency=N` says how many attempts one worker runs at a time
-(default 1). Each attempt still runs in its own forked process, and
-`SKIP LOCKED` already makes concurrent claims safe.
+Each job runs in its own process. When that process finishes, the worker can start another job.
+The worker continues checking timeouts while it records failures and runs maintenance.
+If a database lock prevents failure recording, the worker keeps the failure and retries the write.
+It does not start that job again until the failure is recorded.
+When the wait persists, a warning names the job and elapsed wait.
+Inspect the PostgreSQL lock holder so the worker can record the failure before another attempt starts.
 
 ## Sizing a deployment
 
@@ -106,20 +83,7 @@ The platform ends the wait at its own limit: 30 seconds on Heroku, and
 limit stops there, and the next worker runs it again from its first step. Set
 the limit above the longest provider request of the worker's jobs.
 
-## Knowing a worker stopped
-
-The worker starts one maintenance process once a minute. It stops that
-process after 60 seconds. This keeps failure callbacks outside the
-supervisor that enforces attempt timeouts. A stopped pass leaves
-uncompleted rows for the next pass. Callbacks for completed rows remain
-best-effort and are not retried.
-
-Completed-message cleanup commits groups of at most 1,000 rows. Earlier
-groups stay deleted if the maintenance process stops during a later group.
-Each delete keeps the age filter and newest terminal-failure retention rule.
-An enclosing caller transaction still controls when its batches commit.
-The row limit does not bound database time: a blocked group can still
-reach the process deadline and must be retried on the next pass.
+## Monitoring worker availability
 
 When `dl_worker` stops, jobs, failed-job completion and history cleanup all stop.
 Monitor the worker process directly:
@@ -155,7 +119,7 @@ When an observation exists but no job has progressed, the ERROR says to check
 capacity, other served queues and blocked jobs. Without it, the message suggests
 starting a worker. Recent presence never downgrades a stalled queue to a WARNING.
 `queue_worker_presence(queue_name)` exposes this evidence without changing jobs.
-The job list uses the latest recorded error or postponement to distinguish waiting work from an unfinished attempt.
+The job list uses the latest recorded error or deferral to distinguish waiting work from an unfinished attempt.
 An expired wait does not mean the previous attempt is still running.
 Text statistics include the full declaring process class, so same-named provider actions remain distinguishable.
 Cache writes run inside the bounded maintenance process. A blocked cache cannot
@@ -168,11 +132,10 @@ and workers; an in-memory cache cannot provide cross-process observations.
 `BackgroundTransition(atomic=False)` keeps the same job-row lock on a separate
 connection. Model side effects use their normal connection in autocommit.
 Final state and job completion commit together on the connection holding the lock.
-A side effect's failure or postponement remains its result when another transaction holds the business row.
-A postponed job keeps its due time without spending an allowed error.
+A side effect's failure or deferral remains its result when another transaction holds the business row.
+A deferred job keeps its due time without spending an allowed error.
 A permanent failure completes the job. If its business row remains locked, the worker records that problem separately.
 It leaves the business state unchanged and skips failure callbacks in that case.
-The default atomic execution remains unchanged.
 
 This option works with transaction pooling: it uses no session advisory lock.
 The locking transaction remains open during provider work, so the database
@@ -195,7 +158,7 @@ idle-transaction timeout above the declared job timeout. Budget the extra connec
 for `atomic=False` as described above. A session lost during an external request
 cannot stop that request; the application must prevent duplicate external changes.
 
-### See what is not moving
+## Inspecting jobs
 
 ```bash
 python manage.py dl_transitions
@@ -207,13 +170,7 @@ python manage.py dl_transitions --stats --since 7d --queues django_logic --json
 each one is not moving: it has spent every attempt, it waits out the retry
 pause, its last attempt has no recorded result, or it waits for worker capacity.
 The report also distinguishes recent worker presence from actual queue progress. `--queues` narrows the list.
-Workers take turns between eligible clients. Within a client, jobs run by when they became ready, then submission time and ID.
-A postponed older job can therefore follow newer work that was ready first.
-
-Workers record their served queues during each maintenance check, even when all
-job slots are full. This recent observation is separate from queue progress.
-A queue with no progress still reports an error when its worker is present.
-The message directs operators to check capacity and blocked jobs.
+For queue ordering and presence alerts, see the selection and monitoring sections above.
 
 `--stats` reports retained jobs created during the selected period, grouped by
 queue, model, process and transition. It includes outcomes, errors,
@@ -235,29 +192,21 @@ for no retained observation, or `None` when the cache cannot answer.
 The job can then run when a worker has capacity. The command runs no business functions itself.
 It cannot override a saved deferral or be combined with `--queues`.
 
-### Periodic maintenance
+## Periodic maintenance
 
-The worker starts maintenance checks once a minute in one separate process.
-Only one maintenance process runs per worker. Its time limit is 60 seconds.
-Nothing else needs a schedule.
+The worker starts one maintenance process once a minute, with a 60-second limit.
+Nothing else needs a schedule. Reserve its database connection as described under sizing.
+The worker continues enforcing job timeouts while maintenance runs application callbacks.
+If a pass stops, the next pass checks the remaining unfinished jobs.
+Optional callbacks for completed jobs are not retried.
 
-- `detect_stuck_transitions` completes a job that has spent every allowed error.
+- `detect_stuck_transitions` completes jobs that have used their error allowance.
   It writes `failed_state` and runs failure callbacks only when the saved state still applies and can be checked under its lock.
-  Otherwise it records why the state change was skipped. It also reports rows that waited past the retry window with no attempt, in one
-  line per queue. If a worker started a row from that queue inside the window,
-  or holds one now, the queue is behind, and the line is a WARNING. If not, no
-  worker has taken a row from the queue for the whole window, and the line is
-  an ERROR. Either no worker serves the queue, or work from other queues fills
-  every slot of the workers that do. Recent worker presence changes the
-  explanation, but does not reduce the severity of missing progress.
-- `cleanup_completed_transitions` deletes completed rows older than
-  `TRANSITION_MESSAGE_CLEANUP_DAYS`. It keeps the newest failed row per
-  instance and process, because that row is the only explanation for an
-  instance parked in its `failed_state`.
+  Otherwise, it records why the business state was left unchanged.
+  It also reports queues without progress, as described under monitoring.
+- `cleanup_completed_transitions` deletes completed jobs older than `TRANSITION_MESSAGE_CLEANUP_DAYS`.
+  It keeps the newest failed job per record and process so the failure remains available for investigation.
 
-Alert when the worker processes stop. Periodic maintenance stops with them.
-Reserve one extra database connection for the maintenance process, plus any
-connections your callbacks open. A slow or exiting callback cannot block
-the supervisor's attempt timeouts. If a pass stops, the next pass checks
-the remaining uncompleted rows. Callbacks for completed rows remain
-best-effort and are not retried.
+Cleanup commits bounded groups of rows. Earlier groups stay deleted if a later group is interrupted.
+An enclosing caller transaction still controls when those deletions commit.
+A blocked deletion can reach the maintenance time limit and be retried on the next pass.

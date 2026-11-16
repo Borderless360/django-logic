@@ -1,10 +1,20 @@
 # Upgrading and rollback
 
+## From 5.1.0 to 5.1.1
+
+Version 5.1.1 fixes application-context error handling and removes the unused `TransitionMessage.operation_name` alias.
+Use `transition_name`. No new migration is needed. Stop producers and workers before replacing their application version,
+then verify retained jobs and their application context after restarting.
+
 ## From 5.0 to 5.1
 
 Migration 0019 adds nullable application job context and removes six database defaults used by older producers.
 Python model defaults remain. Existing jobs keep `job_context=None`; configured adapters must clear attribution for that value.
-Apply the migration with the coordinated application and worker version. No historical jobs are rewritten.
+Stop all job producers, scheduled submissions and workers. Confirm that no job process remains.
+Install the selected application version, run `migrate`, then start only that version's producers and workers.
+Migration 0019 has no bounded table-lock wait. A running job or another open transaction can block it and delay later submissions.
+If it still waits with the application stopped, inspect the PostgreSQL lock holder and resolve that transaction before continuing.
+No historical jobs are rewritten. Do not run mixed producer and worker versions.
 Django 5.2 is the minimum supported framework version. PostgreSQL workers require psycopg 3.2 or later, or Django’s supported psycopg2 driver.
 Install the `postgres` extra for psycopg 3 and the `redis` package when using Django’s Redis cache.
 Unknown transition declaration options now raise `TypeError`. Bind every process through an installed `django_logic` application.
@@ -23,11 +33,11 @@ Before upgrading:
    Put required work in saved jobs. Use an ordinary callback only when its
    failure or loss is acceptable; replacing the name alone does not make work durable.
    Remove `BackgroundEffect` and `background_effects` declarations too.
-   Move required functions into their owning job, or save ordinary business jobs with the result that requests them.
+   Move required functions into their job that performs the work, or save business jobs with the result that requests them.
 2. Make injected `ProcessScenario` failures explicit with `expect_raises=ErrorType`
    or `expect_raises=False`. Omitting it no longer absorbs the injected exception.
 3. Keep root process classes importable and preserve their `process_name`, bound
-   field, owning class and action names while jobs using them remain unfinished.
+   field, class that declares the transition and action names while jobs using them remain unfinished.
    Submit background jobs through a `Process` to record all identity fields.
    Low-level `change_state` calls must supply the same complete, valid identity. Attribute lookup, renamed-class and action-name fallbacks are removed.
 4. Finish or explicitly resolve unsupported unfinished jobs on 4.3.2, including

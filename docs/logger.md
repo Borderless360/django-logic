@@ -6,7 +6,7 @@ handlers through Django `LOGGING`, as you would for any library.
 ## Loggers
 
 - **`django-logic`** — general library activity (the worker loop, the
-  safety nets). Available in code as `from django_logic.logger import logger`.
+  maintenance). Available in code as `from django_logic.logger import logger`.
 - **`django-logic.transition`** — the per-transition lifecycle event log.
   Available as `from django_logic.logger import transition_logger`.
 
@@ -58,7 +58,7 @@ def finish_job_process():
 
 `collector` is application code. The library does not provide a collector
 or automatically flush logging handlers, queues, or Sentry.
-The setting defaults to `None`, which keeps the existing exit behavior.
+With the default `None`, no application reporting function runs before exit.
 
 The library calls this function on a new daemon thread after engine work
 finishes, including handled job failures. Report delivery has its own
@@ -81,7 +81,7 @@ depend on the thread-local state of a side effect.
 
 Delivery is best effort. A crash, `SIGKILL`, or `os._exit()` during business
 work skips the function. The library retains `os._exit()` after delivery
-and does not run inherited Python exit handlers. Sync mode does not create
+and does not run inherited Python exit handlers. Inline execution does not create
 a job process and does not call this function.
 
 

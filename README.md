@@ -28,7 +28,7 @@ runs it.
 
 ## Install
 
-The current release is **5.1.0**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
+The current release is **5.1.1**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
 Before upgrading, follow the [upgrade and rollback requirements](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 
@@ -149,7 +149,7 @@ class OrderProcess(Process):
     ]
 ```
 
-Each declaration slot has one job:
+Each declaration option has one purpose:
 
 - `conditions` — functions that answer True or False. Every one must answer
   True, or the transition is not available.
@@ -177,7 +177,6 @@ the same rules as every transition: it takes the state lock, it is
 refused while a background transition is uncompleted, and it runs callbacks after success.
 
 An explicit `target=''` saves an empty state. Use `target=None` to leave the state unchanged.
-Before upgrading, change declarations that used `target=''` to mean no state change.
 An empty target keeps the usual source checks and state locks, including for background transitions.
 
 Add `lock=False` when the unit of work is not the bound row. A store
@@ -186,7 +185,7 @@ store, the work is the parcel, and two parcels must not wait for each
 other. A `lock=False` transition takes no state lock and is not refused
 while a background transition is uncompleted. It keeps `conditions`,
 `permissions`, `side_effects`, `callbacks` and `failure_callbacks`.
-A callback is best-effort; a transition it starts can be refused while the row is locked. It cannot declare a `target` or a
+A callback is best-effort; a transition it starts can be refused while the row is locked. A `lock=False` transition cannot declare a `target` or a
 `failed_state` — a state write must serialise on that state — and
 `BackgroundTransition` refuses it. `get_available_actions()` lists it
 while the row is locked, because it can be called.
@@ -247,7 +246,7 @@ unsupported. The library does not validate that combination.
 For an inherited state field on a multi-table model, drive the process through
 the parent model that owns the field. Mixing parent and child process access
 is unsupported. Their background identities and pending-work probes do not
-share one gate. Use a separate concrete model for an independent workflow.
+share one unfinished-job check. Use a separate concrete model for an independent workflow.
 
 ## Run a transition
 
@@ -256,15 +255,9 @@ order = Order.objects.get(pk=pk)
 order.process.approve(user=request.user)
 ```
 
-The engine manages `tr_id`, `root_id`, `parent_id`, `process_class` and
-`owning_process_class`. Use other names for business data. A process action
-always records its actual bound root and declaring class, replacing forwarded
-`process_class` and `owning_process_class` values. These arguments cannot select
-a different process. Validate request fields at the application boundary.
-Background transitions rebuild `context`; they do not save a caller's `context`.
-They also refuse `user_id`; pass `user=` instead.
-Calls refuse `state` and `exception` because those names belong to engine internals.
-Failure callbacks receive `exception=`; ordinary hooks do not receive a `state` argument.
+Use business argument names that do not conflict with the engine's trace identifiers.
+See the [saved arguments reference](https://github.com/Borderless360/django-logic/blob/master/docs/reference.md#saved-arguments)
+for reserved names and the temporary `context` dictionary shared by hooks.
 
 - The accessor is the process class's `process_name`. It is `process` by
   default.
@@ -352,15 +345,17 @@ The worker completes the job as `superseded` and skips its side effects.
 - While a row is uncompleted, a second background transition on the same
   instance and process raises `AlreadyInProgress`, and a synchronous transition
   on it raises `TransitionTemporarilyUnavailable`. Keep required functions in
-  the owning job, or save ordinary business jobs with the result that requests them.
+  the job that performs the work, or save business jobs with the result that requests them.
   Callbacks run after completion and are suitable only for optional work.
-
-[docs/workers.md](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) explains how a
-worker claims a row and what happens when one dies.
 
 ## Run the workers
 
 One `dl_worker` process serves one group of queues.
+
+```bash
+python manage.py dl_worker --queues django_logic.critical,django_logic.fast
+python manage.py dl_worker --queues django_logic.slow --concurrency=4
+```
 
 If logging or telemetry buffers reports, configure
 `DJANGO_LOGIC['JOB_PROCESS_FINISH']` with an application function's dotted path.
@@ -368,23 +363,9 @@ The function sends this job process's reports before exit, with a separate
 two-second limit. See [buffered reporting](https://github.com/Borderless360/django-logic/blob/master/docs/logger.md#send-buffered-reports-before-a-job-process-exits)
 for process-local state requirements and delivery limits.
 
-```bash
-python manage.py dl_worker --queues django_logic.critical,django_logic.fast
-python manage.py dl_worker --queues django_logic.slow --concurrency=4
-```
-
 `--concurrency=N` says how many attempts one worker runs at a time. The default
-is 1. Each attempt runs in its own forked process and holds its own database
-connection. Read "Sizing a deployment" in
-[docs/workers.md](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) for the memory and
-connection budget.
-
-A worker that dies releases its row lock with its database connection, and the
-next claim takes the row.
-A job process can stop while it saves another background job. On PostgreSQL that
-save holds the business row and writes no cache lock, so the record is not left locked.
-
-See [running workers](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) for queue diagnostics, retry commands, retained statistics and maintenance.
+is 1. Each attempt runs in its own job process and holds a database connection.
+See [running workers](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) for deployment size, queue diagnostics, retry commands and maintenance.
 
 ## Test your process
 
@@ -413,12 +394,7 @@ For deployment-wide inline tests, call `django_logic.conf.enable_sync()` in test
 Production deployments normally use `pull`. Business code can use `django_logic.background.sync_execution()` for one block that needs an immediate result.
 That block runs in the caller's process and starts no retry loop.
 A committed unfinished job can still be claimed by workers serving its queue.
-SQLite supports synchronous process tests and default atomic background tests.
-`DatabaseTransition` and `BackgroundTransition(atomic=False)` tests require PostgreSQL.
-An atomic background transition can join a caller transaction. Outside the test runtime, `atomic=False` still requires PostgreSQL autocommit.
-In the test runtime, an `atomic=False` job called inside a transaction runs in that transaction, so `TestCase` can run it.
-Its writes stay when a later step fails, unless the test's own transaction rolls back.
-[docs/TESTING_GUIDE.md](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) has the test setup and scenario catalog.
+See the [testing guide](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) for database requirements, transaction behavior and the scenario catalog.
 
 ## More documentation
 
@@ -428,18 +404,17 @@ Its writes stay when a later step fails, unless the test's own transaction rolls
 - [Refused actions](https://github.com/Borderless360/django-logic/blob/master/docs/refusals.md) — reason codes and messages for users.
 - [Upgrading](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md) — supported migration and rollback requirements.
 
-- [docs/TESTING_GUIDE.md](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) — how to test a process, and
+- [Testing guide](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) — how to test a process, and
   the assertions `ProcessScenario` gives you.
-- [docs/workers.md](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) — how the workers
+- [Running workers](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) — how the workers
   claim and run rows, how to size a deployment, and how to run behind
   pgbouncer.
-- [docs/recipes/nested-processes.md](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/nested-processes.md) — how a
-  parent drives many children without cascading their failures.
-- [docs/recipes/long-jobs.md](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/long-jobs.md) — how to split work
+- [Waiting for work on related records](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/related-records.md) — how an order waits for several fulfilments and records their results.
+- [Long jobs](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/long-jobs.md) — how to split work
   that runs for a long time.
-- [docs/recipes/interactive-and-automatic.md](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/interactive-and-automatic.md) — shared business functions with separate worker queues.
-- [docs/logger.md](https://github.com/Borderless360/django-logic/blob/master/docs/logger.md) — the loggers and the events they write.
-- [CHANGELOG.md](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) — what each release changed, and every upgrade
+- [Interactive and automatic requests](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/interactive-and-automatic.md) — shared business functions with separate worker queues.
+- [Logging](https://github.com/Borderless360/django-logic/blob/master/docs/logger.md) — the loggers and the events they write.
+- [Changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) — what each release changed, and every upgrade
   step.
 
 ## Contributing

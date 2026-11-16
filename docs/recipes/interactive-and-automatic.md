@@ -2,7 +2,7 @@
 
 The same export rules apply whether a person requests an export or a schedule starts it.
 Write those rules once in application functions.
-Two ordinary transition declarations can choose different queues for that work.
+Two transition declarations can choose different queues for that work.
 
 ```python
 from django_logic import Process
@@ -40,6 +40,9 @@ Each call validates permissions and conditions before saving a job.
 Workers for the interactive queue can serve user requests without waiting behind scheduled exports.
 The deployment chooses worker capacity for each queue.
 Both paths use the same business function, saved-job recovery and completion states.
+Use these distinct names when callers choose the action explicitly. If callers need one action name and the presence of a user selects the branch,
+use the [nested declarations with `StrictPermissions` and `NoUserPermissions`](../reference.md#process-declarations).
+The queue choice does not replace application authorization.
 
 An accepted request is not a completed export.
 The user interface shows `building`, then `ready` or `failed` from the saved business record.
@@ -51,13 +54,13 @@ Use application records to preserve results that a retry must reuse.
 Use `atomic=False` only when independently committed progress or provider confirmations must survive a later failure.
 That choice changes transaction behavior; it does not change the export's business rules.
 
-Required steps belong in the owning job's `side_effects` when they share one completion result.
-Related records can have their own ordinary background transitions.
+Required steps belong in the job that performs the work's `side_effects` when they share one completion result.
+Related records can have their own background transitions.
 Save their submissions and the parent's required check together, then let that check wait for their recorded results.
-See [parent and child processes](nested-processes.md).
+See [work on related records](related-records.md).
 Optional callbacks can report observations, but must not be the only place that submits required work.
 
 `sync_execution()` runs the same saved jobs inline for tests.
-It does not repeatedly run postponed work until every related job finishes.
+It does not repeatedly run deferred work until every related job finishes.
 Tests that exercise a waiting parent should run its pending job again after the child jobs finish.
 Check both saved business results and job outcomes.

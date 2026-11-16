@@ -80,13 +80,8 @@ remains valid, including after a lost database connection. PostgreSQL protects
 database state; neither lock can undo an external request already sent.
 Saving a background job calls no provider. On PostgreSQL that save holds the business row and writes no cache lock.
 It still refuses a record that has a cache lock. A process that stops during the save leaves no lock on the record.
-For a lock-taking synchronous `Transition`, callbacks also run inside the PostgreSQL transaction, before the outermost commit.
-Each one runs in a savepoint. A database error discards its writes; any other error keeps the writes made before it, including the failed state of a transition it started.
+Each synchronous callback runs in a savepoint inside the transaction described above. A database error discards its writes; any other error keeps the writes made before it, including the failed state of a transition it started.
 The cache lock is released first, so callbacks can call another transition on the same instance.
-Other connections still see the prior committed state. An interruption can discard the target and side-effect writes before commit.
-Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.
-Inline background execution can still be inside a caller's outer transaction.
-Use `transaction.on_commit()` for best-effort publication that requires committed data, not as a guarantee of required work.
 
 On other databases, `State.protected()` takes no row lock and opens no transaction.
 Without a caller transaction, synchronous writes commit independently and swallowed database errors may not be detected.
@@ -108,7 +103,7 @@ be checked, the job completes
 as failed, records why the failed state could not be written, and leaves the
 business state unchanged without running failure callbacks. A final attempt can
 therefore make two bounded lock attempts: one before its work and one before
-completion. Normal retries keep their existing error count and pause. The same
+completion. Normal retries keep their error count and pause. The same
 completion check applies to `atomic=False` jobs and stuck-job completion; a
 non-atomic job keeps any provider confirmations already committed.
 
