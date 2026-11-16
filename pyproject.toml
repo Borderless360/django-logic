@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "5.0.0"
+version = "5.1.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -19,9 +19,9 @@ classifiers = [
     "Operating System :: OS Independent",
     "Intended Audience :: Developers",
     "Framework :: Django",
-    "Framework :: Django :: 5.1",
     "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.0",
+    "Framework :: Django :: 6.1",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -32,15 +32,12 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    # The floor matches the tested matrix in the classifiers and CI. Version
-    # 3.0.1 dropped 4.2, which reached end of life in April 2026, because the
-    # job table's database defaults need Django's db_default. There is no
-    # upper bound: the django-main CI job warns about an unreleased Django instead.
-    "django>=5.1",
+    "django>=5.2",
     "django-model-utils>=4.5.1",
 ]
 
 [project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2"]
 dev = [
     "coverage>=7.0",
     # Driver for the PostgreSQL stability suite and the
@@ -53,11 +50,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Borderless360/django-logic"
+Documentation = "https://github.com/Borderless360/django-logic/blob/master/README.md"
 Repository = "https://github.com/Borderless360/django-logic"
 
 [tool.setuptools.packages.find]
-exclude = ["tests*"]
+include = ["django_logic*"]
 
 [tool.coverage.run]
 source = ["django_logic"]

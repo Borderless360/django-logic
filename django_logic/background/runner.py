@@ -46,7 +46,7 @@ re-raising out of the worker loop would only add noise.
 from __future__ import annotations
 
 import importlib
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +57,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from django_logic import conf
+from django_logic.background.context import JobContextError, restored_job_context
 from django_logic.background.models import TransitionMessage, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
@@ -97,6 +98,18 @@ def run_background_transition(transition_message_id: int) -> None:
             f'the row (or it is already completed); skipping this dispatch.'
         )
         return
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(restored_job_context(transition_message_id))
+        except JobContextError as error:
+            _record_context_failure(transition_message_id, error)
+            if conf.sync_mode():
+                raise
+            return
+        return _run_background_transition(transition_message_id)
+
+
+def _run_background_transition(transition_message_id):
     try:
         outcome = _run_atomic(transition_message_id)
         if isinstance(outcome, _NonAtomicAttempt):
@@ -146,6 +159,30 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
 
     Returns True if the row was finalized, False if skipped.
     """
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(restored_job_context(transition_message_id))
+        except JobContextError as error:
+            return _record_context_failure(transition_message_id, error, finalizing=True)
+        return _finalize_stuck_attempt(transition_message_id)
+
+
+def _record_context_failure(transition_message_id, error, *, finalizing=False):
+    """Record adapter failure without running application code in the wrong context."""
+    with transaction.atomic():
+        try:
+            job = TransitionMessage.objects.select_for_update(nowait=True).get(
+                pk=transition_message_id, is_completed=False,
+            )
+        except (TransitionMessage.DoesNotExist, OperationalError):
+            return False
+        if finalizing:
+            _complete_restore_failure(job, error)
+            return True
+        return _handle_restore_failure(job, error).terminal
+
+
+def _finalize_stuck_attempt(transition_message_id):
     hooks = None
     with transaction.atomic():
         try:
@@ -211,16 +248,7 @@ def _finalize_stuck_row(
         with transaction.atomic():
             _, process, transition = _restore(transition_message)
     except Exception as exc:
-        # Completion stops repeated restore failures without changing business state.
-        transition_logger.warning(
-            f'detect_stuck: TransitionMessage#{transition_message.pk} could not be restored '
-            f'({type(exc).__name__}: {exc}); completing it so the safety net '
-            f'stops retrying. Business state is unchanged; check the restore '
-            f'error before submitting this transition again.',
-            exc_info=True,
-        )
-        transition_message.mark_as_completed(
-            measure_duration=False, ended_in_failure=True)
+        _complete_restore_failure(transition_message, exc)
         return None
 
     kwargs, decode_error = _decode_kwargs(transition_message)
@@ -315,6 +343,8 @@ def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
     Restoration failures and jobs whose business state cannot be checked do not run these callbacks.
     ``Callbacks.execute`` already swallows ordinary exceptions; this guard also covers a malformed hook list.
     """
+    kwargs = kwargs or {}
+    token = _transition_context.set({'root_id': kwargs.get('root_id'), 'tr_id': kwargs.get('tr_id')})
     try:
         transition.failure_callbacks.execute(
             state, exception=exception, **(kwargs or {})
@@ -325,6 +355,8 @@ def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
             f'(best-effort, swallowed): {e}',
             exc_info=True,
         )
+    finally:
+        _transition_context.reset(token)
 
 
 def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
@@ -406,7 +438,7 @@ def _run_atomic_state(transition_message, transition, state, instance, kwargs, d
                 return _handle_success(transition_message, transition, state, kwargs)
         try:
             return _run_in_savepoint(
-                instance._state.db or DEFAULT_DB_ALIAS, execute_and_complete, require_commit=True,
+                instance._state.db or DEFAULT_DB_ALIAS, execute_and_complete,
             )
         except Exception as error:
             transition_message.refresh_from_db()
@@ -467,6 +499,7 @@ def _decode_kwargs(transition_message) -> 'tuple[dict, BaseException | None]':
     # otherwise a side-effect declared as ``def fn(instance, context,
     # **kwargs)`` works synchronously but raises in background mode.
     kwargs.setdefault('context', {})
+    kwargs['owning_process_class'] = transition_message.owning_process_class
     return kwargs, None
 
 
@@ -484,13 +517,8 @@ def _restore_for_attempt(transition_message):
         with transaction.atomic():
             return _restore(transition_message), None
     except Exception as exc:
-        # _restore raises _RestoreError only for the permanent failures.
-        # Everything else — a consumer ``process`` property raising, a
-        # corrupt instance_id, a temporary database error — used to escape
-        # the worker with errors_count still 0, so the row stayed claimable
-        # forever. Count it like any other attempt failure:
-        # temporary causes get their retries, permanent ones reach
-        # MAX_ERRORS and stop.
+        # Missing declarations complete immediately. Other restore failures
+        # count toward the configured error allowance and can retry.
         return None, exc
 
 
@@ -576,7 +604,6 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
 
     _run_in_savepoint(
         instance._state.db or DEFAULT_DB_ALIAS, _attempt,
-        require_commit=True,
     )
 
 
@@ -585,19 +612,7 @@ def _handle_restore_failure(
 ) -> _Outcome:
     """Complete missing work, or count a temporary restore failure for retry."""
     if isinstance(error, _RestoreError):
-        now = timezone.now()
-        TransitionMessage.objects.using(transition_message._state.db).filter(
-            pk=transition_message.pk,
-        ).update(
-            is_completed=True, ended_in_failure=True, completion_kind='failed',
-            completed_at=now, last_error_dt=now, modified=now,
-            last_error_message=db_safe_text(
-                f'{UNRESTORABLE_MARKER} {str(error) or "restore failed"}'),
-        )
-        transition_logger.error(
-            f'TransitionMessage#{transition_message.pk} cannot be restored: {error}. '
-            f'Marking completed to stop retries.'
-        )
+        _complete_restore_failure(transition_message, error)
         return _Outcome(terminal=True, succeeded=False)
 
     transition_message.record_error(error)
@@ -609,15 +624,23 @@ def _handle_restore_failure(
     if transition_message.errors_count < conf.max_errors():
         return _Outcome(terminal=False, succeeded=False, exception=error)
 
-    transition_logger.error(
-        f'TransitionMessage#{transition_message.pk} restore failed {transition_message.errors_count} times; '
-        f'completing the row so it stops retrying. No failed_state could be '
-        f'written, so the instance stays in its in_progress_state; run the '
-        f'transition again from there to move it on.'
-    )
-    transition_message.mark_as_completed(
-        measure_duration=False, ended_in_failure=True)
+    _complete_restore_failure(transition_message, error)
     return _Outcome(terminal=True, succeeded=False, exception=error)
+
+
+def _complete_restore_failure(transition_message, error):
+    note = str(error) or 'restore failed'
+    if isinstance(error, (_RestoreError, JobContextError)):
+        note = f'{UNRESTORABLE_MARKER} {note}'
+    transition_message.last_error_message = db_safe_text(note)
+    transition_message.last_error_dt = timezone.now()
+    transition_message.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
+    transition_message.mark_as_completed(measure_duration=False, ended_in_failure=True)
+    transition_logger.error(
+        f'TransitionMessage#{transition_message.pk} cannot be restored: {error}. '
+        'The job is completed as failed. Business state is unchanged. '
+        'Check the saved identity and error before submitting replacement work.'
+    )
 
 
 def _handle_success(
@@ -732,6 +755,8 @@ def _failure_is_permanent(transition, error: BaseException) -> bool:
 
 def _run_success_hooks(outcome: _Outcome) -> None:
     assert outcome.transition is not None
+    kwargs = outcome.kwargs or {}
+    token = _transition_context.set({'root_id': kwargs.get('root_id'), 'tr_id': kwargs.get('tr_id')})
     try:
         outcome.transition.callbacks.execute(
             outcome.state_obj, **(outcome.kwargs or {})
@@ -742,6 +767,8 @@ def _run_success_hooks(outcome: _Outcome) -> None:
             f'(best-effort, swallowed): {e}',
             exc_info=True,
         )
+    finally:
+        _transition_context.reset(token)
 
 
 class _RestoreError(Exception):

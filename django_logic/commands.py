@@ -26,44 +26,20 @@ def _in_open_transaction(instance) -> tuple[str, bool]:
 
 
 class _SilentRollback(Exception):
-    """Internal: the savepoint rolled back with NO exception propagating.
-
-    Raised only for callers that pass ``require_commit`` — those whose next
-    step reports the work as done. Without it "``fn`` returned" reads as
-    "``fn``'s writes committed", which is false on this path: the writes are
-    gone and nothing raised, so the caller commits its own bookkeeping on top
-    of an attempt that never happened.
-    """
+    """The required work rolled back after its function suppressed a database error."""
 
 
-def _run_in_savepoint(using: str, fn, *, require_commit: bool = False):
-    """Run ``fn`` inside a savepoint.
-
-    ``require_commit`` turns the silent rollback below into a raised
-    ``_SilentRollback`` — for callers whose next act is to record the work
-    as done."""
-    conn = transaction.get_connection(using)
+def _run_in_savepoint(using: str, fn):
+    """Run required work in a savepoint and refuse an unreported rollback."""
+    connection = transaction.get_connection(using)
     with transaction.atomic(using=using):
         result = fn()
-        # A savepoint also rolls back with NO exception propagating:
-        # Atomic.__exit__ takes the rollback branch on
-        # `exc_type is None and connection.needs_rollback`, and
-        # needs_rollback is set by mark_for_rollback_on_error — which
-        # Model.save_base wraps every write in — whenever a database error
-        # is raised inside the block, even if the hook caught it.
-        rolled_back = bool(conn.needs_rollback)
+        rolled_back = bool(connection.needs_rollback)
     if rolled_back:
-        # Worth a line even where the caller tolerates it (best-effort hook
-        # bundles): the writes are gone and nothing raised, so their absence
-        # is the only other trace anyone gets.
-        note = (
-            'a savepoint rolled back with no exception propagating — a '
-            'database error inside it was raised and then suppressed, so '
-            'every write it made was discarded.'
+        raise _SilentRollback(
+            'A function suppressed a database error. Its savepoint rolled back, '
+            'so none of its writes were saved.'
         )
-        transition_logger.warning(note)
-        if require_commit:
-            raise _SilentRollback(note)
     return result
 
 
@@ -122,7 +98,6 @@ def write_failed_state(state, failed_state, *, prefix, consequence, using=None):
         _run_in_savepoint(
             using or state.instance._state.db or DEFAULT_DB_ALIAS,
             lambda: state.set_state(failed_state, **database_kwargs),
-            require_commit=True,
         )
     except Exception as write_error:
         setattr(state.instance, state.field_name, previous)
@@ -163,7 +138,6 @@ def reload_after_rollback(state, *, prefix):
     try:
         _run_in_savepoint(
             using, lambda: state.instance.refresh_from_db(using=using),
-            require_commit=True,
         )
     except Exception as refresh_error:
         _log_hook_error(
@@ -261,7 +235,7 @@ class SideEffects(BaseCommand):
 
     def execute(self, state: State, **kwargs):
         command_name = 'before the first side effect'
-        atomic_sync = self._transition.atomic and not self._transition.is_background
+        atomic_sync = self._transition.atomic
         previous_state = state.get_state()
 
         def run_commands():
@@ -288,7 +262,7 @@ class SideEffects(BaseCommand):
             )
             using, in_transaction = _in_open_transaction(state.instance)
             if atomic_sync:
-                _run_in_savepoint(using, run_required_changes, require_commit=True)
+                _run_in_savepoint(using, run_required_changes)
             elif in_transaction:
                 _run_keeping_writes(using, run_commands)
             else:

@@ -2,9 +2,8 @@
 
 The committed ``TransitionMessage`` row is the signal. A worker asks the
 database for one claimable row, runs the shared execute path on it, and
-asks again. Nothing is sent to a broker, so nothing can be lost,
-duplicated, or published to a queue nobody consumes.
-See ``docs/design/PULL_WORKERS.md`` for the worker design.
+asks again. Unfinished jobs remain in the database until they complete.
+See ``docs/workers.md`` for the worker design.
 
 The claim's WHERE clause is the retry rule:
 
@@ -25,13 +24,12 @@ for pickup latency on a direct Postgres connection; pgbouncer
 transaction pooling rejects LISTEN, and there the worker falls back to
 the poll floor.
 
-Each attempt runs in a forked attempt process, so a crash kills the
-attempt and not the worker. ``--concurrency`` says how many of them a
+Each attempt runs in a separate job process. A failure in that process
+does not stop the worker. ``--concurrency`` says how many job processes a
 worker runs at a time; the default of one keeps the worker sequential.
 
-The worker runs the safety nets in one separate process with a time limit.
-This keeps consumer callbacks out of the supervisor. Nothing needs an
-external schedule.
+The worker runs periodic maintenance in one separate process with a time limit.
+The worker can check running jobs while maintenance runs application callbacks.
 """
 from __future__ import annotations
 
@@ -224,6 +222,8 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) 
             else:
                 run_background_transition(pk)
             status = 0
+        except BaseException:
+            logger.exception('Job process failed while running job %s. See this traceback before retrying.', pk)
         finally:
             try:
                 if finish is not None:
@@ -412,12 +412,9 @@ def _try_account(attempt: _Attempt) -> bool:
 def _account(attempt: _Attempt, exit_code: int) -> None:
     """Record one error on the row when the attempt did not end cleanly.
 
-    An attempt process that dies without completing the row left no
-    error on it, so the worker records one: the claim's retry wait then
-    paces the next attempt, and ``MAX_ERRORS`` bounds a crash loop — a
-    side-effect that crashes (or hangs) every time ends in
-    ``failed_state`` like one that fails every time, instead of looping
-    forever.
+    When a job process stops before recording its failure, the worker records
+    one error. The job waits for ``TRANSITION_MESSAGE_RETRY_MINUTES`` before
+    another attempt. ``TRANSITION_MESSAGE_MAX_ERRORS`` bounds those retries.
 
     If the exit status shows a process finished on its own, do not record
     a timeout. ``os.kill`` can succeed after a process exits,
@@ -435,20 +432,17 @@ def _account(attempt: _Attempt, exit_code: int) -> None:
         logger.warning(
             f'pull: the attempt for TransitionMessage#{attempt.pk} ran past '
             f'its declared timeout={attempt.timeout_seconds}s and was '
-            f'stopped. The error recorded here paces the next claim.'
+            f'stopped. This counts as one error; the configured retry wait applies.'
         )
         return
     if exit_code == 0:
         return
-    _record_attempt_error(
-        attempt.pk,
-        f'[crashed] the attempt process died (exit {exit_code}) '
-        f'before the attempt finished',
-    )
+    reason = (f'was killed by signal {-exit_code}' if exit_code < 0
+              else f'stopped with exit code {exit_code}; see the worker log')
+    _record_attempt_error(attempt.pk, f'[crashed] the job process {reason}')
     logger.warning(
-        f'pull: the attempt process for TransitionMessage#{attempt.pk} died '
-        f'(exit {exit_code}). Its row lock died with it; the error recorded '
-        f'here paces the next claim.'
+        f'pull: the job process for TransitionMessage#{attempt.pk} {reason}. '
+        f'The database released its lock. This counts as one error; the configured retry wait applies.'
     )
 
 
@@ -594,7 +588,7 @@ def run_worker(
     safety nets across them; several one-slot workers each reserve memory
     for their heaviest attempt. Every slot holds its own database
     connection while it runs, so size ``concurrency`` against the
-    connection cap (see docs/design/PULL_WORKERS.md).
+    connection cap (see docs/workers.md).
 
     One additional process runs safety nets with a 60-second limit.
     It does not use an attempt slot. Reserve a connection for it too.

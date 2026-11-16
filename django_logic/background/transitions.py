@@ -77,8 +77,7 @@ class BackgroundTransition(Transition):
     """Transition that runs its side-effects on a worker process.
 
     ``target=None`` declares a background transition that writes no
-    state on success — same durability, same lock, same one-uncompleted-
-    row gate, same chaining; the worker just skips the target write.
+    state on success — same durability, same lock, same unfinished-job check; the worker just skips the target write.
     ``lock=False`` is refused: enqueue writes the busy state and the
     durable row under the state lock.
 
@@ -129,8 +128,11 @@ class BackgroundTransition(Transition):
         atomic: bool = True,
         fairness_key=None,
         submission_context=None,
+        in_progress_state=None,
         **kwargs,
     ):
+        if not kwargs.get('lock', True):
+            raise ImproperlyConfigured('BackgroundTransition requires its state lock; remove lock=False.')
         if queue is not None and (not queue or not isinstance(queue, str)):
             raise ImproperlyConfigured(
                 f"BackgroundTransition '{action_name}': queue must be a "
@@ -171,6 +173,14 @@ class BackgroundTransition(Transition):
         super().__init__(
             action_name=action_name, sources=sources, target=target, atomic=atomic, **kwargs
         )
+
+        self.in_progress_state = in_progress_state
+        if in_progress_state and self.target is None:
+            raise ImproperlyConfigured('in_progress_state requires a target so completed work leaves the busy state.')
+        if in_progress_state and self.failed_state == in_progress_state:
+            raise ImproperlyConfigured('failed_state and in_progress_state must be different states.')
+        if in_progress_state and in_progress_state not in self.sources:
+            self.sources.append(in_progress_state)
 
     def get_queue_name(self) -> str:
         """The queue name this transition's row carries.
@@ -331,6 +341,7 @@ class BackgroundTransition(Transition):
                 if (not isinstance(resolved_fairness, str) or len(resolved_fairness) > 255
                         or '\x00' in resolved_fairness):
                     raise ValueError('fairness_key must be a string of at most 255 characters without NUL.')
+                from django_logic.background.context import capture_job_context
                 transition_message = rows.create(
                     # Keep the proxy class so the worker restores its behavior.
                     **TransitionMessage.instance_key(
@@ -345,6 +356,7 @@ class BackgroundTransition(Transition):
                     queue_name=queue_name,
                     timeout_seconds=self.timeout,
                     kwargs=serialized,
+                    job_context=capture_job_context(),
                 )
                 if self.in_progress_state:
                     # Model constraint errors must not appear as duplicate jobs.

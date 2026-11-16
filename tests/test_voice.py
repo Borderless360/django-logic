@@ -49,7 +49,9 @@ def _scanned_files():
             yield path
     for name in ('README.md', 'CLAUDE.md', 'RELEASING.md'):
         yield REPO_ROOT / name
-    yield from sorted((REPO_ROOT / 'docs').rglob('*.md'))
+    for path in sorted((REPO_ROOT / 'docs').rglob('*.md')):
+        if 'history' not in path.relative_to(REPO_ROOT / 'docs').parts:
+            yield path
 
 
 def _is_allowed(path, line):

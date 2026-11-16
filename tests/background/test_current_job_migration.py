@@ -193,7 +193,7 @@ class BackgroundEffectRemovalMigrationTests(TransactionTestCase):
         self.assertFalse(self.removed_columns & self.columns())
         self.assertEqual(
             TransitionMessage.objects.values().get(pk=history.pk),
-            {key: value for key, value in before.items() if key not in self.removed_columns},
+            {**{key: value for key, value in before.items() if key not in self.removed_columns}, 'job_context': None},
         )
         self.assertFalse(TransitionMessage.objects.get(pk=pending.pk).is_completed)
         run_background_transition(pending.pk)

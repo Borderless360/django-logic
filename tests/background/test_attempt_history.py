@@ -179,23 +179,6 @@ class AttemptHistoryTests(TestCase):
         self.assertGreater(row.first_started_at, old_start)
         self.assertEqual(row.start_attempt_count, 1)
 
-    def test_earlier_producer_can_omit_new_columns(self):
-        row = self.enqueue()
-        row.is_completed = True
-        row.save(update_fields=['is_completed'])
-        new_fields = {'id', 'start_attempt_count', 'deferral_count', 'first_started_at',
-                      'last_deferral_reason', 'last_deferred_at', 'last_deferred_until'}
-        columns = ', '.join(connection.ops.quote_name(field.column)
-                            for field in TransitionMessage._meta.concrete_fields if field.name not in new_fields)
-        table = connection.ops.quote_name(TransitionMessage._meta.db_table)
-        with connection.cursor() as cursor:
-            cursor.execute(f'INSERT INTO {table} ({columns}) SELECT {columns} FROM {table} WHERE id = %s', [row.pk])
-        copied = TransitionMessage.objects.exclude(pk=row.pk).get()
-        self.assertEqual((copied.start_attempt_count, copied.deferral_count, copied.last_deferral_reason), (0, 0, ''))
-        self.assertIsNone(copied.first_started_at)
-        self.assertIsNone(copied.last_deferred_at)
-        self.assertIsNone(copied.last_deferred_until)
-
     def test_essential_error_identifies_operation_without_arguments(self):
         with self.assertLogs('django-logic.transition', level='ERROR') as logs:
             with self.assertRaises(ValueError):

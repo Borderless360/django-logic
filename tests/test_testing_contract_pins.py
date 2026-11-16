@@ -27,7 +27,6 @@ class InjectionMustFireTests(ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
-    process_name = 'process'
 
     def test_unknown_fail_side_effect_fails_the_drive(self):
         widget = self.create_instance()
@@ -64,7 +63,6 @@ class TrackingCoversCallbackTransitionsTests(ProcessScenario):
     process_class = WidgetChainProcess
     model = Widget
     state_field = 'status'
-    process_name = 'chain_process'
 
     def setUp(self):
         super().setUp()
@@ -87,7 +85,6 @@ class SnapshotFidelityTests(ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
-    process_name = 'process'
 
     def test_jsonfield_round_trips_as_a_real_list(self):
         widget = self.create_instance()
@@ -133,7 +130,6 @@ class FailureHookAssertionsTests(ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
-    process_name = 'process'
 
     @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=1))
     def test_failure_hooks_are_assertable(self):

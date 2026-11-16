@@ -8,7 +8,7 @@
 The list is what an operator needs during an incident: which rows are
 still open, and why each one is not moving. ``--send`` clears the retry
 wait on one row and wakes the workers, so the next claim takes it
-without waiting out ``RETRY_MINUTES``. A worker still claims the row —
+without waiting out ``TRANSITION_MESSAGE_RETRY_MINUTES``. A worker still claims the row —
 this command runs no side-effects itself.
 """
 from datetime import timedelta
@@ -53,6 +53,8 @@ class Command(BaseCommand):
         if not options['stats'] and (options['since'] is not None or options['json']):
             raise CommandError('--since and --json require --stats.')
         if options['send'] is not None:
+            if options['queues']:
+                raise CommandError('--send identifies one job and cannot be combined with --queues.')
             self._send(options['send'])
             return
         queues = None
@@ -93,7 +95,7 @@ class Command(BaseCommand):
         for group in groups:
             action = group['transition_name']
             self.stdout.write(
-                f"queue={group['queue_name']} process_class={group['owning_process_class']} "
+                f"queue={group['queue_name']} owning_process_class={group['owning_process_class']} "
                 f"{group['app_label']}.{group['model_name']}.{group['process_name']}.{action} "
                 f"jobs={group['jobs']} pending={group['pending']} "
                 f"succeeded={group['succeeded']} failed={group['failed']} "
@@ -153,7 +155,7 @@ class Command(BaseCommand):
             return f'waiting until {row.eligible_at.isoformat()}: {row.deferral_reason}'
         if row.errors_count >= max_errors:
             return (
-                f'at MAX_ERRORS ({max_errors}) — the stuck finalizer ends it '
+                f'at TRANSITION_MESSAGE_MAX_ERRORS ({max_errors}) — maintenance completes it '
                 f'in its failed_state on the next pass of any running worker'
             )
         if row.pk not in claimable:

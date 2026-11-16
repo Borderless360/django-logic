@@ -20,7 +20,6 @@ class WidgetFulfilmentScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
-    process_name = 'process'
 
     def test_background_happy_path(self):
         """draft -> fulfilling -> fulfilled, side-effects + callback run."""
@@ -124,7 +123,6 @@ class GuardedApprovalScenario(StateTraceMixin, ProcessScenario):
     process_class = ScenarioGuardProcess
     model = Widget
     state_field = 'status'
-    process_name = 'guard'
 
     def test_permission_gate(self):
         User = get_user_model()
@@ -195,3 +193,35 @@ class NonAtomicScenario(StateTraceMixin, ProcessScenario):
         self.assert_error_recorded(widget, 'report refused')
         self.assert_failure_callbacks_ran(['bg_failure_callback'])
         self.assertEqual(widget.se_log, 'ok,')
+
+
+class DeferredJobScenario(ProcessScenario):
+    process_class = WidgetProcess
+    model = Widget
+    state_field = 'status'
+
+    def test_retry_refuses_a_future_wait_then_runs_after_it_is_due(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from django_logic.background import Defer
+
+        widget = self.create_instance(status='draft')
+        due = timezone.now() + timedelta(minutes=1)
+        self.background_transition(
+            widget, 'fulfil', fail_side_effect='bg_ok',
+            fail_with=Defer(until=due, reason='Waiting for provider'), expect_raises=False,
+        )
+        job = self.assert_deferred(widget, until=due, reason='Waiting for provider')
+        self.assert_error_count(widget, 0)
+        starts = job.start_attempt_count
+        with self.assertRaisesMessage(AssertionError, 'the job is deferred'):
+            self.retry_transition(widget)
+        job.refresh_from_db()
+        self.assertEqual(job.start_attempt_count, starts)
+        self.assert_state(widget, 'fulfilling')
+        job.eligible_at = timezone.now() - timedelta(seconds=1)
+        job.save(update_fields=['eligible_at'])
+        self.retry_transition(widget)
+        self.assert_state(widget, 'fulfilled')
+        with self.assertRaises(AssertionError):
+            self.assert_deferred(widget)

@@ -19,8 +19,6 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import import_string
 
-LOCK_TIMEOUT_DEFAULT = 7200
-
 EXECUTION_SYNC = 'sync'
 EXECUTION_PULL = 'pull'
 _VALID_EXECUTION_MODES = frozenset({EXECUTION_SYNC, EXECUTION_PULL})
@@ -32,10 +30,7 @@ def _conf() -> dict:
         # Unset — every reader falls back to its documented default.
         return {}
     if not isinstance(conf, dict):
-        # Every reader does conf.get(...), so a string or a list of keys
-        # used to surface as a bare AttributeError from whichever reader
-        # ran first — during AppConfig.ready(), with no mention of the
-        # setting that was wrong.
+        # Report the setting itself before a reader accesses its keys.
         raise ImproperlyConfigured(
             f'DJANGO_LOGIC must be a dict, got '
             f'{type(conf).__name__} ({conf!r}).'
@@ -46,7 +41,7 @@ def _conf() -> dict:
 def lock_timeout():
     """Effective global ``LOCK_TIMEOUT`` in seconds — read on every call
     (not cached at import time)."""
-    return _conf().get('LOCK_TIMEOUT', LOCK_TIMEOUT_DEFAULT)
+    return _validated_number('LOCK_TIMEOUT', 7200, minimum=0, exclusive=True)
 
 
 #: Set by :func:`enable_sync`. Boot reads it to decide whether
@@ -139,12 +134,30 @@ def job_process_finish():
     return finish
 
 
+def job_context():
+    """Return the optional application context adapter class."""
+    path = _conf().get('JOB_CONTEXT')
+    if path is None:
+        return None
+    if not isinstance(path, str) or not path:
+        raise ImproperlyConfigured("DJANGO_LOGIC['JOB_CONTEXT'] must be a dotted class path or None.")
+    try:
+        adapter = import_string(path)
+    except (ImportError, AttributeError) as error:
+        raise ImproperlyConfigured(f"DJANGO_LOGIC['JOB_CONTEXT'] could not import {path!r}.") from error
+    if not isinstance(adapter, type) or not all(callable(getattr(adapter, method, None))
+                                              for method in ('capture', 'restore')):
+        raise ImproperlyConfigured("DJANGO_LOGIC['JOB_CONTEXT'] must name a class with capture() and restore(value).")
+    return adapter
+
+
 def _validated_number(
     key: str,
     default,
     *,
     minimum,
     integral: bool = False,
+    exclusive: bool = False,
 ):
     """Read ``DJANGO_LOGIC[key]`` and validate it is a sane number.
 
@@ -152,7 +165,7 @@ def _validated_number(
     value. ``bool`` is rejected explicitly (it subclasses ``int``, so
     ``True`` would otherwise pass as ``1``); non-finite floats (``nan``,
     ``inf``) are rejected; ``integral=True`` additionally rejects
-    non-integral floats and returns an ``int``. ``minimum`` is inclusive.
+    non-integral floats and returns an ``int``. ``exclusive`` excludes the minimum.
     """
     value = _conf().get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -167,9 +180,9 @@ def _validated_number(
         raise ImproperlyConfigured(
             f"DJANGO_LOGIC[{key!r}] must be a whole number, got {value!r}."
         )
-    if value < minimum:
+    if value < minimum or (exclusive and value == minimum):
         raise ImproperlyConfigured(
-            f"DJANGO_LOGIC[{key!r}] must be >= {minimum}, got {value!r}."
+            f"DJANGO_LOGIC[{key!r}] must be {'>' if exclusive else '>='} {minimum}, got {value!r}."
         )
     if integral:
         return int(value)
@@ -203,8 +216,7 @@ def cleanup_days():
 
 
 def retry_window_minutes() -> int:
-    """The whole retry pipeline's span plus slack, floored so a short test
-    retry config does not classify a fresh row as stale."""
+    """The retry wait multiplied by the error allowance plus one, with a 15-minute minimum."""
     return max(retry_minutes() * (max_errors() + 1), 15)
 
 
@@ -234,29 +246,13 @@ def sync_mode() -> bool:
     return _force_sync.get() or background_execution() == EXECUTION_SYNC
 
 
-def validate_core_settings() -> None:
-    """Fail fast on misconfigured core knobs (``ImproperlyConfigured``
-    naming the setting), from every install shape."""
-    value = _conf().get('LOCK_TIMEOUT', LOCK_TIMEOUT_DEFAULT)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
-        raise ImproperlyConfigured(
-            f"DJANGO_LOGIC['LOCK_TIMEOUT'] must be a positive finite number "
-            f"of seconds (it is the state lock's TTL, so it bounds how long a "
-            f"crashed run can keep an instance locked), got {value!r}."
-        )
-
-
 def validate_on_ready() -> None:
     """The app's boot gate — fail fast on a misconfigured settings block."""
     mode = background_execution()
     # Surface value errors now rather than on first use.
     default_queue()
     job_process_finish()
+    job_context()
     # Safety settings: every numeric knob the retry/cleanup/lock
     # machinery depends on is validated at boot in EVERY mode — a bad
     # value must not wait for its first use (which may be a 3am retry
@@ -264,7 +260,7 @@ def validate_on_ready() -> None:
     max_errors()
     retry_minutes()
     cleanup_days()
-    validate_core_settings()
+    lock_timeout()
     if mode == EXECUTION_SYNC:
         _reject_sync_without_opt_in()
     # The pull-mode database and cache rules are system checks
@@ -288,5 +284,5 @@ def _reject_sync_without_opt_in() -> None:
         "retries what fails. Use 'pull' as the deployment default. "
         "For a test runtime, call "
         "django_logic.conf.enable_sync() in it before Django boots. To run "
-        "one block inline elsewhere, use django_logic.conf.sync_execution()."
+        "one block inline elsewhere, use django_logic.background.sync_execution()."
     )

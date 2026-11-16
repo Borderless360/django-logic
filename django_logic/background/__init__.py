@@ -13,6 +13,8 @@ Public API:
   seams.
 * :class:`PermanentFailure` — raise from a side-effect to say the failure
   is permanent: the worker takes the terminal path instead of retrying.
+* :class:`Defer` — wait until a declared time without counting an error.
+* :class:`AlreadyInProgress` — submission was refused because this process has an unfinished job.
 * :func:`transition_statistics` — read retained job counts and timings.
 * :func:`queue_worker_presence` — read a queue's recent worker observation.
 
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 
 _PUBLIC = {
+    'AlreadyInProgress': ('django_logic.background.exceptions', 'AlreadyInProgress'),
     'Defer': ('django_logic.background.exceptions', 'Defer'),
     'BackgroundTransition': ('django_logic.background.transitions', 'BackgroundTransition'),
     'sync_execution': ('django_logic.conf', 'sync_execution'),

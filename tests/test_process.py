@@ -33,7 +33,6 @@ class SyncProcessAvailabilityScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_actions_available_from_draft(self):
         widget = self.create_instance(status='draft')
@@ -163,7 +162,6 @@ class SyncProcessDrivingScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_approval_callback_starts_notify(self):
         widget = self.create_instance(status='draft')
@@ -265,7 +263,6 @@ class NestedSyncDelegationScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetNestedSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'nested_sync'
 
     def test_parent_entrypoint_drives_nested_transition(self):
         widget = self.create_instance(status='draft')
@@ -285,7 +282,6 @@ class AmbiguousConditionScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetAmbiguousConditionProcess
     model = Widget
     state_field = 'status'
-    process_name = 'ambig_cond'
 
     def test_genuinely_ambiguous_call_is_refused_with_no_state_change(self):
         widget = self.create_instance(status='draft')
@@ -306,7 +302,6 @@ class DomainOutcomeScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_capture_and_assert_the_domain_delta(self):
         widget = self.create_instance(status='draft')

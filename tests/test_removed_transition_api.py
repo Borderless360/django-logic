@@ -12,7 +12,7 @@ class RemovedTransitionApiTests(SimpleTestCase):
             for value in ('followup', None):
                 with self.subTest(transition=transition_class.__name__, value=value):
                     with self.assertRaisesMessage(
-                            ImproperlyConfigured, 'does not take next_transition'):
+                            TypeError, "unexpected keyword argument 'next_transition'"):
                         transition_class('start', sources=['draft'], target='done',
                                          next_transition=value)
 
@@ -24,7 +24,7 @@ class RemovedTransitionApiTests(SimpleTestCase):
     def test_background_effects_are_not_an_accepted_declaration_option(self):
         for transition_class in (Transition, DatabaseTransition, BackgroundTransition):
             with self.subTest(transition=transition_class.__name__):
-                with self.assertRaisesMessage(ImproperlyConfigured, 'does not take background_effects'):
+                with self.assertRaisesMessage(TypeError, "unexpected keyword argument 'background_effects'"):
                     transition_class('start', sources=['draft'], background_effects=[])
 
     def test_background_effect_has_no_public_alias_or_runtime_module(self):

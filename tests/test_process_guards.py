@@ -28,7 +28,6 @@ class ProcessLevelGuardScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetProcGuardProcess
     model = Widget
     state_field = 'status'
-    process_name = 'proc_guard'
 
     def setUp(self):
         super().setUp()

@@ -46,7 +46,6 @@ class BgToBgChainScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetBgChainProcess
     model = Widget
     state_field = 'status'
-    process_name = 'bg_chain'
 
     def test_chains_and_records_each_owner(self):
         widget = self.create_instance(status='draft')
@@ -124,7 +123,6 @@ class NestedDisambiguatedBgChainScenario(StateTraceMixin, ProcessScenario):
     process_class = ChainConversationProcess
     model = Conversation
     state_field = 'status'
-    process_name = 'chain_conv'
 
     def test_gmail_chain_records_nested_owner_on_each_leg(self):
         conv = self.create_instance(status='open', source_integration='gmail')

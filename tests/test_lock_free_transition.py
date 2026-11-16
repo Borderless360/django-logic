@@ -36,11 +36,11 @@ class DeclarationTests(SimpleTestCase):
             Transition('go', sources=['draft'], failed_state='failed', lock=False)
 
     def test_a_background_transition_refuses_it(self):
-        with self.assertRaisesRegex(ImproperlyConfigured, 'lock=False is not supported'):
+        with self.assertRaisesRegex(ImproperlyConfigured, 'remove lock=False'):
             BackgroundTransition('go', sources=['draft'], lock=False)
 
     def test_an_unknown_keyword_is_refused_and_named(self):
-        with self.assertRaisesRegex(ImproperlyConfigured, 'does not take lokc'):
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'lokc'"):
             Transition('go', sources=['draft'], lokc=False)
 
     def test_the_background_keywords_still_pass(self):

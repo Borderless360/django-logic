@@ -37,9 +37,8 @@ def db_safe_text(value: str) -> str:
     """Make ``value`` storable in a Postgres text column.
 
     NUL (U+0000) and lone surrogates are rejected by PostgreSQL, so an
-    exception message that contains one raises ``DataError`` from the
-    accounting write itself. The bookkeeping must never be the thing that
-    fails, so the characters are escaped rather than passed through.
+    exception message containing either cannot be saved directly. Escape
+    those characters so the worker can record the original failure.
     """
     text = str(value)
     if '\x00' in text:
@@ -54,15 +53,15 @@ def db_safe_text(value: str) -> str:
 
 
 class TransitionMessage(TimeStampedModel):
-    fairness_key = models.CharField(max_length=255, blank=True, default='', db_default='', db_index=True)
+    fairness_key = models.CharField(max_length=255, blank=True, default='', db_index=True)
     eligible_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    deferral_reason = models.TextField(blank=True, default='', db_default='')
+    deferral_reason = models.TextField(blank=True, default='')
     # Keep the last recorded wait after the current wait ends or the job finishes.
-    deferral_count = models.PositiveIntegerField(default=0, db_default=0)
+    deferral_count = models.PositiveIntegerField(default=0)
     last_deferred_at = models.DateTimeField(blank=True, null=True)
     last_deferred_until = models.DateTimeField(blank=True, null=True)
-    last_deferral_reason = models.TextField(blank=True, default='', db_default='')
-    completion_kind = models.CharField(max_length=16, blank=True, default='', db_default='')
+    last_deferral_reason = models.TextField(blank=True, default='')
+    completion_kind = models.CharField(max_length=16, blank=True, default='')
     is_completed = models.BooleanField(default=False)
     errors_count = models.PositiveIntegerField(default=0)
     last_error_dt = models.DateTimeField(blank=True, null=True)
@@ -93,7 +92,7 @@ class TransitionMessage(TimeStampedModel):
     # Two workers can record starts before only one obtains the execution lock.
     # These count recorded starts, not provider requests.
     first_started_at = models.DateTimeField(blank=True, null=True)
-    start_attempt_count = models.PositiveIntegerField(default=0, db_default=0)
+    start_attempt_count = models.PositiveIntegerField(default=0)
     completed_at = models.DateTimeField(blank=True, null=True)
     duration_ms = models.PositiveIntegerField(blank=True, null=True)
 
@@ -129,6 +128,7 @@ class TransitionMessage(TimeStampedModel):
 
 
     kwargs = models.JSONField(blank=True, default=dict)
+    job_context = models.JSONField(blank=True, null=True)
 
     class Meta:
         app_label = 'django_logic_background'
@@ -400,8 +400,7 @@ class TransitionMessage(TimeStampedModel):
         self.mark_as_completed(measure_duration=False, completion_kind='superseded')
 
     def record_error(self, exception: BaseException) -> None:
-        # db_safe_text, not a bare slice: the accounting write must never be
-        # the statement that fails (see its docstring).
+        # Sanitize text so an invalid error message cannot prevent recording the failure.
         self.last_error_message = db_safe_text(exception)
         self.last_error_dt = timezone.now()
         # Increment on the DB side (F expression) rather than a

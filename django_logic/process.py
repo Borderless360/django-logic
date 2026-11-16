@@ -118,27 +118,16 @@ class Process:
             raise AttributeError(item)
 
         def transition_method(**kwargs):
-            # Drop an 'action_name' key the caller passed: it would clash with
-            # _get_transition_method's first parameter and raise "multiple
-            # values for argument 'action_name'". No engine path forwards it;
-            # only a hand-built kwargs dict does. The reserved engine names
-            # stay, because callbacks can forward tr_id, root_id,
-            # parent_id and process_class through this same path.
-            kwargs.pop('action_name', None)
             return self._get_transition_method(item, **kwargs)
 
         transition_method.__name__ = item
         transition_method.__qualname__ = item
-        # Django's template engine CALLS any callable it resolves, so
-        # ``{{ order.process.approve }}`` used to drive the state machine
-        # while rendering a page and print the tr_id. ``alters_data``
-        # is the framework's opt-out — the same marker Model.save/delete
-        # carry — and makes the engine render '' instead of calling.
+        # A template must not run a transition while rendering its callable.
         transition_method.alters_data = True
 
         return transition_method
 
-    def _get_transition_method(self, action_name: str, **kwargs):
+    def _get_transition_method(self, action_name: str, /, **kwargs):
         parent_ctx = _transition_context.get()
         if parent_ctx:
             kwargs.setdefault('root_id', parent_ctx['root_id'])
@@ -166,20 +155,9 @@ class Process:
         kwargs['process_class'] = (
             f"{self.__class__.__module__}.{self.__class__.__name__}"
         )
-        if transition.is_background:
-            # Record the process class that DECLARES this transition. For a
-            # nested transition this differs from ``process_class`` (the bound
-            # process this call entered through); for a transition on the bound
-            # process itself the two coincide. Worker restore
-            # (runner._find_transition) uses it to pick the exact background
-            # transition when an ``action_name`` is shared across
-            # condition-disambiguated nested processes. Overwrite, never
-            # setdefault: a callback can forward the previous
-            # transition's kwargs, and that owner is not this transition's.
-            kwargs['owning_process_class'] = (
-                f"{type(owning_process).__module__}."
-                f"{type(owning_process).__name__}"
-            )
+        kwargs['owning_process_class'] = (
+            f"{type(owning_process).__module__}.{type(owning_process).__name__}"
+        )
 
         token = _transition_context.set(
             {'root_id': kwargs['root_id'], 'tr_id': kwargs['tr_id']}
@@ -243,7 +221,7 @@ class Process:
         for transition, _owner in self._iter_available_with_owner(
             user=user,
             action_name=action_name,
-            ignore_state=include_locked,
+            include_locked=include_locked,
         ):
             yield transition
 
@@ -251,7 +229,7 @@ class Process:
         self,
         user=None,
         action_name=None,
-        ignore_state=False,
+        include_locked=False,
         _seen=None,
         _refusals=None,
     ):
@@ -302,7 +280,7 @@ class Process:
 
         # A held lock hides the transitions that would take it. A lock=False
         # transition runs regardless, so it stays listed.
-        locked = not ignore_state and self.state.is_locked()
+        locked = not include_locked and self.state.is_locked()
 
         for transition in self.transitions:
             if action_name is not None and transition.action_name != action_name:
@@ -328,7 +306,7 @@ class Process:
             yield from sub_process._iter_available_with_owner(
                 user=user,
                 action_name=action_name,
-                ignore_state=ignore_state,
+                include_locked=include_locked,
                 _seen=_seen,
                 _refusals=_refusals,
             )
@@ -337,7 +315,7 @@ class Process:
         """Resolve ``action_name`` to ``(transition, owning_process)``.
 
         Exactly one match is required, after conditions/permissions
-        filtering with ``ignore_state=True``. Also returns the declaring
+        filtering with ``include_locked=True``. Also returns the declaring
         process so the caller can record it for worker restore.
         """
         # Prefer a checked transition over a different branch's process guard.
@@ -346,7 +324,7 @@ class Process:
             self._iter_available_with_owner(
                 action_name=action_name,
                 user=user,
-                ignore_state=True,
+                include_locked=True,
                 _refusals=refusals,
             )
         )
@@ -456,15 +434,12 @@ def _validate_unique_background_action_names(process_cls):
     by the recorded class at restore, and a synchronous namesake is
     invisible to restore (it filters to ``is_background``).
     """
-    def _where(proc_cls, transition):
-        return (
-            f"{proc_cls.__module__}.{proc_cls.__name__}."
-            f"{type(transition).__name__}"
-        )
+    def _where(proc_cls, index):
+        return f"{proc_cls.__module__}.{proc_cls.__name__}.transitions[{index}]"
 
     for proc_cls in _iter_process_tree(process_cls):
         local_background: dict[str, str] = {}
-        for transition in proc_cls.transitions:
+        for index, transition in enumerate(proc_cls.transitions):
             if not transition.is_background:
                 continue
             name = transition.action_name
@@ -475,13 +450,13 @@ def _validate_unique_background_action_names(process_cls):
                     f"has two background transitions sharing "
                     f"action_name='{name}' within a single process class "
                     f"({local_background[name]} and "
-                    f"{_where(proc_cls, transition)}). The worker restores "
+                    f"{_where(proc_cls, index)}). The worker restores "
                     f"a background transition by (declaring class, "
                     f"action_name), so background action_names must be "
                     f"unique within a process class. Move one to a "
                     f"separate nested process or rename it."
                 )
-            local_background[name] = _where(proc_cls, transition)
+            local_background[name] = _where(proc_cls, index)
 
 
 def _validate_hook_signatures(process_cls) -> None:
@@ -573,20 +548,11 @@ class ProcessManager:
             # and registry entry are already in place.
             return
 
-        # A background transition writes a TransitionMessage row, and the
-        # 'django_logic' app owns that table, its migrations and every
-        # system check. Without the app nothing would report the gap, so
-        # the first background transition would die on a missing table.
         from django.apps import apps as django_apps
 
-        from django_logic.checks import _process_tree_has_background_transition
-
-        if (_process_tree_has_background_transition(process_class)
-                and not django_apps.is_installed('django_logic')):
+        if not django_apps.is_installed('django_logic'):
             raise ImproperlyConfigured(
-                f"{model._meta.label} binds {process_class.__name__}, which "
-                f"declares a background transition, but 'django_logic' is "
-                f"not in INSTALLED_APPS. Add it and run manage.py migrate."
+                "Process binding requires 'django_logic' in INSTALLED_APPS. Add it and run manage.py migrate."
             )
 
         # Refuse an invalid state field here, before a later transition tries to write it.

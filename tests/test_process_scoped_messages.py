@@ -32,7 +32,6 @@ class ProcessScopedMessageScenario(ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
-    process_name = 'process'
 
     # --- fixtures ---------------------------------------------------------
 

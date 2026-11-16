@@ -5,8 +5,8 @@
 > 1. **You test your process, not the background machinery.** Delivery,
 >    retries, durability, crash recovery and queue routing are the library's
 >    job — guaranteed by its own regression suite, a PostgreSQL + Redis
->    stability suite, and a Heroku validation matrix.
->    Your tests run the *business process* **entirely without services**.
+>    stability suite and real-worker tests.
+>    Inline process tests need no worker; database-only transitions and non-atomic jobs still need PostgreSQL.
 > 2. **You test the object's journey, not the wiring.** Assert what the object
 >    *became* as it moved through the process — its state trajectory, the
 >    fields the side-effects changed, and what happens to the caller on failure
@@ -64,9 +64,9 @@ DJANGO_LOGIC = {
 }
 ```
 
-SQLite is fine for process tests (the library refuses SQLite only in pull
-mode, where the claim needs real row locking). No services, no worker
-processes.
+SQLite supports synchronous process tests and default atomic background jobs.
+`DatabaseTransition` and `BackgroundTransition(atomic=False)` require PostgreSQL, including inline tests.
+Inline tests start no worker process. Use PostgreSQL and a shared cache to verify concurrent behavior.
 
 If a specific test file needs sync mode while the global setting is
 `'pull'`, use the context manager instead:
@@ -162,8 +162,7 @@ def test_validation_failure_voids_the_order(self):
 ```
 
 `expect_raises` is what makes this a journey test rather than a mirror:
-without it the harness absorbs the injected exception, so the test would pass
-whether the engine re-raised or silently swallowed. The full contract:
+omitting it with an injected failure raises `ValueError` before the action runs. The full contract:
 `side_effects` re-raise to the caller; `callbacks`
 are swallowed (best-effort).
 
@@ -179,10 +178,11 @@ def test_courier_failure_is_recorded(self):
     self.background_transition(
         order, 'fulfil',
         fail_side_effect='call_courier',
-        fail_with=ConnectionError('Aramex timeout'))
+        fail_with=ConnectionError('Courier timeout'),
+        expect_raises=ConnectionError)
 
     self.assert_state(order, 'fulfilling')        # left in progress
-    self.assert_error_recorded(order, 'Aramex timeout')
+    self.assert_error_recorded(order, 'Courier timeout')
     self.assert_error_count(order, 1)
     self.assert_side_effects_not_ran(['call_courier'])
 ```
@@ -197,11 +197,12 @@ def test_failed_attempt_rolls_back_db_writes(self):
     order = self.create_instance(status='approved')
     self.background_transition(order, 'fulfil',
                                fail_side_effect='call_courier',
-                               fail_with=ConnectionError('boom'))
+                               fail_with=ConnectionError('boom'),
+                               expect_raises=ConnectionError)
     self.assertFalse(StockReservation.objects.filter(order=order).exists())
 ```
 
-### 4. Terminal failure at MAX_ERRORS → failed_state
+### 4. Terminal failure at TRANSITION_MESSAGE_MAX_ERRORS → failed_state
 
 ```python
 @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'sync',
@@ -210,13 +211,28 @@ def test_persistent_failure_reaches_failed_state(self):
     order = self.create_instance(status='approved')
     self.background_transition(order, 'fulfil',
                                fail_side_effect='call_courier',
-                               fail_with=ConnectionError('down'))
+                               fail_with=ConnectionError('down'),
+                          expect_raises=ConnectionError)
     self.retry_transition(order,                     # attempt 2 = terminal
                           fail_side_effect='call_courier',
-                          fail_with=ConnectionError('down'))
+                          fail_with=ConnectionError('down'),
+                          expect_raises=ConnectionError)
     self.assert_state(order, 'fulfilment_failed')
     self.assert_error_count(order, 2)
 ```
+
+### Waiting for a required result
+
+A deferred job has not completed. Assert its saved wait and the business state:
+
+```python
+self.background_transition(order, 'fulfil')
+self.assert_deferred(order, reason='Waiting for stock')
+self.assert_state(order, 'fulfilling')
+```
+
+Complete the dependency and advance the test clock past the saved deadline before `retry_transition(order)`.
+The helper refuses a retry while the job is still waiting, so an unexecuted attempt cannot pass as success.
 
 ### 5. Snapshot & replay — turn a production bug into a test
 
@@ -260,7 +276,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg). Override for factories. |
 | `transition(obj, action, **kwargs)` | Run a synchronous transition through the normal entrypoint. |
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition` enqueue **and** execute inline. |
-| `retry_transition(obj)` | Re-run the instance's uncompleted `TransitionMessage` — simulates a worker's next claim. |
+| `retry_transition(obj)` | Run the unfinished job when due; fails the test if the job is still deferred. |
 | `snapshot(obj)` / `from_snapshot(data_or_path)` | Capture / rebuild the model fields. Create background jobs separately with `open_transition_message`. |
 
 `transition`, `background_transition` and `retry_transition` all accept:
@@ -318,6 +334,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_raised(exc_type=None, match=None)` | The last drive propagated an exception to the caller (optionally of a type / containing a substring). |
 | `assert_not_raised()` | The last drive propagated nothing (the swallow contract). |
 | `assert_error_recorded(obj, contains)` | Substring of `last_error_message` on the latest `TransitionMessage`. |
+| `assert_deferred(obj, reason=None, until=None)` | The latest job is unfinished with a future due time; optionally check its reason and deadline. |
 | `assert_error_count(obj, expected)` | `errors_count` on the latest `TransitionMessage`. |
 | `assert_transition_owner(obj, 'app.process.OrderProcess', transition_name=None)` | The dotted path of the process class that declared the recorded transition. |
 

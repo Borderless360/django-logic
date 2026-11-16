@@ -50,11 +50,7 @@ class KwargsRoundTripTests(TestCase):
         self.assertIn('context', seen)
         self.assertEqual(seen['context'], {})
 
-        # owning_process_class is engine bookkeeping, not caller data. It
-        # belongs on the row's column only. A side-effect declared as
-        # fn(instance, owning_process_class, **kwargs) must behave the same
-        # in both modes.
-        self.assertNotIn('owning_process_class', seen)
+        self.assertEqual(seen['owning_process_class'], 'tests.background.models.WidgetProcess')
         transition_message = TransitionMessage.objects.get(
             transition_name='fulfil')
         self.assertEqual(
@@ -70,14 +66,10 @@ class KwargsRoundTripTests(TestCase):
             self.widget.process.fulfil(request=object())
         self.assertFalse(TransitionMessage.objects.exists())
 
-    def test_owning_process_class_kept_out_of_nested_side_effect_kwargs(self):
-        # Same rule for a nested owner. nested_fulfil is declared on
-        # NestedBgChildProcess and reached through the bound parent_process.
-        # The nested class lands on the column, never in the side-effect
-        # kwargs.
+    def test_nested_side_effect_receives_its_actual_declaring_class(self):
         self.widget.parent_process.nested_fulfil()
         seen = bg_models.LAST_KWARGS
-        self.assertNotIn('owning_process_class', seen)
+        self.assertEqual(seen['owning_process_class'], 'tests.background.models.NestedBgChildProcess')
         transition_message = TransitionMessage.objects.get(
             transition_name='nested_fulfil')
         self.assertEqual(
@@ -125,10 +117,7 @@ class KwargsRoundTripTests(TestCase):
         self.assertEqual(seen['when'], _WHEN.isoformat())
         self.assertEqual(seen['some_uuid'], str(_UUID))
 
-    def test_malformed_tagged_row_passes_through_and_completes(self):
-        # A known tag whose payload no longer decodes (someone edited the row
-        # by hand) must not stall the worker. The raw tagged value reaches the
-        # side-effect and the row completes.
+    def test_malformed_tagged_row_fails_without_running_business_functions(self):
         self.widget.status = 'fulfilling'
         self.widget.save(update_fields=['status'])
         bad = {'__dl_type__': 'datetime', 'value': 'not-a-datetime'}
@@ -143,12 +132,15 @@ class KwargsRoundTripTests(TestCase):
             queue_name='django_logic.critical',
             kwargs={'process_class': 'tests.background.models.WidgetProcess', 'when': bad},
         )
-        with self.assertLogs('django-logic.transition', level='WARNING'):
-            run_background_transition(transition_message.pk)
-        transition_message.refresh_from_db()
-        self.assertTrue(transition_message.is_completed)
-        self.assertEqual(transition_message.errors_count, 0)
-        self.assertEqual(bg_models.LAST_KWARGS['when'], bad)
+        for expected_errors in range(1, 4):
+            with self.assertRaisesMessage(KwargsSerializationError, "Cannot restore kwargs type tag 'datetime'"):
+                run_background_transition(transition_message.pk)
+            transition_message.refresh_from_db()
+            self.assertEqual(transition_message.errors_count, expected_errors)
+            self.assertEqual(transition_message.is_completed, expected_errors == 3)
+            self.assertEqual(bg_models.LAST_KWARGS, {})
+        self.widget.refresh_from_db()
+        self.assertEqual(self.widget.status, 'fulfilment_failed')
 
     def test_undecodable_kwargs_row_counts_errors_and_routes_failed_state(self):
         # A decode that really raises (a user_id that cannot be a primary key)

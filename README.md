@@ -15,9 +15,11 @@ runs it.
 ## Requirements
 
 - Python 3.11 or later.
-- Django 5.1 or later. CI tests 5.1, 5.2 and 6.0.
+- Django 5.2 or later. CI tests 5.2, 6.0 and 6.1.
 - PostgreSQL for background transitions. The worker claims a row with
   `SELECT FOR UPDATE SKIP LOCKED`, and SQLite has no row locks.
+  Use psycopg 3.2 or later, or Django’s supported psycopg2 driver.
+  The `postgres` installation extra installs psycopg 3.
 - A cross-process `default` cache. The web processes and the worker processes
   share the state lock through it. django-logic locks through Django's cache
   API and imports no backend, so `django.core.cache.backends.redis.RedisCache`
@@ -26,12 +28,12 @@ runs it.
 
 ## Install
 
-The current release is **4.3.2**. See the [changelog](CHANGELOG.md) for its fixes.
-Before upgrading to 5.0, follow the [upgrade and rollback requirements](docs/operation-contract.md#upgrade-and-rollback).
+The current release is **5.1.0**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
+Before upgrading, follow the [upgrade and rollback requirements](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 
 ```bash
-pip install django-logic
+pip install "django-logic[postgres]" redis
 ```
 
 Add one entry to `INSTALLED_APPS` and create the table:
@@ -45,7 +47,7 @@ INSTALLED_APPS = [
 
 That one entry is the whole library: the `TransitionMessage` table and
 its migrations, the `dl_worker` and `dl_transitions` commands, and every
-system check. There is nothing else to install or configure.
+system check. Configure the database and cache described below.
 
 Running no background transitions? The same entry. The PostgreSQL and
 shared-cache rules below apply only when a background transition is
@@ -73,14 +75,14 @@ CACHES = {
 Every `DJANGO_LOGIC` key has a default, so you need no other configuration to
 start.
 
-### Upgrading to 5.0
+### Upgrading to version 5
 
 Version 5 removes obsolete APIs and saved-job restoration fallbacks. Start from
 4.3.2, update application declarations, and finish jobs whose action or process
 names will change before stopping the old producers and workers. Apply migrations
-with the new application installed, then start only 5.0 processes. Migration 0017
+with the new application installed, then start only the new version’s processes. Migration 0017
 refuses unresolved jobs that the new code cannot restore; it does not discard them.
-Mixed versions are unsupported. See the [upgrade checklist](docs/operation-contract.md#upgrade-and-rollback).
+Mixed versions are unsupported. See the [upgrade checklist](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 ## Declare a process
 
@@ -96,6 +98,7 @@ class Order(models.Model):
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('approved', 'Approved'),
+        ('fulfilling', 'Fulfilling'),
         ('fulfilled', 'Fulfilled'),
         ('fulfilment_failed', 'Fulfilment failed'),
         ('cancelled', 'Cancelled'),
@@ -162,74 +165,12 @@ Each declaration slot has one job:
   failed state when it fails.
   Put required work in `side_effects`.
 - `failure_callbacks` — functions that run after a side-effect fails. They
-  receive `exception=`. Put cleanup and compensation here.
+  receive `exception=` and are best-effort. Use them for optional reporting.
+  Required compensation belongs in a saved business job.
 
-On PostgreSQL, a lock-taking synchronous `Transition` runs callbacks inside its transaction, before the target state commits.
+Required database changes can use `atomic=True`. Use `DatabaseTransition` when all work can be rolled back by PostgreSQL.
+See [locks and transactions](https://github.com/Borderless360/django-logic/blob/master/docs/transactions.md) for callback timing, nested actions and external-request limits.
 
-Other connections see the prior committed state until the outermost transaction commits, including any transaction opened by the caller.
-A process interruption during callbacks can therefore discard the state and side-effect writes too.
-Use `transaction.on_commit()` for best-effort work that needs committed data; it does not guarantee delivery of required work.
-Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.
-Inline background execution can still be inside a caller's outer transaction.
-
-Declare `Transition(..., atomic=True)` when its required database changes and
-final target save must succeed together. A side-effect error or a target save
-error discards both, including writes made by model save overrides and signals.
-The transaction uses the bound instance's database. This option also works with
-`DatabaseTransition`; its default remains unchanged.
-
-After rollback, the engine reloads the bound instance, writes `failed_state`
-when declared, releases its lock, runs failure callbacks, and re-raises the
-original error. Failure callbacks therefore see the restored persisted fields.
-If reloading fails, the engine releases its lock and reports the original error
-without running failure writes or callbacks on an unverified object. A failed
-failure-state save also preserves the original error. An atomic transition may
-declare `failed_state` without side effects because its target save can fail.
-An error saving `failed_state` triggers another reload before failure callbacks.
-
-The synchronous default is `atomic=False`, preserving existing failure behavior.
-It differs from `BackgroundTransition`, whose `atomic=True` default is unchanged.
-The new option does not make external requests reversible, change permissions or
-locking, or make optional callbacks required. Success callbacks run after the required transaction block and retain their
-best-effort behavior. Use `transaction.on_commit(..., robust=True)` for optional
-publication that must wait for the containing transaction to commit.
-An exception from a non-robust commit callback still reaches the caller after
-commit; it does not undo the completed action or run its failure callbacks.
-
-The atomic option separates the target save from optional completion. A subclass
-that overrides `complete_transition` is refused with `atomic=True`, because the
-engine cannot place arbitrary completion code on the correct side of that
-transaction. Existing subclasses remain supported with the default `atomic=False`.
-Use the declared `side_effects` and `callbacks` for the atomic option.
-
-Nested required actions share the containing database transaction. If an outer
-action fails, successful nested state changes and their commit callbacks are
-discarded too. A nested failed-state write can also be discarded by its outer
-action's rollback. Django does not restore other Python instances after that
-rollback; reload related objects before retrying. Writes to another database
-and external effects are outside this guarantee.
-
-Use `DatabaseTransition` for changes that PostgreSQL can roll back completely.
-It takes the same declaration arguments as `Transition` and requires PostgreSQL.
-It keeps row locks, permissions, conditions, source checks, pending-job checks,
-targets, failure handling and callbacks.
-It refuses reentry without creating a persistent cache lock. A killed process
-therefore leaves no cache lock that delays a saved completion job's retry.
-
-This database-only promise includes **all nested transitions and submissions**,
-including their ordinary callbacks. They must use the same database.
-The scope ends before `transaction.on_commit()` callbacks run. Save required
-external work as a background job; do not call providers, publish messages,
-or perform other irreversible work in this scope. In a synchronous test runtime,
-background work runs inline and must also satisfy that promise.
-
-Ordinary `Transition` calls outside this scope keep their shared cache protection.
-`DatabaseTransition` also refuses an existing cache lock, including one held by
-an external call whose database connection failed. Do not clear that lock to
-force a retry. Replacing an external operation with `DatabaseTransition` is unsafe.
-
-For example, an import completion saves its results and updates stock in one transaction.
-Its notifications and shipping requests run as separately saved background jobs.
 Declare a `Transition` with no `target` for work that needs conditions,
 permissions and side-effects but writes no state on success. It follows
 the same rules as every transition: it takes the state lock, it is
@@ -322,15 +263,16 @@ always records its actual bound root and declaring class, replacing forwarded
 a different process. Validate request fields at the application boundary.
 Background transitions rebuild `context`; they do not save a caller's `context`.
 They also refuse `user_id`; pass `user=` instead.
-Calls refuse `state` and `exception` because hooks receive these from the engine.
+Calls refuse `state` and `exception` because those names belong to engine internals.
+Failure callbacks receive `exception=`; ordinary hooks do not receive a `state` argument.
 
 - The accessor is the process class's `process_name`. It is `process` by
   default.
 - Pass `user=` in a request handler. A call without `user=` is a system call,
   and it skips every permission check.
 - Never pass the request. A transition refuses `request=` at the call:
-  hooks are `fn(instance, **kwargs)` and run on a worker for a background
-  transition, where no request exists. Resolve what a hook needs in the
+  side effects and callbacks accept `fn(instance, **kwargs)` and can run on a worker.
+  Conditions receive `instance`; permissions receive `instance, user`. Neither receives business arguments. Resolve what a hook needs in the
   view and pass plain values.
 - `order.process.get_available_actions(user=request.user)` lists what this user
   may run right now.
@@ -339,105 +281,7 @@ Calls refuse `state` and `exception` because hooks receive these from the engine
   means the instance is busy, so the caller may retry shortly. Catch the
   subclass first.
 
-The exception's `reason` is a `RefusalReason` from `django_logic.exceptions`.
-Its values are strings and can be included in JSON responses. Process calls
-also attach `user_message`, ready to display. Existing exception classes,
-diagnostic text from `str(error)`, and exception arguments stay unchanged.
-
-| Reason value | What refused the call |
-| --- | --- |
-| `permission` | A process or transition permission check failed. |
-| `condition` | A process or transition condition check failed. |
-| `source_state` | The current or persisted state is outside the transition's sources. |
-| `unknown_action` | No process declaration has this action name. |
-| `locked` | The state lock could not be acquired. |
-| `background_in_flight` | An uncompleted background transition still has retry coverage. |
-| `background_stranded` | An uncompleted background transition is no longer being retried. |
-| `ambiguous` | More than one transition passed the checks for this action. |
-
-Reasons describe the existing checks; they do not change retry behavior.
-A PostgreSQL row-lock timeout raises `TransitionTemporarilyUnavailable` with reason `locked`.
-A cache state-lock refusal raises plain `TransitionNotAllowed` with that same reason.
-Use the exception type, not `reason='locked'` alone, to decide whether to suggest a short retry.
-When declarations share an action name, prefer a transition whose sources
-include the current state and whose process permissions and conditions pass.
-Its failed check supplies the reason. Otherwise, use a process guard that
-blocks a declaration for the current state. If all declarations require
-another source state, report `source_state`.
-
-Declaration order resolves ties within each group. A custom check that
-supplies no reason keeps `None`, even if a lower-priority refusal supplies
-a reason. This rule does not infer a unique intended branch or list every
-failed check. Process guards still run before their transitions and nested
-processes.
-
-The resolver captures reasons during the existing checks. It does not run
-permissions or conditions again to explain a refusal.
-Call `get_available_actions()` explicitly when the caller needs a fresh action list.
-
-A custom `is_valid` override can return `False` without explaining why.
-Its reason is `None` unless a stock check on that same object recorded a
-failure. Caller-created exceptions also default to `None`. Continue to catch
-`TransitionNotAllowed` when handling these refusals.
-
-### Refusal messages
-
-Process calls provide generic messages, such as
-`Action 'submit' is not allowed: this record does not meet the requirements for this action.`
-Pending background work uses `is temporarily unavailable` in the prefix.
-An unknown reason code or a custom check with no reason uses
-`Action 'submit' is not allowed`.
-
-Use `Process.refusal_messages` for process-wide wording and the same option
-on a transition for its wording. These mappings contain overrides only.
-Use `@refusal_message(text)` for one condition or permission callable:
-
-```python
-from django_logic import Process, Transition
-from django_logic.commands import refusal_message
-from django_logic.exceptions import RefusalReason, TransitionNotAllowed
-
-
-@refusal_message("Upload an invoice before submitting.")
-def has_invoice(claim):
-    return claim.invoices.exists()
-
-
-class ClaimProcess(Process):
-    refusal_messages = {
-        RefusalReason.PERMISSION: "Only the claim owner can perform this action.",
-    }
-    transitions = [
-        Transition(
-            "submit", sources=["draft"], target="submitted",
-            conditions=[has_invoice],
-            refusal_messages={
-                RefusalReason.SOURCE_STATE: "This claim has already been submitted.",
-            },
-        ),
-    ]
-
-
-try:
-    claim.process.submit(user=request.user)
-except TransitionNotAllowed as error:
-    response = {"reason": error.reason, "message": error.user_message}
-```
-
-Values are literal explanation text. The library adds the action prefix;
-it does not substitute templates or call message functions. The decorator
-returns the same callable with the same signature and behavior.
-
-The first failed callable's message takes precedence over the transition
-map, then the selected nested process map, the root process map, and built-in
-defaults. A nested process with no override keeps the root's wording.
-A process-level failure uses process messages because no transition was
-selected. Only checks already evaluated can supply a message.
-
-Message capture does not repeat checks or change short-circuit behavior.
-Nested refusals keep an already supplied `user_message`. Technical exceptions
-retain their normal behavior. Direct `Transition.change_state()` calls can
-leave `user_message=None`; process configuration applies to Process calls.
+See [refused actions](https://github.com/Borderless360/django-logic/blob/master/docs/refusals.md) for reason codes, temporary refusals and messages for users.
 
 ## Background transitions
 
@@ -486,7 +330,7 @@ Several transitions may share it; each saved job records its exact transition.
 A synchronous transition cannot declare it. Use `submission_context` for required
 database preparation that must commit together with the background job and its
 in-progress state. A failed submission rolls all of them back. See the
-[submission contract](docs/operation-contract.md#preparing-a-submission).
+[submission contract](https://github.com/Borderless360/django-logic/blob/master/docs/background-jobs.md#preparing-a-submission).
 
 If another action changes the model's state while a job waits, that change wins.
 The worker completes the job as `superseded` and skips its side effects.
@@ -495,8 +339,8 @@ The worker completes the job as `superseded` and skips its side effects.
   them again from the start, so a payment or an email can happen twice.
 - `atomic=False` preserves committed model writes when later work fails. Use it
   for provider receipts that must survive a report or state-write failure.
-  See [provider receipts](docs/recipes/provider-receipts.md) for restrictions and
-  retry safety. The default `atomic=True` behavior is unchanged.
+  See [provider receipts](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/provider-receipts.md) for restrictions and
+  retry safety.
 - `queue=` is optional. A transition without it runs on
   `DJANGO_LOGIC['DEFAULT_QUEUE']`, which is `django_logic`. Name a queue per
   service level and give it its own worker.
@@ -511,7 +355,7 @@ The worker completes the job as `superseded` and skips its side effects.
   the owning job, or save ordinary business jobs with the result that requests them.
   Callbacks run after completion and are suitable only for optional work.
 
-[docs/design/PULL_WORKERS.md](docs/design/PULL_WORKERS.md) explains how a
+[docs/workers.md](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) explains how a
 worker claims a row and what happens when one dies.
 
 ## Run the workers
@@ -521,7 +365,7 @@ One `dl_worker` process serves one group of queues.
 If logging or telemetry buffers reports, configure
 `DJANGO_LOGIC['JOB_PROCESS_FINISH']` with an application function's dotted path.
 The function sends this job process's reports before exit, with a separate
-two-second limit. See [buffered reporting](docs/logger.md#send-buffered-reports-before-a-job-process-exits)
+two-second limit. See [buffered reporting](https://github.com/Borderless360/django-logic/blob/master/docs/logger.md#send-buffered-reports-before-a-job-process-exits)
 for process-local state requirements and delivery limits.
 
 ```bash
@@ -532,7 +376,7 @@ python manage.py dl_worker --queues django_logic.slow --concurrency=4
 `--concurrency=N` says how many attempts one worker runs at a time. The default
 is 1. Each attempt runs in its own forked process and holds its own database
 connection. Read "Sizing a deployment" in
-[docs/design/PULL_WORKERS.md](docs/design/PULL_WORKERS.md) for the memory and
+[docs/workers.md](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) for the memory and
 connection budget.
 
 A worker that dies releases its row lock with its database connection, and the
@@ -540,71 +384,7 @@ next claim takes the row.
 A job process can stop while it saves another background job. On PostgreSQL that
 save holds the business row and writes no cache lock, so the record is not left locked.
 
-### See what is not moving
-
-```bash
-python manage.py dl_transitions
-python manage.py dl_transitions --send 1234
-python manage.py dl_transitions --stats --since 7d --queues django_logic --json
-```
-
-`dl_transitions` lists every uncompleted background transition and says why
-each one is not moving: it has spent every attempt, it waits out the retry
-pause, its last attempt has no recorded result, or it waits for worker capacity.
-The report also distinguishes recent worker presence from actual queue progress. `--queues` narrows the list.
-Workers take turns between eligible clients. Within a client, jobs run by when they became ready, then submission time and ID.
-A postponed older job can therefore follow newer work that was ready first.
-
-Workers record their served queues during each maintenance check, even when all
-job slots are full. This recent observation is separate from queue progress.
-A queue with no progress still reports an error when its worker is present.
-The message directs operators to check capacity and blocked jobs.
-
-`--stats` reports retained jobs created during the selected period, grouped by
-queue, model, process, transition, parent action and effect. It includes outcomes, errors,
-recorded starts, repeated starts and deferrals. Initial waiting uses the first
-recorded start. Duration covers the last measured attempt, excluding completion
-callbacks. Each timing includes its sample count, median, 90th percentile and
-maximum in milliseconds. Missing history stays unknown. Repeated starts include
-deferrals and competing starts; they are not an exact retry count. The report
-cannot infer total runtime or worker utilization. It changes no job records.
-Use `--json` for machine-readable output. `--queue` also accepts the queue filter.
-
-The same report is available as
-`django_logic.background.transition_statistics(since=cutoff, queues=None, using=None)`.
-`cutoff` is a datetime; the optional database alias selects where to read jobs.
-`queue_worker_presence(queue_name)` returns `True` for recent presence, `False`
-for no retained observation, or `None` when the cache cannot answer.
-
-`--send <pk>` clears the retry wait on one row and wakes the workers, so the
-next claim takes it. The command runs no side-effects itself.
-
-### Two safety nets
-
-The worker starts two safety nets once a minute in one separate process.
-Only one safety-net process runs per worker. Its time limit is 60 seconds.
-Nothing else needs a schedule.
-
-- `detect_stuck_transitions` completes a job that has spent every allowed error.
-  It writes `failed_state` and runs failure callbacks only when the saved state still applies and can be checked under its lock.
-  Otherwise it records why the state change was skipped. It also reports rows that waited past the retry window with no attempt, in one
-  line per queue. If a worker started a row from that queue inside the window,
-  or holds one now, the queue is behind, and the line is a WARNING. If not, no
-  worker has taken a row from the queue for the whole window, and the line is
-  an ERROR. Either no worker serves the queue, or work from other queues fills
-  every slot of the workers that do. Recent worker presence changes the
-  explanation, but does not reduce the severity of missing progress.
-- `cleanup_completed_transitions` deletes completed rows older than
-  `TRANSITION_MESSAGE_CLEANUP_DAYS`. It keeps the newest failed row per
-  instance and process, because that row is the only explanation for an
-  instance parked in its `failed_state`.
-
-Alert when the worker processes stop. The safety nets stop with them.
-Reserve one extra database connection for the safety-net process, plus any
-connections your callbacks open. A slow or exiting callback cannot block
-the supervisor's attempt timeouts. If a pass stops, the next pass checks
-the remaining uncompleted rows. Callbacks for completed rows remain
-best-effort and are not retried.
+See [running workers](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) for queue diagnostics, retry commands, retained statistics and maintenance.
 
 ## Test your process
 
@@ -633,25 +413,33 @@ For deployment-wide inline tests, call `django_logic.conf.enable_sync()` in test
 Production deployments normally use `pull`. Business code can use `django_logic.background.sync_execution()` for one block that needs an immediate result.
 That block runs in the caller's process and starts no retry loop.
 A committed unfinished job can still be claimed by workers serving its queue.
+SQLite supports synchronous process tests and default atomic background tests.
+`DatabaseTransition` and `BackgroundTransition(atomic=False)` tests require PostgreSQL.
 An atomic background transition can join a caller transaction. Outside the test runtime, `atomic=False` still requires PostgreSQL autocommit.
 In the test runtime, an `atomic=False` job called inside a transaction runs in that transaction, so `TestCase` can run it.
 Its writes stay when a later step fails, unless the test's own transaction rolls back.
-[docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) has the test setup and scenario catalog.
+[docs/TESTING_GUIDE.md](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) has the test setup and scenario catalog.
 
 ## More documentation
 
-- [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) — how to test a process, and
+- [API and settings reference](https://github.com/Borderless360/django-logic/blob/master/docs/reference.md) — declarations, imports and configuration.
+- [Background jobs](https://github.com/Borderless360/django-logic/blob/master/docs/background-jobs.md) — accepted inputs, required work, fairness and deferral.
+- [Locks and transactions](https://github.com/Borderless360/django-logic/blob/master/docs/transactions.md) — database changes, callbacks and external requests.
+- [Refused actions](https://github.com/Borderless360/django-logic/blob/master/docs/refusals.md) — reason codes and messages for users.
+- [Upgrading](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md) — supported migration and rollback requirements.
+
+- [docs/TESTING_GUIDE.md](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) — how to test a process, and
   the assertions `ProcessScenario` gives you.
-- [docs/design/PULL_WORKERS.md](docs/design/PULL_WORKERS.md) — how the workers
+- [docs/workers.md](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) — how the workers
   claim and run rows, how to size a deployment, and how to run behind
   pgbouncer.
-- [docs/recipes/nested-processes.md](docs/recipes/nested-processes.md) — how a
+- [docs/recipes/nested-processes.md](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/nested-processes.md) — how a
   parent drives many children without cascading their failures.
-- [docs/recipes/long-jobs.md](docs/recipes/long-jobs.md) — how to split work
+- [docs/recipes/long-jobs.md](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/long-jobs.md) — how to split work
   that runs for a long time.
-- [docs/recipes/interactive-and-automatic.md](docs/recipes/interactive-and-automatic.md) — shared business functions with separate worker queues.
-- [docs/logger.md](docs/logger.md) — the loggers and the events they write.
-- [CHANGELOG.md](CHANGELOG.md) — what each release changed, and every upgrade
+- [docs/recipes/interactive-and-automatic.md](https://github.com/Borderless360/django-logic/blob/master/docs/recipes/interactive-and-automatic.md) — shared business functions with separate worker queues.
+- [docs/logger.md](https://github.com/Borderless360/django-logic/blob/master/docs/logger.md) — the loggers and the events they write.
+- [CHANGELOG.md](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) — what each release changed, and every upgrade
   step.
 
 ## Contributing
@@ -664,7 +452,7 @@ python tests/manage.py test          # SQLite suite
 python tests/manage.py test tests.test_transition
 ```
 
-Add a test for every change, and update the documentation the change touches.
+Test changed behavior and update the affected documentation.
 
 Report a bug in the
 [issue tracker](https://github.com/Borderless360/django-logic/issues).

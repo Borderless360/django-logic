@@ -156,6 +156,21 @@ class ScenarioAssertions:
             )
         self._record_assert(f'assert_error_recorded({contains!r})', ok=True)
 
+    def assert_deferred(self, instance, *, reason=None, until=None):
+        """Check the saved wait without running a job before its due time."""
+        from django.utils import timezone
+        job = latest_message(instance, process_name=self._process_name)
+        valid = (job is not None and not job.is_completed and job.eligible_at is not None
+                 and job.eligible_at > timezone.now())
+        if valid and reason is not None:
+            valid = job.deferral_reason == reason
+        if valid and until is not None:
+            valid = job.eligible_at == until
+        self._record_assert('assert_deferred', ok=valid)
+        if not valid:
+            self._fail('Expected an unfinished job with a future due time and the specified wait.', instance=instance)
+        return job
+
     def assert_error_count(self, instance, expected):
         transition_message = latest_message(instance, process_name=self._process_name)
         actual = None if transition_message is None else transition_message.errors_count

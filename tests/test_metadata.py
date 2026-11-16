@@ -137,17 +137,16 @@ class MetadataDriftTests(unittest.TestCase):
             'django dependency floor (%s) is below the smallest claimed '
             'classifier (%s): pip could install a Django version the project '
             'neither tests nor claims (%r)' % (floor, min_classifier, dep))
-        # The concrete, current contract: floor at 5.1 (4.2 support was
-        # dropped in 3.0.1 for db_default — see CHANGELOG).
-        self.assertIn(
-            '>=5.1', dep.replace(' ', ''),
-            'django dependency (%r) must exclude versions below 5.1' % dep)
-
     # -- 4. README agrees and carries no stale install instructions ----------
 
     def test_readme_states_the_same_django_floor(self):
-        self.assertIn(
-            'Django 5.1', self.readme_text,
-            'README.md no longer states the "Django 5.1" support floor — '
-            'keep it in sync with pyproject.toml and CI (#147)')
+        floor = min(self.django_classifier_versions, key=_version_tuple)
+        self.assertIn(f'Django {floor} or later', self.readme_text)
 
+    def test_readme_version_matches_package(self):
+        self.assertIn(f"The current release is **{self.project['version']}**", self.readme_text)
+
+    def test_postgresql_matrix_covers_supported_django_versions(self):
+        workflow = (REPO_ROOT / '.github/workflows/stability.yml').read_text()
+        matrix = re.search(r'django: \[(.*?)\]', workflow).group(1)
+        self.assertEqual(set(re.findall(r'"(\d+\.\d+)"', matrix)), self.django_classifier_versions)

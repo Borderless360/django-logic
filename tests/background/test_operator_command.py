@@ -58,7 +58,7 @@ class ListUncompletedTests(TestCase):
     def test_a_row_at_max_errors_names_the_finalizer(self):
         self._row(errors_count=3, last_error_dt=timezone.now())
         listing = self._listing()
-        self.assertIn('at MAX_ERRORS (3)', listing)
+        self.assertIn('at TRANSITION_MESSAGE_MAX_ERRORS (3)', listing)
         # The finalizer runs in every worker loop, whatever its queues.
         self.assertIn('on the next pass of any running worker', listing)
 
@@ -161,6 +161,11 @@ class SendOneRowTests(TestCase):
             TransitionMessage.objects.filter(pk=row.pk).update(**updates)
             row.refresh_from_db()
         return row
+
+    def test_send_refuses_an_ignored_queue_filter(self):
+        row = self._row()
+        with self.assertRaisesMessage(CommandError, 'cannot be combined with --queues'):
+            call_command('dl_transitions', send=row.pk, queues='other', stdout=StringIO())
 
     def test_send_clears_the_retry_wait(self):
         row = self._row(errors_count=1, last_error_dt=timezone.now())

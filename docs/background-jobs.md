@@ -1,21 +1,4 @@
-# Durable operations
-
-## Checking eligibility while another action runs
-
-`process.get_available_actions(..., include_locked=True)` and
-`process.get_available_transitions(..., include_locked=True)` check the object's
-current state, conditions and permissions even when another action holds its
-state lock. This lets an application distinguish a temporary wait from a business
-rule that forbids an action. The default continues to hide actions that need a
-held lock.
-
-Inside `DatabaseTransition`, the lock is visible only within the current call.
-Other connections can list those actions, but calls still wait for the PostgreSQL row lock or refuse after its timeout.
-
-These queries do not acquire or release locks, save a request, or guarantee that
-an action can run immediately. Calling the action still acquires its normal
-locks, checks the latest persisted state and rejects conflicting unfinished
-work. Applications must handle a later refusal without damaging existing data.
+# Background jobs
 
 ## Fair progress
 
@@ -34,8 +17,7 @@ Applications that combine refresh requests must persist their own dirty flag or 
 ## Preparing a submission
 
 Use `submission_context` when accepting work must also lock related records,
-recheck business conditions or save trusted inputs. It replaces a private
-`_enqueue_atomic` override for these application rules.
+recheck business conditions or save trusted inputs.
 
 ```python
 from contextlib import contextmanager
@@ -80,8 +62,7 @@ Use durable database records when that distinction matters.
 
 The context ends before job execution, including inline execution. An outer
 caller transaction can still retain its database locks until commit.
-Retries and previously saved jobs do not run the context again. Jobs keep the
-existing serialized argument format. Each job receives its own saved inputs.
+Retries and previously saved jobs do not run the context again. Each job receives its own saved inputs.
 
 ## Expected waiting
 
@@ -124,19 +105,16 @@ the current wait. The two retained times describe the last requested wait,
 not all elapsed waiting. Applications should use a short reason without
 credentials or request payloads.
 
-For jobs created after the upgrade, `first_started_at - created` measures
+`first_started_at - created` measures
 the delay until the first recorded start attempt. That delay includes any initial
 application-specified eligibility time. `completed_at - created` includes
 execution, errors, deferrals and time waiting for a worker. `duration_ms`
 still measures only the last attempt and excludes completion callbacks.
 
-These measurements begin with the first attempt on an upgraded worker.
-Migration 0014 leaves old start and wait history unknown instead of guessing.
-Existing retention rules still apply to the job records. Missing historical
-measurements remain unknown; they are not reconstructed at upgrade.
+Missing historical measurements remain unknown. Cleanup limits the available job history.
 
 `transition_statistics(since=cutoff, queues=None, using=None)` groups retained
-jobs by queue, model, process class, action, parent action and effect. Counts describe each
+jobs by queue, model, process class and action. Counts describe each
 selected job's recorded history, not events that happened within the window.
 `initial_wait_ms` uses only `first_started_at`; `last_attempt_duration_ms` uses
 only recorded `duration_ms` values. Each contains `samples`, `p50`, `p90` and
@@ -158,7 +136,7 @@ and record their completion in business records.
 
 ### Required work on related records
 
-An order can reach `shipping` before its old callback ships the fulfilments.
+An order can reach `shipping` before all its fulfilments finish shipping.
 A manifest must not treat that state change as permission to finish billing.
 Required shipping work belongs in a durable order job with a separate completion state:
 
@@ -248,98 +226,51 @@ Use explicit job fixtures to reproduce pending work.
 Finish outstanding jobs before changing their recorded action, process or field.
 The worker uses the exact saved identity and never substitutes a similarly named declaration.
 
-## State protection
 
-On PostgreSQL, lock-taking transitions acquire the physical business-row lock.
-They wait at most two seconds for another transaction that holds the row.
-A holder that outlasts the wait causes `TransitionTemporarilyUnavailable` before application work starts, and the engine logs a warning that names the record.
-A background job that meets this refusal records an error and retries after the normal pause. It does not wait quietly.
-The database retains the lock through the actual outer commit or rollback.
-Inside this transaction, synchronous side effects run in a savepoint. A database error in a side effect discards their writes and still records the failed state and runs the failure callbacks. Any other error keeps the writes made before it.
-The shared cache lock also prevents overlapping external calls while its timeout
-remains valid, including after a lost database connection. PostgreSQL protects
-database state; neither lock can undo an external request already sent.
-Saving a background job calls no provider. On PostgreSQL that save holds the business row and writes no cache lock.
-It still refuses a record that has a cache lock. A process that stops during the save leaves no lock on the record.
-For a lock-taking synchronous `Transition`, callbacks also run inside the PostgreSQL transaction, before the outermost commit.
-Each one runs in a savepoint. A database error discards its writes; any other error keeps the writes made before it, including the failed state of a transition it started.
-The cache lock is released first, so callbacks can call another transition on the same instance.
-Other connections still see the prior committed state. An interruption can discard the target and side-effect writes before commit.
-Pull workers run background success callbacks after the job commits; a crash can lose callbacks after completion.
-Inline background execution can still be inside a caller's outer transaction.
-Use `transaction.on_commit()` for best-effort publication that requires committed data, not as a guarantee of required work.
+## Application context
 
-On other databases, `State.protected()` takes no row lock and opens no transaction.
-Without a caller transaction, synchronous writes commit independently and swallowed database errors may not be detected.
-SQLite remains useful for synchronous tests, but does not verify PostgreSQL transaction or concurrent-state protection.
+An application can preserve audit attribution or tracing across worker processes with `DJANGO_LOGIC['JOB_CONTEXT']`.
+Set it to the dotted path of an adapter class. This is application configuration, not a transition option.
+Business functions and declarations need no additional arguments.
 
-Default atomic state-writing background jobs retain the business-row lock during their transaction.
-Targetless jobs without a failed state protect only finalization, so independent provider work can overlap.
-`atomic=False` jobs retain a separate job-row lock and protect business state only when finalizing.
-Allow for both database connections. Provider requests must be bounded.
-A connection loss cannot undo an external request that was already sent.
+The library constructs the adapter without arguments. `capture()` returns JSON-compatible data or `None` when a job is submitted.
+The library saves an independent JSON copy in `TransitionMessage.job_context`, separately from business arguments.
+Capture failures refuse submission; retries use the originally saved context rather than the retrying person's context.
 
-Completing a failed job makes a bounded check of the business row before writing
-`failed_state`. If the state changed, the job completes as `superseded` and skips
-failure callbacks. If another transaction still holds the row, or its state cannot
-be checked, the job completes
-as failed, records why the failed state could not be written, and leaves the
-business state unchanged without running failure callbacks. A final attempt can
-therefore make two bounded lock attempts: one before its work and one before
-completion. Normal retries keep their existing error count and pause. The same
-completion check applies to `atomic=False` jobs and stuck-job completion; a
-non-atomic job keeps any provider confirmations already committed.
+For each attempt, `restore(value)` returns a context manager. Its scope includes required functions, optional callbacks and failure handling.
+It also applies when periodic maintenance completes an exhausted job and when `atomic=False` is selected.
+The adapter must restore the previous ambient context when its block exits, including after an error.
+Jobs without saved context call `restore(None)`; the adapter must clear attribution instead of inheriting the worker's ambient user.
 
-Applications own cancellation state and any confirmed external effects.
-A state change supersedes an unfinished state-changing job before its next attempt.
-It does not interrupt a provider request already running or undo a confirmed external change.
+If context setup fails, the worker records the error and applies the normal retry allowance.
+After that allowance, the job completes as failed with `[unrestorable]`.
+Business functions and callbacks do not run when context setup fails.
+Context cleanup cannot suppress a business error or cause committed work to run again.
+Cleanup errors are logged separately, including during inline execution; they do not consume another job retry.
 
-## Upgrade and rollback
+```python
+from contextlib import contextmanager
+from contextvars import ContextVar
 
-Version 5 is a breaking release. Its supported upgrade baseline is 4.3.2.
-Earlier installations must complete their earlier upgrade steps first, using
-the corresponding release documentation. Historical migration files remain so
-Django can recognize applied migrations; they do not provide an older runtime.
+current_origin = ContextVar('current_origin', default=None)
 
-Before upgrading:
 
-1. Remove every `next_transition` declaration and `NextTransition` import.
-   Put required work in saved jobs. Use an ordinary callback only when its
-   failure or loss is acceptable; replacing the name alone does not make work durable.
-   Remove `BackgroundEffect` and `background_effects` declarations too.
-   Move required functions into their owning job, or save ordinary business jobs with the result that requests them.
-2. Make injected `ProcessScenario` failures explicit with `expect_raises=ErrorType`
-   or `expect_raises=False`. Omitting it no longer absorbs the injected exception.
-3. Keep root process classes importable and preserve their `process_name`, bound
-   field, owning class and action names while jobs using them remain unfinished.
-   Submit background jobs through a `Process` to record all identity fields.
-   Low-level `change_state` calls must supply the same complete, valid identity. Attribute lookup, renamed-class and action-name fallbacks are removed.
-4. Finish or explicitly resolve unsupported unfinished jobs on 4.3.2, including
-   jobs with `required_next` instructions or incomplete identity. Do not mark work
-   complete merely to pass the migration. When application declarations are removed,
-   finish their jobs before installing that application change.
-   Finish all pending background effects and parents that still promise them using the installed version.
-5. Stop all job producers, scheduled submissions and old workers. Confirm that no
-   old job process remains. Back up the database, install the new application and
-   run `migrate` before starting any 5.0 process.
+class JobContext:
+    def capture(self):
+        return current_origin.get()
 
-Migration 0017 checks unfinished work before removing the physical
-`request_fingerprint` and `required_next` columns. A failed check leaves the
-columns and jobs intact. Resolve the reported work using the previous application,
-then retry. The migration does not call providers, replay jobs or rewrite identities.
-A bounded PostgreSQL lock wait can also stop the migration; retry after the holder
-finishes, with producers still stopped.
+    @contextmanager
+    def restore(self, value):
+        token = current_origin.set(value)
+        try:
+            yield
+        finally:
+            current_origin.reset(token)
 
-Migration 0018 refuses unfinished jobs with background-effect metadata or a nonempty request key.
-It then removes `request_key`, `background_effect_names`, `effect_name`, `parent_transition_name` and `parent_job_id`.
-Compatible ordinary pending jobs remain available and completed job rows remain in history.
-The backup preserves the removed metadata; reversing the migration cannot restore those values.
 
-Start only 5.0 producers and workers. Verify the installed package, queue coverage
-and completion of retained jobs. Mixing earlier workers or producers with 5.0 is
-unsupported. This release is not a normal rolling upgrade.
+DJANGO_LOGIC = {'JOB_CONTEXT': 'myapp.audit.JobContext'}
+```
 
-Before rollback, stop new submissions and workers and review every unfinished job
-against the previous application's declarations. Reversing 0017 and 0018 recreates empty
-obsolete columns; it cannot restore removed values or reverse application changes.
-Do not start the previous application until its schema and saved jobs are compatible.
+The application validates and assigns trusted origin information before calling a business action.
+Do not copy an HTTP request, credentials or arbitrary client-provided identity into this context.
+Context supports attribution; it does not grant permission or replace saved business inputs.

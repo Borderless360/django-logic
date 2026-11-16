@@ -141,6 +141,11 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
             self._record('retry_transition', 'FAILED', 'no uncompleted TransitionMessage')
             self._fail('retry_transition(): no uncompleted TransitionMessage for '
                        'this instance — nothing to retry.', instance=instance)
+        from django.utils import timezone
+        if transition_message.eligible_at is not None and transition_message.eligible_at > timezone.now():
+            self._record('retry_transition', 'FAILED', f'waiting until {transition_message.eligible_at}')
+            self._fail('retry_transition(): the job is deferred. Assert the wait with assert_deferred(), '
+                       'then advance its due time before retrying.', instance=instance)
         if not transitions_for(self.process_class, transition_message.transition_name):
             self._record('retry_transition', 'FAILED',
                          f'no transition named {transition_message.transition_name!r}')
@@ -258,10 +263,8 @@ class ProcessScenario(ScenarioAssertions, TransactionTestCase):
                 self._record(label, 'FAILED', f'{type(raised).__name__}: {raised}')
                 self._fail(f'{label} raised unexpectedly: '
                            f'{type(raised).__name__}: {raised}', instance=instance)
-        # A requested injection that never fired silently turns a failure
-        # test into a happy-path run. Only identity with
-        # tracker.injected_exception proves the injection fired — a
-        # different hook raising the expected type is no evidence.
+        # Confirm that the selected hook was reached, rather than a different
+        # hook raising the expected exception first.
         if (tracker.requested_fail_side_effect is not None
                 and tracker.failed_side_effect is None):
             self._record(label, 'FAILED',

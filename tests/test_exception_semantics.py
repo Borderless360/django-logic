@@ -1,9 +1,6 @@
 """Named engine contract: the re-raise / swallow exception asymmetry.
 
-This is the contract the ``0.1.6 -> 0.2.0`` upgrade silently flipped (see
-``fundamental problem.md`` §3 and the process-testing report §4.1). The engine
-deliberately treats required work and callbacks differently at the *caller
-boundary*:
+Required work and callbacks report failures differently to the caller:
 
 * ``SideEffects`` — on failure, run ``fail_transition``, then **RE-RAISE** so
   the caller observes the failure (``commands.py`` ``SideEffects.execute``).
@@ -29,7 +26,6 @@ class SideEffectReRaiseContract(ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_side_effect_failure_reraises_to_caller(self):
         # Inject a failure into reject's side-effect. The engine must write
@@ -63,7 +59,6 @@ class SwallowContract(ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_callback_failure_is_swallowed_and_target_kept(self):
         # boom_callback's callback raises. The target is already written, so

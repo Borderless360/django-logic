@@ -132,12 +132,7 @@ class State:
         an existing row raise ``DoesNotExist`` mid-transition.
         """
         model = type(self.instance)
-        # Route to the instance's own connection. Every WRITE path is already
-        # instance-aware (Model.save and refresh_from_db pass
-        # hints={'instance': ...}), but this read was unrouted, so on a
-        # non-default alias the under-lock revalidation and the worker's
-        # state guard compared against whatever row the DEFAULT database
-        # happened to hold.
+        # Check the same database that stores the instance.
         using = self.instance._state.db or DEFAULT_DB_ALIAS
         return (
             model._base_manager
@@ -160,12 +155,7 @@ class State:
         try:
             self.instance.save(update_fields=[self.field_name], **database_kwargs)
         except Exception:
-            # Restore the attribute the database refused. setattr happens
-            # before the write, so a rejected save used to leave the instance
-            # holding a value the database never had — harmless while the
-            # exception escaped everything, but the failure paths now swallow
-            # a rejected state write, so this phantom instance reaches
-            # failure_callbacks and the sync caller.
+            # Callbacks and callers must see the state that the database accepted.
             setattr(self.instance, self.field_name, previous)
             raise
         self.instance.refresh_from_db(fields=[self.field_name], **database_kwargs)
@@ -177,9 +167,7 @@ class State:
         The key names the table that holds the column, not the class the
         caller happened to load. A proxy model and its concrete model,
         and a multi-table-inheritance child and the parent that declares
-        the column, all write the same column of the same row. Keyed by
-        class name they took different locks, so two transitions ran on
-        one row at the same time.
+        the column, all write the same column of the same row and share its lock.
         """
         declaring_model = self.instance._meta.get_field(self.field_name).model
         return f'{declaring_model._meta.db_table}-' \
@@ -232,18 +220,19 @@ class State:
         "always, after any takeover" to a takeover happening between the
         compare and the delete.
 
-        A State object that never acquired the lock holds no token and
-        falls back to an unconditional delete — the historical
-        force-release behavior, kept for manual repair paths.
+        A State object without a token cannot release another object's lock.
         """
         for held in reversed(_database_locks.get()):
             if held is self:
                 _database_locks.set(tuple(item for item in _database_locks.get() if item is not held))
                 return
-        key = self._get_hash()
         token = getattr(self, '_lock_token', None)
-        if token is None or cache.get(key) == token:
+        if token is None:
+            return
+        key = self._get_hash()
+        if cache.get(key) == token:
             cache.delete(key)
+        self._lock_token = None
 
     def is_locked(self):
         """Report a cache lock or DatabaseTransition ownership in this call.

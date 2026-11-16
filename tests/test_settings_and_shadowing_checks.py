@@ -20,6 +20,8 @@ Each test pins one confirmed finding:
   the supported inverse.
 """
 from tests import unbind_model_process
+from types import SimpleNamespace
+from unittest.mock import patch
 from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
 from django.test import (
@@ -35,7 +37,7 @@ from django_logic.checks import (
     check_pull_mode_database,
     check_pull_mode_lock_cache,
 )
-from django_logic.conf import validate_core_settings
+from django_logic.conf import lock_timeout
 from django_logic.process import (
     ModelProcessBinding,
     Process,
@@ -131,8 +133,9 @@ class MissingAppGuardTests(_BindingHelper, SimpleTestCase):
         self.assertIn('migrate', message)
 
     @modify_settings(INSTALLED_APPS={'remove': 'django_logic'})
-    def test_a_sync_only_binding_without_the_app_still_binds(self):
-        self.bind(Invoice, _SyncOnlyProcess)
+    def test_a_sync_only_binding_without_the_app_is_refused(self):
+        with self.assertRaisesMessage(ImproperlyConfigured, "INSTALLED_APPS"):
+            self.bind(Invoice, _SyncOnlyProcess)
 
 
 class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):
@@ -145,11 +148,21 @@ class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):
     def test_e004_names_sqlite_when_pull_mode_has_background_bindings(self):
         self.bind(Invoice, _BackgroundBoundProcess)
         with override_settings(DJANGO_LOGIC=self._PULL,
-                               DATABASES=self._SQLITE):
+                               DATABASES=self._SQLITE), patch(
+                                   'django.db.connections', {'default': SimpleNamespace(vendor='sqlite')}):
             findings = check_pull_mode_database(None)
         self.assertEqual([f.id for f in findings], ['django_logic.pull_mode_needs_postgresql'])
-        self.assertIn('SQLite', findings[0].msg)
+        self.assertIn("vendor 'sqlite'", findings[0].msg)
         self.assertIn('PostgreSQL', findings[0].hint)
+
+    def test_other_non_postgresql_backends_are_refused_too(self):
+        self.bind(Invoice, _BackgroundBoundProcess)
+        for vendor in ('mysql', 'oracle', 'postgresql'):
+            with self.subTest(vendor=vendor), override_settings(DJANGO_LOGIC=self._PULL), patch(
+                'django.db.connections', {'default': SimpleNamespace(vendor=vendor)},
+            ):
+                findings = check_pull_mode_database(None)
+                self.assertEqual(bool(findings), vendor != 'postgresql')
 
     def test_sqlite_is_fine_while_nothing_background_is_bound(self):
         saved = ProcessManager.bindings
@@ -188,7 +201,7 @@ class NonDictSettingsBlockTests(SimpleTestCase):
             with self.subTest(value=bad):
                 with override_settings(DJANGO_LOGIC=bad):
                     with self.assertRaises(ImproperlyConfigured) as ctx:
-                        validate_core_settings()
+                        lock_timeout()
                 self.assertIn('DJANGO_LOGIC must be a dict', str(ctx.exception))
                 self.assertIn(type(bad).__name__, str(ctx.exception))
 
@@ -213,7 +226,7 @@ class NonDictSettingsBlockTests(SimpleTestCase):
         for value in (None, {}):
             with self.subTest(value=value):
                 with override_settings(DJANGO_LOGIC=value):
-                    validate_core_settings()
+                    lock_timeout()
 
 
 # --- F1: only the ROOT's attributes can shadow an action_name -----------

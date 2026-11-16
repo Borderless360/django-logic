@@ -122,7 +122,7 @@ class HarvestTests(TransactionTestCase):
         _harvest(attempts, self.pending, block=True)
         self.assertEqual(len(self.recorded()), 1)
         self.assertIn('[crashed]', self.recorded()[0])
-        self.assertIn('exit 3', self.recorded()[0])
+        self.assertIn('exit code 3', self.recorded()[0])
 
     def test_a_process_that_ended_before_the_kill_is_charged_nothing(self):
         """``os.kill`` succeeds on a process that has exited and is
@@ -220,7 +220,7 @@ class HarvestTests(TransactionTestCase):
         }
         self.pending.append(_Attempt(
             pk=2, timeout_seconds=1, deadline=_PASSED,
-            killed=True,
+            killed=True, exit_code=-signal.SIGKILL,
         ))
         started = time.monotonic()
         _harvest(attempts, self.pending, block=True)
