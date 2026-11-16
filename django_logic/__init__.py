@@ -2,14 +2,8 @@ from .process import Process, ProcessManager
 from .transition import Transition
 from .database_transition import DatabaseTransition
 
-#: The public surface of the top-level package. Both sibling public packages
-#: (``django_logic.background``, ``django_logic.testing``) define one; without
-#: it here ``from django_logic import *`` leaked the submodules that happened
-#: to be imported, so the star-import namespace varied with INSTALLED_APPS.
-#: State, exceptions, background and testing are imported from their own
-#: modules by design — see the README. The command classes live in
-#: ``django_logic.commands``: consumers declare lists of functions, and a
-#: bundle subclass imports its base from there.
+#: Process declarations are available here. State, exceptions, background jobs,
+#: testing helpers, and command classes are imported from their named modules.
 __all__ = [
     'Process',
     'ProcessManager',

@@ -67,42 +67,21 @@ class SerializeKwargsTests(SimpleTestCase):
         payload = {'when': '2024-01-02T03:04:05+00:00', 'some_id': 'abc', 'n': 1}
         self.assertEqual(decode_value(dict(payload)), payload)
 
-    def test_unknown_tag_passes_through_with_a_warning(self):
+    def test_unknown_tag_is_refused(self):
         row = {'v': {'__dl_type__': 'from_the_future', 'value': 'x'}}
-        with self.assertLogs('django-logic.transition', level='WARNING'):
-            self.assertEqual(decode_value(dict(row)), row)
+        with self.assertRaisesMessage(KwargsSerializationError, "Unknown kwargs type tag 'from_the_future'"):
+            decode_value(row)
 
-    def test_malformed_scalar_payload_passes_through_with_a_warning(self):
-        # A KNOWN tag whose payload no longer decodes (hand-edited row,
-        # cross-version writer bug) must not crash execute — same
-        # passthrough contract as an unknown tag.
-        row = {'when': {'__dl_type__': 'datetime', 'value': 'not-a-datetime'}}
-        with self.assertLogs('django-logic.transition', level='WARNING') as logs:
-            self.assertEqual(decode_value(dict(row)), row)
-        self.assertIn('malformed payload', logs.output[0])
-        self.assertIn("'datetime'", logs.output[0])
-
-    def test_missing_payload_for_known_tag_passes_through(self):
-        # Tagged dict without its 'value' key: the inner payload is None.
-        row = {'when': {'__dl_type__': 'datetime'}}
-        with self.assertLogs('django-logic.transition', level='WARNING'):
-            self.assertEqual(decode_value(dict(row)), row)
-
-    def test_malformed_container_payload_passes_through(self):
-        for tag in ('dict', 'tuple', 'set', 'frozenset'):
-            row = {'v': {'__dl_type__': tag, 'value': None}}
-            with self.assertLogs('django-logic.transition', level='WARNING'):
-                self.assertEqual(decode_value(dict(row)), row, tag)
-
-    def test_well_formed_neighbours_of_a_malformed_payload_still_decode(self):
-        row = {
-            'bad': {'__dl_type__': 'uuid', 'value': 'not-a-uuid'},
-            'good': {'__dl_type__': 'decimal', 'value': '1.5'},
-        }
-        with self.assertLogs('django-logic.transition', level='WARNING'):
-            out = decode_value(dict(row))
-        self.assertEqual(out['bad'], row['bad'])
-        self.assertEqual(out['good'], Decimal('1.5'))
+    def test_malformed_tag_is_refused(self):
+        values = (
+            ('datetime', 'not-a-datetime'), ('datetime', None),
+            ('dict', None), ('tuple', None), ('set', None), ('frozenset', None),
+            ('uuid', 'not-a-uuid'),
+        )
+        for tag, value in values:
+            with self.subTest(tag=tag, value=value):
+                with self.assertRaisesMessage(KwargsSerializationError, f"Cannot restore kwargs type tag {tag!r}"):
+                    decode_value({'item': {'__dl_type__': tag, 'value': value}})
 
     def test_tr_ids_stringified_when_uuid(self):
         tr_id = UUID(int=99)
@@ -184,3 +163,10 @@ class RestoreUserTests(SimpleTestCase):
         kwargs = {'other': 1}
         restore_user(kwargs)
         self.assertEqual(kwargs, {'other': 1})
+
+
+class InvalidTypeTagTests(SimpleTestCase):
+    def test_null_or_unhashable_tags_are_refused(self):
+        for tag in (None, [], {}):
+            with self.subTest(tag=tag), self.assertRaises(KwargsSerializationError):
+                decode_value({'__dl_type__': tag, 'value': 'not business data'})

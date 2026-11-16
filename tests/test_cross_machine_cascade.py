@@ -30,7 +30,6 @@ class CrossMachineCascadeContract(ProcessScenario):
     process_class = CascadeOuterProcess
     model = Widget
     state_field = 'status'
-    process_name = 'cascade_outer'
 
     def setUp(self):
         super().setUp()

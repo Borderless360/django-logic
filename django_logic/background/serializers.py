@@ -38,8 +38,6 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
-from django_logic.logger import transition_logger
-
 
 class KwargsSerializationError(TypeError):
     """Rejection of kwargs that enqueue would otherwise mutate silently
@@ -101,9 +99,9 @@ def decode_value(value):
     if isinstance(value, list):
         return [decode_value(v) for v in value]
     if isinstance(value, dict):
-        tag = value.get(TYPE_TAG)
-        if tag is None:
+        if TYPE_TAG not in value:
             return {k: decode_value(v) for k, v in value.items()}
+        tag = value[TYPE_TAG]
         inner = value.get('value')
         try:
             if tag == 'dict':
@@ -117,23 +115,13 @@ def decode_value(value):
             decoder = _SCALAR_DECODERS.get(tag)
             if decoder is not None:
                 return decoder(inner)
-        except Exception as e:
-            # A known tag whose payload no longer decodes (hand-edited row,
-            # cross-version writer bug): mirror the unknown-tag passthrough
-            # below rather than crash the worker — the raw tagged form stays
-            # visible to the side-effect and the log says why.
-            transition_logger.warning(
-                f"malformed payload for kwargs type tag {tag!r} "
-                f"({type(e).__name__}: {e}) — passing value through undecoded"
-            )
-            return value
-        # A row written by a newer version than this worker: pass the
-        # tagged form through rather than crash the worker.
-        transition_logger.warning(
-            f"unknown kwargs type tag {tag!r} — passing value through "
-            f"undecoded (worker older than the row writer?)"
+        except (TypeError, ValueError, AttributeError, ArithmeticError) as error:
+            raise KwargsSerializationError(
+                f"Cannot restore kwargs type tag {tag!r}: {error}. Check the saved job arguments."
+            ) from error
+        raise KwargsSerializationError(
+            f"Unknown kwargs type tag {tag!r}. Run the same supported release for every producer and worker."
         )
-        return value
     return value
 
 
@@ -197,12 +185,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
     than at the worker.
     """
     out = dict(kwargs)
-    # ``user_id`` is the engine's own wire form for ``user`` (restored in
-    # the worker by restore_user). A caller passing it as ordinary data used to
-    # be silently consumed: restore_user popped it and replaced it with a
-    # live ``user``, so the hook never saw the value — and the same call ran
-    # correctly in sync mode, a parity break that only showed up in
-    # production. Reserved, refused.
+    # The worker restores ``user_id`` as a user object, so it cannot carry business data.
     if 'user_id' in out:
         raise KwargsSerializationError(
             f"{out.get('tr_id')} 'user_id' cannot be passed to a background "
@@ -211,9 +194,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
             f"value could never reach a hook. Pass it under a different name."
         )
     out.pop('context', None)  # rebuilt in the worker
-    # Persisted on its own TransitionMessage column, not in the kwargs JSON:
-    # the worker reads it from the column, and it must not leak into the kwargs
-    # passed to side-effects (it is engine bookkeeping, not caller data).
+    # Store the declaring class once; the worker reconstructs this hook argument.
     out.pop('owning_process_class', None)
 
     user = out.pop('user', None)

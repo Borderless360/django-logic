@@ -12,6 +12,7 @@ import os
 from tests.settings import *
 
 DATABASES = {
+    'other': DATABASES['other'],
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.environ.get('POSTGRES_DB', 'django_logic_test'),

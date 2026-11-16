@@ -6,14 +6,23 @@ One process per SLA group. ``--concurrency`` says how many attempts the
 process runs at a time. The loop also runs the safety nets (stuck
 report, cleanup), so pull mode needs no beat schedule. On SIGTERM the
 worker takes no new job, waits for its running jobs and exits. See
-docs/design/PULL_WORKERS.md.
+docs/workers.md.
 """
 import signal
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import connection
 
 from django_logic import conf
 from django_logic.background.pull import run_worker
+
+
+def validate_worker_database():
+    if connection.vendor != 'postgresql':
+        raise CommandError('dl_worker requires PostgreSQL.')
+    driver = connection.Database
+    if driver.__name__ == 'psycopg' and tuple(map(int, driver.__version__.split('.')[:2])) < (3, 2):
+        raise CommandError('dl_worker requires psycopg 3.2 or later, or psycopg2. Install django-logic[postgres].')
 
 
 class Command(BaseCommand):
@@ -37,6 +46,7 @@ class Command(BaseCommand):
             raise CommandError(
                 "dl_worker needs DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull'."
             )
+        validate_worker_database()
         queues = [q for q in options['queues'].split(',') if q]
         if not queues:
             raise CommandError('--queues must name at least one queue.')

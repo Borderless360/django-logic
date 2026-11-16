@@ -180,7 +180,7 @@ class IndistinguishableFailureStateTests(TestCase):
                 'go', sources=['draft'], target='done',
                 in_progress_state='running', failed_state='running',
             )
-        self.assertIn('indistinguishable', str(ctx.exception))
+        self.assertIn('must be different states', str(ctx.exception))
 
     def test_distinct_states_are_accepted(self):
         BackgroundTransition(
@@ -191,12 +191,11 @@ class IndistinguishableFailureStateTests(TestCase):
     def test_sync_transitions_reject_in_progress_state(self):
         """in_progress_state is background-only. On a synchronous transition it
         left the instance busy with no row to recover it."""
-        with self.assertRaises(ImproperlyConfigured) as ctx:
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'in_progress_state'"):
             Transition(
                 'go', sources=['draft'], target='done',
                 in_progress_state='running',
             )
-        self.assertIn('BackgroundTransition', str(ctx.exception))
 
 
 # --- Engine keyword arguments are refused before the lock ------------------

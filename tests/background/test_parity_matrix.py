@@ -48,7 +48,7 @@ TYPED_KWARGS = dict(
     flag=True,
     note='x',
 )
-_ENGINE_KEYS = {'tr_id', 'root_id', 'parent_id', 'context', 'user', 'process_class'}
+_ENGINE_KEYS = {'tr_id', 'root_id', 'parent_id', 'context', 'user', 'process_class', 'owning_process_class'}
 
 SEEN: dict = {}
 CALLBACK_STATE: dict = {}
@@ -173,6 +173,7 @@ class ParityMatrixTests(TestCase):
             _drive(self._fresh(), action, user=self.user, **dict(TYPED_KWARGS))
             results[action] = self._hook_kwargs()
             self.assertEqual(SEEN['user'].pk, self.user.pk, action)
+            self.assertEqual(SEEN['owning_process_class'], f'{__name__}.ParityProcess')
 
         for action in ALL_ACTIONS:
             self.assertEqual(results[action], TYPED_KWARGS, action)

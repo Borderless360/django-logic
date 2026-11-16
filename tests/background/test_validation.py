@@ -48,7 +48,7 @@ class QueueValidationTests(SimpleTestCase):
                 queue='q',
                 in_progress_state='processing',
             )
-        self.assertIn('in_progress_state needs a target', str(ctx.exception))
+        self.assertIn('in_progress_state requires a target', str(ctx.exception))
 
 
 class SharedInProgressStateTests(SimpleTestCase):

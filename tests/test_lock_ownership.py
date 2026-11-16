@@ -76,14 +76,16 @@ class StateOwnershipTokenTests(TestCase):
         t1.unlock()
         self.assertFalse(t1.is_locked())
 
-    def test_unlock_without_token_force_releases(self):
-        # A State object that never locked keeps the historical
-        # force-release behavior (manual repair path).
+    def test_unlock_without_token_preserves_the_holder(self):
+        # A separate object cannot release a lock it never acquired.
         t1 = self._state()
         self.assertTrue(t1.lock())
 
         repair = self._state()
         repair.unlock()
+        self.assertTrue(t1.is_locked())
+        self.assertFalse(repair.lock())
+        t1.unlock()
         self.assertFalse(t1.is_locked())
 
     def test_double_unlock_is_harmless(self):

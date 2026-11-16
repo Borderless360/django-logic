@@ -46,7 +46,6 @@ class TransitionSideEffectsScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_side_effects_run_in_order_and_write_target(self):
         widget = self.create_instance(status='draft')
@@ -114,7 +113,6 @@ class ActionScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_action_runs_side_effects_without_changing_state(self):
         widget = self.create_instance(status='draft')
@@ -244,7 +242,6 @@ class KwargsAndFailureContractScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_kwargs_forwarded_to_side_effects(self):
         widget = self.create_instance(status='draft')
@@ -274,7 +271,6 @@ class CallbackTransitionScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetContextProcess
     model = Widget
     state_field = 'status'
-    process_name = 'ctx_proc'
 
     def test_follow_up_runs_with_fresh_tr_id_and_chained_context(self):
         widget = self.create_instance(status='draft')
@@ -304,7 +300,6 @@ class CallbackTransitionFailureScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_follow_up_skipped_when_parent_fails(self):
         # 'approve' chains into 'notify' on success. Inject a failure on
@@ -338,7 +333,6 @@ class AmbiguousCallbackTransitionScenario(StateTraceMixin, ProcessScenario):
     process_class = WidgetAmbiguousCallbackProcess
     model = Widget
     state_field = 'status'
-    process_name = 'ambig_callback'
 
     def test_ambiguous_follow_up_runs_neither(self):
         widget = self.create_instance(status='draft')

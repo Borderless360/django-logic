@@ -32,8 +32,6 @@ class ExecutionTracker:
         self.side_effects_ran: list[str] = []
         self.callbacks_ran: list[str] = []
         self.failure_callbacks_ran: list[str] = []
-        # The exception raised by an injected side-effect, if any.
-        self.injected_exception: BaseException | None = None
         self.failed_side_effect: str | None = None
         # What the caller ASKED to fail — so the scenario can detect an
         # injection that never fired (a silent no-op would turn
@@ -61,7 +59,6 @@ def _make_wrapper(fn, tracker, sink_attr, fail_side_effect, fail_with):
     def wrapper(instance, **kwargs):
         if inject:
             exc = _coerce_exception(fail_with, name)
-            tracker.injected_exception = exc
             tracker.failed_side_effect = name
             raise exc  # real hook never runs → it did NOT "run"
         result = fn(instance, **kwargs)

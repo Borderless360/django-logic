@@ -2,7 +2,7 @@
 
 ``LOCK_TIMEOUT`` is consumed by the core engine (state locks) whether or
 not ``django_logic.background`` is installed. ``DjangoLogicConfig.ready``
-calls ``django_logic.conf.validate_core_settings()`` so a sync-only
+calls ``django_logic.conf.lock_timeout()`` so a sync-only
 install fails fast too.
 """
 import math
@@ -16,7 +16,6 @@ from django.test import (
 
 from django_logic.conf import (
     lock_timeout,
-    validate_core_settings,
 )
 from tests import dl_settings
 
@@ -28,7 +27,7 @@ class CoreSettingsValidationTests(SimpleTestCase):
     def assert_rejected(self, conf, setting_name):
         with override_settings(DJANGO_LOGIC=conf):
             with self.assertRaises(ImproperlyConfigured) as ctx:
-                validate_core_settings()
+                lock_timeout()
         self.assertIn(setting_name, str(ctx.exception))
 
     def test_lock_timeout_rejections(self):
@@ -38,12 +37,12 @@ class CoreSettingsValidationTests(SimpleTestCase):
 
     def test_valid_values_accepted(self):
         with override_settings(DJANGO_LOGIC=_conf(LOCK_TIMEOUT=0.5)):
-            validate_core_settings()
+            lock_timeout()
             self.assertEqual(lock_timeout(), 0.5)
 
     def test_defaults_accepted_with_empty_conf(self):
         with override_settings(DJANGO_LOGIC={}):
-            validate_core_settings()
+            lock_timeout()
             self.assertEqual(lock_timeout(), 7200)
 
     def test_app_ready_runs_the_gate(self):

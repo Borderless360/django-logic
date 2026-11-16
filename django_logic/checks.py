@@ -52,12 +52,12 @@ def _pull_mode_with_background_bindings():
 
 @checks.register('django_logic')
 def check_pull_mode_database(app_configs, **kwargs):
-    """Pull mode claims rows with SELECT FOR UPDATE SKIP LOCKED, so the
-    alias that stores ``TransitionMessage`` must not be SQLite
+    """Pull workers need PostgreSQL row locks and database notifications, so the
+    alias that stores ``TransitionMessage`` must use PostgreSQL
     (``django_logic.pull_mode_needs_postgresql``). An install with no background transition
     bound never stores a row, so the rule does not apply to it."""
     from django.conf import settings
-    from django.db import router
+    from django.db import connections, router
 
     from django_logic.background.models import TransitionMessage
 
@@ -66,13 +66,13 @@ def check_pull_mode_database(app_configs, **kwargs):
     databases = getattr(settings, 'DATABASES', {}) or {}
     alias = router.db_for_write(TransitionMessage) or 'default'
     engine = (databases.get(alias) or {}).get('ENGINE', '')
-    if 'sqlite' not in engine.lower():
+    if connections[alias].vendor == 'postgresql':
         return []
     return [checks.Error(
-        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' requires a database "
-        f"that supports SELECT FOR UPDATE with SKIP LOCKED. "
+        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' requires PostgreSQL "
+        f"for row locks and database notifications. "
         f"TransitionMessage is routed to alias '{alias}', "
-        f"which uses {engine!r} (SQLite).",
+        f"which uses {engine!r} (vendor {connections[alias].vendor!r}).",
         hint="Point that alias at PostgreSQL.",
         id='django_logic.pull_mode_needs_postgresql',
     )]
@@ -126,14 +126,6 @@ def check_background_database_routing(app_configs, **kwargs):
     model-class questions asked here and still send a real write elsewhere. So
     passing this check does not prove the rule holds at runtime.
     """
-    from django.apps import apps
-
-    # Nothing to route without the app — and nothing here registers
-    # without it either. bind_model_process refuses a background binding
-    # when the app is missing, so that gap reports itself at bind time.
-    if not apps.is_installed('django_logic'):
-        return []
-
     from django.db import DEFAULT_DB_ALIAS, router
 
     from django_logic.background.models import TransitionMessage
@@ -188,7 +180,7 @@ def check_background_database_routing(app_configs, **kwargs):
 _KNOWN_SETTINGS = frozenset({
     'BACKGROUND_EXECUTION',
     'DEFAULT_QUEUE',
-    'JOB_PROCESS_FINISH',
+    'JOB_PROCESS_FINISH', 'JOB_CONTEXT',
     'LOCK_TIMEOUT',
     'TRANSITION_MESSAGE_MAX_ERRORS',
     'TRANSITION_MESSAGE_RETRY_MINUTES',

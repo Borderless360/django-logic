@@ -4,10 +4,8 @@ from django.apps import AppConfig
 class DjangoLogicConfig(AppConfig):
     """The one installed app: ``INSTALLED_APPS = ['django_logic']``.
 
-    The label stays ``django_logic_background``: the label is the address
-    of the live ``TransitionMessage`` table, of its rows in
-    ``django_migrations`` and of its content types, so an install that
-    upgrades from the two-entry era keeps its data without a migration.
+    The label ``django_logic_background`` identifies the job table,
+    migration records, and content types.
 
     A consumer that never declares a background transition needs nothing
     beyond this entry: the pull-mode database and cache rules are system

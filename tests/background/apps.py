@@ -67,7 +67,7 @@ class BackgroundTestsConfig(AppConfig):
         ProcessManager.bind_model_process(Widget, WidgetAmbiguousCallbackProcess, state_field='status')
         ProcessManager.bind_model_process(Conversation, ChainConversationProcess, state_field='status')
         # Contract fixtures: resolve-time ambiguity, process-level guards, and
-        # the cross-machine failure cascade (fundamental problem.md §3).
+        # failures from one process called by another.
         ProcessManager.bind_model_process(Widget, WidgetAmbiguousConditionProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, WidgetProcGuardProcess, state_field='status')
         ProcessManager.bind_model_process(Widget, CascadeOuterProcess, state_field='status')

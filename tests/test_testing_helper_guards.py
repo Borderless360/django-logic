@@ -40,7 +40,6 @@ class BareStringNameArgumentTests(ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_assert_not_available_rejects_a_bare_string(self):
         # 'approve' is available, but iterating the string one character at a
@@ -94,7 +93,6 @@ class ExpectRaisesMismatchTests(ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_a_mismatched_raise_names_both_types(self):
         widget = self.create_instance(status='draft')
@@ -145,7 +143,6 @@ class SnapshotRestoreGuardTests(ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
-    process_name = 'process'
 
     def test_wrong_model_snapshot_is_rejected_loudly(self):
         widget = self.create_instance(status='draft')
@@ -175,7 +172,6 @@ class BackgroundEntrypointGuardTests(ProcessScenario):
     process_class = WidgetProcess
     model = Widget
     state_field = 'status'
-    process_name = 'process'
 
     @override_settings(DJANGO_LOGIC=dl_settings(BACKGROUND_EXECUTION='pull'))
     def test_transition_refuses_a_background_action_under_pull_mode(self):
@@ -212,7 +208,6 @@ class MixedNamesakeEntrypointTests(ProcessScenario):
     process_class = MixedSyncBgProcess
     model = Conversation
     state_field = 'status'
-    process_name = 'mixed_process'
 
     def test_sync_namesake_is_still_driven_by_transition(self):
         conversation = self.create_instance(status='open',
@@ -228,7 +223,6 @@ class InjectionNeverFiredTests(ProcessScenario):
     process_class = WidgetSyncProcess
     model = Widget
     state_field = 'status'
-    process_name = 'sync_proc'
 
     def test_matching_exception_from_another_hook_is_not_evidence(self):
         # 'se_c' lives on 'notify' and cannot run during a 'capture_fail'

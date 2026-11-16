@@ -186,7 +186,7 @@ def _run_attempt(transition_message_id, alias):
                 return _handle_success(transition_message, transition, state, kwargs)
 
         try:
-            return _run_in_savepoint(alias, complete, require_commit=True)
+            return _run_in_savepoint(alias, complete)
         except Exception as exception:
             transition_message.refresh_from_db(using=alias)
             instance.refresh_from_db(using=alias, fields=[state.field_name])
