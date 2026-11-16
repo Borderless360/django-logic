@@ -1,8 +1,4 @@
-"""Django system checks for django-logic.
-
-Hook-signature validation raises at bind time since 1.0.0, so the old
-re-report check is retired: a machine with a bad hook never binds.
-"""
+"""Django system checks for database routing, workers, and settings."""
 from django.core import checks
 
 from django_logic.process import ProcessManager
@@ -138,9 +134,8 @@ def check_background_database_routing(app_configs, **kwargs):
             f"A database router routes TransitionMessage to "
             f"write={tm_write!r} / read={tm_read!r}, but the background "
             f"engine's plain managers and bare transaction.atomic() blocks "
-            f"resolve to {DEFAULT_DB_ALIAS!r}. The atomic outbox rule — the "
-            f"state write and the TransitionMessage row commit in one "
-            f"transaction — cannot hold across two databases.",
+            f"resolve to {DEFAULT_DB_ALIAS!r}. The business state and saved job "
+            f"must commit together, which cannot happen across two databases.",
             hint="Route TransitionMessage (app_label "
                  "'django_logic_background') to the 'default' alias. The "
                  "supported topology is TransitionMessage and every "
@@ -162,9 +157,8 @@ def check_background_database_routing(app_configs, **kwargs):
                 f"{binding.model._meta.label} is bound to a process with "
                 f"background transitions but a database router sends its "
                 f"writes to {model_write!r} while TransitionMessage writes "
-                f"go to {tm_write!r}. The atomic outbox rule — the state "
-                f"write and the TransitionMessage row commit in one "
-                f"transaction — cannot hold across two databases.",
+                f"go to {tm_write!r}. The business state and saved job must "
+                f"commit together, which cannot happen across two databases.",
                 hint="Keep every background-bound model on the same "
                      "'default' alias as TransitionMessage. Split databases "
                      "are not supported.",
@@ -174,9 +168,7 @@ def check_background_database_routing(app_configs, **kwargs):
     return findings
 
 
-#: Every key the engine reads. The set is closed, so anything outside it is
-#: unread — a typo, or a key a past release removed (the changelog carries
-#: the upgrade advice for those).
+#: Every supported setting. Other keys have no effect.
 _KNOWN_SETTINGS = frozenset({
     'BACKGROUND_EXECUTION',
     'DEFAULT_QUEUE',
@@ -193,13 +185,9 @@ def check_no_unknown_settings(app_configs, **kwargs):
     """Report ``DJANGO_LOGIC`` keys the engine never reads
     (``django_logic.unread_setting``).
 
-    ``DJANGO_LOGIC`` is a plain dict with no schema. A typo such as
-    ``TRANSITION_MESSAGE_MAX_ERROR`` or ``LOCK_TIMOUT`` is ignored and the
-    default applies, which is the cause behind every "I set the retry limit and
-    it did nothing" report. The known set is closed and small, so listing
-    everything outside it is cheap and precise. A key a past release removed
-    reports the same way — the value has no effect — and the changelog carries
-    that release's upgrade advice.
+    A typo such as ``TRANSITION_MESSAGE_MAX_ERROR`` or ``LOCK_TIMOUT`` has
+    no effect. Report unsupported names so users can correct the setting
+    instead of unknowingly using its default.
     """
     from django.conf import settings
 

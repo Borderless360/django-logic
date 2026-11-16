@@ -80,6 +80,10 @@ class HookSignatureValidationTests(SimpleTestCase):
         self.assertIn('kwargs_only_hook', message)
         self.assertIn('_NestedBad.reject', message)
         self.assertIn('fn(instance, **kwargs)', message)
+        self.assertIn('conditions as fn(instance)', message)
+        self.assertIn('permissions as fn(instance, user)', message)
+        self.assertNotIn('fn(instance, user, **kwargs)', message)
+        self.assertIn('Failure callbacks also receive exception', message)
 
     def test_process_level_conditions_and_permissions_are_validated(self):
         # Process.is_valid executes class-level conditions/permissions with

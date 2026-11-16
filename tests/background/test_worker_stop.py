@@ -169,6 +169,6 @@ class WorkerStopTests(TransactionTestCase):
 
         self.assertLess(time.monotonic() - began, 10)
         self.assertTrue(
-            any('safety nets exceeded their 0.2s limit and were stopped' in line for line in logs.output),
+            any('maintenance exceeded its 0.2s limit and was stopped' in line for line in logs.output),
             logs.output,
         )

@@ -140,7 +140,7 @@ class Command(BaseCommand):
                 queue_is_served, queue_has_worker)
             self.stdout.write(
                 f'#{row.pk} {row.recorded_model_label}'
-                f'#{row.instance_id} {row.process_name}.{row.operation_name} '
+                f'#{row.instance_id} {row.process_name}.{row.transition_name} '
                 f'queue={row.queue_name} errors={row.errors_count} '
                 f'start_attempts={row.start_attempt_count} deferrals={row.deferral_count} '
                 f'age={age_minutes}m — {why}'
@@ -179,7 +179,7 @@ class Command(BaseCommand):
             if queue_is_served(row.queue_name):
                 return (
                     f'claimable, and waiting its turn — a worker takes rows '
-                    f'from {row.queue_name!r}; eligible clients take turns and ready work goes first within each client'
+                    f'from {row.queue_name!r}; fairness groups take turns and ready work goes first within each group'
                 )
             if queue_has_worker(row.queue_name):
                 return (
@@ -207,7 +207,7 @@ class Command(BaseCommand):
             raise CommandError(
                 f'TransitionMessage#{pk} has spent all '
                 f'{conf.max_errors()} of its attempts, so no claim will take '
-                f'it. The stuck finalizer ends it in its failed_state; run '
+                f'it. Maintenance completes the failed job; run '
                 f'the transition again from the instance after that.'
             )
         TransitionMessage.objects.filter(pk=pk, is_completed=False).update(

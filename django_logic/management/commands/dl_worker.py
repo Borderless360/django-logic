@@ -3,7 +3,7 @@
     python manage.py dl_worker --queues django_logic.critical,django_logic.fast
 
 One process per SLA group. ``--concurrency`` says how many attempts the
-process runs at a time. The loop also runs the safety nets (stuck
+process runs at a time. The loop also runs maintenance (stuck
 report, cleanup), so pull mode needs no beat schedule. On SIGTERM the
 worker takes no new job, waits for its running jobs and exits. See
 docs/workers.md.

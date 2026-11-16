@@ -201,7 +201,7 @@ def serialize_kwargs(kwargs: dict) -> dict:
     if user is not None:
         # Read .pk (not .id) to match the worker restore (get(pk=user_id))
         # and to support custom user models whose primary key isn't named
-        # 'id'. AnonymousUser (pk is None) is dropped, as before.
+        # 'id'. AnonymousUser (pk is None) is not saved.
         user_id = getattr(user, 'pk', None)
         if user_id is not None:
             out['user_id'] = user_id

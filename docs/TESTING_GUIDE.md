@@ -49,8 +49,7 @@ a refactor, or an AI rewrite) changes behaviour.
 ## Setup
 
 Background transitions execute on pull workers by default
-(`BACKGROUND_EXECUTION` defaults to `'pull'`). Tests opt into **sync
-execution mode**, where enqueue (validate + persist the `TransitionMessage` +
+(`BACKGROUND_EXECUTION` defaults to `'pull'`). Tests opt into **inline execution**, where enqueue (validate + persist the `TransitionMessage` +
 write `in_progress_state`) and execute (side-effects + target state) run
 inline in the test process — the *real* code paths, not a re-implementation:
 
@@ -68,7 +67,7 @@ SQLite supports synchronous process tests and default atomic background jobs.
 `DatabaseTransition` and `BackgroundTransition(atomic=False)` require PostgreSQL, including inline tests.
 Inline tests start no worker process. Use PostgreSQL and a shared cache to verify concurrent behavior.
 
-If a specific test file needs sync mode while the global setting is
+If a specific test file needs inline execution while the global setting is
 `'pull'`, use the context manager instead:
 
 ```python
@@ -82,9 +81,8 @@ with sync_execution():
 side-effect behaviour, failure handling, and retry outcomes.
 
 **What you should NOT test** — that the worker loop claims rows, that the database
-survives restarts, that the safety nets run on their cadence, that a
-crashed worker's row is claimed again. Those are library guarantees; sync
-mode deliberately removes them from your test surface.
+survives restarts, that maintenance runs on schedule, that a
+crashed worker's row is claimed again. Those are library guarantees; inline execution does not exercise them.
 
 ---
 ## The scenario catalog
@@ -231,7 +229,14 @@ self.assert_deferred(order, reason='Waiting for stock')
 self.assert_state(order, 'fulfilling')
 ```
 
-Complete the dependency and advance the test clock past the saved deadline before `retry_transition(order)`.
+Complete the dependency, then advance the clock past the saved deadline (`patch` is from `unittest.mock`; `timedelta` is from `datetime`):
+
+```python
+job = self.assert_deferred(order, reason='Waiting for stock')
+with patch('django.utils.timezone.now', return_value=job.eligible_at + timedelta(seconds=1)):
+    self.retry_transition(order)
+```
+
 The helper refuses a retry while the job is still waiting, so an unexecuted attempt cannot pass as success.
 
 ### 5. Snapshot & replay — turn a production bug into a test
@@ -258,7 +263,7 @@ def test_reproduce_stuck_order_12345(self):
 ```
 
 The five scenarios above are the canonical shapes; every other case
-(condition/permission gating, retry-to-success, the one-in-flight gate,
+(condition/permission gating, retry-to-success, the unfinished-job check,
 superseded rows, callback follow-ups, nested processes, the caller
 boundary, the cross-machine cascade) follows the same pattern and is
 pinned in the library's own suite under `tests/` — copy from there when
@@ -289,8 +294,8 @@ Class attributes: `process_class`, `model`, `state_field` (default
   **`False`** asserts nothing propagated. Injecting a failure requires an explicit
   expectation; omitting it raises `ValueError` before the action runs. Without
   injection, omitting the option asserts that no exception propagated.
-  On a `background_transition` drive the caller boundary is a sync-mode
-  artefact: the runner re-raises the hook's exception to the inline caller,
+  On a `background_transition` drive the caller boundary is an inline-execution
+  behavior: the runner re-raises the hook's exception to the inline caller,
   but a production caller in pull mode returns once the row is committed and
   sees only an enqueue-time refusal (`TransitionNotAllowed`). Use
   `expect_raises` there for the refusal, and pin the work's own outcome with
@@ -344,12 +349,33 @@ for humans *and* AI agents to diagnose without re-running.
 
 ---
 
+## Checking repeatable business functions
+
+`assert_idempotent` calls a function twice and compares the selected fields and any additional observations after each call:
+
+```python
+from django_logic.testing import assert_idempotent
+
+assert_idempotent(
+    book_courier, order,
+    fields=['tracking_number'],
+    capture=lambda order: {'bookings': courier_mock.book.call_count},
+)
+```
+
+Use the application's actual mock in `capture` to check external request counts; model fields alone cannot show a duplicate provider request.
+Pass business arguments as keyword arguments. `refresh_from_db=False` is available for objects that are not saved models.
+The helper checks repeated calls in this scenario. Separate interruption tests must cover failures between a provider accepting work and the application saving its result.
+
 ## Testing without ProcessScenario
 
-Plain `TestCase` works fine once sync mode is on — the scenario class is
+Plain `TestCase` works fine once inline execution is on — the scenario class is
 convenience, not a requirement:
 
 ```python
+from django_logic.background.models import TransitionMessage
+
+
 class FulfilmentTests(TestCase):     # DJANGO_LOGIC['BACKGROUND_EXECUTION']='sync'
     def test_happy_path(self):
         order = Order.objects.create(status='approved')
@@ -358,7 +384,7 @@ class FulfilmentTests(TestCase):     # DJANGO_LOGIC['BACKGROUND_EXECUTION']='syn
         self.assertEqual(order.status, 'fulfilled')
 
     def test_side_effect_failure_propagates(self):
-        # In sync mode the side-effect exception re-raises to the caller
+        # In inline execution the side-effect exception re-raises to the caller
         # AFTER being recorded on the TransitionMessage.
         #
         # NB: patch what the side-effect CALLS, never the side-effect
@@ -378,7 +404,7 @@ Two lower-level helpers mirror production behaviour exactly:
 
 ```python
 from django_logic.background import retry_pending
-retry_pending()   # run every claimable row inline, as a worker pass would (sync mode)
+retry_pending()   # run every claimable row inline, as a worker pass would (inline execution)
 
 from django_logic.background.runner import run_background_transition
 run_background_transition(transition_message.pk)   # one worker attempt for a specific row
@@ -391,19 +417,30 @@ in the test runtime it joins the test's transaction.
 
 ### An uncompleted row as a fixture
 
-Tests that pin behaviour around the one-uncompleted-row gate need a live
+Tests that pin behaviour around the unfinished-job check need a live
 `TransitionMessage`. Do not build the row by hand — one wrong field and the
-gate never sees it. The helper writes every field from the instance itself:
+unfinished-job check never sees it. The helper writes every field from the instance itself:
 
 ```python
 from django_logic.testing import open_transition_message
 
 row = open_transition_message(order, 'process', 'fulfil')
 with self.assertRaises(TransitionTemporarilyUnavailable):
-    order.process.cancel()          # the gate answers "busy"
+    order.process.cancel()          # the call reports unfinished work
 
 # An attempt that started an hour ago, for the retry-window branches:
 row = open_transition_message(order, 'process', 'fulfil', started_minutes_ago=60)
 ```
 
 ---
+
+
+## Tests with real commits
+
+Inline execution of `atomic=False` work requires autocommit, except in the test runtime.
+There, a job called inside a transaction runs in that transaction and keeps its writes when a later step fails.
+Tests of transactional submission must submit in pull mode, commit, then call `retry_pending()` to execute saved jobs inline.
+Its return value counts calls without raised exceptions, including failed attempts in pull mode.
+Check saved job and business results to establish success.
+Use `TransactionTestCase` for those real commits.
+Do not add an empty production job just to make transactional submission run inside a synchronous test.

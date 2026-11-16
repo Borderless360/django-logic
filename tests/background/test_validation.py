@@ -11,6 +11,16 @@ from django_logic.background import BackgroundTransition
 
 
 class QueueValidationTests(SimpleTestCase):
+    def test_background_declaration_errors_identify_the_action(self):
+        for options in (
+            {'lock': False}, {'fairness_key': 42}, {'submission_context': 42},
+            {'in_progress_state': 'busy', 'target': None},
+            {'in_progress_state': 'busy', 'failed_state': 'busy'},
+        ):
+            with self.subTest(options=options):
+                with self.assertRaisesMessage(ImproperlyConfigured, "BackgroundTransition 'send_invoice':"):
+                    BackgroundTransition('send_invoice', sources=['draft'], **{'target': 'done', **options})
+
     def test_empty_queue_string_rejected(self):
         # queue is optional (DEFAULT_QUEUE applies), but an explicit empty
         # string is a typo, not a request for the default.

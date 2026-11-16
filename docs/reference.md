@@ -17,6 +17,13 @@ Business rules belong in application functions. Worker configuration belongs in 
 | `from django_logic.exceptions import TransitionNotAllowed, TransitionTemporarilyUnavailable, RefusalReason` | Handle unavailable actions. |
 | `from django_logic.commands import StrictPermissions, NoUserPermissions, refusal_message` | Require a person, require automation, or explain a failed business check. |
 | `from django_logic.testing import ProcessScenario` | Test a business process inline. |
+| `from django_logic.testing import snapshot, from_snapshot, open_transition_message` | Capture model fields, rebuild a test record, or create an unfinished job fixture. |
+| `from django_logic.testing import assert_idempotent` | Call a function twice and compare the selected saved fields and observations. |
+| `from django_logic.background import retry_pending` | Run each eligible saved job once inline. |
+| `from django_logic.background.runner import run_background_transition` | Run one eligible saved job by its identifier. |
+| `from django_logic.background.models import TransitionMessage` | Read a saved job and its recorded outcome. |
+| `from django_logic.background.serializers import KwargsSerializationError` | Handle an argument that cannot be saved or restored. |
+| `from django_logic.background.context import JobContextError` | Handle application-context restoration failure during inline execution. |
 | `from django_logic.conf import enable_sync` | Allow deployment-wide inline execution from test settings before Django starts. |
 
 ## Transition declarations
@@ -100,7 +107,13 @@ class OrderProcess(Process):
 
 Bind the root once in `AppConfig.ready()`:
 `ProcessManager.bind_model_process(Order, OrderProcess, state_field='status')`.
-A background action must be unique within its declaring class.
+A background action must be unique within its declaring class. Keep that class importable while its jobs remain unfinished.
+`nested_processes` groups declarations for one bound state field; it does not create related records or jobs.
+For an order waiting on several fulfilment records, use [waiting for work on related records](recipes/related-records.md).
+
+Use the same action name in nested processes when callers share one action API and permissions select the manual or automatic branch.
+Use [two explicit action names](recipes/interactive-and-automatic.md) when the endpoint and scheduler select separate actions themselves.
+Both choices share the business function and can use separate queues; permission checks must still match each caller.
 
 Use declared functions for application behavior. An `atomic=True` synchronous transition cannot override `complete_transition`.
 Its transaction must distinguish required work from optional callbacks.
@@ -120,6 +133,9 @@ Datetime conversion preserves the instant and numeric offset, but not the origin
 Unknown or malformed saved type tags fail restoration rather than reaching business code as a different type.
 
 The engine manages `tr_id`, `root_id`, `parent_id`, `process_class`, `owning_process_class` and runtime `context`.
+`process_class` and `owning_process_class` are dotted-path strings, not Python class objects.
+`context` is a shared scratch dictionary for the hooks of one execution. It is not saved, and each retry starts with an empty dictionary.
+It differs from `submission_context` (transactional preparation) and `JOB_CONTEXT` (saved application audit context).
 `user_id` is written from `user=` and restored by the worker.
 `state`, `exception` and `request` are reserved at the call boundary.
 A failure callback receives `exception=` after the engine handles the failure:
@@ -131,6 +147,9 @@ def report_failure(instance, exception, **kwargs):
 
 Failure callbacks see `failed_state` after a successful failure-state save.
 Any action they call must be available from that state.
+When maintenance completes a job at its error limit, it reconstructs `RuntimeError('[detect_stuck] <saved error text>')`.
+That exception has neither the original exception class nor its traceback. Failure callbacks must not rely on either being available;
+log the saved text and use the recorded job identifier to inspect the earlier attempt.
 
 ## Settings
 
@@ -166,6 +185,7 @@ Run `python manage.py check --tag django_logic` after configuring the applicatio
 | --- | --- |
 | `[unrestorable]` | The saved model, process, action or application context cannot be restored. Check the recorded error and deployed configuration. |
 | `[superseded]` | The record's state changed, so the saved action no longer applies. |
+| `[detect_stuck]` | Maintenance completed a job at its error limit; the following text is its saved error, not an original traceback. |
 | `[timeout]` | The job exceeded its declared attempt timeout. |
 | `[crashed]` | The job process stopped before it recorded a result. Inspect the worker log for its exit or signal. |
 

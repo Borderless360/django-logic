@@ -62,17 +62,17 @@ POLL_SECONDS = 5.0
 #: and only the worker can record one.
 BUSY_POLL_SECONDS = 1.0
 
-#: Check child exits promptly while a full worker waits for a free slot.
+#: Check finished job processes promptly while a full worker waits for a free slot.
 CHILD_POLL_SECONDS = 0.01
 
-# Stop claiming when too many error writes are waiting. Existing children
+# Stop claiming when too many error writes are waiting. Running job processes
 # can still finish, so the maximum also includes the worker's concurrency.
 MAX_PENDING_ACCOUNTING = 1000
 ACCOUNTING_RETRIES_PER_PASS = 16
 ACCOUNTING_WARNING_SECONDS = 5.0
 ACCOUNTING_WARNING_REPEAT_SECONDS = 60.0
 
-#: How often the loop runs the safety nets (stuck report, cleanup).
+#: How often the loop runs maintenance (delayed-job report, cleanup).
 SAFETY_NET_SECONDS = 60.0
 SAFETY_NET_TIMEOUT_SECONDS = 60.0
 # A pass that still runs when the worker is asked to stop gets this long.
@@ -98,13 +98,13 @@ def claim_next(queues: list[str], *, exclude_pks=()) -> int | None:
     The lock taken by ``SKIP LOCKED`` is released when this short
     transaction ends; the runner then takes its own row lock for the
     attempt. Several workers can select the same row during that gap.
-    Competing starts are common when workers share queues with few client groups.
+    Competing starts are common when workers share queues with few fairness groups.
     Non-atomic jobs expose another gap while the runner changes connections.
     The runner's row lock prevents overlapping execution. A competing process
     can record a start and exit without running the job's side effects.
 
     ``exclude_pks`` names the rows this worker already runs. One worker
-    claims faster than its own attempt processes take their row locks, so
+    claims faster than its own job processes take their row locks, so
     without this it would claim the same head row into every free slot.
     """
     from django_logic.background.safety_nets import _claimable
@@ -122,7 +122,7 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     """Claim and execute at most one row. Returns whether one ran.
 
     With ``isolate=True`` (what the worker loop uses) the attempt runs in
-    a forked attempt process, so a crash — ``os._exit`` in consumer code, a
+    a forked job process, so a crash — ``os._exit`` in consumer code, a
     segmentation fault, the platform's memory killer — kills the attempt,
     not the worker. The worker records the crash as an error on the row,
     so a crashing attempt gets the same paced, bounded retries as a
@@ -149,7 +149,7 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
 class _Attempt:
     """One job process and any failure the worker still needs to record."""
 
-    # A safety-net pass has no message row.
+    # A maintenance pass has no message row.
     pk: int | None
     timeout_seconds: float | None
     deadline: float | None
@@ -177,9 +177,9 @@ def _supervisor_transaction(alias):
 
 
 def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) -> None:
-    """Fork one attempt or safety-net pass and track its deadline.
+    """Fork one attempt or maintenance pass and track its deadline.
 
-    The worker and the attempt process must not share a database
+    The worker and the job process must not share a database
     connection — a connection closed (or crashed) on one side poisons
     the other's session. The worker closes every connection before the
     fork; each side then opens its own lazily.
@@ -223,7 +223,10 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) 
                 run_background_transition(pk)
             status = 0
         except BaseException:
-            logger.exception('Job process failed while running job %s. See this traceback before retrying.', pk)
+            if pk is None:
+                logger.exception('Maintenance process failed. See this traceback before the next maintenance pass.')
+            else:
+                logger.exception('Job process failed while running job %s. See this traceback before retrying.', pk)
         finally:
             try:
                 if finish is not None:
@@ -280,7 +283,7 @@ def _stop_overdue(attempts: dict[int, _Attempt]) -> None:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
-            # The child ended between the deadline check and the signal.
+            # The job process finished between the deadline check and the signal.
             pass
 
 
@@ -361,7 +364,7 @@ def _harvest(
             continue
         attempt = attempts.pop(pid, None)
         if attempt is None:
-            # Consumer code can leave a child which this worker did not start.
+            # Application code can start another process that finishes here.
             continue
         attempt.exit_code = os.waitstatus_to_exitcode(raw_status)
         _finish_attempt(attempt, pending)
@@ -437,8 +440,14 @@ def _account(attempt: _Attempt, exit_code: int) -> None:
         return
     if exit_code == 0:
         return
-    reason = (f'was killed by signal {-exit_code}' if exit_code < 0
-              else f'stopped with exit code {exit_code}; see the worker log')
+    if exit_code < 0:
+        try:
+            signal_name = f' ({signal.Signals(-exit_code).name})'
+        except ValueError:
+            signal_name = ''
+        reason = f'was killed by signal {-exit_code}{signal_name}'
+    else:
+        reason = f'stopped with exit code {exit_code}; see the worker log'
     _record_attempt_error(attempt.pk, f'[crashed] the job process {reason}')
     logger.warning(
         f'pull: the job process for TransitionMessage#{attempt.pk} {reason}. '
@@ -478,9 +487,8 @@ def _record_attempt_error(pk: int, message: str) -> None:
 
 
 def _run_safety_nets(queues=()) -> None:
-    """The periodic work: the stuck finalizer and its never-started
-    report, and the cleanup sweep. Called from the loop, so pull mode
-    schedules nothing anywhere else."""
+    """Complete jobs at the error limit, report jobs that never started,
+    and remove old completed jobs. The worker schedules these checks."""
     from django_logic.background.safety_nets import (
         cleanup_completed_transitions,
         detect_stuck_transitions,
@@ -497,20 +505,20 @@ def _run_safety_nets(queues=()) -> None:
         try:
             step()
         except Exception as exc:
-            logger.error('pull: safety net %s failed: %s',
+            logger.error('pull: maintenance %s failed: %s',
                          getattr(step, '__name__', step), exc)
 
 
 def _report_safety_net_result(attempt: _Attempt, exit_code: int) -> None:
     if attempt.killed and exit_code == -signal.SIGKILL:
         logger.warning(
-            'pull: safety nets exceeded their %ss limit and were stopped. '
+            'pull: maintenance exceeded its %ss limit and was stopped. '
             'Uncompleted rows will be checked on the next pass.',
             attempt.timeout_seconds,
         )
     elif exit_code != 0:
         logger.warning(
-            'pull: safety nets stopped with exit code %s. '
+            'pull: maintenance stopped with exit code %s. '
             'Uncompleted rows will be checked on the next pass.',
             exit_code,
         )
@@ -580,26 +588,26 @@ def run_worker(
     stop_requested: Callable[[], bool] | None = None,
 ) -> None:
     """The worker loop: fill the free attempt slots from the claimable
-    rows, account for the attempts that end, run the safety nets on
+    rows, record the results of finished attempts, run maintenance on
     schedule, wait for a notification, repeat.
 
     ``concurrency`` is how many attempts this worker runs at a time. One
-    worker with several slots shares one memory pool and one set of
-    safety nets across them; several one-slot workers each reserve memory
+    worker with several slots shares one memory pool and one maintenance
+    process; several one-slot workers each reserve memory
     for their heaviest attempt. Every slot holds its own database
     connection while it runs, so size ``concurrency`` against the
     connection cap (see docs/workers.md).
 
-    One additional process runs safety nets with a 60-second limit.
+    One additional process runs maintenance with a 60-second limit.
     It does not use an attempt slot. Reserve a connection for it too.
 
     ``forever=False`` drains what is claimable now, waits for the
-    attempts it started, runs the safety nets, and returns — for tests
-    and for a one-off catch-up command.
+    attempts it started, runs maintenance, and returns. Tests can use it
+    to finish the work currently ready in the selected queues.
 
     ``stop_requested`` is a callable that the loop asks before it takes
     new work. Once it returns true, the worker starts nothing new, waits
-    for its running jobs, and returns. A safety-net pass that still runs
+    for its running jobs, and returns. A maintenance pass that still runs
     gets ``SAFETY_NET_STOP_SECONDS``; the next pass repeats its work.
     ``dl_worker`` sets it from SIGTERM, so a deploy lets a running job finish.
     """
@@ -657,7 +665,7 @@ def run_worker(
             )
         if stop_requested():
             continue
-        # A full worker still checks deadlines and schedules safety nets.
+        # A full worker still checks deadlines and schedules maintenance.
         before_harvest = len(attempts) + len(pending)
         before_children = len(attempts)
         _harvest(attempts, pending, block=False)
@@ -671,13 +679,13 @@ def run_worker(
             try:
                 _start_attempt(None, attempts, queues=queues)
             except Exception as exc:
-                logger.error('pull: could not start safety nets: %s', exc)
+                logger.error('pull: could not start maintenance: %s', exc)
             last_safety_net = now
         if claimed_any or harvested:
             continue
         full = sum(attempt.pk is not None for attempt in attempts.values()) >= concurrency
         if (attempts or pending) and (full or not forever or len(pending) >= MAX_PENDING_ACCOUNTING):
-            # Child exits do not notify PostgreSQL. A full worker waits for
+            # Finished job processes do not notify PostgreSQL. A full worker waits for
             # them directly, but returns in time to schedule maintenance.
             max_wait = None
             if forever:

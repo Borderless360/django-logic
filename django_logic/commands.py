@@ -88,9 +88,8 @@ def write_failed_state(state, failed_state, *, prefix, consequence, using=None):
     The savepoint opens on the instance's alias, not DEFAULT: set_state
     routes its write with ``hints={'instance': ...}``, so a savepoint
     opened on DEFAULT would guard the wrong connection.
-    ``require_commit``, because the success branch logs ``SET_STATE`` —
-    a savepoint Django discards without an exception must surface as
-    the failure it is, not log a state change that never landed.
+    A savepoint Django discards without an exception is still a failure;
+    only a successful write can produce a ``SET_STATE`` log entry.
     """
     database_kwargs = {'using': using} if using is not None else {}
     previous = state.get_state()
@@ -298,10 +297,8 @@ class Callbacks(BaseCommand):
     Each callback is isolated: one failing callback does not
     prevent the later ones from being attempted, and when the caller is
     inside an open transaction each callback runs in its own savepoint —
-    a database error would otherwise mark the whole outer transaction
-    rollback-only, so the swallow left every later ORM call broken
-    (``TransactionManagementError``) and could roll back the transition's
-    own state write. Only a database error discards the callback's writes.
+    a database error then discards only that callback's writes and leaves
+    the outer transaction usable.
     Any other error keeps what the callback saved before it failed, inside
     a transaction and outside one. A transition that a callback starts
     keeps its failed state when it fails.

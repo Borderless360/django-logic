@@ -1,11 +1,11 @@
 # Long imports: save progress after each page
 
 A large import must keep its finished pages when a later attempt fails.
-One ordinary background job can own the whole import.
-Each attempt processes one page and saves its records and cursor together.
+One background job can own the whole import.
+Each job processes one page and saves its records and cursor together.
 The job remains pending while another page remains.
 
-Use `atomic=False` so an attempt can commit a finished page before postponing itself.
+Use `atomic=False` so an attempt can commit a finished page before deferring itself.
 Put each page's database changes inside an explicit transaction.
 Do not put the entire import inside one transaction.
 
@@ -58,7 +58,8 @@ This example uses the default PostgreSQL database and a process bound to `status
 The application calls `import_pages()` once.
 That call saves the job and the `importing` state together.
 `ImportRun` is the application's import record; only this workflow changes its cursor.
-`None` means there are no more pages.
+Create `ImportRun` with the first page cursor before submitting the job.
+`None` means there are no more pages; a new record with that value completes without importing anything.
 
 The page transaction rolls back imported records and the cursor if any page write fails.
 After that transaction commits, `Defer` keeps the same job available for another attempt.
@@ -79,5 +80,5 @@ An import that reaches its error limit needs an explicit business recovery decis
 
 Use one import record per run.
 A new import uses a new record, so an old attempt cannot change a restarted import.
-For independent records, submit one ordinary background job per record and save the parent check with those submissions.
-See [parent and child processes](nested-processes.md).
+For independent records, submit one background job per record and save the parent check with those submissions.
+See [work on related records](related-records.md).

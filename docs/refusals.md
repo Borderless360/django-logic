@@ -18,6 +18,10 @@ also attach `user_message`, ready to display. `str(error)` contains diagnostic d
 A PostgreSQL row-lock timeout raises `TransitionTemporarilyUnavailable` with reason `locked`.
 A cache state-lock refusal raises plain `TransitionNotAllowed` with that same reason.
 Use the exception type, not `reason='locked'` alone, to decide whether to suggest a short retry.
+On PostgreSQL, a plain cache-lock refusal can mean a nested call to the same record, or a lock left after a process stopped or lost its connection.
+Check for a nested action first. Otherwise inspect the unfinished work and provider results, then wait for the remaining `LOCK_TIMEOUT` before a safe retry.
+Do not remove a lock while another call may still act on the record.
+On other databases a cache-lock refusal can also mean two callers arrived together; concurrent production state guarantees require PostgreSQL.
 When declarations share an action name, prefer a transition whose sources
 include the current state and whose process permissions and conditions pass.
 Its failed check supplies the reason. Otherwise, use a process guard that
@@ -105,7 +109,7 @@ leave `user_message=None`; process configuration applies to Process calls.
 `process.get_available_transitions(..., include_locked=True)` check the object's
 current state, conditions and permissions even when another action holds its
 state lock. This lets an application distinguish a temporary wait from a business
-rule that forbids an action. The default continues to hide actions that need a
+rule that forbids an action. The default hides actions that need a
 held lock.
 
 Inside `DatabaseTransition`, the lock is visible only within the current call.

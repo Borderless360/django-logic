@@ -16,9 +16,18 @@ def capture_job_context():
     adapter_class = conf.job_context()
     if adapter_class is None:
         return None
-    value = adapter_class().capture()
+    try:
+        value = adapter_class().capture()
+    except Exception as error:
+        error.add_note('JOB_CONTEXT capture() failed before a job could be saved.')
+        raise
     # Copy the value so later application mutations cannot change the saved context.
-    return json.loads(json.dumps(value, allow_nan=False))
+    try:
+        return json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError) as error:
+        raise type(error)(
+            f'JOB_CONTEXT capture() must return JSON-compatible data: {error}'
+        ) from error
 
 
 @contextmanager
@@ -38,12 +47,16 @@ def restored_job_context(job_id):
             f'JOB_CONTEXT could not restore the saved application context: '
             f'{type(error).__name__}: {error}'
         ) from error
+    body_error = (None, None, None)
     try:
         yield
+    except BaseException:
+        body_error = sys.exc_info()
+        raise
     finally:
         try:
             # Cleanup cannot suppress work errors or change the recorded job result.
-            context.__exit__(*sys.exc_info())
+            context.__exit__(*body_error)
         except Exception:
             transition_logger.exception(
                 'TransitionMessage#%s: JOB_CONTEXT cleanup failed. '

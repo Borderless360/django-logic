@@ -489,16 +489,17 @@ def _validate_hook_signatures(process_cls) -> None:
             request_readers.append(name)
     if offenders:
         raise ImproperlyConfigured(
-            'FSM hooks without a named instance-first parameter — the engine '
-            'calls hooks as fn(instance, **kwargs) (permissions as '
-            'fn(instance, user, **kwargs)), so give each hook a named first '
-            'parameter, e.g. def hook(instance, **kwargs); decorated hooks '
+            'Transition hooks without a named instance-first parameter. '
+            'The engine calls conditions as fn(instance), permissions as '
+            'fn(instance, user), and side effects and callbacks as '
+            'fn(instance, **kwargs). Failure callbacks also receive exception '
+            'as a keyword argument. Give each hook a named first parameter; decorated hooks '
             'need functools.wraps to expose the real signature: '
             f'{"; ".join(sorted(set(offenders)))}'
         )
     if request_readers:
         raise ImproperlyConfigured(
-            'FSM hooks that name a request parameter — a transition never '
+            'Transition hooks that name a request parameter — a transition never '
             'takes the request (it is refused at the call, and a worker has '
             'none), so a hook can never receive one. Resolve what the hook '
             'needs at the call site and pass plain values: '

@@ -1,6 +1,6 @@
 """Stand up an uncompleted ``TransitionMessage`` row for a test.
 
-Tests that pin behaviour around the one-uncompleted-row gate need a row
+Tests of the unfinished-job check need a row
 whose fields agree with the engine's keying. Hand-rolled rows get one of
 the eight fields wrong and pin nothing, so this helper writes them all
 from the instance itself.
@@ -24,7 +24,7 @@ def open_transition_message(
 ):
     """Create and return an uncompleted ``TransitionMessage`` for ``instance``.
 
-    The row is keyed exactly as enqueue keys it, so the sync gate, the
+    The row is keyed exactly as enqueue keys it, so the unfinished-job check, the
     enqueue constraint, and ``retry_status`` all see it. Its saved process and
     declaring class come from the bound process and named background declaration,
     so the worker can restore it without guessing. With

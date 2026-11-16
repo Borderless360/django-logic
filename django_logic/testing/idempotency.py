@@ -4,8 +4,7 @@ Background side-effects re-run FROM SCRATCH on every retry (a crashed
 worker's released row, a failed row claimed again after the retry wait),
 so every side-effect
 must be idempotent: a second application must change nothing observable.
-Consumers hand-rolled "call twice, compare" — or skipped the check.
-``assert_idempotent`` makes it one call::
+``assert_idempotent`` calls the function twice and compares the results::
 
     from django_logic.testing import assert_idempotent
 

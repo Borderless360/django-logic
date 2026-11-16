@@ -89,7 +89,7 @@ class TransitionTemporarilyUnavailable(TransitionNotAllowed):
     Catch this AHEAD of ``TransitionNotAllowed`` to answer "busy" instead
     of "forbidden". Covers the background concurrency guard
     (``AlreadyInProgress``) and the
-    sync gate while the uncompleted ``TransitionMessage`` is still being
+    unfinished-job check while the uncompleted ``TransitionMessage`` is still being
     retried — all of these resolve when that work completes. A row
     nothing is retrying is stranded, not busy, and raises the plain
     base: no worker will retry it automatically.

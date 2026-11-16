@@ -1,25 +1,23 @@
-"""The safety nets: the stuck finalizer and the cleanup sweep.
+"""Complete jobs at the error limit, report delays, and remove old completed jobs.
 
 Plain functions. The pull worker loop runs them on a fixed cadence
 (``pull.run_worker``), so no scheduler has to be configured for them.
-Sync-mode tests call them directly, or through ``retry_pending()`` for
+Tests with inline execution call them directly, or through ``retry_pending()`` for
 the retry pass.
 
 What each one owns:
 
 * :func:`retry_pending` — run every claimable row inline. The visibility
   rule is the same one the pull claim uses: uncompleted, retries left,
-  and past the retry wait after the last recorded error. Sync mode's
-  "time passed" simulation.
+  and past the retry wait after the last recorded error.
 * :func:`detect_stuck_transitions` — finalize rows stuck at
   ``MAX_ERRORS``, and report, once per queue, rows that wait past the
   retry window.
 * :func:`cleanup_completed_transitions` — delete old completed rows,
   keeping the newest terminal-failure row per instance and process.
 
-A hanging attempt needs no net here: the worker enforces the declared
-``timeout=`` on its attempt process (``pull``), and a dead worker's row
-lock dies with its connection.
+The worker enforces ``timeout=`` on each job process. PostgreSQL releases
+its row lock when its connection closes.
 """
 from __future__ import annotations
 
@@ -87,11 +85,11 @@ def _queue_is_served(queue_name: str, now, window_minutes: int) -> bool:
 def retry_pending() -> int:
     """Run every claimable row inline. Count calls that return without raising.
 
-    Outside sync mode, that count also includes failed attempts.
+    Outside inline execution, that count also includes failed attempts.
     It does not establish that their business work succeeded.
 
     A failing side-effect re-raises out of ``run_background_transition``
-    in sync mode; the failure is already recorded on its row, so the scan
+    in inline execution; the failure is already recorded on its row, so the scan
     logs it and keeps going. Rows another connection holds are skipped by
     the runner's own row-lock guard.
     """

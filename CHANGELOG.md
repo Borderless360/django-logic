@@ -1,5 +1,21 @@
 # Changelog
 
+## [5.1.1] — 2026-11-16
+
+### Fixed
+
+- A successful inline job restores its application context without passing an unrelated exception being handled by its caller.
+- When application-context restoration prevents maintenance from completing the business action, retain the earlier business error alongside the context failure.
+- Name `JOB_CONTEXT` in capture errors while preserving their exception types.
+- Make worker diagnostics describe deferred jobs, maintenance failures, actual saved states and operating-system signal names accurately.
+
+### Changed
+
+- Remove the unused `TransitionMessage.operation_name` alias; use `transition_name`.
+- Simplify current guides, distinguish the three context APIs, and document repeatability tests, maintenance failures and manual/automatic action choices.
+- State the required stop, migrate and restart procedure for migration 0019. Published migrations are unchanged; 5.1.0 installations need no new migration.
+
+
 ## [5.1.0] — 2026-11-16
 
 ### Added

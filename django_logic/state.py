@@ -215,10 +215,8 @@ class State:
         Compare-and-delete on the ownership token issued by ``lock()``:
         if this holder's lock TTL-expired and another caller acquired the
         key since, the stored token no longer matches and the successor's
-        lock is left intact. The get+compare+delete pair is not atomic on
-        generic cache backends, but it shrinks the misdelete window from
-        "always, after any takeover" to a takeover happening between the
-        compare and the delete.
+        lock is left intact. Generic cache backends cannot compare and
+        delete atomically; another caller can take the key between those steps.
 
         A State object without a token cannot release another object's lock.
         """

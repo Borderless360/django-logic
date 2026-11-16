@@ -225,7 +225,7 @@ _force_sync: ContextVar[bool] = ContextVar('_dl_force_sync', default=False)
 
 @contextmanager
 def sync_execution():
-    """Force sync mode for the duration of the ``with`` block.
+    """Force inline execution for the duration of the ``with`` block.
 
     Business code and tests can use this block when the caller needs an immediate result.
     Inline execution starts no retry loop. A committed unfinished job can still be claimed by workers serving its queue.
