@@ -90,7 +90,10 @@ Use `transaction.on_commit()` for best-effort publication that requires committe
 
 On other databases, `State.protected()` takes no row lock and opens no transaction.
 Without a caller transaction, synchronous writes commit independently and swallowed database errors may not be detected.
-SQLite remains useful for synchronous tests, but does not verify PostgreSQL transaction or concurrent-state protection.
+SQLite is supported for single-process business tests, not concurrent production state transitions.
+Even with `atomic=True`, its cache lock can be released while an outer transaction remains open.
+A second connection can then read the earlier state and run an external action before the first transaction commits.
+Atomic rollback does not provide concurrent-state protection on this backend. Use PostgreSQL for that guarantee.
 
 Default atomic state-writing background jobs retain the business-row lock during their transaction.
 Targetless jobs without a failed state protect only finalization, so independent provider work can overlap.

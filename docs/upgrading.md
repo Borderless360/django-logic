@@ -5,6 +5,10 @@
 Migration 0019 adds nullable application job context and removes six database defaults used by older producers.
 Python model defaults remain. Existing jobs keep `job_context=None`; configured adapters must clear attribution for that value.
 Apply the migration with the coordinated application and worker version. No historical jobs are rewritten.
+Django 5.2 is the minimum supported framework version. PostgreSQL workers require psycopg 3.2 or later, or Django’s supported psycopg2 driver.
+Install the `postgres` extra for psycopg 3 and the `redis` package when using Django’s Redis cache.
+Unknown transition declaration options now raise `TypeError`. Bind every process through an installed `django_logic` application.
+`ProcessScenario.retry_transition()` refuses a future deferral; assert that wait with `assert_deferred()` before advancing the test clock.
 
 ## From 4.3.2 to version 5
 
@@ -33,7 +37,7 @@ Before upgrading:
    Finish all pending background effects and parents that still promise them using the installed version.
 5. Stop all job producers, scheduled submissions and old workers. Confirm that no
    old job process remains. Install the new application and run `migrate` before
-   starting any 5.0 process. Preserve any removed metadata that the environment must retain.
+   starting the new application processes. Preserve any removed metadata that the environment must retain.
 
 Migration 0017 checks unfinished work before removing the physical
 `request_fingerprint` and `required_next` columns. A failed check leaves the
@@ -47,8 +51,8 @@ It then removes `request_key`, `background_effect_names`, `effect_name`, `parent
 Compatible ordinary pending jobs remain available and completed job rows remain in history.
 Reversing the migration cannot restore removed metadata. Preserve an archive if the environment requires that history.
 
-Start only 5.0 producers and workers. Verify the installed package, queue coverage
-and completion of retained jobs. Mixing earlier workers or producers with 5.0 is
+Start only producers and workers of the selected version. Verify the installed package, queue coverage
+and completion of retained jobs. Mixing different producer and worker versions is
 unsupported. This release is not a normal rolling upgrade.
 
 Before rollback, stop new submissions and workers and review every unfinished job

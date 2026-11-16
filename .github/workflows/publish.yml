@@ -62,5 +62,5 @@ jobs:
         run: |
           # A re-run of a tag must not fail on a release that exists.
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --title "django-logic $version" --notes-file /tmp/notes.md --verify-tag
+            gh release create "$GITHUB_REF_NAME" --title "django-logic ${GITHUB_REF_NAME#v}" --notes-file /tmp/notes.md --verify-tag
           fi

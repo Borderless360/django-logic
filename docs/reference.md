@@ -29,11 +29,11 @@ Business rules belong in application functions. Worker configuration belongs in 
 | `action_name` | Required | Name used in `instance.process.action()`. |
 | `sources` | Required | States from which the action is allowed. |
 | `target` | `None` | State saved on success; `None` leaves it unchanged, while `''` saves an empty value. |
-| `conditions` | `[]` | Each function receives the instance and must return true. |
-| `permissions` | `[]` | Each function receives the instance and user and must permit that user. |
-| `side_effects` | `[]` | Required functions, run in declaration order with `instance, **kwargs`. |
-| `callbacks` | `[]` | Optional functions after success; ordinary exceptions are logged and suppressed. |
-| `failure_callbacks` | `[]` | Optional failure handling, including the error as `exception=`. |
+| `conditions` | `()` | Each function receives the instance and must return true. |
+| `permissions` | `()` | Each function receives the instance and user and must permit that user. |
+| `side_effects` | `()` | Required functions, run in declaration order with `instance, **kwargs`. |
+| `callbacks` | `()` | Optional functions after success; ordinary exceptions are logged and suppressed. |
+| `failure_callbacks` | `()` | Optional failure handling, including the error as `exception=`. |
 | `failed_state` | `None` | State saved when failure handling can safely update the record. |
 | `refusal_messages` | `{}` | Business explanations indexed by `RefusalReason`. |
 | `lock` | `True` | Protect the record's state. `False` cannot be combined with target or failed-state writes. |

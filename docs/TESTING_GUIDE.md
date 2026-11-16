@@ -221,6 +221,19 @@ def test_persistent_failure_reaches_failed_state(self):
     self.assert_error_count(order, 2)
 ```
 
+### Waiting for a required result
+
+A deferred job has not completed. Assert its saved wait and the business state:
+
+```python
+self.background_transition(order, 'fulfil')
+self.assert_deferred(order, reason='Waiting for stock')
+self.assert_state(order, 'fulfilling')
+```
+
+Complete the dependency and advance the test clock past the saved deadline before `retry_transition(order)`.
+The helper refuses a retry while the job is still waiting, so an unexecuted attempt cannot pass as success.
+
 ### 5. Snapshot & replay — turn a production bug into a test
 
 Capture a stuck instance in production (shell, admin action, Sentry hook):
@@ -263,7 +276,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `create_instance(**fields)` | Create a model instance (state via the `state_field` kwarg). Override for factories. |
 | `transition(obj, action, **kwargs)` | Run a synchronous transition through the normal entrypoint. |
 | `background_transition(obj, action, **kwargs)` | Run a `BackgroundTransition` enqueue **and** execute inline. |
-| `retry_transition(obj)` | Re-run the instance's uncompleted `TransitionMessage` — simulates a worker's next claim. |
+| `retry_transition(obj)` | Run the unfinished job when due; fails the test if the job is still deferred. |
 | `snapshot(obj)` / `from_snapshot(data_or_path)` | Capture / rebuild the model fields. Create background jobs separately with `open_transition_message`. |
 
 `transition`, `background_transition` and `retry_transition` all accept:
@@ -321,6 +334,7 @@ Class attributes: `process_class`, `model`, `state_field` (default
 | `assert_raised(exc_type=None, match=None)` | The last drive propagated an exception to the caller (optionally of a type / containing a substring). |
 | `assert_not_raised()` | The last drive propagated nothing (the swallow contract). |
 | `assert_error_recorded(obj, contains)` | Substring of `last_error_message` on the latest `TransitionMessage`. |
+| `assert_deferred(obj, reason=None, until=None)` | The latest job is unfinished with a future due time; optionally check its reason and deadline. |
 | `assert_error_count(obj, expected)` | `errors_count` on the latest `TransitionMessage`. |
 | `assert_transition_owner(obj, 'app.process.OrderProcess', transition_name=None)` | The dotted path of the process class that declared the recorded transition. |
 
