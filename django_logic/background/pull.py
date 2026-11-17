@@ -13,8 +13,9 @@ The claim's WHERE clause is the retry rule:
   visible again;
 * a row whose attempt runs right now is row-locked by that attempt, so
   ``SKIP LOCKED`` passes over it;
-* a worker that dies releases its lock with its connection, so its row
-  is claimable at once.
+* a lost job connection releases its row lock; unexpired state locks
+  still delay a retry until the worker confirms exit and removes them,
+  or their configured duration ends.
 
 ``LISTEN/NOTIFY`` is the wake-up: enqueue fires one payload-free
 notification after commit, and a waiting worker asks the database at
@@ -41,12 +42,16 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from uuid import uuid4
 
 from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
                        transaction)
 
 from django_logic.logger import logger
 from django_logic.background import reporting
+from django_logic.lock_ownership import (
+    create_process_owner, retire_process_owner, retire_unstarted_owner, set_process_owner,
+)
 
 #: One channel for every queue. The notification carries no payload and
 #: means only "ask the database now"; the claim's queue filter does the
@@ -137,7 +142,7 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     if isolate and hasattr(os, 'fork'):
         attempts: dict[int, _Attempt] = {}
         pending: deque[_Attempt] = deque()
-        _start_attempt(pk, attempts)
+        _start_attempt(pk, attempts, pending=pending)
         while attempts or pending:
             _harvest(attempts, pending, block=True)
     else:
@@ -160,6 +165,8 @@ class _Attempt:
     last_deferred_warning: float | None = None
     result_fd: int | None = None
     work_exit_code: int | None = None
+    owner_id: object = None
+    cleanup_only: bool = False
 
 
 @contextmanager
@@ -176,7 +183,7 @@ def _supervisor_transaction(alias):
         yield
 
 
-def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) -> None:
+def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, pending, queues=()) -> None:
     """Fork one attempt or maintenance pass and track its deadline.
 
     The worker and the job process must not share a database
@@ -190,23 +197,40 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) 
 
     finish = job_process_finish()
     timeout_seconds = SAFETY_NET_TIMEOUT_SECONDS
-    if pk is not None:
-        rows = TransitionMessage.objects.filter(pk=pk)
-        with _supervisor_transaction(rows.db):
-            timeout_seconds = rows.values_list('timeout_seconds', flat=True).first()
-    connections.close_all()
+    if connections[DEFAULT_DB_ALIAS].vendor != 'postgresql':
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured('Forked job processes require the default PostgreSQL database.')
+    if not connections[DEFAULT_DB_ALIAS].get_autocommit():
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured('Start job processes outside a caller transaction.')
     read_fd = write_fd = None
-    if finish is not None:
-        read_fd, write_fd = os.pipe()
-        os.set_blocking(read_fd, False)
+    owner_id = uuid4()
+    registration_started = False
     try:
+        if finish is not None:
+            read_fd, write_fd = os.pipe()
+            os.set_blocking(read_fd, False)
+        with _supervisor_transaction(DEFAULT_DB_ALIAS):
+            if pk is not None:
+                rows = TransitionMessage.objects.filter(pk=pk)
+                timeout_seconds = rows.values_list('timeout_seconds', flat=True).first()
+            registration_started = True
+            create_process_owner(pk, owner_id=owner_id)
+        connections.close_all()
         attempt_pid = os.fork()
     except BaseException:
         if read_fd is not None:
             os.close(read_fd)
             os.close(write_fd)
+        if registration_started:
+            cleanup = _Attempt(pk=pk, timeout_seconds=None, deadline=None,
+                               owner_id=owner_id, cleanup_only=True)
+            if not _try_account(cleanup):
+                cleanup.next_retry_at = time.monotonic() + BUSY_POLL_SECONDS
+                pending.append(cleanup)
         raise
     if attempt_pid == 0:
+        set_process_owner(owner_id, pk)
         # A platform can send its stop signal to every process. The worker then
         # waits for this job; only the platform's kill ends it early.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -244,6 +268,7 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, queues=()) 
             else time.monotonic() + timeout_seconds
         ),
         result_fd=read_fd,
+        owner_id=owner_id,
     )
 
 
@@ -381,7 +406,16 @@ def _try_account(attempt: _Attempt) -> bool:
     nothing to enforce their ``timeout=``.
     """
     try:
-        _account(attempt, attempt.exit_code)
+        if attempt.owner_id is not None:
+            with _supervisor_transaction(DEFAULT_DB_ALIAS):
+                if attempt.cleanup_only:
+                    retire_unstarted_owner(attempt.owner_id)
+                else:
+                    retire_process_owner(attempt.owner_id)
+                    _account(attempt, attempt.exit_code)
+            attempt.owner_id = None
+        else:
+            _account(attempt, attempt.exit_code)
     except Exception as exc:
         cause = exc.__cause__
         if (getattr(cause, 'sqlstate', None)
@@ -394,7 +428,7 @@ def _try_account(attempt: _Attempt) -> bool:
                     and (attempt.last_deferred_warning is None
                          or now - attempt.last_deferred_warning >= ACCOUNTING_WARNING_REPEAT_SECONDS)):
                 logger.warning(
-                    'pull: recording the failure for TransitionMessage#%s has waited %.1fs '
+                    'pull: releasing ownership and recording the result for TransitionMessage#%s has waited %.1fs '
                     'for a database lock. The worker retains the error and retries; '
                     'check the PostgreSQL lock holder if the wait continues.',
                     attempt.pk, waited,
@@ -403,8 +437,8 @@ def _try_account(attempt: _Attempt) -> bool:
                 attempt.last_deferred_warning = now
             return False
         logger.error(
-            'pull: could not record how the attempt for '
-            'TransitionMessage#%s ended (%s: %s); the worker keeps it and '
+            'pull: could not release ownership or record the result for '
+            'TransitionMessage#%s (%s: %s); the worker keeps it and '
             'retries the write.',
             attempt.pk, type(exc).__name__, exc,
         )
@@ -494,6 +528,7 @@ def _run_safety_nets(queues=()) -> None:
         detect_stuck_transitions,
     )
     from django_logic.background.worker_presence import record_worker_presence
+    from django_logic.lock_ownership import cleanup_expired_locks
 
     # Cache access stays outside the worker that enforces job deadlines.
     record_worker_presence(queues)
@@ -501,6 +536,7 @@ def _run_safety_nets(queues=()) -> None:
     for step in (
         detect_stuck_transitions,
         cleanup_completed_transitions,
+        cleanup_expired_locks,
     ):
         try:
             step()
@@ -651,7 +687,7 @@ def run_worker(
                 # ready for another worker.
                 if pk is None or stop_requested():
                     break
-                _start_attempt(pk, attempts)
+                _start_attempt(pk, attempts, pending=pending)
                 claimed_any = True
         except Exception as exc:
             # A database blip or a failed fork must not end the loop while
@@ -677,7 +713,7 @@ def run_worker(
                 and (last_safety_net is None or forever or claimed_any)
                 and (last_safety_net is None or now - last_safety_net >= SAFETY_NET_SECONDS)):
             try:
-                _start_attempt(None, attempts, queues=queues)
+                _start_attempt(None, attempts, pending=pending, queues=queues)
             except Exception as exc:
                 logger.error('pull: could not start maintenance: %s', exc)
             last_safety_net = now

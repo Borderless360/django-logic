@@ -90,9 +90,9 @@ never `getattr(process, action_name)` with the name held in a variable.
 
 ## The architecture rule (locked — do not drift back)
 
-One rule decides every reliability design here: **the cache may lie briefly
-(a lock key expires); the database row never lies (it is written atomically
-with the state change); everything recoverable recovers from a row.**
+Save required work with the business change in one database transaction.
+Workers recover that work from its saved job. Ordinary state locks use
+separately committed PostgreSQL ownership records with a configured expiry.
 Apply these rules:
 
 - **No durable busy marker without a durable owner.** A busy state written
@@ -100,9 +100,10 @@ Apply these rules:
   without recovery when a job process stops. Save a recoverable job with the busy state.
 - **PostgreSQL protects state through the actual transaction commit.**
   State changes take the business-row lock and wait at most two seconds for
-  another transaction to commit before they refuse. The shared cache lock also
-  prevents overlapping external calls while its timeout remains valid.
-  Saving a background job writes no cache lock on PostgreSQL.
+  another transaction to commit before they refuse. Independently committed
+  ownership also prevents overlapping external calls while its timeout remains valid.
+  A worker removes its job process's ownership only after confirmed exit.
+  Saving a background job writes no ownership record on PostgreSQL.
   Workers separately lock their job row. Finalization takes
   the job lock before the business row. Enqueue must not wait for an unfinished
   job while holding its business row. Allow for a separate connection when

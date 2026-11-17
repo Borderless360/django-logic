@@ -160,7 +160,7 @@ class ActionScenario(StateTraceMixin, ProcessScenario):
         locked_at_write = []
 
         def observing(state, value):
-            locked_at_write.append(cache.get(state._get_hash()) is not None)
+            locked_at_write.append(state.is_locked())
             real_set_state(state, value)
 
         with mock.patch.object(State, 'set_state', autospec=True,

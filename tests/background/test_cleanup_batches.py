@@ -151,7 +151,7 @@ class CleanupDeadlineTests(TransactionTestCase):
             try:
                 with patch.object(safety_nets, '_CLEANUP_BATCH_SIZE', 2), \
                         patch.object(pull, 'SAFETY_NET_TIMEOUT_SECONDS', 0.5):
-                    pull._start_attempt(None, attempts)
+                    pull._start_attempt(None, attempts, pending=pending)
                     child_pid, attempt = next(iter(attempts.items()))
                     while attempts or pending:
                         self.assertLess(time.monotonic() - started, 3, 'Cleanup child did not stop.')

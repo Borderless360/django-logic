@@ -120,6 +120,7 @@ class ReportingSettingsTests(SimpleTestCase):
 
 
 @unittest.skipUnless(hasattr(os, 'fork'), 'requires os.fork')
+@requires_postgres
 class ProcessReportingTests(TransactionTestCase):
     def setUp(self):
         global _handler, _directory
@@ -155,7 +156,7 @@ class ProcessReportingTests(TransactionTestCase):
                 patch.object(TransitionMessage.objects, 'filter') as rows:
             rows.return_value.db = 'default'
             rows.return_value.values_list.return_value.first.return_value = timeout
-            pull._start_attempt(pk, self.attempts)
+            pull._start_attempt(pk, self.attempts, pending=self.pending)
         pid = next(reversed(self.attempts))
         return pid, self.attempts[pid]
 
@@ -179,6 +180,7 @@ class ProcessReportingTests(TransactionTestCase):
             job_pid, job = self._start(pk=1)
             safety_pid, safety = self._start()
             descriptors = [job.result_fd, safety.result_fd]
+            identities = [os.fstat(descriptor) for descriptor in descriptors]
             self._wait()
         _handler.send()
         self.assertCountEqual(self._reports(), [
@@ -189,9 +191,16 @@ class ProcessReportingTests(TransactionTestCase):
         self.assertEqual(job.exit_code, 0)
         self.assertEqual(safety.exit_code, 0)
         self.record.assert_not_called()
-        for descriptor in descriptors:
-            with self.assertRaises(OSError):
-                os.fstat(descriptor)
+        for descriptor, identity in zip(descriptors, identities):
+            self._assert_original_descriptor_closed(descriptor, identity)
+
+    def _assert_original_descriptor_closed(self, descriptor, identity):
+        try:
+            current = os.fstat(descriptor)
+        except OSError:
+            return
+        # A later database connection can reuse the number of the closed pipe.
+        self.assertNotEqual((current.st_dev, current.st_ino), (identity.st_dev, identity.st_ino))
 
     @override_settings(DJANGO_LOGIC=dl_settings())
     def test_no_hook_keeps_the_existing_exit_without_a_pipe(self):
@@ -297,13 +306,13 @@ class ProcessReportingTests(TransactionTestCase):
     @override_settings(DJANGO_LOGIC=_finish_settings())
     def test_fork_failure_closes_both_pipe_descriptors(self):
         descriptors = os.pipe()
+        identities = [os.fstat(descriptor) for descriptor in descriptors]
         with patch.object(pull.os, 'pipe', return_value=descriptors), \
                 patch.object(pull.os, 'fork', side_effect=OSError('cannot fork')):
             with self.assertRaisesMessage(OSError, 'cannot fork'):
                 self._start()
-        for descriptor in descriptors:
-            with self.assertRaises(OSError):
-                os.fstat(descriptor)
+        for descriptor, identity in zip(descriptors, identities):
+            self._assert_original_descriptor_closed(descriptor, identity)
 
 
 @requires_postgres
@@ -323,7 +332,7 @@ class RecordedFailureReportingTests(TransactionTestCase):
             attempts = {}
             pending = deque()
             with patch.object(reporting, 'FINISH_SECONDS', 1.25):
-                pull._start_attempt(row.pk, attempts)
+                pull._start_attempt(row.pk, attempts, pending=pending)
                 deadline = time.monotonic() + 5
                 try:
                     while attempts or pending:

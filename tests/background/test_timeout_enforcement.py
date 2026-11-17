@@ -353,8 +353,9 @@ class TimeoutKillTests(TransactionTestCase):
 
 
 @unittest.skipUnless(hasattr(os, 'fork'), 'needs os.fork')
+@requires_postgres
 class RunOnceAccountingTests(TransactionTestCase):
-    """run_once returns only after the attempt's accounting write lands."""
+    """run_once returns only after the worker records the failure."""
 
     def test_run_once_retries_a_failed_accounting_write(self):
         from django_logic.background import pull

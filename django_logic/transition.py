@@ -87,14 +87,14 @@ class Transition:
     """Synchronous transition from a source state to a target state.
 
     Execution order on success:
-      1. take the PostgreSQL row lock and the cache lock
+      1. take the PostgreSQL row lock and the state lock
       2. revalidate under the lock: the persisted state is still a valid
          source AND no background transition is in flight on this
          process (uncompleted ``TransitionMessage``)
       3. run side-effects
-      4. on success: set ``target``, release the cache lock, run callbacks
+      4. on success: set ``target``, release the state lock, run callbacks
       5. on failure: set ``failed_state`` (so failure hooks observe the
-         contained state), release the cache lock, run ``failure_callbacks`` (and re-raise)
+         contained state), release the state lock, run ``failure_callbacks`` (and re-raise)
 
     ``in_progress_state`` belongs to background submissions and is saved with their job.
     On PostgreSQL, a locked synchronous call keeps database changes inside a transaction through its callbacks.
@@ -254,7 +254,7 @@ class Transition:
             self.side_effects.execute(state, **kwargs)
             return kwargs.get('tr_id')
 
-        # lock() is atomic (cache.add / Redis SET NX) and returns False if
+        # Lock acquisition is conditional in the database and returns False if
         # the state is already locked, so the acquire alone is sufficient.
         # A separate is_locked() pre-check only adds a TOCTOU window and a
         # redundant round-trip (a stale is_locked()==True could even reject
@@ -297,9 +297,9 @@ class Transition:
         return kwargs.get('tr_id')
 
     def complete_transition(self, state: State, **kwargs):
-        """Write the target, release the cache lock, then run callbacks.
+        """Write the target, release the state lock, then run callbacks.
 
-        Releasing the cache lock lets a callback call another transition on this instance.
+        Releasing the state lock lets a callback call another transition on this instance.
         A locked PostgreSQL call still holds its database lock and transaction through callbacks.
         Other connections see the prior state until the outermost transaction commits.
         A process interruption during callbacks can discard the state write too.

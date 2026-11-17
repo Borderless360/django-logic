@@ -43,6 +43,7 @@ _CLEANUP_BATCH_SIZE = 1000
 def _claimable(queues: list[str] | None = None):
     """Rows a worker may take now. The one place the visibility rule is
     written — the pull claim and the sync retry pass both read it."""
+    from django_logic.lock_ownership import jobs_with_state_locks
     retry_cutoff = timezone.now() - timedelta(
         minutes=conf.retry_minutes())
     rows = TransitionMessage.objects.filter(
@@ -51,7 +52,7 @@ def _claimable(queues: list[str] | None = None):
     ).filter(
         Q(last_error_dt__isnull=True) | Q(last_error_dt__lt=retry_cutoff)
     )
-    rows = rows.filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
+    rows = rows.filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now())).exclude(pk__in=jobs_with_state_locks())
     if queues is not None:
         rows = rows.filter(queue_name__in=queues)
     return rows.order_by('created', 'pk')

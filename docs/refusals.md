@@ -16,12 +16,12 @@ also attach `user_message`, ready to display. `str(error)` contains diagnostic d
 | `ambiguous` | More than one transition passed the checks for this action. |
 
 A PostgreSQL row-lock timeout raises `TransitionTemporarilyUnavailable` with reason `locked`.
-A cache state-lock refusal raises plain `TransitionNotAllowed` with that same reason.
+A state-lock refusal raises plain `TransitionNotAllowed` with that same reason.
 Use the exception type, not `reason='locked'` alone, to decide whether to suggest a short retry.
-On PostgreSQL, a plain cache-lock refusal can mean a nested call to the same record, or a lock left after a process stopped or lost its connection.
-Check for a nested action first. Otherwise inspect the unfinished work and provider results, then wait for the remaining `LOCK_TIMEOUT` before a safe retry.
+On PostgreSQL, a plain state-lock refusal can mean a nested call to the same record, or a lock left after a process stopped or lost its connection.
+Check for a nested action first. Otherwise inspect the unfinished work and provider results. A worker removes its process's locks after confirmed exit; an unobserved interruption can retain them for the remaining `LOCK_TIMEOUT`. Expiry alone does not prove an external operation stopped.
 Do not remove a lock while another call may still act on the record.
-On other databases a cache-lock refusal can also mean two callers arrived together; concurrent production state guarantees require PostgreSQL.
+SQLite is supported only for single-process tests; concurrent production state guarantees require PostgreSQL.
 When declarations share an action name, prefer a transition whose sources
 include the current state and whose process permissions and conditions pass.
 Its failed check supplies the reason. Otherwise, use a process guard that

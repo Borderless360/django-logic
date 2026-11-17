@@ -20,6 +20,7 @@ from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import run_once, run_worker
 from django_logic.background.runner import run_background_transition
 from django_logic.exceptions import RefusalReason, TransitionNotAllowed, TransitionTemporarilyUnavailable
+from django_logic.models import StateLock
 from django_logic.state import State
 from tests import unbind_model_process
 from tests.stability.base import requires_postgres, requires_real_redis
@@ -244,7 +245,7 @@ class DatabaseTransitionTests(TransactionTestCase):
         with patch(__name__ + '.LOCAL_WAIT', (started, release)), ThreadPoolExecutor(2) as pool:
             first = pool.submit(call)
             self.assertTrue(started.wait(5))
-            self.assertIsNone(cache.get(State(row, 'status')._get_hash()))
+            self.assertFalse(StateLock.objects.filter(key=State(row, 'status')._get_hash()).exists())
             second = pool.submit(call)
             time.sleep(0.1)
             self.assertFalse(second.done())
@@ -331,7 +332,7 @@ class DatabaseTransitionTests(TransactionTestCase):
         row.refresh_from_db()
         self.assertEqual(row.status, 'done')
 
-    def test_ordinary_call_after_exception_still_acquires_its_cached_lock(self):
+    def test_ordinary_call_after_exception_still_acquires_its_committed_lock(self):
         row = Order.objects.create()
         with patch.object(Order, 'save', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
             row.database_process.finish()
@@ -340,7 +341,7 @@ class DatabaseTransitionTests(TransactionTestCase):
         original = Order.save
 
         def inspect_lock(current, *args, **kwargs):
-            observed.append(cache.get(State(current, 'status')._get_hash()) is not None)
+            observed.append(State(current, 'status').is_locked())
             return original(current, *args, **kwargs)
 
         with patch.object(Order, 'save', inspect_lock):
@@ -359,7 +360,7 @@ class DatabaseTransitionTests(TransactionTestCase):
             if current.pk == local.pk and kwargs.get('update_fields') == ['status']:
                 transaction.on_commit(ordinary.cached_process.finish)
             if current.pk == ordinary.pk:
-                observed.append(cache.get(State(current, 'status')._get_hash()) is not None)
+                observed.append(State(current, 'status').is_locked())
             return result
 
         with patch.object(Order, 'save', inspect_commit):

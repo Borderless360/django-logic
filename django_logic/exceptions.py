@@ -94,6 +94,6 @@ class TransitionTemporarilyUnavailable(TransitionNotAllowed):
     nothing is retrying is stranded, not busy, and raises the plain
     base: no worker will retry it automatically.
     A PostgreSQL row-lock timeout also raises this subclass, with reason ``locked``.
-    A cache lock refusal ("State is locked") raises plain ``TransitionNotAllowed``.
+    A state lock refusal ("State is locked") raises plain ``TransitionNotAllowed``.
     The shared reason alone does not determine whether a short retry is appropriate.
     """

@@ -7,7 +7,7 @@ from django_logic.transition import Transition
 
 
 class DatabaseTransition(Transition):
-    """Change local records using PostgreSQL row locks without creating cache locks.
+    """Change local records using PostgreSQL row locks without creating committed ownership records.
 
     All nested transitions and submissions share this database-only contract.
     External writes need separate background work outside this transaction.

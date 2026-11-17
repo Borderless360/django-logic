@@ -141,7 +141,7 @@ class TestRaceBetweenUserActionAndBackground(StabilityTestCase):
             "No transitions should be available while state is locked")
 
         state.unlock()
-        self._tracked_cache_keys.discard(state._get_hash())
+        self._tracked_lock_keys.discard(state._get_hash())
 
     def test_different_transition_rejected_when_locked(self):
         """Even if source state matches, the lock prevents execution."""
@@ -157,7 +157,7 @@ class TestRaceBetweenUserActionAndBackground(StabilityTestCase):
         self.assertIn("locked", str(ctx.exception).lower())
 
         state.unlock()
-        self._tracked_cache_keys.discard(state._get_hash())
+        self._tracked_lock_keys.discard(state._get_hash())
 
 
 @tag('stability')

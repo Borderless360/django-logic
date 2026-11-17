@@ -8,8 +8,8 @@ class DjangoLogicConfig(AppConfig):
     migration records, and content types.
 
     A consumer that never declares a background transition needs nothing
-    beyond this entry: the pull-mode database and cache rules are system
-    checks that fire only when a background transition is bound.
+    beyond this entry: the ownership tables are still required. PostgreSQL provides independent
+    lock ownership; the enabled single-process test runtime can use SQLite.
     """
     name = 'django_logic'
     label = 'django_logic_background'

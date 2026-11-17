@@ -17,7 +17,7 @@ from django_logic import Process, ProcessManager, Transition
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 
-from tests.stability.base import StabilityTestCase, run_concurrent
+from tests.stability.base import StabilityTestCase, requires_postgres, run_concurrent
 from tests.stability.models import Order
 
 _posted = []
@@ -64,6 +64,7 @@ class LockFreeTransitionUnderThreadsTests(StabilityTestCase):
         self.assertEqual([error for _, error in outcomes if error], [])
         self.assertEqual(sorted(_posted), list(range(10)))
 
+    @requires_postgres
     def test_the_lock_taking_sibling_refuses_the_overlapping_callers(self):
         # With no wait on the row lock, overlapping callers are refused
         # instead of served in turn.

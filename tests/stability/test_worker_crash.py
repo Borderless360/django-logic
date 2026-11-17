@@ -190,7 +190,7 @@ class TestCommittedStateWithHeldCacheLock(StabilityTestCase):
         self.assert_locked(state)
 
         state.unlock()
-        self._tracked_cache_keys.discard(state._get_hash())
+        self._tracked_lock_keys.discard(state._get_hash())
 
 
 @tag('stability')

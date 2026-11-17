@@ -161,7 +161,7 @@ class StabilityTestCase(TransactionTestCase):
     def setUp(self):
         super().setUp()
         cache.clear()
-        self._tracked_cache_keys = set()
+        self._tracked_lock_keys = set()
 
     def tearDown(self):
         self._assert_no_leaked_locks()
@@ -169,22 +169,24 @@ class StabilityTestCase(TransactionTestCase):
         super().tearDown()
 
     def _assert_no_leaked_locks(self):
-        """Fail the test if it left a tracked lock key in the cache."""
-        for key in list(self._tracked_cache_keys):
-            value = cache.get(key)
-            if value is not None:
+        """Fail the test if it left a tracked state lock."""
+        from django_logic.lock_ownership import is_locked
+        for key in list(self._tracked_lock_keys):
+            if is_locked(key):
                 self.fail(
-                    f"Leaked lock: cache key '{key}' still holds '{value}' "
+                    f"State lock '{key}' is still held "
                     f"after the test finished. A lock was never released."
                 )
 
     def track_lock(self, state):
-        """Register a state's cache key, so tearDown checks it for a leak."""
-        self._tracked_cache_keys.add(state._get_hash())
+        """Register a state's key, so tearDown checks that its lock was released."""
+        self._tracked_lock_keys.add(state._get_hash())
 
-    def get_cache_value(self, state):
-        """Read the raw cache value for a state's lock key."""
-        return cache.get(state._get_hash())
+    def get_lock_token(self, state):
+        """Read the token for a currently held state lock."""
+        from django_logic.models import StateLock
+        from django.db.models.functions import Now
+        return StateLock.objects.filter(key=state._get_hash(), expires_at__gt=Now()).values_list('token', flat=True).first()
 
     def assert_locked(self, state, msg=None):
         self.assertTrue(state.is_locked(), msg or f"Expected {state.instance_key} to be locked")

@@ -8,23 +8,23 @@ successor's lock. The canonical hazard:
     T1 finishes late and calls unlock() → pre-#139 that deleted T2's
     lock, letting T3 enter concurrently with T2.
 
-Covered for both supported lock implementations (``State`` on the generic
-cache backend).
+Lock records use token-conditional database deletion.
 """
 
-from django.core.cache import cache as django_cache
-from django.test import TestCase
+from datetime import timedelta
+from django.db.models.functions import Now
+from django_logic.models import StateLock
+from django.test import TransactionTestCase
 
 from django_logic.state import State
 from tests.models import Invoice
 
 
-class StateOwnershipTokenTests(TestCase):
-    """Base State on the default (locmem) cache backend."""
+class StateOwnershipTokenTests(TransactionTestCase):
+    """State ownership remains safe when an expired lock is replaced."""
 
     def setUp(self):
         super().setUp()
-        django_cache.clear()
         self.invoice = Invoice.objects.create(status='draft')
 
     def _state(self):
@@ -35,7 +35,7 @@ class StateOwnershipTokenTests(TestCase):
         self.assertTrue(t1.lock())
 
         # Simulate T1's TTL expiry: the key vanishes without T1 unlocking.
-        django_cache.delete(t1._get_hash())
+        StateLock.objects.filter(key=t1._get_hash()).update(expires_at=Now() - timedelta(seconds=1))
 
         t2 = self._state()
         self.assertTrue(t2.lock())

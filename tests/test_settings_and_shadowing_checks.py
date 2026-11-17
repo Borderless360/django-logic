@@ -5,11 +5,9 @@ Each test pins one confirmed finding:
 
 * The install is one ``INSTALLED_APPS`` entry, ``'django_logic'``, and the
   app keeps the label ``django_logic_background`` — the address of the live
-  table, its migration records and its content types. The pull-mode database and cache
-  rules (``pull_mode_needs_postgresql``, ``pull_mode_needs_a_shared_cache``)
-  fire only when a background
-  transition is bound, so a sync-only install runs on SQLite with the
-  default cache.
+  table, its migration records and its content types. The pull-mode PostgreSQL
+  requirement applies when a background transition is bound. A sync-only test
+  install can use SQLite.
 * ``DJANGO_LOGIC`` set to a non-dict raised a bare ``AttributeError`` out of
   ``ready()``, naming no setting.
 * The #182 shadow validator checked every class in the nested tree, so a
@@ -35,7 +33,7 @@ from django_logic.background.transitions import BackgroundTransition
 from django_logic.checks import (
     check_background_database_routing,
     check_pull_mode_database,
-    check_pull_mode_lock_cache,
+    check_state_lock_store,
 )
 from django_logic.conf import lock_timeout
 from django_logic.process import (
@@ -46,6 +44,29 @@ from django_logic.process import (
 from django_logic.transition import Transition
 from tests import dl_settings
 from tests.models import Invoice
+
+
+class StateOwnershipSetupTests(SimpleTestCase):
+    def test_other_databases_do_not_silently_join_business_transactions(self):
+        for vendor in ('mysql', 'oracle'):
+            with self.subTest(vendor=vendor), patch(
+                'django.db.connections', {'default': SimpleNamespace(vendor=vendor)},
+            ):
+                self.assertEqual([finding.id for finding in check_state_lock_store(None)],
+                                 ['django_logic.state_lock_database'])
+
+    def test_sqlite_requires_explicit_test_runtime(self):
+        with patch('django.db.connections', {'default': SimpleNamespace(vendor='sqlite')}), \
+                patch('django_logic.conf.sync_enabled', return_value=False):
+            self.assertEqual([finding.id for finding in check_state_lock_store(None)],
+                             ['django_logic.state_lock_database'])
+
+    def test_migration_router_cannot_omit_either_ownership_table(self):
+        with patch('django.db.connections', {'default': SimpleNamespace(vendor='postgresql')}), \
+                patch('django.db.router.allow_migrate_model', return_value=False):
+            findings = check_state_lock_store(None)
+        self.assertEqual([finding.id for finding in findings],
+                         ['django_logic.state_lock_routing', 'django_logic.state_lock_routing'])
 
 
 class _BindingHelper:
@@ -174,22 +195,6 @@ class PullModeInfrastructureCheckTests(_BindingHelper, SimpleTestCase):
                 self.assertEqual(check_pull_mode_database(None), [])
         finally:
             ProcessManager.bindings = saved
-
-    def test_e005_is_an_error_in_production_and_a_warning_with_debug(self):
-        from django.core import checks as django_checks
-        self.bind(Invoice, _BackgroundBoundProcess)
-        with override_settings(DJANGO_LOGIC=self._PULL, CACHES=self._LOCMEM,
-                               DEBUG=False):
-            findings = check_pull_mode_lock_cache(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.pull_mode_needs_a_shared_cache'])
-        self.assertIsInstance(findings[0], django_checks.Error)
-        self.assertIn('per-process', findings[0].msg)
-        with override_settings(DJANGO_LOGIC=self._PULL, CACHES=self._LOCMEM,
-                               DEBUG=True):
-            findings = check_pull_mode_lock_cache(None)
-        self.assertEqual([f.id for f in findings], ['django_logic.pull_mode_needs_a_shared_cache'])
-        self.assertIsInstance(findings[0], django_checks.Warning)
-
 
 # --- A3: DJANGO_LOGIC is not a dict --------------------------------------
 
