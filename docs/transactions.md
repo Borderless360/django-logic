@@ -113,7 +113,9 @@ acquisition cannot recreate a removed owner, and a delayed release cannot delete
 another owner's token.
 
 The full configured `LOCK_TIMEOUT` still limits exclusion, including when an
-entire worker disappears before it can confirm a job process's exit. Expiry is
+entire worker disappears before it can confirm a job process's exit. The duration
+starts when PostgreSQL starts the acquisition statement, including time spent
+waiting for its result. It does not restart when the caller receives the token. Expiry is
 not proof that an old process or provider request stopped. Application receipts
 and duplicate protection remain required. Expired lock rows are removed in bounded
 maintenance batches; unknown process-owner records are retained, not treated as
