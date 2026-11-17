@@ -20,20 +20,19 @@ runs it.
   `SELECT FOR UPDATE SKIP LOCKED`, and SQLite has no row locks.
   Use psycopg 3.2 or later, or Django’s supported psycopg2 driver.
   The `postgres` installation extra installs psycopg 3.
-- A cross-process `default` cache. The web processes and the worker processes
-  share the state lock through it. django-logic locks through Django's cache
-  API and imports no backend, so `django.core.cache.backends.redis.RedisCache`
-  is enough. `manage.py check` refuses a per-process cache (locmem,
-  dummy) when `DEBUG=False` and a background transition is bound.
+- The `default` PostgreSQL database stores committed state-lock ownership for every
+  transition caller. SQLite is supported for single-process business tests with the
+  test runtime enabled. Other database backends are refused.
+- A shared cache is useful for worker-presence observations. State locks do not use it.
 
 ## Install
 
-The current release is **5.1.2**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
+The current release is **5.2.0**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
 Before upgrading, follow the [upgrade and rollback requirements](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 
 ```bash
-pip install "django-logic[postgres]" redis
+pip install "django-logic[postgres]"
 ```
 
 Add one entry to `INSTALLED_APPS` and create the table:
@@ -49,19 +48,16 @@ That one entry is the whole library: the `TransitionMessage` table and
 its migrations, the `dl_worker` and `dl_transitions` commands, and every
 system check. Configure the database and cache described below.
 
-Running no background transitions? The same entry. The PostgreSQL and
-shared-cache rules below apply only when a background transition is
-bound — `manage.py check` tells you the moment one is — so a
-synchronous-only project runs on SQLite with Django's default cache.
-By default, a synchronous transition on other databases takes its cache lock but opens no transaction.
-Without a caller transaction, earlier writes survive an interruption, and swallowed database errors may not be detected.
-Use PostgreSQL to verify the transaction and concurrent-state guarantees described below.
+Synchronous-only applications use the same entry and ownership tables. PostgreSQL
+keeps ownership committed separately from business changes. SQLite tests use their
+ordinary connection and cannot establish concurrent production guarantees.
 
 ```bash
 python manage.py migrate
 ```
 
-Point the `default` cache at a backend the web processes and the workers share:
+For worker-presence observations across processes, install the cache backend you use
+and point `default` at a shared service. For example, with the `redis` package:
 
 ```python
 CACHES = {

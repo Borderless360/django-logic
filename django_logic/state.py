@@ -1,9 +1,6 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 from hashlib import blake2b
-from uuid import uuid4
-
-from django.core.cache import cache
 from django.db import DEFAULT_DB_ALIAS, connections, transaction, OperationalError
 
 from django_logic.conf import lock_timeout as _get_lock_timeout
@@ -49,8 +46,8 @@ def _enqueue_lock(state):
     """Lock a record while the engine saves its background job.
 
     On PostgreSQL the caller holds the business row until its transaction ends.
-    The lock then refuses an existing lock and writes no cache key.
-    A process that dies during the save leaves no lock on the record.
+    The lock then refuses an existing lock and writes no ownership record.
+    A process that dies during the save leaves no ownership record.
     Yield False when the record is already locked.
     """
     using = state.instance._state.db or DEFAULT_DB_ALIAS
@@ -184,8 +181,8 @@ class State:
         """
         Return True after taking the lock, or False when already locked.
 
-        Cache locks store an ownership token, which ``unlock()`` compares
-        before deleting the key.
+        Committed lock records retain their ownership if the business connection
+        is lost. ``unlock()`` removes only this object's token.
         Inside DatabaseTransition, ownership is visible only within this call.
         Other connections rely on the PostgreSQL row lock when they act.
         """
@@ -196,12 +193,13 @@ class State:
             if (self.instance._state.db or DEFAULT_DB_ALIAS) != using:
                 from django.core.exceptions import ImproperlyConfigured
                 raise ImproperlyConfigured('Nested database transitions must use the same database transaction.')
-            if cache.get(self._get_hash()) is not None:
+            if self.is_locked():
                 return False
             _database_locks.set((*_database_locks.get(), self))
             return True
-        token = uuid4().hex
-        if cache.add(self._get_hash(), token, _get_lock_timeout()):
+        from django_logic.lock_ownership import acquire_lock
+        token = acquire_lock(self._get_hash(), _get_lock_timeout())
+        if token is not None:
             self._lock_token = token
             return True
         return False
@@ -212,11 +210,8 @@ class State:
         Inside DatabaseTransition, remove ownership recorded in the current call.
         PostgreSQL keeps its row lock until the transaction ends.
 
-        Compare-and-delete on the ownership token issued by ``lock()``:
-        if this holder's lock TTL-expired and another caller acquired the
-        key since, the stored token no longer matches and the successor's
-        lock is left intact. Generic cache backends cannot compare and
-        delete atomically; another caller can take the key between those steps.
+        The database checks the ownership token in the deletion itself. If an
+        expired lock was replaced, this call cannot remove the newer lock.
 
         A State object without a token cannot release another object's lock.
         """
@@ -227,16 +222,15 @@ class State:
         token = getattr(self, '_lock_token', None)
         if token is None:
             return
-        key = self._get_hash()
-        if cache.get(key) == token:
-            cache.delete(key)
+        from django_logic.lock_ownership import release_lock
+        release_lock(self._get_hash(), token)
         self._lock_token = None
 
     def is_locked(self):
-        """Report a cache lock or DatabaseTransition ownership in this call.
+        """Report a committed lock or DatabaseTransition ownership in this call.
 
         Other connections cannot see DatabaseTransition ownership through this check.
         Lock status can change before the caller acts; action calls take their own locks.
         """
-        return (_database_lock_is_held(self)
-                or cache.get(self._get_hash()) is not None)
+        from django_logic.lock_ownership import is_locked
+        return _database_lock_is_held(self) or is_locked(self._get_hash())

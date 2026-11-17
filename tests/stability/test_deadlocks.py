@@ -195,7 +195,7 @@ class TestNestedTransitionDifferentInstance(StabilityTestCase):
         self.assert_unlocked(state1)
 
         state2.unlock()
-        self._tracked_cache_keys.discard(state2._get_hash())
+        self._tracked_lock_keys.discard(state2._get_hash())
 
 
 @tag('stability')
@@ -318,65 +318,30 @@ class TestLockReleaseOnEveryFailurePath(StabilityTestCase):
 
 
 @tag('stability')
-class TestCacheBackendFailure(StabilityTestCase):
-    """
-    3.6 -- Redis goes down during lock() or unlock().
+class TestLockStoreFailure(StabilityTestCase):
+    """An unavailable ownership store must never allow unprotected work."""
 
-    The system should raise a clear error, NOT silently proceed without
-    locking (which would allow concurrent execution).
-    """
-
-    def test_lock_failure_raises_on_broken_cache(self):
-        """If cache.add raises (Redis down), the transition should not proceed."""
-        order = Order.objects.create(status='approved')
-
-        with patch('django_logic.state.cache') as mock_cache:
-            mock_cache.add.side_effect = ConnectionError("Redis connection refused")
-            mock_cache.get.side_effect = ConnectionError("Redis connection refused")
-
-            state = State(order, 'status', process_name='process')
+    def test_lock_failure_is_visible(self):
+        state = State(Order.objects.create(status='approved'), 'status', process_name='process')
+        with patch('django_logic.lock_ownership._lock_connection', side_effect=ConnectionError('Store unavailable')):
             with self.assertRaises(ConnectionError):
                 state.lock()
 
-    def test_is_locked_returns_false_on_cache_error(self):
-        """
-        If cache.get fails, is_locked should propagate the error
-        rather than returning False (which would allow a second lock).
-        """
-        order = Order.objects.create(status='approved')
-
-        with patch('django_logic.state.cache') as mock_cache:
-            mock_cache.get.side_effect = ConnectionError("Redis down")
-            state = State(order, 'status', process_name='process')
-
+    def test_visibility_failure_does_not_report_unlocked(self):
+        state = State(Order.objects.create(status='approved'), 'status', process_name='process')
+        with patch('django_logic.lock_ownership._lock_connection', side_effect=ConnectionError('Store unavailable')):
             with self.assertRaises(ConnectionError):
                 state.is_locked()
 
-    def test_unlock_failure_is_visible(self):
-        """If unlock fails at the cache, the error should propagate.
-
-        Since #139 unlock() is a compare-and-delete: it reads the stored
-        ownership token before deleting. A downed cache backend surfaces
-        at either round-trip — both must stay visible.
-        """
-        order = Order.objects.create(status='approved')
-        state = State(order, 'status', process_name='process')
-
+    def test_failed_unlock_retains_ownership_until_release_succeeds(self):
+        state = State(Order.objects.create(status='approved'), 'status', process_name='process')
         self.assertTrue(state.lock())
         self.track_lock(state)
-
-        # Failure at the ownership read.
-        with patch('django_logic.state.cache') as mock_cache:
-            mock_cache.get.side_effect = ConnectionError("Redis down")
+        token = state._lock_token
+        with patch('django_logic.lock_ownership._lock_connection', side_effect=ConnectionError('Store unavailable')):
             with self.assertRaises(ConnectionError):
                 state.unlock()
-
-        # Failure at the delete (ownership read succeeds).
-        with patch('django_logic.state.cache') as mock_cache:
-            mock_cache.get.return_value = state._lock_token
-            mock_cache.delete.side_effect = ConnectionError("Redis down")
-            with self.assertRaises(ConnectionError):
-                state.unlock()
-
-        cache.delete(state._get_hash())
-        self._tracked_cache_keys.discard(state._get_hash())
+        self.assertEqual(state._lock_token, token)
+        self.assertTrue(state.is_locked())
+        state.unlock()
+        self.assertFalse(state.is_locked())

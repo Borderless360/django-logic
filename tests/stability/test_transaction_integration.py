@@ -154,7 +154,7 @@ class TestCommittedStateAndCacheLock(StabilityTestCase):
         self.assert_locked(state)
 
         state.unlock()
-        self._tracked_cache_keys.discard(state._get_hash())
+        self._tracked_lock_keys.discard(state._get_hash())
 
     def test_recovery_is_a_plain_re_dispatch_from_the_source(self):
         """A synchronous run writes no marker, so a lost run leaves the instance

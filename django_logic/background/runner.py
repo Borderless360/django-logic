@@ -453,7 +453,7 @@ def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> Transiti
     claim retries it, so nothing is lost by skipping.
     """
     try:
-        return (
+        message = (
             TransitionMessage.objects.using(using)
             .select_for_update(nowait=True)
             .filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
@@ -471,6 +471,15 @@ def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> Transiti
             f'skipping this attempt'
         )
         raise _NothingToDo() from exc
+
+    from django_logic.lock_ownership import another_process_holds_job_locks
+    if another_process_holds_job_locks(transition_message_id):
+        transition_logger.info(
+            f'TransitionMessage#{transition_message_id}: another job process still owns state locks; '
+            'waiting for their release without counting a retry error.'
+        )
+        raise _NothingToDo()
+    return message
 
 
 def _decode_kwargs(transition_message) -> 'tuple[dict, BaseException | None]':

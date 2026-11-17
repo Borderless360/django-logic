@@ -159,7 +159,7 @@ Set these keys inside `DJANGO_LOGIC`. Omitted keys use their defaults.
 | --- | --- | --- |
 | `BACKGROUND_EXECUTION` | `'pull'` | Workers run saved jobs; `'sync'` runs inline and requires `enable_sync()` before startup. |
 | `DEFAULT_QUEUE` | `'django_logic'` | Queue for declarations without `queue=`. |
-| `LOCK_TIMEOUT` | `7200` | Positive cache-lock timeout in seconds. An interrupted external call may leave that lock until it expires. |
+| `LOCK_TIMEOUT` | `7200` | Positive ownership-lease duration in seconds. Confirmed job-process exits release their locks sooner. An unobserved interruption can leave ownership until expiry; expiry does not prove an external request stopped. |
 | `TRANSITION_MESSAGE_MAX_ERRORS` | `5` | Positive integer limit on recorded errors before a job completes as failed. |
 | `TRANSITION_MESSAGE_RETRY_MINUTES` | `2` | Nonnegative wait after a recorded error. |
 | `TRANSITION_MESSAGE_CLEANUP_DAYS` | `7` | Age before completed job history is eligible for cleanup; the newest failed job per record and process is retained. |
@@ -177,7 +177,8 @@ Run `python manage.py check --tag django_logic` after configuring the applicatio
 | Check ID | Meaning |
 | --- | --- |
 | `django_logic.pull_mode_needs_postgresql` | Background workers require PostgreSQL. |
-| `django_logic.pull_mode_needs_a_shared_cache` | Web and worker processes must share the state-lock cache. |
+| `django_logic.state_lock_database` | State ownership requires the default PostgreSQL database; explicitly enabled single-process tests may use SQLite. |
+| `django_logic.state_lock_routing` | Both ownership tables must be migrated and written on the default database. |
 | `django_logic.transition_message_routing` | Jobs and their bound models must use the same default database. |
 | `django_logic.unread_setting` | A configured setting is not a supported key. |
 

@@ -42,7 +42,7 @@ class TestStateConsistencyAfterSuccess(StabilityTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfilled')
         self.assert_unlocked(state)
-        self.assertIsNone(self.get_cache_value(state))
+        self.assertIsNone(self.get_lock_token(state))
 
 
 @tag('stability')
@@ -76,7 +76,7 @@ class TestStateConsistencyAfterFailure(StabilityTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfillment_failed')
         self.assert_unlocked(state)
-        self.assertIsNone(self.get_cache_value(state))
+        self.assertIsNone(self.get_lock_token(state))
 
 
 @tag('stability')

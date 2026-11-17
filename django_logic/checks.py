@@ -4,6 +4,32 @@ from django.core import checks
 from django_logic.process import ProcessManager
 
 
+@checks.register('django_logic')
+def check_state_lock_store(app_configs, **kwargs):
+    """All callers must use the same writable default database for lock ownership."""
+    from django.db import DEFAULT_DB_ALIAS, connections, router
+    from django_logic.conf import sync_enabled
+    from django_logic.lock_ownership import JobProcessOwner, StateLock
+
+    findings = []
+    vendor = connections[DEFAULT_DB_ALIAS].vendor
+    if vendor != 'postgresql' and not (vendor == 'sqlite' and sync_enabled()):
+        findings.append(checks.Error(
+            'State lock ownership requires the default PostgreSQL database.',
+            hint='Use PostgreSQL. SQLite is supported only in the enabled single-process test runtime.',
+            id='django_logic.state_lock_database',
+        ))
+    for model in (JobProcessOwner, StateLock):
+        if (router.db_for_write(model) != DEFAULT_DB_ALIAS
+                or not router.allow_migrate_model(DEFAULT_DB_ALIAS, model)):
+            findings.append(checks.Error(
+                f'{model._meta.label} must be stored and migrated on the default database.',
+                hint='Keep both internal ownership tables on the same default database used by every caller.',
+                id='django_logic.state_lock_routing',
+            ))
+    return findings
+
+
 def _process_tree_has_background_transition(process_class) -> bool:
     """Does ``process_class`` (or any process nested under it) declare a
     background transition? Duck-typed via ``is_background`` so the check
@@ -24,12 +50,6 @@ def _models_bound_to_background_transitions() -> list:
         binding.model._meta.label for binding in ProcessManager.bindings
         if _process_tree_has_background_transition(binding.process_class)
     })
-
-
-_LOCAL_CACHE_BACKENDS = (
-    'django.core.cache.backends.locmem',
-    'django.core.cache.backends.dummy',
-)
 
 
 def _pull_mode_with_background_bindings():
@@ -72,34 +92,6 @@ def check_pull_mode_database(app_configs, **kwargs):
         hint="Point that alias at PostgreSQL.",
         id='django_logic.pull_mode_needs_postgresql',
     )]
-
-
-@checks.register('django_logic')
-def check_pull_mode_lock_cache(app_configs, **kwargs):
-    """The state lock lives in the ``default`` cache. In pull mode the web
-    processes and the worker processes are different OS processes, so a
-    per-process cache means the lock silently does not lock anything
-    across them (``django_logic.pull_mode_needs_a_shared_cache``; a warning under ``DEBUG=True`` so
-    local pull-mode experiments stay possible)."""
-    from django.conf import settings
-
-    if not _pull_mode_with_background_bindings():
-        return []
-    caches = getattr(settings, 'CACHES', {}) or {}
-    backend = (caches.get('default') or {}).get('BACKEND', '')
-    if not backend.startswith(_LOCAL_CACHE_BACKENDS):
-        return []
-    message = (
-        f"DJANGO_LOGIC['BACKGROUND_EXECUTION']='pull' but the 'default' "
-        f"cache backend is {backend!r}, which is per-process. The state "
-        f"lock will not be shared between the web processes and the "
-        f"worker processes."
-    )
-    hint = ("Use a cross-process cache for 'default' — e.g. Django's own "
-            "'django.core.cache.backends.redis.RedisCache', or any shared "
-            "backend (memcached, django-redis).")
-    finding = checks.Warning if getattr(settings, 'DEBUG', False) else checks.Error
-    return [finding(message, hint=hint, id='django_logic.pull_mode_needs_a_shared_cache')]
 
 
 @checks.register('django_logic')

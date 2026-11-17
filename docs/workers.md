@@ -14,7 +14,10 @@ This lets required newer work run before an older job checks its result again.
 Jobs without a deferral keep their submission order, including jobs without a fairness key.
 A failed attempt waits until its retry time. The configured error limit stops repeated failures.
 Error retries keep their submission order once the retry wait ends.
-A lost database connection releases the lock, allowing another worker to try again.
+A lost business connection releases its row lock. Unexpired state locks taken by
+that job still prevent a retry until confirmed-stop cleanup or their configured
+lease expires. A process-owner record alone does not delay a job that has no such
+locks; database-only work can recover as soon as its database transaction ends.
 External side effects still require application duplicate protection.
 
 Each job runs in a separate process. The worker records crashes and stops
@@ -37,7 +40,9 @@ An unknown `BACKGROUND_EXECUTION` value fails at startup.
 Each job runs in its own process. When that process finishes, the worker can start another job.
 The worker continues checking timeouts while it records failures and runs maintenance.
 If a database lock prevents failure recording, the worker keeps the failure and retries the write.
-It does not start that job again until the failure is recorded.
+Any unexpired state locks keep other workers from starting that job while cleanup
+and failure recording wait. A worker that selected the job earlier checks these
+locks again before application work and refuses without counting another error.
 When the wait persists, a warning names the job and elapsed wait.
 Inspect the PostgreSQL lock holder so the worker can record the failure before another attempt starts.
 
@@ -59,7 +64,10 @@ model writes independently. Applications may open additional connections. Budget
 `workers × (concurrency + 2)` connections per queue group for atomic jobs.
 For `atomic=False` jobs, budget `workers × (2 × concurrency + 2)`. The two extras
 are the worker's LISTEN connection and its separate maintenance process.
-Add any connections that consumer callbacks open. Keep the total under the
+Each synchronous state-lock check, acquisition or release also opens one short
+independent connection. Add one possible concurrent connection per active job or
+application thread using state locks; repeated availability checks repeatedly open connections too. Measure request latency and concurrent throughput with the actual
+database topology. Add any connections that consumer callbacks open. Keep the total under the
 database plan's cap, or under the pgbouncer pool size. A worker that
 cannot connect logs and retries; a database at its cap refuses the web
 processes too, so leave headroom for them.

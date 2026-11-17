@@ -41,7 +41,7 @@ class TestRetryVisibilityContract(StabilityTestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')
         state.unlock()
-        self._tracked_cache_keys.discard(state._get_hash())
+        self._tracked_lock_keys.discard(state._get_hash())
 
     def test_completed_state_should_not_be_retried(self):
         """Instances that reached a terminal state need no retry."""

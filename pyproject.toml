@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "5.1.2"
+version = "5.2.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -45,7 +45,7 @@ dev = [
     # SQLite suite but not tests.stability.
     "psycopg[binary]>=3.2",
     # Client for Django's built-in Redis cache backend. The real-Redis and
-    # stability test settings use that backend for the state lock.
+    # stability test settings use that backend for worker-presence observations.
     "redis>=4.2",
 ]
 

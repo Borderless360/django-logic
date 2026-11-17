@@ -1,5 +1,30 @@
 # Changelog
 
+## [5.2.0] — 2026-11-17
+
+### Fixed
+
+- A stopped background job releases the locks taken by its nested synchronous
+  transitions. The worker removes only that process owner after confirmed exit,
+  and records its failure before another worker can retry.
+- PostgreSQL stores ownership separately from business transactions. Losing a
+  business connection does not release the token while its configured lease is valid.
+  Token-checked deletion and process ownership prevent delayed operations from
+  removing or recreating another process's lock.
+
+### Changed
+
+- Replace cache state locks with committed ownership records. No business-facing
+  option, cache adapter or compatibility path is added. DatabaseTransition remains
+  for work that PostgreSQL can roll back completely.
+- Migration 0020 creates two internal tables. Stop every old process that runs transitions
+  before switching versions; old and new locking stores do not coordinate.
+  Budget the short independent ownership connections. See the
+  [upgrade requirements](docs/upgrading.md).
+- Preserve the full configured ownership lease for unobserved interruptions.
+  Lease expiry does not guarantee an old external operation stopped; application
+  receipts and duplicate protection are still required.
+
 ## [5.1.2] — 2026-11-16
 
 ### Fixed

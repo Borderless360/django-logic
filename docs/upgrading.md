@@ -1,5 +1,36 @@
 # Upgrading and rollback
 
+## From 5.1.2 to 5.2.0
+
+Migration 0020 adds the internal state-lock and job-process ownership tables on the
+default database. No business transition declaration changes are needed. The
+library no longer reads or writes cache state locks, and there is no compatibility
+path between the two stores.
+
+Stop every old process that runs transitions before changing versions: web/API processes,
+job producers, scheduled commands, pull workers, other task workers and management
+commands. Confirm their job processes have stopped and resolve uncertain provider
+results from their receipts. Apply migrations with the application stopped, then
+start only the new version. Old and new processes must never overlap. Existing job
+rows and business data are not rewritten by this migration.
+
+The default PostgreSQL database must permit both ownership tables to be migrated
+and written. Ownership operations use short independent connections; include their
+peak connection count and connection creation rate in deployment sizing. SQLite
+is supported only in the explicitly enabled single-process test runtime. Other
+backends are refused. A shared cache remains useful for worker-presence reporting,
+but no longer owns state locks.
+
+The configured LOCK_TIMEOUT remains the full ownership lease. A worker removes
+exact process ownership after confirmed exit, before the job becomes available to
+other workers. Whole-worker loss still relies on the lease limit; it is not proof
+that an external operation stopped. Preserve provider receipts and duplicate
+protection. Unknown process-owner records remain available for investigation.
+
+Rollback requires the same complete stop of all processes that run transitions and a review of unfinished
+work and provider outcomes. Do not restart an old cache-locking process alongside
+a new process merely because the schema migration is additive.
+
 ## From 5.1.1 to 5.1.2
 
 Version 5.1.2 changes PostgreSQL state protection to allow foreign-key checks from related records.

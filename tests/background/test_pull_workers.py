@@ -165,13 +165,14 @@ class PullClaimTests(TransactionTestCase):
                 marker.write_text(str(TransitionMessage.objects.filter(is_completed=False).count()))
             start_attempt = pull._start_attempt
             def start_and_wait_for_pass(pk, attempts, **kwargs):
-                start_attempt(pk, attempts, **kwargs)
+                started = start_attempt(pk, attempts, **kwargs)
                 if pk is None:
                     limit = time.monotonic() + 5
                     while not marker.exists():
                         if time.monotonic() >= limit:
                             self.fail('The safety-net child did not record its pass.')
                         time.sleep(0.01)
+                return started
             with patch('django_logic.background.pull._run_safety_nets', record_pass), \
                     patch('django_logic.background.pull._start_attempt', start_and_wait_for_pass):
                 run_worker(_CRITICAL, forever=False)
@@ -245,7 +246,7 @@ class PullClaimTests(TransactionTestCase):
 
         def track(pk, attempts, **kwargs):
             tracked['attempts'] = attempts
-            start_attempt(pk, attempts, **kwargs)
+            return start_attempt(pk, attempts, **kwargs)
 
         def wait(timeout):
             waits.append(timeout)

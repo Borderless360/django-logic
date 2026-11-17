@@ -100,7 +100,7 @@ class SupervisorDatabaseWaitTests(TransactionTestCase):
             return execute_attempt(*args)
 
         with patch.object(runner, '_execute_attempt', execute_when_locked):
-            pull._start_attempt(running.pk, attempts)
+            pull._start_attempt(running.pk, attempts, pending=pending)
         pid = next(iter(attempts))
         try:
             self.assertTrue(job_started.wait(timeout=2), 'the job did not start')
@@ -135,14 +135,14 @@ class SupervisorDatabaseWaitTests(TransactionTestCase):
             self.assertTrue(acquired.wait(timeout=0.5))
             started = time.monotonic()
             with self.assertRaises(OperationalError):
-                pull._start_attempt(row.pk, attempts)
+                pull._start_attempt(row.pk, attempts, pending=deque())
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(attempts, {})
             fork.assert_not_called()
         row.refresh_from_db()
         self.assertEqual(row.errors_count, 0)
         self.assertFalse(row.is_completed)
-        pull._start_attempt(row.pk, attempts)
+        pull._start_attempt(row.pk, attempts, pending=deque())
         pid = next(iter(attempts))
         try:
             pull._harvest(attempts, deque(), block=True, max_wait=3)

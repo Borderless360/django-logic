@@ -49,8 +49,8 @@ Use `DatabaseTransition` for changes that PostgreSQL can roll back completely.
 It takes the same declaration arguments as `Transition` and requires PostgreSQL.
 It keeps row locks, permissions, conditions, source checks, pending-job checks,
 targets, failure handling and callbacks.
-It refuses reentry without creating a persistent cache lock. A killed process
-therefore leaves no cache lock that delays a saved completion job's retry.
+It refuses reentry without creating a persistent ownership record. A killed process
+therefore leaves no ownership record that delays a saved completion job's retry.
 
 This database-only promise includes **all nested transitions and submissions**,
 including their ordinary callbacks. They must use the same database.
@@ -59,8 +59,8 @@ external work as a background job; do not call providers, publish messages,
 or perform other irreversible work in this scope. In a synchronous test runtime,
 background work runs inline and must also satisfy that promise.
 
-Ordinary `Transition` calls outside this scope keep their shared cache protection.
-`DatabaseTransition` also refuses an existing cache lock, including one held by
+Ordinary `Transition` calls outside this scope keep their committed ownership protection.
+`DatabaseTransition` also refuses an existing ownership record, including one held by
 an external call whose database connection failed. Do not clear that lock to
 force a retry. Replacing an external operation with `DatabaseTransition` is unsafe.
 
@@ -85,20 +85,39 @@ A holder that outlasts the wait causes `TransitionTemporarilyUnavailable` before
 A background job that meets this refusal records an error and retries after the normal pause. It does not wait quietly.
 The database retains the lock through the actual outer commit or rollback.
 Inside this transaction, synchronous side effects run in a savepoint. A database error in a side effect discards their writes and still records the failed state and runs the failure callbacks. Any other error keeps the writes made before it.
-The shared cache lock also prevents overlapping external calls while its timeout
+The committed ownership record also prevents overlapping external calls while its timeout
 remains valid, including after a lost database connection. PostgreSQL protects
 database state; neither lock can undo an external request already sent.
-Saving a background job calls no provider. On PostgreSQL that save holds the business row and writes no cache lock.
-It still refuses a record that has a cache lock. A process that stops during the save leaves no lock on the record.
+Saving a background job calls no provider. On PostgreSQL that save holds the business row and writes no ownership record.
+It still refuses a record that has an ownership record. A process that stops during the save leaves no lock on the record.
 Each synchronous callback runs in a savepoint inside the transaction described above. A database error discards its writes; any other error keeps the writes made before it, including the failed state of a transition it started.
-The cache lock is released first, so callbacks can call another transition on the same instance.
+The ownership record is released first, so callbacks can call another transition on the same instance.
 
-On other databases, `State.protected()` takes no row lock and opens no transaction.
-Without a caller transaction, synchronous writes commit independently and swallowed database errors may not be detected.
-SQLite is supported for single-process business tests, not concurrent production state transitions.
-Even with `atomic=True`, its cache lock can be released while an outer transaction remains open.
-A second connection can then read the earlier state and run an external action before the first transaction commits.
-Atomic rollback does not provide concurrent-state protection on this backend. Use PostgreSQL for that guarantee.
+SQLite is supported only for single-process business tests with the test runtime
+explicitly enabled. Its ownership records use the ordinary connection and can
+participate in the caller's transaction. It does not provide the PostgreSQL
+independent-commit or concurrent-state guarantees. Other backends are refused.
+
+State ownership lives on the default database, even when a synchronous action
+writes a business object on another alias. Every ownership check, acquisition and
+release uses a short independent PostgreSQL connection and closes it immediately.
+The tables have no foreign keys to business objects or job records, so taking a
+lock does not wait for the caller's uncommitted business row.
+
+A pull worker creates a unique process owner before starting each job process.
+After the operating system confirms that process has stopped, the worker removes
+only that owner's locks and records the outcome in the same bounded transaction.
+Other workers wait for the job's unexpired state locks before retrying. The process
+record alone does not delay database-only recovery. A delayed
+acquisition cannot recreate a removed owner, and a delayed release cannot delete
+another owner's token.
+
+The full configured `LOCK_TIMEOUT` still limits exclusion, including when an
+entire worker disappears before it can confirm a job process's exit. Expiry is
+not proof that an old process or provider request stopped. Application receipts
+and duplicate protection remain required. Expired lock rows are removed in bounded
+maintenance batches; unknown process-owner records are retained, not treated as
+confirmed dead merely because they are old.
 
 Default atomic state-writing background jobs retain the business-row lock during their transaction.
 Targetless jobs without a failed state protect only finalization, so independent provider work can overlap.
