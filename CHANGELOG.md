@@ -1,5 +1,15 @@
 # Changelog
 
+## [5.2.1] — 2026-11-20
+
+### Fixed
+
+- Reduce PostgreSQL time spent setting transaction limits during work selection,
+  worker supervision and state-lock operations. Read the two current settings
+  directly and apply both limits in one statement instead of scanning `pg_settings` twice.
+- Preserve stricter current timeouts, PostgreSQL time units and transaction-local
+  settings. No migration, declaration or worker configuration change is needed.
+
 ## [5.2.0] — 2026-11-17
 
 ### Fixed

@@ -48,6 +48,7 @@ from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
                        transaction)
 
 from django_logic.logger import logger
+from django_logic.database import set_local_timeouts
 from django_logic.background import reporting
 from django_logic.lock_ownership import (
     create_process_owner, retire_process_owner, retire_unstarted_owner, set_process_owner,
@@ -175,11 +176,7 @@ def _supervisor_transaction(alias):
     with transaction.atomic(using=alias):
         if connections[alias].vendor == 'postgresql':
             with connections[alias].cursor() as cursor:
-                for name, limit in [('statement_timeout', 1000), ('lock_timeout', 100)]:
-                    cursor.execute(
-                        "SELECT set_config(name, LEAST(NULLIF(setting::int, 0), %s)::text, true) "
-                        "FROM pg_settings WHERE name = %s", [limit, name],
-                    )
+                set_local_timeouts(cursor, statement_timeout=1000, lock_timeout=100)
         yield
 
 

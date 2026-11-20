@@ -8,6 +8,8 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, connections, models, transaction
 from django.db.models.functions import Now
 
+from django_logic.database import set_local_timeouts
+
 
 class JobProcessOwner(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
@@ -75,11 +77,7 @@ def _lock_connection():
         with transaction.atomic(using=alias):
             with connection.cursor() as cursor:
                 cursor.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-                for name, limit in [('lock_timeout', 2000), ('statement_timeout', 5000)]:
-                    cursor.execute(
-                        "SELECT set_config(name, LEAST(NULLIF(setting::int, 0), %s)::text, true) "
-                        "FROM pg_settings WHERE name = %s", [limit, name],
-                    )
+                set_local_timeouts(cursor, statement_timeout=5000, lock_timeout=2000)
             yield alias
     finally:
         connection.close()
