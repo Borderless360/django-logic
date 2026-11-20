@@ -50,7 +50,7 @@ class HappyPathTests(TestCase):
 
     def test_queue_name_persisted(self):
         self.widget.status = 'fulfilled'
-        self.widget.save()
+        self.widget.save(update_fields=['status'])
         self.widget.process.generate_export()
         transition_message = TransitionMessage.objects.get(
             transition_name='generate_export')
@@ -124,7 +124,7 @@ class FailurePathTests(TestCase):
 
     def test_background_action_failure_writes_failed_state(self):
         self.widget.status = 'fulfilled'
-        self.widget.save()
+        self.widget.save(update_fields=['status'])
         with override_settings(
             DJANGO_LOGIC=dict(_SYNC_SETTINGS, TRANSITION_MESSAGE_MAX_ERRORS=1)
         ):
@@ -150,7 +150,7 @@ class ConcurrencyTests(TestCase):
             kwargs={},
         )
         widget.status = 'fulfilling'
-        widget.save()
+        widget.save(update_fields=['status'])
 
         fresh = Widget.objects.get(pk=widget.pk)
         fresh.status = 'draft'  # pretend the caller still sees draft
@@ -158,7 +158,7 @@ class ConcurrencyTests(TestCase):
             # Put the instance back on a declared source so the source gate
             # passes and the row is what rejects the second call.
             fresh.status = 'draft'
-            fresh.save()
+            fresh.save(update_fields=['status'])
             fresh.process.fulfil()
 
     def test_non_guard_integrity_error_surfaces_raw(self):

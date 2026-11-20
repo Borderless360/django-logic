@@ -9,6 +9,7 @@ import inspect
 import uuid
 from collections import namedtuple
 from contextvars import ContextVar
+from functools import cache, wraps
 
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 
@@ -533,12 +534,74 @@ ModelProcessBinding = namedtuple(
     'ModelProcessBinding', ['model', 'process_class', 'state_field'])
 
 
+# Only model.save() opts in. Raw fixture writes and explicit field lists keep Django's behavior.
+_ordinary_save = ContextVar('django_logic_ordinary_save', default=None)
+
+
+@cache
+def _protect_model_save(model):
+    # Proxies and multi-table children can write the same column through its declaring model.
+    original_save = model.save
+    original_save_base = model.save_base
+    original_update = model._do_update
+
+    @wraps(original_save)
+    def save(instance, *args, **kwargs):
+        # Django 5.2 also accepts update_fields as its fourth positional argument.
+        update_fields = args[3] if len(args) >= 4 else kwargs.get('update_fields')
+        token = _ordinary_save.set(instance if update_fields is None else None)
+        try:
+            return original_save(instance, *args, **kwargs)
+        finally:
+            _ordinary_save.reset(token)
+
+    @wraps(original_save_base)
+    def save_base(instance, raw=False, force_insert=False, force_update=False, using=None, update_fields=None):
+        if (_ordinary_save.get() is instance and not raw and not force_insert
+                and not instance._state.adding and using == instance._state.db
+                and instance._is_pk_set() and any(
+                    not field.generated and field.attname not in instance.__dict__
+                    for field in instance._meta.concrete_fields
+                )):
+            # Django has now included fields assigned by a custom save() and used the names its signals expect.
+            protected = ProcessManager.state_fields(type(instance))
+            update_fields = frozenset(
+                name for name in update_fields or () if instance._meta.get_field(name).name not in protected
+            )
+            if not update_fields:
+                return
+        return original_save_base(instance, raw=raw, force_insert=force_insert, force_update=force_update,
+                                  using=using, update_fields=update_fields)
+
+    @wraps(original_update)
+    def update(instance, base_qs, using, pk_val, values, update_fields, *args, **kwargs):
+        # Django may try an update before an insert, even for an instance with a new primary key.
+        # Exclude state only from the update. An insert must keep the initial values.
+        if update_fields is None and _ordinary_save.get() is instance:
+            protected = ProcessManager.state_fields(type(instance))
+            values = [value for value in values if value[0].name not in protected]
+        return original_update(instance, base_qs, using, pk_val, values, update_fields, *args, **kwargs)
+
+    model.save = save
+    model.save_base = save_base
+    model._do_update = update
+
+
 class ProcessManager:
     #: Public registry of every bound machine, in bind order. Consumer
     #: tooling (coverage audits, contract tests, the ``django_logic``
     #: system check) reads this instead of re-deriving bindings from
     #: model attributes.
     bindings: list = []
+
+    @classmethod
+    @cache
+    def state_fields(cls, model):
+        """Return the names of process state fields stored by this model."""
+        bound_fields = {
+            binding.model._meta.get_field(binding.state_field) for binding in cls.bindings
+        }
+        return frozenset(field.name for field in model._meta.concrete_fields if field in bound_fields)
 
     @classmethod
     def bind_model_process(cls, model, process_class, state_field: str = 'state') -> None:
@@ -614,6 +677,8 @@ class ProcessManager:
 
         _validate_hook_signatures(process_class)
         cls.bindings.append(binding)
+        cls.state_fields.cache_clear()
+        _protect_model_save(field.model)
 
         def make_process_getter(field_name, process_cls):
             return lambda self: process_cls(field_name=field_name, instance=self)

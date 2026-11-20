@@ -3,6 +3,13 @@
 The database stores each submitted job and its retry history.
 Workers select available jobs directly from that database.
 
+`dl_worker` requires Linux. On macOS or Windows, run the worker in a Linux VM
+or container. The command refuses other operating systems before running its
+checks or starting worker activity. Native macOS jobs can abort when looking
+up a provider hostname after the worker starts a job process with `os.fork()`.
+Synchronous transitions and single-process SQLite developer tests do not
+require Linux.
+
 ## Selecting and retrying jobs
 
 A worker selects an eligible job from its queues using `SELECT FOR UPDATE SKIP LOCKED`.

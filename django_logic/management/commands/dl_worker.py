@@ -9,6 +9,7 @@ worker takes no new job, waits for its running jobs and exits. See
 docs/workers.md.
 """
 import signal
+import sys
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
@@ -27,6 +28,14 @@ def validate_worker_database():
 
 class Command(BaseCommand):
     help = 'Run a pull worker for the given queues (BACKGROUND_EXECUTION=pull).'
+
+    def execute(self, *args, **options):
+        if sys.platform != 'linux':
+            raise CommandError(
+                'dl_worker requires Linux. On macOS or Windows, run the worker '
+                'in a Linux VM or container.'
+            )
+        return super().execute(*args, **options)
 
     def add_arguments(self, parser):
         parser.add_argument(
