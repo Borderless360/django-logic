@@ -131,9 +131,10 @@ Transitions name the state field in `update_fields`. You can also name it explic
 `ProcessManager.state_fields(Order)` returns the names of all bound state fields for the model.
 A proxy, parent and child that write the same column share its protection.
 
-On an ordinary update, Django passes the fields selected for writing to `pre_save` and `post_save`.
-A receiver can check `created` in `post_save` to identify an insert.
-When an update selects no writable fields, Django skips the write and both signals.
+On a fully loaded record, an ordinary save keeps `update_fields=None` for `pre_save` and `post_save`.
+For a deferred record saved to its original database, the signals receive the loaded fields selected for writing.
+If that selection is empty, Django skips the save and both signals.
+A supplied key that already exists keeps the stored state. Saving to a different database writes the initial state when it inserts a row.
 `QuerySet.update()` and `bulk_update()` bypass model saves and can write a state field directly.
 
 ## Saved arguments

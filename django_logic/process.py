@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from functools import cache, wraps
 
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
+from django.db import router
 
 from django_logic.commands import Conditions, Permissions
 from django_logic.exceptions import (
@@ -534,20 +535,31 @@ ModelProcessBinding = namedtuple(
     'ModelProcessBinding', ['model', 'process_class', 'state_field'])
 
 
+# Only model.save() opts in. Raw fixture writes and explicit field lists keep Django's behavior.
+_ordinary_save = ContextVar('django_logic_ordinary_save', default=None)
+
+
 @cache
 def _protect_model_save(model):
-    # A proxy or child can bind a field that another model also writes.
-    # Install this once on the model that declares the column.
+    # Proxies and multi-table children can write the same column through its declaring model.
     original_save = model.save
+    original_update = model._do_update
 
     @wraps(original_save)
     def save(instance, *args, **kwargs):
         # Django 5.2 also accepts the four save arguments by position.
-        force_insert = args[0] if args else kwargs.get('force_insert')
         update_fields = args[3] if len(args) >= 4 else kwargs.get('update_fields')
-        if not instance._state.adding and not force_insert and update_fields is None:
-            protected = ProcessManager.state_fields(type(instance))
-            if protected and instance._is_pk_set():
+        if update_fields is not None:
+            return original_save(instance, *args, **kwargs)
+
+        if not instance._state.adding and instance.get_deferred_fields():
+            force_insert = args[0] if args else kwargs.get('force_insert')
+            using = args[2] if len(args) >= 3 else kwargs.get('using')
+            using = using or router.db_for_write(type(instance), instance=instance)
+            if not force_insert and using == instance._state.db and instance._is_pk_set():
+                # Django turns a deferred save into an explicit list of loaded fields.
+                # Exclude state before Django sends that list to signal receivers.
+                protected = ProcessManager.state_fields(type(instance))
                 fields = frozenset(
                     field.name for field in instance._meta.concrete_fields
                     if field.name not in protected and not field.generated
@@ -558,9 +570,25 @@ def _protect_model_save(model):
                     args = (*args[:3], fields, *args[4:])
                 else:
                     kwargs['update_fields'] = fields
-        return original_save(instance, *args, **kwargs)
+                return original_save(instance, *args, **kwargs)
+
+        token = _ordinary_save.set(instance)
+        try:
+            return original_save(instance, *args, **kwargs)
+        finally:
+            _ordinary_save.reset(token)
+
+    @wraps(original_update)
+    def update(instance, base_qs, using, pk_val, values, update_fields, *args, **kwargs):
+        # Django may try an update before an insert, even for an instance with a new primary key.
+        # Exclude state only from the update. An insert must keep the initial values.
+        if update_fields is None and _ordinary_save.get() is instance:
+            protected = ProcessManager.state_fields(type(instance))
+            values = [value for value in values if value[0].name not in protected]
+        return original_update(instance, base_qs, using, pk_val, values, update_fields, *args, **kwargs)
 
     model.save = save
+    model._do_update = update
 
 
 class ProcessManager:

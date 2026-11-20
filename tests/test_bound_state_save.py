@@ -18,6 +18,8 @@ class Review(Process):
 
 
 class BoundStateSaveTests(TestCase):
+    databases = {'default', 'other'}
+
     def bind(self, model=Invoice, process=Approval, field='status'):
         ProcessManager.bind_model_process(model, process, state_field=field)
         self.addCleanup(unbind_model_process, model, process)
@@ -44,6 +46,30 @@ class BoundStateSaveTests(TestCase):
         invoice.save(update_fields=['status'])
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, 'corrected')
+
+    def test_preset_key_that_matches_an_existing_row_preserves_its_state(self):
+        self.bind()
+        approved = Invoice.objects.create(status='success')
+        Invoice(pk=approved.pk, status='draft', customer_received=True).save()
+        approved.refresh_from_db()
+        self.assertTrue(approved.customer_received)
+        self.assertEqual(approved.status, 'success')
+
+    def test_copy_to_another_database_inserts_or_preserves_existing_state(self):
+        self.bind()
+        invoice = Invoice.objects.create(status='draft')
+        invoice.save(using='other')
+        copy = Invoice.objects.using('other').get(pk=invoice.pk)
+        self.assertEqual(copy.status, 'draft')
+        copy.status = 'success'
+        copy.save(using='other', update_fields=['status'])
+        stale = Invoice.objects.get(pk=invoice.pk)
+        stale.customer_received = True
+        stale.save(using='other')
+        copy.refresh_from_db(using='other')
+        self.assertTrue(copy.customer_received)
+        self.assertEqual(copy.status, 'success')
+        self.assertFalse(Invoice.objects.get(pk=invoice.pk).customer_received)
 
     def test_deferred_fields_stay_unread_and_keep_concurrent_updates(self):
         self.bind()
@@ -86,12 +112,19 @@ class BoundStateSaveTests(TestCase):
         stale = MtiChild.objects.create(status='draft', review_status='draft')
         parent = MtiParent.objects.get(pk=stale.pk)
         MtiChild.objects.filter(pk=stale.pk).update(status='success', review_status='ready')
-        with self.assertNumQueries(0):
-            parent.save()
+        parent.save()
         stale.note = 'received'
         stale.save()
         stale.refresh_from_db()
         self.assertEqual((stale.status, stale.review_status, stale.note), ('success', 'ready', 'received'))
+
+    def test_raw_fixture_save_can_restore_state(self):
+        self.bind()
+        invoice = Invoice.objects.create(status='success')
+        invoice.status = 'restored'
+        invoice.save_base(raw=True)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, 'restored')
 
     def test_bulk_updates_can_write_a_bound_field(self):
         self.bind()
@@ -116,11 +149,13 @@ class BoundStateSaveTests(TestCase):
         invoice = Invoice.objects.create(status='draft')
         invoice.save()
         invoice.save(update_fields=['status'])
+        Invoice.objects.only('customer_received', 'status').get(pk=invoice.pk).save()
         Invoice.objects.only('id', 'status').get(pk=invoice.pk).save()
         self.assertEqual(events, [
             (True, None),
-            (False, frozenset({'customer_received', 'is_available'})),
+            (False, None),
             (False, frozenset({'status'})),
+            (False, frozenset({'customer_received'})),
         ])
 
     def test_django_positional_save_arguments(self):
