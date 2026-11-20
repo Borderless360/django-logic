@@ -10,6 +10,8 @@ from django.db.models import Exists, F, OuterRef
 from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 
+from django_logic.database import set_local_timeouts
+
 
 class FairnessGroup(models.Model):
     key = models.CharField(max_length=255, primary_key=True, blank=True)
@@ -34,11 +36,7 @@ def claim_fair(rows):
         # Preserve a stricter database setting when one is already configured.
         if connections[alias].vendor == 'postgresql':
             with connections[alias].cursor() as cursor:
-                for name, limit in [('statement_timeout', 1000), ('lock_timeout', 100)]:
-                    cursor.execute(
-                        "SELECT set_config(name, LEAST(NULLIF(setting::int, 0), %s)::text, true) "
-                        "FROM pg_settings WHERE name = %s", [limit, name],
-                    )
+                set_local_timeouts(cursor, statement_timeout=1000, lock_timeout=100)
         started = time.monotonic()
         return _claim_in_transaction(rows, groups, started)
 
