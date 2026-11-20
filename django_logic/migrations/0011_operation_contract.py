@@ -2,7 +2,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    dependencies = [('django_logic_background', '0010_proxy_model_label')]
+    dependencies = [('django_logic_background', '0001_squashed_0010_proxy_model_label')]
 
     operations = [
         migrations.AddField('transitionmessage', 'request_key', models.CharField(max_length=255, null=True, blank=True, unique=True)),
