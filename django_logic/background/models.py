@@ -146,6 +146,11 @@ class TransitionMessage(TimeStampedModel):
                 fields=['is_completed', 'started_at'],
                 name='dl_bg_started_idx',
             ),
+            models.Index(
+                fields=['modified', 'id'],
+                condition=models.Q(is_completed=True),
+                name='dl_bg_cleanup_age_idx',
+            ),
         ]
         constraints = [
             # One uncompleted background transition per instance PER PROCESS.

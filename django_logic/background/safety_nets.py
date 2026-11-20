@@ -231,7 +231,7 @@ def cleanup_completed_transitions() -> int:
     while True:
         with transaction.atomic(using=alias):
             message_ids = list(
-                eligible.order_by('pk').values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
+                eligible.order_by('modified', 'pk').values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
             )
             if not message_ids:
                 break

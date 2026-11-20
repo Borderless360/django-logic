@@ -5,6 +5,7 @@ instance and process — the only explanation for an instance parked in its
 ``failed_state``.
 """
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -112,3 +113,37 @@ class CleanupRetentionTests(TestCase):
         _old_completed_row(widget, days_ago=1)
         self.assertEqual(cleanup_completed_transitions(), 0)
         self.assertEqual(TransitionMessage.objects.count(), 1)
+
+    def test_completion_time_and_ties_determine_the_retained_failure_across_batches(self):
+        for same_completion_time in (False, True):
+            with self.subTest(same_completion_time=same_completion_time):
+                widget = Widget.objects.create(status='fulfilled')
+                first = _old_completed_row(widget, days_ago=20, failed=True)
+                second = _old_completed_row(widget, days_ago=30, failed=True)
+                completed = timezone.now() - timedelta(days=20)
+                TransitionMessage.objects.filter(pk=first.pk).update(
+                    completed_at=completed, modified=completed - timedelta(days=20),
+                )
+                TransitionMessage.objects.filter(pk=second.pk).update(
+                    completed_at=completed if same_completion_time else completed - timedelta(days=10),
+                    modified=completed + timedelta(days=10),
+                )
+                _old_completed_row(widget, days_ago=8)  # Later successful work also expires.
+
+                with patch('django_logic.background.safety_nets._CLEANUP_BATCH_SIZE', 1):
+                    self.assertEqual(cleanup_completed_transitions(), 2)
+
+                expected = second if same_completion_time else first
+                self.assertEqual(
+                    list(TransitionMessage.objects.filter(instance_id=str(widget.pk)).values_list('pk', flat=True)),
+                    [expected.pk],
+                )
+
+    def test_a_recent_failure_replaces_the_older_failure_kept_for_the_same_process(self):
+        widget = Widget.objects.create(status='fulfilment_failed')
+        _old_completed_row(widget, days_ago=30, failed=True)
+        recent = _old_completed_row(widget, days_ago=1, failed=True)
+
+        self.assertEqual(cleanup_completed_transitions(), 1)
+
+        self.assertEqual(list(TransitionMessage.objects.values_list('pk', flat=True)), [recent.pk])
