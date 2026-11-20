@@ -16,6 +16,9 @@ runs it.
 
 - Python 3.11 or later.
 - Django 5.2 or later. CI tests 5.2, 6.0 and 6.1.
+- Linux for the `dl_worker` background worker. On macOS or Windows, run the worker
+  in a Linux VM or container. Synchronous transitions and single-process SQLite
+  developer tests do not require Linux.
 - PostgreSQL for background transitions. The worker claims a row with
   `SELECT FOR UPDATE SKIP LOCKED`, and SQLite has no row locks.
   Use psycopg 3.2 or later, or Django’s supported psycopg2 driver.

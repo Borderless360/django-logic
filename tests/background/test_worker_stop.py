@@ -6,6 +6,7 @@ process of the dyno. Kubernetes sends it to the worker process only.
 import os
 from pathlib import Path
 import signal
+import sys
 import tempfile
 import time
 import unittest
@@ -122,12 +123,15 @@ class WorkerStopTests(TransactionTestCase):
         self.assertEqual((waiting.status, waiting.se_log), ('fulfilling', ''))
         self.assertEqual(self._job(waiting).start_attempt_count, 0)
 
+    @unittest.skipUnless(sys.platform == 'linux', 'dl_worker requires Linux')
     def test_signal_to_every_process_lets_the_running_job_finish(self):
         self._stop_during_a_job(lambda worker_pid: os.killpg(worker_pid, signal.SIGTERM))
 
+    @unittest.skipUnless(sys.platform == 'linux', 'dl_worker requires Linux')
     def test_signal_to_the_worker_process_alone_lets_the_running_job_finish(self):
         self._stop_during_a_job(lambda worker_pid: os.kill(worker_pid, signal.SIGTERM))
 
+    @unittest.skipUnless(sys.platform == 'linux', 'dl_worker requires Linux')
     def test_worker_without_a_job_exits(self):
         done, _ = self._enqueue('done', seconds=0)
         worker_pid = self._start_worker()
