@@ -5,7 +5,7 @@ from django.test import TestCase
 from django_logic.process import Process, ProcessManager
 from django_logic.transition import Transition
 from tests import unbind_model_process
-from tests.models import Invoice, InvoiceProxy, MtiChild, MtiParent
+from tests.models import Invoice, InvoiceProxy, InvoiceReceipt, MtiChild, MtiParent
 
 
 class Approval(Process):
@@ -88,6 +88,39 @@ class BoundStateSaveTests(TestCase):
                 self.assertEqual(invoice.status, 'success')
                 self.assertFalse(invoice.is_available)
                 self.assertTrue(invoice.customer_received)
+
+    def test_custom_save_assigns_deferred_field_and_signals_keep_foreign_key_attname(self):
+        self.bind(InvoiceReceipt)
+        first = Invoice.objects.create(status='draft')
+        second = Invoice.objects.create(status='draft')
+        receipt = InvoiceReceipt.objects.create(invoice=first, note='old')
+        stale = InvoiceReceipt.objects.only('invoice', 'note').get(pk=receipt.pk)
+        InvoiceReceipt.objects.filter(pk=receipt.pk).update(status='success')
+        fields = []
+
+        def observe(sender, update_fields, **kwargs):
+            fields.append(update_fields)
+
+        post_save.connect(observe, sender=InvoiceReceipt)
+        self.addCleanup(post_save.disconnect, observe, sender=InvoiceReceipt)
+        stale.invoice_id = second.pk
+        stale.note = 'new'
+        with self.assertNumQueries(1):
+            stale.save()
+        self.assertEqual(fields, [frozenset({'invoice_id', 'note', 'receipt_text', 'computed_note'})])
+        receipt.refresh_from_db()
+        self.assertEqual((receipt.status, receipt.receipt_text, receipt.invoice_id), ('success', 'NEW', second.pk))
+
+    def test_deferring_only_a_generated_field_preserves_an_ordinary_update(self):
+        self.bind(InvoiceReceipt)
+        receipt = InvoiceReceipt.objects.create(invoice=Invoice.objects.create(), note='old')
+        stale = InvoiceReceipt.objects.defer('computed_note').get(pk=receipt.pk)
+        InvoiceReceipt.objects.filter(pk=receipt.pk).update(status='success')
+        stale.note = 'changed'
+        with self.assertNumQueries(1):
+            stale.save()
+        receipt.refresh_from_db()
+        self.assertEqual((receipt.status, receipt.note, receipt.computed_note), ('success', 'changed', 'CHANGED'))
 
     def test_proxy_binding_protects_both_fields_through_both_models(self):
         self.bind(InvoiceProxy)

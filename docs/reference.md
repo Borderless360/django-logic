@@ -132,7 +132,7 @@ Transitions name the state field in `update_fields`. You can also name it explic
 A proxy, parent and child that write the same column share its protection.
 
 On a fully loaded record, an ordinary save keeps `update_fields=None` for `pre_save` and `post_save`.
-For a deferred record saved to its original database, the signals receive the loaded fields selected for writing.
+For a deferred record saved to its original database, Django Logic removes bound state from the field names Django selected.
 If that selection is empty, Django skips the save and both signals.
 A supplied key that already exists keeps the stored state. Saving to a different database writes the initial state when it inserts a row.
 `QuerySet.update()` and `bulk_update()` bypass model saves and can write a state field directly.

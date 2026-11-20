@@ -12,7 +12,6 @@ from contextvars import ContextVar
 from functools import cache, wraps
 
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
-from django.db import router
 
 from django_logic.commands import Conditions, Permissions
 from django_logic.exceptions import (
@@ -543,40 +542,36 @@ _ordinary_save = ContextVar('django_logic_ordinary_save', default=None)
 def _protect_model_save(model):
     # Proxies and multi-table children can write the same column through its declaring model.
     original_save = model.save
+    original_save_base = model.save_base
     original_update = model._do_update
 
     @wraps(original_save)
     def save(instance, *args, **kwargs):
-        # Django 5.2 also accepts the four save arguments by position.
+        # Django 5.2 also accepts update_fields as its fourth positional argument.
         update_fields = args[3] if len(args) >= 4 else kwargs.get('update_fields')
-        if update_fields is not None:
-            return original_save(instance, *args, **kwargs)
-
-        if not instance._state.adding and instance.get_deferred_fields():
-            force_insert = args[0] if args else kwargs.get('force_insert')
-            using = args[2] if len(args) >= 3 else kwargs.get('using')
-            using = using or router.db_for_write(type(instance), instance=instance)
-            if not force_insert and using == instance._state.db and instance._is_pk_set():
-                # Django turns a deferred save into an explicit list of loaded fields.
-                # Exclude state before Django sends that list to signal receivers.
-                protected = ProcessManager.state_fields(type(instance))
-                fields = frozenset(
-                    field.name for field in instance._meta.concrete_fields
-                    if field.name not in protected and not field.generated
-                    and not field.primary_key and field not in instance._meta.pk_fields
-                    and field.attname in instance.__dict__
-                )
-                if len(args) >= 4:
-                    args = (*args[:3], fields, *args[4:])
-                else:
-                    kwargs['update_fields'] = fields
-                return original_save(instance, *args, **kwargs)
-
-        token = _ordinary_save.set(instance)
+        token = _ordinary_save.set(instance if update_fields is None else None)
         try:
             return original_save(instance, *args, **kwargs)
         finally:
             _ordinary_save.reset(token)
+
+    @wraps(original_save_base)
+    def save_base(instance, raw=False, force_insert=False, force_update=False, using=None, update_fields=None):
+        if (_ordinary_save.get() is instance and not raw and not force_insert
+                and not instance._state.adding and using == instance._state.db
+                and instance._is_pk_set() and any(
+                    not field.generated and field.attname not in instance.__dict__
+                    for field in instance._meta.concrete_fields
+                )):
+            # Django has now included fields assigned by a custom save() and used the names its signals expect.
+            protected = ProcessManager.state_fields(type(instance))
+            update_fields = frozenset(
+                name for name in update_fields or () if instance._meta.get_field(name).name not in protected
+            )
+            if not update_fields:
+                return
+        return original_save_base(instance, raw=raw, force_insert=force_insert, force_update=force_update,
+                                  using=using, update_fields=update_fields)
 
     @wraps(original_update)
     def update(instance, base_qs, using, pk_val, values, update_fields, *args, **kwargs):
@@ -588,6 +583,7 @@ def _protect_model_save(model):
         return original_update(instance, base_qs, using, pk_val, values, update_fields, *args, **kwargs)
 
     model.save = save
+    model.save_base = save_base
     model._do_update = update
 
 
