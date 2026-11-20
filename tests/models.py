@@ -36,4 +36,5 @@ class MtiParent(models.Model):
 
 
 class MtiChild(MtiParent):
-    pass
+    review_status = models.CharField(max_length=32, default='draft')
+    note = models.TextField(blank=True)

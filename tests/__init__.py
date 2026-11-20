@@ -27,6 +27,7 @@ def unbind_model_process(model, process_class=None, state_field=None):
                and (process_class is None or binding.process_class is process_class)
                and (state_field is None or binding.state_field == state_field)]
     ProcessManager.bindings = [binding for binding in ProcessManager.bindings if binding not in removed]
+    ProcessManager.state_fields.cache_clear()
     remaining = {binding.process_class.process_name for binding in ProcessManager.bindings if binding.model is model}
     for binding in removed:
         name = binding.process_class.process_name

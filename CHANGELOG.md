@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- An older copy of a record can now save changes without undoing a transition.
+  An ordinary save of an existing record excludes its bound state fields.
+  To write a state field directly, name it in `update_fields`.
+  Save signals receive the fields selected for writing. An insert still writes the initial state.
+- `ProcessManager.state_fields(model)` lists the protected field names, including fields shared with parent and proxy models.
+
 ## [5.2.1] — 2026-11-20
 
 ### Fixed

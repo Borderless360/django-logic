@@ -9,6 +9,7 @@ import inspect
 import uuid
 from collections import namedtuple
 from contextvars import ContextVar
+from functools import cache, wraps
 
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 
@@ -533,12 +534,50 @@ ModelProcessBinding = namedtuple(
     'ModelProcessBinding', ['model', 'process_class', 'state_field'])
 
 
+@cache
+def _protect_model_save(model):
+    # A proxy or child can bind a field that another model also writes.
+    # Install this once on the model that declares the column.
+    original_save = model.save
+
+    @wraps(original_save)
+    def save(instance, *args, **kwargs):
+        # Django 5.2 also accepts the four save arguments by position.
+        force_insert = args[0] if args else kwargs.get('force_insert')
+        update_fields = args[3] if len(args) >= 4 else kwargs.get('update_fields')
+        if not instance._state.adding and not force_insert and update_fields is None:
+            protected = ProcessManager.state_fields(type(instance))
+            if protected and instance._is_pk_set():
+                fields = frozenset(
+                    field.name for field in instance._meta.concrete_fields
+                    if field.name not in protected and not field.generated
+                    and not field.primary_key and field not in instance._meta.pk_fields
+                    and field.attname in instance.__dict__
+                )
+                if len(args) >= 4:
+                    args = (*args[:3], fields, *args[4:])
+                else:
+                    kwargs['update_fields'] = fields
+        return original_save(instance, *args, **kwargs)
+
+    model.save = save
+
+
 class ProcessManager:
     #: Public registry of every bound machine, in bind order. Consumer
     #: tooling (coverage audits, contract tests, the ``django_logic``
     #: system check) reads this instead of re-deriving bindings from
     #: model attributes.
     bindings: list = []
+
+    @classmethod
+    @cache
+    def state_fields(cls, model):
+        """Return the names of process state fields stored by this model."""
+        bound_fields = {
+            binding.model._meta.get_field(binding.state_field) for binding in cls.bindings
+        }
+        return frozenset(field.name for field in model._meta.concrete_fields if field in bound_fields)
 
     @classmethod
     def bind_model_process(cls, model, process_class, state_field: str = 'state') -> None:
@@ -614,6 +653,8 @@ class ProcessManager:
 
         _validate_hook_signatures(process_class)
         cls.bindings.append(binding)
+        cls.state_fields.cache_clear()
+        _protect_model_save(field.model)
 
         def make_process_getter(field_name, process_cls):
             return lambda self: process_cls(field_name=field_name, instance=self)
