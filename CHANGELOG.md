@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [5.2.2] — 2026-11-20
 
 ### Fixed
 
@@ -9,6 +9,23 @@
   To write a state field directly, name it in `update_fields`.
   An ordinary save keeps the existing signal behavior for fully loaded records. An insert writes the initial state.
 - `ProcessManager.state_fields(model)` lists the protected field names, including fields shared with parent and proxy models.
+- Preserve normal inserts and copies between databases while protecting state
+  when a supplied primary key identifies an existing record.
+- Restore migration SQL inspection after the earlier migrations were combined.
+  Existing migration history and database operations remain unchanged.
+
+### Worker requirements
+
+- `dl_worker` requires Linux and now rejects unsupported systems before starting
+  work. Use a Linux container or virtual machine on macOS or Windows.
+  Ordinary synchronous library use and local SQLite tests remain available.
+
+### Upgrade
+
+- Upgrading from 5.2.1 adds no database migration or saved-job format change.
+  Deploy the same package to application processes and workers.
+- An ordinary save preserves bound process state. Name a state field explicitly
+  in `update_fields` only when deliberately writing it outside a transition.
 
 ## [5.2.1] — 2026-11-20
 
