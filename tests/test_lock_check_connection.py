@@ -38,6 +38,7 @@ class LockCheckConnectionTests(TransactionTestCase):
             with connection.cursor() as cursor:
                 cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
             self.assertFalse(checker.is_locked())
+            # The first query on the default connection fixes the transaction's snapshot.
             Invoice.objects.count()
             self.assertTrue(self.holder.lock())
             self.assertTrue(checker.is_locked())

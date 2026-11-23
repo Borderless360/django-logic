@@ -4,11 +4,11 @@
 
 ### Fixed
 
-- A state-lock check outside a database transaction reads through the default connection.
+- A state-lock check outside a transaction on the default database reads through the default connection.
   Before, each check opened and closed its own PostgreSQL connection.
   A web request that listed available transitions opened one connection for each process it checked.
-- Inside a transaction, a check still uses its own short connection.
-  It then sees locks that other connections committed after the transaction started.
+  Inside such a transaction, a check still uses its own short connection,
+  so it sees locks that other connections committed after the transaction started.
 
 ## [5.2.2] — 2026-11-20
 
