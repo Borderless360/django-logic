@@ -17,6 +17,8 @@ import threading
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.db import transaction
+from django.db.models.query import QuerySet
 from django.test import override_settings, tag
 
 from django_logic import Transition
@@ -330,6 +332,10 @@ class TestLockStoreFailure(StabilityTestCase):
     def test_visibility_failure_does_not_report_unlocked(self):
         state = State(Order.objects.create(status='approved'), 'status', process_name='process')
         with patch('django_logic.lock_ownership._lock_connection', side_effect=ConnectionError('Store unavailable')):
+            with self.assertRaises(ConnectionError), transaction.atomic():
+                state.is_locked()
+        # Outside a transaction, the check reads through the default connection.
+        with patch.object(QuerySet, 'exists', side_effect=ConnectionError('Store unavailable')):
             with self.assertRaises(ConnectionError):
                 state.is_locked()
 
