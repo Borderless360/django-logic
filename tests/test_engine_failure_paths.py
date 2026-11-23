@@ -340,6 +340,14 @@ class ConcurrencyGuardLogLevelTests(TestCase):
         self.assertEqual(
             [r.levelno for r in logs.records], [logging.ERROR], logs.output)
 
+    def test_the_failure_line_carries_its_exception(self):
+        from django_logic.commands import _log_hook_error
+
+        error = ValueError('a genuine bug')
+        with self.assertLogs('django-logic.transition', level='DEBUG') as logs:
+            _log_hook_error('real', error)
+        self.assertIs(logs.records[0].exc_info[1], error)
+
 
 # --- One catchable type for "busy, retry shortly" --------------------------
 
