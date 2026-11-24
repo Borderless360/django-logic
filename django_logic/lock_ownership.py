@@ -140,6 +140,10 @@ def release_lock(key, token):
 
 
 def is_locked(key):
+    default = connections[DEFAULT_DB_ALIAS]
+    if default.vendor == 'postgresql' and default.get_autocommit():
+        # With no transaction open on the default database, each statement sees every committed lock.
+        return StateLock.objects.using(DEFAULT_DB_ALIAS).filter(key=key, expires_at__gt=Now()).exists()
     with _lock_connection() as alias:
         return StateLock.objects.using(alias).filter(key=key, expires_at__gt=Now()).exists()
 
