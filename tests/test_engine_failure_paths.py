@@ -340,6 +340,44 @@ class ConcurrencyGuardLogLevelTests(TestCase):
         self.assertEqual(
             [r.levelno for r in logs.records], [logging.ERROR], logs.output)
 
+    def test_the_failure_line_carries_its_exception(self):
+        from django_logic.commands import _log_hook_error
+
+        error = ValueError('a genuine bug')
+        with self.assertLogs('django-logic.transition', level='DEBUG') as logs:
+            _log_hook_error('real', error)
+        self.assertIs(logs.records[0].exc_info[1], error)
+
+
+# --- The failed side-effect line carries its exception ---------------------
+
+class FailedSideEffectLineProcess(Process):
+    process_name = 'failed_side_effect_line'
+    transitions = [
+        Transition(
+            'go', sources=['draft'], target='done', failed_state='failed',
+            side_effects=[_boom],
+        ),
+    ]
+
+
+class FailedSideEffectLineTests(_BindCleanup, TestCase):
+    """An error tracker groups and filters a log line by the exception it carries."""
+
+    _bound = (FailedSideEffectLineProcess,)
+
+    def test_the_line_for_a_failed_side_effect_carries_the_raised_exception(self):
+        ProcessManager.bind_model_process(Invoice, FailedSideEffectLineProcess, state_field='status')
+        invoice = Invoice.objects.create(status='draft')
+
+        with self.assertLogs('django-logic.transition', level='ERROR') as logs:
+            with self.assertRaisesMessage(ValueError, 'boom') as raised:
+                invoice.failed_side_effect_line.go()
+
+        lines = [record for record in logs.records if 'SideEffect _boom failed' in record.getMessage()]
+        self.assertEqual(len(lines), 1, logs.output)
+        self.assertIs(lines[0].exc_info[1], raised.exception)
+
 
 # --- One catchable type for "busy, retry shortly" --------------------------
 
