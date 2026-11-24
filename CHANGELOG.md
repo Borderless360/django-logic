@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [5.3.0] — 2026-11-24
 
 ### Fixed
 
@@ -31,6 +31,10 @@
   A build waits for the transactions that were open when it started.
   If something interrupts a build, PostgreSQL leaves an invalid index.
   Drop `dl_bg_cleanup_age_idx` or `dl_bg_failure_idx` in that case, then run `migrate` again.
+- The saved-job format does not change. Deploy the same package to application processes and workers.
+- An error tracker now groups the failed side-effect line by its exception.
+  Issues that it grouped by the text of the line stop receiving events.
+  See the [upgrade requirements](docs/upgrading.md).
 
 ## [5.2.2] — 2026-11-20
 
