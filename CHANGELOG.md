@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Completed-job cleanup no longer reads the whole job table on each pass.
+  Before, a pass with nothing to delete still visited every completed job.
+  Every worker runs a pass once a minute.
+  Cleanup now reads the jobs that did not fail through an index by age.
+  It reads the failed jobs through an index by record and process.
+  That read finds each failure that a newer failure of the same record and process replaced.
+  The retention rule does not change. Cleanup keeps the newest failed job of each record and process.
+  A pass still reads every failed job, so its time grows with the number of failures that cleanup keeps.
+
+### Upgrade
+
+- Migrations 0021 and 0022 each add one index to the job table.
+  PostgreSQL builds each index without blocking job writes, so producers and workers can keep running.
+  A build waits for the transactions that were open when it started.
+  If something interrupts a build, PostgreSQL leaves an invalid index.
+  Drop `dl_bg_cleanup_age_idx` or `dl_bg_failure_idx` in that case, then run `migrate` again.
+
 ## [5.2.2] — 2026-11-20
 
 ### Fixed

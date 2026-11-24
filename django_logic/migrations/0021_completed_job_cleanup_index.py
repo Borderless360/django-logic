@@ -14,7 +14,8 @@ class Migration(migrations.Migration):
         AddIndexConcurrentlyOnPostgreSQL(
             model_name='transitionmessage',
             index=models.Index(
-                fields=['modified', 'id'], condition=models.Q(is_completed=True),
+                fields=['modified', 'id'],
+                condition=models.Q(is_completed=True, ended_in_failure=False),
                 name='dl_bg_cleanup_age_idx',
             ),
         ),

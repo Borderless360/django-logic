@@ -1,4 +1,4 @@
-"""The cleanup index preserves jobs and permits writes during PostgreSQL migration."""
+"""The two cleanup indexes preserve jobs and permit writes during PostgreSQL migration."""
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 from pathlib import Path
@@ -16,11 +16,9 @@ from django.test import SimpleTestCase, TransactionTestCase
 from tests.stability.base import requires_postgres
 
 
-class CleanupIndexMigrationTests(TransactionTestCase):
+class IndexMigrationCase:
+    """One migration that adds one index. A subclass names the migration and its index."""
     app_label = 'django_logic_background'
-    old_target = [('django_logic_background', '0020_state_lock_ownership')]
-    new_target = [('django_logic_background', '0021_completed_job_cleanup_index')]
-    index_name = 'dl_bg_cleanup_age_idx'
 
     def setUp(self):
         self.latest = MigrationExecutor(connection).loader.graph.leaf_nodes(self.app_label)
@@ -49,7 +47,7 @@ class CleanupIndexMigrationTests(TransactionTestCase):
     def assert_index_valid(self):
         index = self.indexes()[self.index_name]
         self.assertTrue(index['index'])
-        self.assertEqual(index['columns'], ['modified', 'id'])
+        self.assertEqual(index['columns'], self.columns)
         if connection.vendor == 'postgresql':
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -83,7 +81,7 @@ class CleanupIndexMigrationTests(TransactionTestCase):
         backwards = '\n'.join(loader.collect_sql([(migration, True)]))
         concurrent = ' CONCURRENTLY' if connection.vendor == 'postgresql' else ''
         self.assertIn(f'CREATE INDEX{concurrent} "{self.index_name}"', forwards)
-        self.assertIn('("modified", "id") WHERE "is_completed"', forwards)
+        self.assertIn(self.definition, forwards)
         self.assertIn(f'DROP INDEX{concurrent}', backwards)
         self.assertIn(f'"{self.index_name}"', backwards)
         if connection.vendor != 'postgresql':
@@ -145,13 +143,34 @@ class CleanupIndexMigrationTests(TransactionTestCase):
         self.assertTrue(self.jobs.objects.filter(pk=written_id).exists())
 
 
+class CleanupAgeIndexMigrationTests(IndexMigrationCase, TransactionTestCase):
+    old_target = [('django_logic_background', '0020_state_lock_ownership')]
+    new_target = [('django_logic_background', '0021_completed_job_cleanup_index')]
+    index_name = 'dl_bg_cleanup_age_idx'
+    columns = ['modified', 'id']
+    definition = '("modified", "id") WHERE (NOT "ended_in_failure" AND "is_completed")'
+
+
+class FailedJobIndexMigrationTests(IndexMigrationCase, TransactionTestCase):
+    old_target = [('django_logic_background', '0021_completed_job_cleanup_index')]
+    new_target = [('django_logic_background', '0022_failed_job_index')]
+    index_name = 'dl_bg_failure_idx'
+    columns = ['app_label', 'model_name', 'instance_id', 'process_name', 'completed_at', 'id']
+    definition = (
+        '("app_label", "model_name", "instance_id", "process_name", "completed_at" DESC, "id" DESC) '
+        'WHERE ("ended_in_failure" AND "is_completed")'
+    )
+
+
 class CleanupIndexDependencyTests(SimpleTestCase):
     def test_operation_serializes_with_its_importable_helper(self):
-        module = import_module('django_logic.migrations.0021_completed_job_cleanup_index')
-        migration = module.Migration('0021_completed_job_cleanup_index', 'django_logic_background')
-        namespace = {}
-        exec(MigrationWriter(migration).as_string(), namespace)
-        self.assertIs(type(namespace['Migration'].operations[0]), type(migration.operations[0]))
+        for name in ('0021_completed_job_cleanup_index', '0022_failed_job_index'):
+            with self.subTest(migration=name):
+                module = import_module(f'django_logic.migrations.{name}')
+                migration = module.Migration(name, 'django_logic_background')
+                namespace = {}
+                exec(MigrationWriter(migration).as_string(), namespace)
+                self.assertIs(type(namespace['Migration'].operations[0]), type(migration.operations[0]))
 
     def test_sqlite_migrates_without_postgresql_drivers(self):
         script = dedent('''

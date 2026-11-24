@@ -114,6 +114,17 @@ class CleanupRetentionTests(TestCase):
         self.assertEqual(cleanup_completed_transitions(), 0)
         self.assertEqual(TransitionMessage.objects.count(), 1)
 
+    def test_a_replaced_failure_stays_until_it_is_old_enough(self):
+        widget = Widget.objects.create(status='fulfilment_failed')
+        replaced = _old_completed_row(widget, days_ago=3, failed=True)
+        newest = _old_completed_row(widget, days_ago=1, failed=True)
+
+        self.assertEqual(cleanup_completed_transitions(), 0)
+
+        self.assertEqual(
+            set(TransitionMessage.objects.values_list('pk', flat=True)), {replaced.pk, newest.pk},
+        )
+
     def test_completion_time_and_ties_determine_the_retained_failure_across_batches(self):
         for same_completion_time in (False, True):
             with self.subTest(same_completion_time=same_completion_time):

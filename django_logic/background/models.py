@@ -146,10 +146,18 @@ class TransitionMessage(TimeStampedModel):
                 fields=['is_completed', 'started_at'],
                 name='dl_bg_started_idx',
             ),
+            # Completed-job cleanup reads these two. Age alone expires a job that
+            # did not fail. A failed job expires only after a newer failure of the
+            # same record and process replaces it.
             models.Index(
                 fields=['modified', 'id'],
-                condition=models.Q(is_completed=True),
+                condition=models.Q(is_completed=True, ended_in_failure=False),
                 name='dl_bg_cleanup_age_idx',
+            ),
+            models.Index(
+                fields=['app_label', 'model_name', 'instance_id', 'process_name', '-completed_at', '-id'],
+                condition=models.Q(is_completed=True, ended_in_failure=True),
+                name='dl_bg_failure_idx',
             ),
         ]
         constraints = [
