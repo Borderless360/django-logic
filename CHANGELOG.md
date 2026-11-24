@@ -9,6 +9,8 @@
   A web request that listed available transitions opened one connection for each process it checked.
   Inside such a transaction, a check still uses its own short connection,
   so it sees locks that other connections committed after the transaction started.
+- A listing of available transitions reads the lock of its record once.
+  Before, it read the same lock again for each nested process.
 - The log line for a failed side effect now carries its exception, like the line for a failed callback.
   The line for a record that cannot be reloaded after a rollback does too.
   Before, only the text named the exception. An error tracker such as Sentry then
