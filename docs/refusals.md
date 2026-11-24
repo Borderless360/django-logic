@@ -110,7 +110,7 @@ leave `user_message=None`; process configuration applies to Process calls.
 current state, conditions and permissions even when another action holds its
 state lock. This lets an application distinguish a temporary wait from a business
 rule that forbids an action. The default hides actions that need a
-held lock.
+held lock. One listing reads that lock once, for the process and its nested processes.
 
 Inside `DatabaseTransition`, the lock is visible only within the current call.
 Other connections can list those actions, but calls still wait for the PostgreSQL row lock or refuse after its timeout.

@@ -233,6 +233,7 @@ class Process:
         include_locked=False,
         _seen=None,
         _refusals=None,
+        _is_locked=None,
     ):
         """Like :meth:`get_available_transitions`, but yield
         ``(transition, owning_process)`` pairs.
@@ -281,7 +282,10 @@ class Process:
 
         # A held lock hides the transitions that would take it. A lock=False
         # transition runs regardless, so it stays listed.
-        locked = not include_locked and self.state.is_locked()
+        # Nested processes share this state, so one listing reads its lock once.
+        if _is_locked is None:
+            _is_locked = cache(self.state.is_locked)
+        locked = not include_locked and _is_locked()
 
         for transition in self.transitions:
             if action_name is not None and transition.action_name != action_name:
@@ -310,6 +314,7 @@ class Process:
                 include_locked=include_locked,
                 _seen=_seen,
                 _refusals=_refusals,
+                _is_locked=_is_locked,
             )
 
     def _resolve_transition_with_owner(self, action_name: str, user=None):
