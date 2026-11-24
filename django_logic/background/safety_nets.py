@@ -24,7 +24,8 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import DEFAULT_DB_ALIAS, router, transaction
-from django.db.models import Count, F, Min, Q
+from django.db.models import Count, F, Min, Q, Window
+from django.db.models.functions import RowNumber
 from django.utils import timezone
 
 from django_logic import conf
@@ -197,47 +198,47 @@ def cleanup_completed_transitions() -> int:
 
     Each batch commits separately, so a stopped maintenance process keeps
     earlier progress. A caller's outer transaction still controls its commit.
-
     """
-    from django.db.models import OuterRef, Subquery
-
     cutoff = timezone.now() - timedelta(days=conf.cleanup_days())
+    alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
+    completed = TransitionMessage.objects.using(alias).filter(is_completed=True)
     # ended_in_failure, not an errors_count comparison: a permanent failure
     # completes at one error, and a retried success can carry several, so
     # the count cannot tell them apart. Every terminal-failure path sets
     # the flag; a superseded row does not — the external state change won
     # and the instance did not enter its failed state.
-    failed = Q(ended_in_failure=True)
-    alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
-    rows = TransitionMessage.objects.using(alias)
-    newest_failed = (
-        rows
-        .filter(
-            failed,
-            is_completed=True,
-            app_label=OuterRef('app_label'),
-            model_name=OuterRef('model_name'),
-            instance_id=OuterRef('instance_id'),
-            process_name=OuterRef('process_name'),
+    failures = completed.filter(ended_in_failure=True)
+    # The newest failure of an instance and process has position 1, and it stays.
+    # One ordered read of the failed jobs finds every failure that a newer one replaced.
+    replaced = failures.annotate(position=Window(
+        RowNumber(),
+        partition_by=[F('app_label'), F('model_name'), F('instance_id'), F('process_name')],
+        order_by=[F('completed_at').desc(), F('pk').desc()],
+    )).filter(position__gt=1).values('pk')
+    deleted = sum(
+        _delete_in_batches(eligible, alias)
+        for eligible in (
+            # Age alone decides for a job that did not fail, so this read skips every kept failure.
+            completed.filter(ended_in_failure=False, modified__lt=cutoff),
+            failures.filter(modified__lt=cutoff, pk__in=replaced),
         )
-        .order_by('-completed_at', '-pk')
-        .values('pk')[:1]
     )
-    eligible = (
-        rows.filter(is_completed=True, modified__lt=cutoff)
-        .exclude(failed & Q(pk=Subquery(newest_failed)))
-    )
+    if deleted:
+        logger.info(f'cleanup_completed_transitions: deleted {deleted} rows')
+    return deleted
+
+
+def _delete_in_batches(eligible, alias) -> int:
+    """Delete the eligible jobs oldest first. Each batch commits separately."""
     deleted = 0
     while True:
         with transaction.atomic(using=alias):
             message_ids = list(
-                eligible.order_by('pk').values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
+                eligible.order_by('modified', 'pk').values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
             )
             if not message_ids:
                 break
             # Recheck eligibility because a row can change after selection.
             count, _ = eligible.filter(pk__in=message_ids).delete()
         deleted += count
-    if deleted:
-        logger.info(f'cleanup_completed_transitions: deleted {deleted} rows')
     return deleted
