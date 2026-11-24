@@ -1,5 +1,25 @@
 # Upgrading and rollback
 
+## From 5.2.2 to 5.3.0
+
+Migrations 0021 and 0022 each add one index to the job table. Completed-job cleanup reads through them.
+On PostgreSQL each migration builds its index concurrently, so producers and workers can keep running.
+A build does not block job writes. It waits for the transactions that were open when it started.
+If something interrupts a build, PostgreSQL leaves an invalid index.
+Drop `dl_bg_cleanup_age_idx` or `dl_bg_failure_idx` in that case, then run `migrate` again.
+
+The saved-job format and the transition declarations do not change.
+Old and new application processes can run together during this upgrade.
+
+A state-lock check outside a transaction now reads through the default connection.
+There it no longer sets its own 2-second lock wait and 5-second statement limit.
+
+The log line for a failed side effect now carries its exception.
+A log handler that prints tracebacks prints one for this line.
+An error tracker groups the line by its exception. Issues that it grouped by the text of the line stop receiving events.
+
+To roll back, migrate `django_logic_background` to 0020 while 5.3.0 is installed. Then install 5.2.2.
+
 ## From 5.1.2 to 5.2.0
 
 Migration 0020 adds the internal state-lock and job-process ownership tables on the
