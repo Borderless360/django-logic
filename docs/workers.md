@@ -71,9 +71,11 @@ model writes independently. Applications may open additional connections. Budget
 `workers × (concurrency + 2)` connections per queue group for atomic jobs.
 For `atomic=False` jobs, budget `workers × (2 × concurrency + 2)`. The two extras
 are the worker's LISTEN connection and its separate maintenance process.
-Each synchronous state-lock check, acquisition or release also opens one short
-independent connection. Add one possible concurrent connection per active job or
-application thread using state locks; repeated availability checks repeatedly open connections too. Measure request latency and concurrent throughput with the actual
+Each time the library takes or releases a state lock, it opens one short
+independent connection. A lock check does the same inside a transaction on the
+default database; outside one, it reads through the default connection. Add one
+possible concurrent connection per active job or application thread using state
+locks. Measure request latency and concurrent throughput with the actual
 database topology. Add any connections that consumer callbacks open. Keep the total under the
 database plan's cap, or under the pgbouncer pool size. A worker that
 cannot connect logs and retries; a database at its cap refuses the web

@@ -99,8 +99,11 @@ participate in the caller's transaction. It does not provide the PostgreSQL
 independent-commit or concurrent-state guarantees. Other backends are refused.
 
 State ownership lives on the default database, even when a synchronous action
-writes a business object on another alias. Every ownership check, acquisition and
-release uses a short independent PostgreSQL connection and closes it immediately.
+writes a business object on another alias. Each time the library takes or releases
+ownership, it opens a short independent PostgreSQL connection and closes it at once.
+An ownership check does the same inside a transaction on the default database.
+Outside one, a check reads through the default connection, because each statement
+there sees every committed record.
 The tables have no foreign keys to business objects or job records, so taking a
 lock does not wait for the caller's uncommitted business row.
 

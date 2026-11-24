@@ -128,6 +128,8 @@ def _log_hook_error(message: str, error: BaseException, **log_kwargs) -> None:
     level = logging.ERROR
     if isinstance(error, TransitionTemporarilyUnavailable):
         level = logging.WARNING
+    # An error tracker groups and filters the line by the exception it carries.
+    log_kwargs.setdefault('exc_info', error)
     transition_logger.log(level, message, **log_kwargs)
 
 
