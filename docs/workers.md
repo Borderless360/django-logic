@@ -223,6 +223,8 @@ Optional callbacks for completed jobs are not retried.
   It also reports queues without progress, as described under monitoring.
 - `cleanup_completed_transitions` deletes completed jobs older than `TRANSITION_MESSAGE_CLEANUP_DAYS`.
   It keeps the newest failed job per record and process so the failure remains available for investigation.
+  A pass reads the jobs that are old enough to delete, and every failed job.
+  It does not read the rest of the job table.
 
 Cleanup commits bounded groups of rows. Earlier groups stay deleted if a later group is interrupted.
 An enclosing caller transaction still controls when those deletions commit.
