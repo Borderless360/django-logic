@@ -94,17 +94,4 @@ jobs:
           POSTGRES_USER: django_logic
           POSTGRES_PASSWORD: django_logic
           REDIS_URL: redis://localhost:6380/0
-        run: |
-          python tests/manage.py test --exclude-tag=stability --verbosity=2
-
-      - name: Run stability tests
-        env:
-          DJANGO_SETTINGS_MODULE: tests.settings_stability
-          POSTGRES_HOST: localhost
-          POSTGRES_PORT: "5433"
-          POSTGRES_DB: django_logic_test
-          POSTGRES_USER: django_logic
-          POSTGRES_PASSWORD: django_logic
-          REDIS_URL: redis://localhost:6380/0
-        run: |
-          python tests/manage.py test tests.stability --verbosity=2 --tag=stability
+        run: python tests/manage.py test --verbosity=2

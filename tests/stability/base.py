@@ -5,38 +5,19 @@
   - CrashSimulator: raises at a chosen point inside a side effect
   - WorkerCrashSimulated: the exception it raises
   - IdempotencyTracker: counts how many times each side effect runs
-  - requires_postgres: skips a test that needs PostgreSQL
-  - requires_real_redis: skips a test that needs a real Redis (nx=True)
+  - requires_postgres: marks a test that needs PostgreSQL
+  - requires_real_redis: marks a test that needs a shared Redis cache
   - run_concurrent: runs a function in several threads and collects the results
 """
 import threading
-import unittest
 
-from django.conf import settings
 from django.core.cache import cache
 from django.db import connections
 from django.test import TransactionTestCase, tag
 
 
-def _is_real_redis():
-    backend = settings.CACHES.get('default', {}).get('BACKEND', '')
-    return 'redis' in backend.lower()
-
-
-def _is_postgres():
-    engine = settings.DATABASES.get('default', {}).get('ENGINE', '')
-    return 'postgresql' in engine
-
-
-requires_real_redis = unittest.skipUnless(
-    _is_real_redis(),
-    "Requires a real Redis backend (LocMemCache does not support nx=True)"
-)
-
-requires_postgres = unittest.skipUnless(
-    _is_postgres(),
-    "Requires PostgreSQL (SQLite locks the entire DB under write contention)"
-)
+requires_real_redis = tag('redis')
+requires_postgres = tag('postgresql')
 
 
 class WorkerCrashSimulated(Exception):

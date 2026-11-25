@@ -378,10 +378,10 @@ class DatabaseTransitionDeclarationTests(SimpleTestCase):
 
 
 class DatabaseTransitionBackendTests(TestCase):
+    databases = {'other'}
+
     def test_non_postgresql_backend_is_refused_before_side_effects(self):
-        if connection.vendor == 'postgresql':
-            self.skipTest('This case exercises an actual non-PostgreSQL backend.')
-        row = Order.objects.create()
+        row = Order.objects.using('other').create()
         transition = DatabaseTransition('change', sources=['draft'], target='done', side_effects=[save_local_work])
         with self.assertRaisesMessage(ImproperlyConfigured, 'requires PostgreSQL'):
             transition.change_state(State(row, 'status'))

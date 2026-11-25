@@ -7,14 +7,14 @@ import threading
 import unittest
 from unittest.mock import patch, MagicMock, call
 
-from django.db import transaction, connection, connections
+from django.db import transaction, connections
 from django.core.cache import cache
 from django.test import SimpleTestCase, tag
 
 from django_logic import Transition, Process
 from django_logic.state import State
 
-from tests.stability.base import StabilityTestCase
+from tests.stability.base import StabilityTestCase, requires_postgres
 from tests.stability.models import (
     Order, OrderProcess,
     side_effect_one, side_effect_two,
@@ -248,8 +248,7 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 class TestUnlockBeforeCommitWindow(StabilityTestCase):
     """The business row remains protected after the cache lock is released."""
 
-    @unittest.skipUnless(connection.vendor == 'postgresql',
-                         'needs two concurrent writer connections')
+    @requires_postgres
     def test_second_transition_reads_stale_committed_state(self):
         """The second caller cannot repeat work before the first caller commits."""
         order = Order.objects.create(status='draft')

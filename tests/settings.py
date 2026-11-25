@@ -16,6 +16,7 @@ INSTALLED_APPS = [
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 ROOT_URLCONF = 'tests.urls'
+TEST_RUNNER = 'tests.runner.LocalTestRunner'
 
 MIDDLEWARE: list = []
 
@@ -59,8 +60,7 @@ DATABASES['other'] = {
     'NAME': ':memory:',
 }
 
-# LocMemCache by default. Tests that need an atomic add() use the
-# @requires_real_redis skip decorator and run under settings_stability.py in dedicated CI jobs.
+# The full suite uses Redis through settings_stability.py.
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
