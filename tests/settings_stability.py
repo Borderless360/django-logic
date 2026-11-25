@@ -12,6 +12,8 @@ import os
 
 from tests.settings import *
 
+TEST_RUNNER = 'tests.runner.FullTestRunner'
+
 DATABASES = {
     'other': DATABASES['other'],
     'default': {

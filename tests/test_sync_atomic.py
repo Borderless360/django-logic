@@ -1,9 +1,8 @@
 """Opt-in synchronous transactions keep required writes and their state together."""
-from unittest import skipUnless
 
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, transaction
 from django.db.models.signals import post_init, post_save
 from django.test import SimpleTestCase, TransactionTestCase
 
@@ -11,6 +10,7 @@ from django_logic import DatabaseTransition, Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
 from tests import unbind_model_process
 from tests.models import Invoice
+from tests.stability.base import requires_postgres
 
 
 def save_required_work(instance, **kwargs):
@@ -444,7 +444,7 @@ class AtomicSynchronousTests(TransactionTestCase):
         self.assertFalse(self.invoice.customer_received)
         self.assertFalse(Invoice.objects.filter(status='required').exists())
 
-    @skipUnless(connection.vendor == 'postgresql', 'DatabaseTransition requires PostgreSQL')
+    @requires_postgres
     def test_database_transition_saves_required_work_and_target(self):
         self.bind(DatabaseTransition('go', sources=['draft'], target='done', atomic=True,
                                      side_effects=[save_required_work]))
@@ -455,7 +455,7 @@ class AtomicSynchronousTests(TransactionTestCase):
         self.assertEqual(Invoice.objects.filter(status='required').count(), 1)
         self.assertFalse(self.invoice.sync_atomic_test.state.is_locked())
 
-    @skipUnless(connection.vendor == 'postgresql', 'DatabaseTransition requires PostgreSQL')
+    @requires_postgres
     def test_database_transition_target_failure_rolls_back_work_and_records_failed_state(self):
         self.bind(DatabaseTransition('go', sources=['draft'], target='done', failed_state='failed',
                                      atomic=True, side_effects=[save_required_work],

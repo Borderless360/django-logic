@@ -1,11 +1,10 @@
 """Empty state values remain distinct from an action without a state change."""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from unittest import skipUnless
 
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
-from django.db import close_old_connections, connection, connections, transaction
+from django.db import close_old_connections, connections, transaction
 from django.test import TestCase, TransactionTestCase
 
 from django_logic import Transition
@@ -13,6 +12,7 @@ from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import TransitionNotAllowed, TransitionTemporarilyUnavailable
 from django_logic.state import State
 from tests.background.models import Widget
+from tests.stability.base import requires_postgres
 
 
 class EmptyTargetTests(TestCase):
@@ -81,7 +81,7 @@ class EmptyTargetTests(TestCase):
         self.assertTrue(message.is_completed)
 
 
-@skipUnless(connection.vendor == 'postgresql', 'This test needs PostgreSQL row locking.')
+@requires_postgres
 class ConcurrentEmptyTargetTests(TransactionTestCase):
     def test_reset_waits_for_another_writer_and_cannot_overwrite_its_result(self):
         cache.clear()

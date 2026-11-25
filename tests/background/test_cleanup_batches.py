@@ -9,7 +9,6 @@ import time
 from unittest import skipUnless
 from unittest.mock import patch
 
-from django.conf import settings
 from django.db import connections, transaction
 from django.db.models import QuerySet
 from django.db.models.signals import post_delete
@@ -98,10 +97,9 @@ class _CleanupRouter:
         return 'other' if model is TransitionMessage else None
 
 
-@skipUnless('other' in settings.DATABASES, 'needs the second database alias')
 @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_CLEANUP_DAYS=7))
 class CleanupWriteAliasTests(TransactionTestCase):
-    databases = {'default', 'other'} if 'other' in settings.DATABASES else {'default'}
+    databases = {'default', 'other'}
 
     def test_selection_deletion_and_batch_commits_use_the_write_database(self):
         default_ids = _old_messages(1)

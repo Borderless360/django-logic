@@ -15,6 +15,7 @@ from django_logic.background.safety_nets import _claimable
 from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
 from tests import dl_settings
 from tests.background.models import Widget, bg_ok, bg_callback
+from tests.stability.base import requires_postgres
 
 
 def wait_for_provider(instance, **kwargs):
@@ -134,11 +135,8 @@ class NonAtomicOperationContractTests(TransactionTestCase):
     setUp = OperationContractTests.setUp
     enqueue = OperationContractTests.enqueue
 
-
+    @requires_postgres
     def test_non_atomic_defer_keeps_confirmed_database_receipt(self):
-        from django.db import connection
-        if connection.vendor != 'postgresql':
-            self.skipTest('requires a separate PostgreSQL job connection')
         with patch.object(OperationProcess.transitions[2], 'atomic', False):
             result = self.enqueue(action='wait')
             run_background_transition(result.pk)

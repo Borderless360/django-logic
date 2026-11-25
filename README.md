@@ -426,6 +426,13 @@ python tests/manage.py test          # SQLite suite
 python tests/manage.py test tests.test_transition
 ```
 
+The default suite runs the tests that SQLite and the local cache support.
+To run every test, start PostgreSQL and Redis, then use
+`DJANGO_SETTINGS_MODULE=tests.settings_stability python tests/manage.py test` on Linux.
+Set `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` and `REDIS_URL` for your test services.
+The full suite also checks the SQLite rejection using its second database.
+A skipped test or an empty selection fails the run.
+
 Test changed behavior and update the affected documentation.
 
 Report a bug in the
