@@ -11,6 +11,7 @@ from django.db import DEFAULT_DB_ALIAS, DatabaseError, transaction
 
 from django_logic.exceptions import TransitionTemporarilyUnavailable, _record_failed_check
 from django_logic.logger import (
+    _running_job_attempt,
     transition_logger,
     TransitionEventType,
 )
@@ -278,6 +279,7 @@ class SideEffects(BaseCommand):
                 f'{command_name} failed action={self._transition.action_name} '
                 f'instance={state.instance_key}: {type(error).__name__}: {error}',
                 error,
+                extra={'job_failure': 'attempt'} if _running_job_attempt.get() else {},
             )
             if atomic_sync:
                 if not reload_after_rollback(state, prefix=kwargs.get('tr_id')):

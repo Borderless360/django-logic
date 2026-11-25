@@ -80,6 +80,15 @@ class LoggedBackgroundFailureProcess(Process):
     ]
 
 
+def run_nested_submit(instance, **kwargs):
+    LoggedFailureProcess(field_name='status', instance=instance).submit()
+
+
+class NestedFailureProcess(Process):
+    process_name = 'nested_failure'
+    transitions = [BackgroundTransition('run', sources=['draft'], target='done', side_effects=[run_nested_submit])]
+
+
 class LoggedReceiptFailureProcess(Process):
     process_name = 'logged_receipt_failure'
     transitions = [
@@ -246,6 +255,16 @@ class AttemptHistoryTests(TestCase):
         self.assertFalse(any(getattr(record, 'job_failure', None) == 'final' for record in logs.records))
         row.refresh_from_db()
         self.assertFalse(row.ended_in_failure)
+
+    @override_settings(DJANGO_LOGIC={**SETTINGS, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
+    def test_a_nested_operation_marks_both_diagnostic_lines_as_one_job_attempt(self):
+        NestedFailureProcess(field_name='status', instance=self.widget).run()
+        row = TransitionMessage.objects.get()
+        with self.assertLogs('django-logic.transition', level='INFO') as logs, self.captureOnCommitCallbacks(execute=True):
+            run_background_transition(row.pk)
+        errors = [record for record in logs.records if record.exc_info and record.exc_info[0] is ValueError]
+        self.assertEqual([record.job_failure for record in errors], ['attempt', 'attempt'])
+        self.assertEqual(sum(getattr(record, 'job_failure', None) == 'final' for record in logs.records), 1)
 
     @override_settings(DJANGO_LOGIC={**SETTINGS, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
     def test_a_broken_reporter_does_not_retry_the_failed_job(self):

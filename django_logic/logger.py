@@ -9,12 +9,14 @@ Two standard Python loggers are exposed:
 Configure both via ``LOGGING`` in Django settings.
 """
 import logging
+from contextvars import ContextVar
 from enum import Enum
 
 
 
 logger: logging.Logger = logging.getLogger('django-logic')
 transition_logger: logging.Logger = logging.getLogger('django-logic.transition')
+_running_job_attempt = ContextVar('running_job_attempt', default=False)
 
 
 class TransitionEventType(Enum):

@@ -63,7 +63,7 @@ from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
 from django_logic.background.transitions import BackgroundTransition
 from django_logic.commands import _run_in_savepoint, write_failed_state
-from django_logic.logger import TransitionEventType, transition_logger
+from django_logic.logger import TransitionEventType, _running_job_attempt, transition_logger
 from django_logic.process import _iter_process_tree, _transition_context
 
 
@@ -105,6 +105,7 @@ def run_background_transition(transition_message_id: int) -> None:
 
 
 def _run_background_transition(transition_message_id):
+    token = _running_job_attempt.set(True)
     try:
         outcome = _run_atomic(transition_message_id)
         if isinstance(outcome, _NonAtomicAttempt):
@@ -112,6 +113,8 @@ def _run_background_transition(transition_message_id):
             outcome = run_non_atomic(transition_message_id)
     except _NothingToDo:
         return
+    finally:
+        _running_job_attempt.reset(token)
 
     # Best-effort hooks after the transaction commits.
     if outcome.terminal and outcome.succeeded and outcome.transition is not None:
