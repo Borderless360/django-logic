@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.3.1] — 2026-11-25
+
+### Fixed
+
+- Applications can report a background job once its final failure is saved. Earlier versions logged
+  individual attempts before the worker knew whether the job would retry. The new log record names
+  the model, process, transition and exception class. It omits the job arguments and exception text.
+  A reporting error leaves the saved failure intact. This release requires no database migration.
+
 ## [5.3.0] — 2026-11-24
 
 ### Fixed

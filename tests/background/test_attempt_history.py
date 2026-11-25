@@ -1,11 +1,12 @@
 """Job history distinguishes initial waiting, retries and provider deferrals."""
+import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
 from django.core.cache import cache
-from django.db import connection, connections
+from django.db import connection, connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -77,6 +78,15 @@ class LoggedBackgroundFailureProcess(Process):
         BackgroundTransition('submit', sources=['draft'], target='done',
                              side_effects=[bg_ok, reject_provider], queue=QUEUE),
     ]
+
+
+def run_nested_submit(instance, **kwargs):
+    LoggedFailureProcess(field_name='status', instance=instance).submit()
+
+
+class NestedFailureProcess(Process):
+    process_name = 'nested_failure'
+    transitions = [BackgroundTransition('run', sources=['draft'], target='done', side_effects=[run_nested_submit])]
 
 
 class LoggedReceiptFailureProcess(Process):
@@ -198,6 +208,7 @@ class AttemptHistoryTests(TestCase):
             run_background_transition(row.pk)
 
         self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].job_failure, 'attempt')
         message = logs.records[0].getMessage()
         self.assertIn('Fail action=submit', message)
         self.assertIn(f'instance=bg_tests_widget-status-{self.widget.pk}', message)
@@ -210,6 +221,73 @@ class AttemptHistoryTests(TestCase):
         self.assertEqual(row.errors_count, 1)
         self.assertFalse(row.is_completed)
         self.assertEqual(self.widget.se_log, '')
+
+    @override_settings(DJANGO_LOGIC={**SETTINGS, 'TRANSITION_MESSAGE_MAX_ERRORS': 2})
+    def test_final_failure_is_reported_once_after_commit_with_only_the_operation_and_error_class(self):
+        LoggedBackgroundFailureProcess(field_name='status', instance=self.widget).submit(private_input='private-order')
+        row = TransitionMessage.objects.get()
+        with self.assertLogs('django-logic.transition', level='INFO') as logs:
+            with self.captureOnCommitCallbacks(execute=True):
+                run_background_transition(row.pk)
+            self.assertFalse(any(getattr(record, 'job_failure', None) == 'final' for record in logs.records))
+            with self.captureOnCommitCallbacks(execute=True):
+                run_background_transition(row.pk)
+                self.assertFalse(any(getattr(record, 'job_failure', None) == 'final' for record in logs.records))
+            run_background_transition(row.pk)
+        final, = [record for record in logs.records if getattr(record, 'job_failure', None) == 'final']
+        self.assertEqual((final.job_model, final.job_process, final.job_transition, final.failure_type),
+                         ('bg_tests.widget', 'logged_background_failure', 'submit', ValueError))
+        self.assertIsNone(final.exc_info)
+        self.assertNotIn('private-order', final.getMessage())
+        self.assertNotIn('provider rejected the request', final.getMessage())
+        row.refresh_from_db()
+        self.assertTrue(row.ended_in_failure)
+        self.assertEqual(row.errors_count, 2)
+
+    @override_settings(DJANGO_LOGIC={**SETTINGS, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
+    def test_rolled_back_failure_is_not_reported(self):
+        LoggedBackgroundFailureProcess(field_name='status', instance=self.widget).submit()
+        row = TransitionMessage.objects.get()
+        with self.assertLogs('django-logic.transition', level='INFO') as logs, self.captureOnCommitCallbacks(execute=True):
+            with transaction.atomic():
+                run_background_transition(row.pk)
+                transaction.set_rollback(True)
+        self.assertFalse(any(getattr(record, 'job_failure', None) == 'final' for record in logs.records))
+        row.refresh_from_db()
+        self.assertFalse(row.ended_in_failure)
+
+    @override_settings(DJANGO_LOGIC={**SETTINGS, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
+    def test_a_nested_operation_marks_both_diagnostic_lines_as_one_job_attempt(self):
+        NestedFailureProcess(field_name='status', instance=self.widget).run()
+        row = TransitionMessage.objects.get()
+        with self.assertLogs('django-logic.transition', level='INFO') as logs, self.captureOnCommitCallbacks(execute=True):
+            run_background_transition(row.pk)
+        errors = [record for record in logs.records if record.exc_info and record.exc_info[0] is ValueError]
+        self.assertEqual([record.job_failure for record in errors], ['attempt', 'attempt'])
+        self.assertEqual(sum(getattr(record, 'job_failure', None) == 'final' for record in logs.records), 1)
+
+    @override_settings(DJANGO_LOGIC={**SETTINGS, 'TRANSITION_MESSAGE_MAX_ERRORS': 1})
+    def test_a_broken_reporter_does_not_retry_the_failed_job(self):
+        class BrokenReporter(logging.Handler):
+            def emit(self, record):
+                if getattr(record, 'job_failure', None) == 'final':
+                    raise RuntimeError('Reporter unavailable')
+
+        logger = logging.getLogger('django-logic.transition')
+        handler = BrokenReporter()
+        LoggedBackgroundFailureProcess(field_name='status', instance=self.widget).submit()
+        row = TransitionMessage.objects.get()
+        with self.assertLogs(logger, level='INFO'), self.assertLogs('django.test', level='ERROR'):
+            logger.addHandler(handler)
+            try:
+                with self.captureOnCommitCallbacks(execute=True):
+                    run_background_transition(row.pk)
+            finally:
+                logger.removeHandler(handler)
+        run_background_transition(row.pk)
+        row.refresh_from_db()
+        self.assertTrue(row.ended_in_failure)
+        self.assertEqual(row.errors_count, 1)
 
 
 @requires_postgres

@@ -63,7 +63,7 @@ from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
 from django_logic.background.transitions import BackgroundTransition
 from django_logic.commands import _run_in_savepoint, write_failed_state
-from django_logic.logger import TransitionEventType, transition_logger
+from django_logic.logger import TransitionEventType, _running_job_attempt, transition_logger
 from django_logic.process import _iter_process_tree, _transition_context
 
 
@@ -105,6 +105,7 @@ def run_background_transition(transition_message_id: int) -> None:
 
 
 def _run_background_transition(transition_message_id):
+    token = _running_job_attempt.set(True)
     try:
         outcome = _run_atomic(transition_message_id)
         if isinstance(outcome, _NonAtomicAttempt):
@@ -112,6 +113,8 @@ def _run_background_transition(transition_message_id):
             outcome = run_non_atomic(transition_message_id)
     except _NothingToDo:
         return
+    finally:
+        _running_job_attempt.reset(token)
 
     # Best-effort hooks after the transaction commits.
     if outcome.terminal and outcome.succeeded and outcome.transition is not None:
@@ -309,8 +312,7 @@ def _complete_terminal_failure(
             f'state or running failure callbacks because its state could not '
             f'be checked under the row lock: {type(error).__name__}: {error}'
         )
-        transition_message.mark_as_completed(
-            measure_duration=measure_duration, ended_in_failure=True)
+        _finish_failed_job(transition_message, exception, measure_duration=measure_duration)
         return None
     if not matches:
         note = (
@@ -325,9 +327,26 @@ def _complete_terminal_failure(
     if write_error is not None:
         transition_message.record_failure_side_effect_error(
             write_error, label='failed_state write')
-    transition_message.mark_as_completed(
-        measure_duration=measure_duration, ended_in_failure=True)
+    _finish_failed_job(transition_message, exception, measure_duration=measure_duration)
     return (transition, state, kwargs, exception)
+
+
+def _finish_failed_job(job, error, *, measure_duration):
+    job.mark_as_completed(measure_duration=measure_duration, ended_in_failure=True)
+    fields = {
+        'job_failure': 'final', 'job_model': job.recorded_model_label,
+        'job_process': job.process_name, 'job_transition': job.transition_name,
+        'failure_type': type(error),
+    }
+
+    def log_failure():
+        transition_logger.info(
+            'Background job %s.%s.%s finished in failure (%s).',
+            fields['job_model'], fields['job_process'], fields['job_transition'],
+            fields['failure_type'].__qualname__, extra=fields,
+        )
+
+    transaction.on_commit(log_failure, using=job._state.db, robust=True)
 
 
 def _run_failure_callbacks(transition, state, kwargs, exception) -> None:
@@ -612,6 +631,7 @@ def _handle_restore_failure(
         f'TransitionMessage#{transition_message.pk} restore raised '
         f'{type(error).__name__}: {error}',
         exc_info=(type(error), error, error.__traceback__),
+        extra={'job_failure': 'attempt'},
     )
     if transition_message.errors_count < conf.max_errors():
         return _Outcome(terminal=False, succeeded=False, exception=error)
@@ -632,11 +652,12 @@ def _complete_restore_failure(transition_message, error, *, earlier_error=None):
     transition_message.last_error_message = note
     transition_message.last_error_dt = timezone.now()
     transition_message.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
-    transition_message.mark_as_completed(measure_duration=False, ended_in_failure=True)
+    _finish_failed_job(transition_message, error, measure_duration=False)
     transition_logger.error(
         f'TransitionMessage#{transition_message.pk} cannot be restored: {error}. '
         'The job is completed as failed. Business state is unchanged. '
-        'Check the saved identity and error before submitting replacement work.'
+        'Check the saved identity and error before submitting replacement work.',
+        extra={'job_failure': 'attempt'},
     )
 
 
@@ -697,6 +718,7 @@ def _handle_failure(
         f'job={transition_message.pk}: '
         f'{type(error).__name__}: {error}',
         exc_info=(type(error), error, error.__traceback__),
+        extra={'job_failure': 'attempt'},
     )
 
     exhausted = transition_message.errors_count >= conf.max_errors()

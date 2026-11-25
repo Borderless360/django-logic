@@ -45,10 +45,12 @@ class RestoreCompletionTests(TransactionTestCase):
                     checked.append(executor.submit(compete).result(timeout=5))
             return execute(sql, params, many, context)
 
-        with connection.execute_wrapper(inspect_completion):
+        with connection.execute_wrapper(inspect_completion), self.assertLogs('django-logic.transition', level='INFO') as logs:
             run_background_transition(self.message.pk)
 
         self.assertEqual(checked, [True])
+        final, = [record for record in logs.records if getattr(record, 'job_failure', None) == 'final']
+        self.assertEqual(final.job_transition, 'finish')
         self.message.refresh_from_db()
         self.assertTrue(self.message.is_completed)
         self.assertTrue(self.message.ended_in_failure)

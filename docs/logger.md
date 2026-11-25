@@ -24,6 +24,19 @@ LOGGING = {
 }
 ```
 
+## Report a job after its last failure
+
+The `django-logic.transition` logger writes one INFO record with `job_failure == 'final'` after
+the database commits a failed job. A Python logging filter or handler can use `job_model`,
+`job_process`, `job_transition` and `failure_type` (the exception class) to group an alert.
+The record contains no exception message, traceback, job arguments or record IDs.
+If maintenance finishes an interrupted job, the exception class is the one available to maintenance.
+Rolled-back writes, retried jobs, successful jobs and jobs overtaken by a state change emit no final failure.
+Delivery is best effort if the process stops or the reporting service is unavailable after commit.
+
+Earlier diagnostic lines that describe a background attempt's error carry `job_failure == 'attempt'`.
+An application that alerts only on final failures can keep those diagnostics in its own logs.
+
 ## Logging transition kwargs (and redacting PII)
 
 The `Start` lifecycle line attaches the transition's kwargs to the log
