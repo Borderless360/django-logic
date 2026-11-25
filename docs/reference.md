@@ -120,6 +120,19 @@ Its transaction must distinguish required work from optional callbacks.
 Custom execution or state overrides must preserve permissions, locks, rollback, failure recording and saved job identity.
 They are not a substitute for named business functions.
 
+### Recording an accepted action in a subclass
+
+A subclass of `Transition` or `BackgroundTransition` can override
+`change_state(self, state, **kwargs)` to record a caller's action. Consume any
+arguments specific to your recorder, then call `super().change_state(state, **kwargs)`
+once and return its result. Let refusals and failures reach the caller. If the
+record should only be written after commit, register it with Django’s
+`transaction.on_commit` on the record’s database after the call succeeds.
+
+For a background transition this records acceptance of the request. The worker
+records the outcome when it processes the saved job. Arguments consumed by the
+subclass are excluded from that job.
+
 ### Saving a record with a bound process
 
 Creating an order writes its initial state, including when you supply its primary key.
