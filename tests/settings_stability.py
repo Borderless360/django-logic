@@ -5,8 +5,7 @@ Requires PostgreSQL and Redis (vs SQLite + LocMemCache for unit tests).
 These are needed for:
   - select_for_update (not supported by SQLite)
   - Proper transaction isolation (SQLite serializes all writes)
-  - Independent committed state-lock ownership
-  - Worker-presence observations shared across processes
+  - Cache entries shared across processes
 """
 import os
 

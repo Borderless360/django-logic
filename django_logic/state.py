@@ -81,6 +81,13 @@ class State:
         finally:
             _active_actions.reset(token)
 
+    def finish_action(self):
+        # The target is saved. Required completion work can start the next action on this field.
+        active = _active_actions.get()
+        key = (self.instance._state.db or DEFAULT_DB_ALIAS, self.instance_key)
+        if active and active[-1] == key:
+            _active_actions.set(active[:-1])
+
     def get_persisted_state(self):
         """Read the state column straight from the database row.
 

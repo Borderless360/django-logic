@@ -242,8 +242,8 @@ class SideEffects(BaseCommand):
         def run_required_changes():
             nonlocal command_name
             run_commands()
-            command_name = 'target-state save'
-            self._transition._write_target_state(state, **kwargs)
+            command_name = 'transition completion'
+            self._transition.complete_transition(state, **kwargs)
 
         try:
             transition_logger.info(

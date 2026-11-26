@@ -43,9 +43,6 @@ An unknown `BACKGROUND_EXECUTION` value fails at startup.
 Each job runs in its own process. When that process finishes, the worker can start another job.
 The worker continues checking timeouts while it records failures and runs maintenance.
 If a database lock prevents failure recording, the worker keeps the failure and retries the write.
-Any unexpired state locks keep other workers from starting that job while cleanup
-and failure recording wait. A worker that selected the job earlier checks these
-locks again before application work and refuses without counting another error.
 When the wait persists, a warning names the job and elapsed wait.
 Inspect the PostgreSQL lock holder so the worker can record the failure before another attempt starts.
 
@@ -67,12 +64,7 @@ model writes independently. Applications may open additional connections. Budget
 `workers × (concurrency + 2)` connections per queue group for atomic jobs.
 For `atomic=False` jobs, budget `workers × (2 × concurrency + 2)`. The two extras
 are the worker's LISTEN connection and its separate maintenance process.
-Each time the library takes or releases a state lock, it opens one short
-independent connection. A lock check does the same inside a transaction on the
-default database; outside one, it reads through the default connection. Add one
-possible concurrent connection per active job or application thread using state
-locks. Measure request latency and concurrent throughput with the actual
-database topology. Add any connections that consumer callbacks open. Keep the total under the
+Add any connections that consumer callbacks open. Keep the total under the
 database plan's cap, or under the pgbouncer pool size. A worker that
 cannot connect logs and retries; a database at its cap refuses the web
 processes too, so leave headroom for them.

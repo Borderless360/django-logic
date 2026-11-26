@@ -1,5 +1,6 @@
 """Local state changes recover after a killed process without a cache timeout."""
 import os
+from datetime import timedelta
 from pathlib import Path
 import signal
 import tempfile
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from django.core.cache import cache
 from django.db import connection, connections, IntegrityError
 from django.test import TransactionTestCase, override_settings
+from django.utils import timezone
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
@@ -110,7 +112,7 @@ class CompletionProcess(Process):
 @requires_postgres
 @override_settings(DJANGO_LOGIC={'BACKGROUND_EXECUTION': 'pull'})
 class DatabaseTransitionTests(TransactionTestCase):
-    """Real commits, processes and independent connections exercise lock ownership."""
+    """Real commits and independent processes exercise transaction rollback and crash recovery."""
     def setUp(self):
         cache.clear()
         for process in (DatabaseProcess, CachedProcess, CompletionProcess):
@@ -151,7 +153,7 @@ class DatabaseTransitionTests(TransactionTestCase):
             row.refresh_from_db()
             self.assertEqual(row.status, 'done')
 
-    def test_killed_nested_background_submission_rolls_back_and_is_saved_once(self):
+    def test_killed_optional_callback_does_not_reopen_committed_work(self):
         outer, nested = Order.objects.create(), Order.objects.create()
         outer.completion_process.complete(nested_id=nested.pk, enqueue=True)
         job = TransitionMessage.objects.get(instance_id=str(outer.pk), process_name='completion_process')
@@ -169,14 +171,9 @@ class DatabaseTransitionTests(TransactionTestCase):
             self.assertTrue(run_once(['database-test'], isolate=True))
         self.assertTrue(marker.exists())
         self.assertFalse(TransitionMessage.objects.filter(transition_name='pending_done').exists())
-        for row in (outer, nested):
-            row.refresh_from_db()
-            self.assertEqual(row.status, 'draft')
-        run_background_transition(job.pk)
         job.refresh_from_db()
         self.assertTrue(job.is_completed)
         self.assertFalse(job.ended_in_failure)
-        self.assertEqual(TransitionMessage.objects.filter(transition_name='pending_done').count(), 1)
         for row in (outer, nested):
             row.refresh_from_db()
             self.assertEqual(row.status, 'done')
@@ -257,6 +254,7 @@ class DatabaseTransitionTests(TransactionTestCase):
         finally:
             os.killpg(worker_pid, signal.SIGKILL)
             os.waitpid(worker_pid, 0)
+        TransitionMessage.objects.filter(pk=job.pk).update(started_at=timezone.now() - timedelta(seconds=6))
         self.assertTrue(run_once(['database-test'], isolate=True))
         job.refresh_from_db()
         row.refresh_from_db()

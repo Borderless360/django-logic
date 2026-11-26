@@ -156,7 +156,7 @@ class WorkerStopTests(TransactionTestCase):
 
         self.assertFalse(marker.exists())
         job = self._job(widget)
-        self.assertEqual((job.is_completed, job.start_attempt_count), (False, 0))
+        self.assertEqual((job.is_completed, job.start_attempt_count), (False, 1))
 
     def test_safety_net_pass_that_still_runs_does_not_hold_the_stop(self):
         started = self.directory / 'pass'

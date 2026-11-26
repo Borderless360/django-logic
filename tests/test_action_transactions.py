@@ -100,6 +100,23 @@ class ActionCommitTests(TransactionTestCase):
         self.invoice = Invoice.objects.create(status='draft')
         self.process = Review(field_name='status', instance=self.invoice)
 
+    def test_failed_subclass_completion_rolls_back_the_target_and_followup(self):
+        class SubmitReview(Transition):
+            def complete_transition(self, state, **kwargs):
+                super().complete_transition(state, **kwargs)
+                Review(field_name='status', instance=state.instance).review()
+                raise ValueError('could not finish submission')
+
+        class Submission(Process):
+            transitions = [SubmitReview('prepare', sources=['new'], target='draft')]
+
+        Invoice.objects.filter(pk=self.invoice.pk).update(status='new')
+        with self.assertRaisesRegex(ValueError, 'could not finish submission'):
+            Submission(field_name='status', instance=self.invoice).prepare()
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'new')
+        self.assertFalse(TransitionMessage.objects.exists())
+
     def test_callbacks_wait_for_outer_commit_and_disappear_on_rollback(self):
         with self.assertRaises(ValueError):
             with transaction.atomic():

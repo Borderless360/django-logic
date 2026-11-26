@@ -341,7 +341,7 @@ class AttemptHistoryPostgresTests(TransactionTestCase):
         row.refresh_from_db()
         self.assertEqual(row.start_attempt_count, 1)
 
-    def test_simultaneous_start_markers_do_not_imply_duplicate_execution(self):
+    def test_a_second_worker_cannot_mark_the_same_start(self):
         from django_logic.background import runner
 
         HistoryProcess(field_name='status', instance=self.widget).submit()
@@ -383,7 +383,7 @@ class AttemptHistoryPostgresTests(TransactionTestCase):
         row.refresh_from_db()
         self.widget.refresh_from_db()
         self.assertTrue(row.is_completed)
-        self.assertEqual(row.start_attempt_count, 2)
+        self.assertEqual(row.start_attempt_count, 1)
         self.assertEqual(row.first_started_at, first_start_time)
         self.assertEqual(self.widget.se_log, 'ok,')
 

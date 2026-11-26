@@ -152,7 +152,7 @@ class ProcessReportingTests(TransactionTestCase):
 
     def _start(self, pk=None, body=_report, timeout=None):
         with patch.object(pull, '_run_safety_nets', side_effect=body), \
-                patch('django_logic.background.runner.run_background_transition', side_effect=body), \
+                patch('django_logic.background.runner.run_claimed_transition', side_effect=body), \
                 patch.object(TransitionMessage.objects, 'filter') as rows:
             rows.return_value.db = 'default'
             rows.return_value.values_list.return_value.first.return_value = timeout

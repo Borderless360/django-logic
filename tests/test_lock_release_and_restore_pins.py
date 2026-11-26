@@ -1,9 +1,6 @@
 """Three engine rules, each one written after a consumer hit the defect.
 
-The cache lock is released on every failure path after it is taken: a failed
-``in_progress_state`` write, a failed target write, and a failed
-``failed_state`` write. Before the fix any of those froze the instance for the
-whole ``LOCK_TIMEOUT``, and every later transition raised "State is locked".
+A rejected state write leaves the record available for another action.
 
 A positional argument to a process transition method raises ``TypeError``. It
 used to be dropped, so ``instance.process.verify(user)`` ran with

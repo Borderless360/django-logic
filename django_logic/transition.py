@@ -227,6 +227,12 @@ class Transition:
             raise error
         return kwargs.get('tr_id')
 
+    def complete_transition(self, state: State, **kwargs):
+        """Write the target, then let subclasses save required follow-up work in this transaction."""
+        self._write_target_state(state, **kwargs)
+        if self.lock:
+            state.finish_action()
+
     def _write_target_state(self, state: State, **kwargs):
         if self.target is not None:
             state.set_state(self.target)
