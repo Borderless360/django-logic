@@ -5,6 +5,16 @@
 - Background jobs accept plain JSON arguments. Finish jobs containing legacy type tags before upgrading.
 - Use the job table for reporting. The worker and the job list use queue progress to report waiting jobs.
 - Looking up an undeclared action raises `AttributeError`. A declared action can still refuse a call.
+- A synchronous `Transition` commits required database changes and its target together.
+  Its callbacks run after the outermost commit. Use `BackgroundTransition(atomic=False)` for
+  jobs that independently commit progress.
+- PostgreSQL locks the business record while checking the source, conditions and permissions.
+  Migration 0023 removes the separate state lock tables. Remove `DatabaseTransition`,
+  `LOCK_TIMEOUT` and `submission_context` as described in the [upgrade guide](docs/upgrading.md).
+- A job can use a synchronous action on its own process to choose its outcome.
+  Workers claim a job and record its start in one SQL statement.
+- Custom `is_valid` methods still determine availability. Their boolean result supplies no
+  guard-specific reason or user-facing message.
 
 ## [5.3.1] — 2026-11-25
 

@@ -111,10 +111,7 @@ Use the same action name in nested processes when callers share one action API a
 Use [two explicit action names](recipes/interactive-and-automatic.md) when the endpoint and scheduler select separate actions themselves.
 Both choices share the business function and can use separate queues; permission checks must still match each caller.
 
-Use declared functions for application behavior. An `atomic=True` synchronous transition cannot override `complete_transition`.
-Its transaction must distinguish required work from optional callbacks.
-Custom execution or state overrides must preserve permissions, locks, rollback, failure recording and saved job identity.
-They are not a substitute for named business functions.
+A `Transition` subclass can override `complete_transition(self, state, **kwargs)` when its required work needs the newly written target. Call `super().complete_transition(state, **kwargs)` once, then save the required work. The target, preceding side effects and follow-up writes share the same transaction. A failure rolls back all three and discards their success callbacks.
 
 ### Recording an accepted action in a subclass
 

@@ -154,8 +154,11 @@ class Process:
             if not has_unlocked and len(declarations) > 1:
                 # A previously available declaration must not silently become a different action.
                 caller = self.state.instance
-                if any(caller.__dict__[field.attname] != getattr(fresh, field.attname)
-                       for field in fresh._meta.concrete_fields if field.attname in caller.__dict__):
+                cached_relations = caller._state.fields_cache or getattr(caller, '_prefetched_objects_cache', None)
+                if cached_relations or any(
+                    caller.__dict__[field.attname] != getattr(fresh, field.attname)
+                    for field in fresh._meta.concrete_fields if field.attname in caller.__dict__
+                ):
                     try:
                         selected, _ = self._resolve_transition_with_owner(action_name, user)
                     except TransitionNotAllowed:

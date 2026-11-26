@@ -242,7 +242,7 @@ class BackgroundTransition(Transition):
     ) -> TransitionMessage:
         """Atomic: set in_progress_state + create TransitionMessage row.
 
-        Refuse an existing unfinished job before submission preparation.
+        Refuse an existing unfinished job before creating a new one.
         The caller holds the business-row lock on PostgreSQL.
         """
         state_using = state.instance._state.db

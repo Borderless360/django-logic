@@ -2,8 +2,8 @@
 
 A ``Transition`` moves an instance from one of its source states to its
 target state, running side-effects on success and either callbacks or
-failure callbacks on completion. Everything happens synchronously, in
-the caller's call frame — validate, lock, run, write the target state.
+failure callbacks after commit. The required work and target save execute
+in the caller's transaction.
 
 ``target=None`` declares a transition that writes no state on success.
 It runs under the same contract as every other transition: it takes the

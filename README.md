@@ -82,14 +82,9 @@ python manage.py migrate
 Every `DJANGO_LOGIC` key has a default, so you need no other configuration to
 start.
 
-### Upgrading to version 5
+### Upgrading from 5.3.1
 
-Version 5 removes obsolete APIs and saved-job restoration fallbacks. Start from
-4.3.2, update application declarations, and finish jobs whose action or process
-names will change before stopping the old producers and workers. Apply migrations
-with the new application installed, then start only the new version’s processes. Migration 0017
-refuses unresolved jobs that the new code cannot restore; it does not discard them.
-Mixed versions are unsupported. See the [upgrade checklist](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
+Finish jobs with typed arguments, update declarations and stop the old producers and workers before applying migration 0023. Restart on the same application and library version. The checklist covers rollback and earlier releases. See the [upgrade checklist](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 ## Declare a process
 
@@ -111,25 +106,27 @@ class Order(models.Model):
         ('cancelled', 'Cancelled'),
     ]
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='draft')
+    delivery_address = models.TextField(blank=True)
+    approved_at = models.DateTimeField(null=True)
 ```
 
 ```python
 # process.py
+from django.utils import timezone
 from django_logic import Process, Transition
 
 
-def has_stock(instance, **kwargs):
-    return all(item.product.stock >= item.quantity for item in instance.items.all())
+def has_delivery_address(instance, **kwargs):
+    return bool(instance.delivery_address.strip())
 
 
 def is_staff_member(instance, user, **kwargs):
     return user.is_staff
 
 
-def reserve_stock(instance, **kwargs):
-    for item in instance.items.all():
-        item.product.stock -= item.quantity
-        item.product.save()
+def record_approval_time(instance, **kwargs):
+    instance.approved_at = timezone.now()
+    instance.save(update_fields=['approved_at'])
 
 
 def send_approval_email(instance, **kwargs):
@@ -143,9 +140,9 @@ class OrderProcess(Process):
             action_name='approve',
             sources=['draft'],
             target='approved',
-            conditions=[has_stock],
+            conditions=[has_delivery_address],
             permissions=[is_staff_member],
-            side_effects=[reserve_stock],
+            side_effects=[record_approval_time],
             callbacks=[send_approval_email],
         ),
         Transition(

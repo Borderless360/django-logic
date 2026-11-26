@@ -88,8 +88,7 @@ class TransitionMessage(TimeStampedModel):
     # failure). ``duration_ms`` measures the last attempt only; null if
     # the worker never ran.
     started_at = models.DateTimeField(blank=True, null=True)
-    # Two workers can record starts before only one obtains the execution lock.
-    # These count recorded starts, not provider requests.
+    # A claim remains recorded even if the process exits before its first side effect.
     first_started_at = models.DateTimeField(blank=True, null=True)
     start_attempt_count = models.PositiveIntegerField(default=0)
     completed_at = models.DateTimeField(blank=True, null=True)

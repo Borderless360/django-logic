@@ -13,9 +13,8 @@ The claim's WHERE clause is the retry rule:
   visible again;
 * a row whose attempt runs right now is row-locked by that attempt, so
   ``SKIP LOCKED`` passes over it;
-* a lost job connection releases its row lock; unexpired state locks
-  still delay a retry until the worker confirms exit and removes them,
-  or their configured duration ends.
+* a lost job connection releases its row lock. A recently claimed job
+  whose worker never started can be claimed again after five seconds.
 
 ``LISTEN/NOTIFY`` is the wake-up: enqueue fires one payload-free
 notification after commit, and a waiting worker asks the database at
@@ -396,7 +395,7 @@ def _try_account(attempt: _Attempt) -> bool:
                 attempt.last_deferred_warning = now
             return False
         logger.error(
-            'pull: could not release ownership or record the result for '
+            'pull: could not record the result for '
             'TransitionMessage#%s (%s: %s); the worker keeps it and '
             'retries the write.',
             attempt.pk, type(exc).__name__, exc,
