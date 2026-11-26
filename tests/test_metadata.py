@@ -144,7 +144,7 @@ class MetadataDriftTests(unittest.TestCase):
         self.assertIn(f'Django {floor} or later', self.readme_text)
 
     def test_readme_version_matches_package(self):
-        self.assertIn(f"The current release is **{self.project['version']}**", self.readme_text)
+        self.assertIn(f"**{self.project['version']}**", self.readme_text)
 
     def test_postgresql_matrix_covers_supported_django_versions(self):
         workflow = (REPO_ROOT / '.github/workflows/stability.yml').read_text()

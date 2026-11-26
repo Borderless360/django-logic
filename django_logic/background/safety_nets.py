@@ -111,9 +111,7 @@ def detect_stuck_transitions() -> int:
     It writes one line per queue, so a long backlog does not write one
     line per row every minute. A queue a worker still takes rows from is
     behind, which is a WARNING. A queue no worker takes rows from is an
-    ERROR. Recent worker presence distinguishes missing workers from workers
-    that serve this queue but have made no progress. Presence does not lower
-    the severity of a queue with no progress.
+    ERROR. Recent starts and completions provide the evidence for each queue.
 
     Returns the number of rows finalized.
     """
