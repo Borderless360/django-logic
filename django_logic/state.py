@@ -3,7 +3,6 @@ from contextvars import ContextVar
 from hashlib import blake2b
 from django.db import DEFAULT_DB_ALIAS, connections, transaction, OperationalError
 
-from django_logic.conf import lock_timeout as _get_lock_timeout
 
 #: How long a transition waits for another transaction that holds the
 #: business row. Most holders are a web request or a job finalization
@@ -12,61 +11,7 @@ from django_logic.conf import lock_timeout as _get_lock_timeout
 #: at once.
 ROW_LOCK_WAIT_SECONDS = 2
 
-_database_scope = ContextVar('django_logic_database_scope', default=None)
-_database_locks = ContextVar('django_logic_database_locks', default=())
-
-
-def _database_lock_key(state):
-    return (state.instance._state.db or DEFAULT_DB_ALIAS, state.instance_key)
-
-
-def _database_lock_is_held(state):
-    key = _database_lock_key(state)
-    return any(_database_lock_key(held) == key for held in _database_locks.get())
-
-
-@contextmanager
-def _database_only_scope(state):
-    using = state.instance._state.db or DEFAULT_DB_ALIAS
-    parent = _database_scope.get()
-    if parent and parent != using:
-        from django.core.exceptions import ImproperlyConfigured
-        raise ImproperlyConfigured('Nested database transitions must use the same database transaction.')
-    scope_token = _database_scope.set(using)
-    locks_token = _database_locks.set(_database_locks.get())
-    try:
-        yield
-    finally:
-        _database_locks.reset(locks_token)
-        _database_scope.reset(scope_token)
-
-
-@contextmanager
-def _enqueue_lock(state):
-    """Lock a record while the engine saves its background job.
-
-    On PostgreSQL the caller holds the business row until its transaction ends.
-    The lock then refuses an existing lock and writes no ownership record.
-    A process that dies during the save leaves no ownership record.
-    Yield False when the record is already locked.
-    """
-    using = state.instance._state.db or DEFAULT_DB_ALIAS
-    if _database_scope.get() or connections[using].vendor != 'postgresql':
-        locked = state.lock()
-        try:
-            yield locked
-        finally:
-            if locked:
-                state.unlock()
-        return
-    if state.is_locked():
-        yield False
-        return
-    token = _database_locks.set((*_database_locks.get(), state))
-    try:
-        yield True
-    finally:
-        _database_locks.reset(token)
+_active_actions = ContextVar('django_logic_active_actions', default=())
 
 
 class State:
@@ -79,17 +24,21 @@ class State:
     def protected(self):
         """Prevent concurrent changes while allowing references from related rows."""
         using = self.instance._state.db or DEFAULT_DB_ALIAS
+        model = type(self.instance)
+        rows = model._base_manager.using(using)
         if connections[using].vendor != 'postgresql':
-            yield
+            with transaction.atomic(using=using):
+                yield rows.get(pk=self.instance.pk)
             return
         from django_logic.exceptions import TransitionTemporarilyUnavailable, RefusalReason
         from django_logic.logger import transition_logger
         with transaction.atomic(using=using):
             try:
                 with transaction.atomic(using=using):
-                    row = self.instance._meta.get_field(self.field_name).model._base_manager.using(using)
+                    declaring_model = self.instance._meta.get_field(self.field_name).model
+                    row = declaring_model._base_manager.using(using)
                     if ROW_LOCK_WAIT_SECONDS <= 0:
-                        row.select_for_update(nowait=True, no_key=True).get(pk=self.instance.pk)
+                        fresh = row.select_for_update(nowait=True, no_key=True).get(pk=self.instance.pk)
                     else:
                         with connections[using].cursor() as cursor:
                             # The wait applies to this savepoint only. A refused
@@ -99,7 +48,7 @@ class State:
                             previous = cursor.fetchone()[0]
                             cursor.execute("SELECT set_config('lock_timeout', %s, true)",
                                            [f'{int(ROW_LOCK_WAIT_SECONDS * 1000)}ms'])
-                        row.select_for_update(no_key=True).get(pk=self.instance.pk)
+                        fresh = row.select_for_update(no_key=True).get(pk=self.instance.pk)
                         with connections[using].cursor() as cursor:
                             cursor.execute("SELECT set_config('lock_timeout', %s, true)", [previous])
             except OperationalError as error:
@@ -115,7 +64,22 @@ class State:
                         user_message='Another transaction is changing this record. Try again shortly.',
                     ) from error
                 raise
+            yield fresh if type(fresh) is model else rows.get(pk=self.instance.pk)
+
+    @contextmanager
+    def executing_action(self):
+        from django_logic.exceptions import RefusalReason, TransitionNotAllowed
+
+        using = self.instance._state.db or DEFAULT_DB_ALIAS
+        key = (using, self.instance_key)
+        active = _active_actions.get()
+        if key in active:
+            raise TransitionNotAllowed('A side effect already acts on this state field.', reason=RefusalReason.LOCKED)
+        token = _active_actions.set((*active, key))
+        try:
             yield
+        finally:
+            _active_actions.reset(token)
 
     def get_persisted_state(self):
         """Read the state column straight from the database row.
@@ -176,61 +140,3 @@ class State:
 
     def _get_hash(self):
         return blake2b(self.instance_key.encode(), digest_size=16).hexdigest()
-
-    def lock(self):
-        """
-        Return True after taking the lock, or False when already locked.
-
-        Committed lock records retain their ownership if the business connection
-        is lost. ``unlock()`` removes only this object's token.
-        Inside DatabaseTransition, ownership is visible only within this call.
-        Other connections rely on the PostgreSQL row lock when they act.
-        """
-        if _database_lock_is_held(self):
-            return False
-        using = _database_scope.get()
-        if using:
-            if (self.instance._state.db or DEFAULT_DB_ALIAS) != using:
-                from django.core.exceptions import ImproperlyConfigured
-                raise ImproperlyConfigured('Nested database transitions must use the same database transaction.')
-            if self.is_locked():
-                return False
-            _database_locks.set((*_database_locks.get(), self))
-            return True
-        from django_logic.lock_ownership import acquire_lock
-        token = acquire_lock(self._get_hash(), _get_lock_timeout())
-        if token is not None:
-            self._lock_token = token
-            return True
-        return False
-
-    def unlock(self):
-        """Release this State object's lock.
-
-        Inside DatabaseTransition, remove ownership recorded in the current call.
-        PostgreSQL keeps its row lock until the transaction ends.
-
-        The database checks the ownership token in the deletion itself. If an
-        expired lock was replaced, this call cannot remove the newer lock.
-
-        A State object without a token cannot release another object's lock.
-        """
-        for held in reversed(_database_locks.get()):
-            if held is self:
-                _database_locks.set(tuple(item for item in _database_locks.get() if item is not held))
-                return
-        token = getattr(self, '_lock_token', None)
-        if token is None:
-            return
-        from django_logic.lock_ownership import release_lock
-        release_lock(self._get_hash(), token)
-        self._lock_token = None
-
-    def is_locked(self):
-        """Report a committed lock or DatabaseTransition ownership in this call.
-
-        Other connections cannot see DatabaseTransition ownership through this check.
-        Lock status can change before the caller acts; action calls take their own locks.
-        """
-        from django_logic.lock_ownership import is_locked
-        return _database_lock_is_held(self) or is_locked(self._get_hash())

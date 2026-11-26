@@ -13,7 +13,15 @@ WHERE NOT is_completed AND kwargs::text LIKE '%"__dl_type__"%';
 Pass plain JSON when submitting new jobs. Convert dates and UUIDs to strings.
 The worker refuses old type tags before calling any business functions.
 Read job counts and timings from `TransitionMessage`. The operator command lists or wakes jobs.
+A custom `is_valid` override still returns a boolean. When it refuses, the reason is unspecified.
+Condition and permission bundles now return the failed check or `None`.
 Undeclared actions raise `AttributeError`. Use `hasattr(process, name)` for optional actions.
+
+Before migration 0023, stop all old producers and workers and allow their open actions to finish. The migration drops the two ownership tables. Start 6.0 producers and workers after migrating. Mixing versions during this change can leave an old process querying a dropped table.
+
+Replace `DatabaseTransition` with `Transition` and remove `atomic` from synchronous declarations. Required work and the target now roll back together on failure. Move reversible submission preparation into a caller transaction and remove `submission_context`. Remove `LOCK_TIMEOUT` and `include_locked` from settings and action listings. Optional callbacks of synchronous calls run after the surrounding transaction commits.
+
+For rollback, stop 6.0 processes and migrate `django_logic_background` to 0022 before starting 5.3.1. Restored lock tables start empty. Drain jobs whose behavior depends on the new API before rolling back.
 
 ## From 5.2.2 to 5.3.0
 

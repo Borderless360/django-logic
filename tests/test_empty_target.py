@@ -10,7 +10,6 @@ from django.test import TestCase, TransactionTestCase
 from django_logic import Transition
 from django_logic.background.models import TransitionMessage
 from django_logic.exceptions import TransitionNotAllowed, TransitionTemporarilyUnavailable
-from django_logic.state import State
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres
 
@@ -56,18 +55,6 @@ class EmptyTargetTests(TestCase):
         with self.assertRaisesRegex(ImproperlyConfigured, 'lock=False needs target=None'):
             Transition('unsafe_reset', sources=['draft'], target='', lock=False)
 
-    def test_another_operation_keeps_its_lock_when_reset_is_refused(self):
-        other = State(Widget.objects.get(pk=self.widget.pk), 'status', 'empty_status_proc')
-        self.assertTrue(other.lock())
-        try:
-            with self.assertRaises(TransitionNotAllowed):
-                self.widget.empty_status_proc.reset()
-            self.assertTrue(other.is_locked())
-        finally:
-            other.unlock()
-
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'draft')
 
     def test_background_completion_can_clear_its_in_progress_status(self):
         self.widget.empty_status_proc.reset_later()

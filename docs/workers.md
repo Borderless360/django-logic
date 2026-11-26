@@ -21,11 +21,7 @@ This lets required newer work run before an older job checks its result again.
 Jobs without a deferral keep their submission order, including jobs without a fairness key.
 A failed attempt waits until its retry time. The configured error limit stops repeated failures.
 Error retries keep their submission order once the retry wait ends.
-A lost business connection releases its row lock. Unexpired state locks taken by
-that job still prevent a retry until confirmed-stop cleanup or their configured
-lease expires. A process-owner record alone does not delay a job that has no such
-locks; database-only work can recover as soon as its database transaction ends.
-External side effects still require application duplicate protection.
+A lost business connection releases its row lock. If a worker exits between selecting a job and acquiring its execution lock, another worker can recover the job after five seconds. External side effects require application duplicate protection.
 
 Each job runs in a separate process. The worker records crashes and stops
 jobs that exceed their declared timeout. The job row remains the source for recovery.

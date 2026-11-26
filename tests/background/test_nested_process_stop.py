@@ -4,10 +4,7 @@ from pathlib import Path
 import signal
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
 
-from django.db import connections
 from django.test import TransactionTestCase, override_settings
 
 from django_logic import Process, Transition
@@ -15,8 +12,6 @@ from django_logic.background import BackgroundTransition
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import run_once
 from django_logic.state import State
-from django_logic.models import StateLock, JobProcessOwner
-from django_logic.exceptions import TransitionNotAllowed
 from tests import dl_settings
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres, requires_real_redis
@@ -72,9 +67,6 @@ class NestedProcessStopTests(TransactionTestCase):
             self.assertIn('[timeout]' if stop == 'timeout' else '[crashed]', row.last_error_message)
             nested.refresh_from_db()
             self.assertEqual(nested.status, 'draft')
-            self.assertFalse(State(nested, 'status').is_locked(),
-                             'The stopped nested transition must not leave an owned lock.')
-            self.assertFalse(JobProcessOwner.objects.exists())
             self.assertTrue(run_once(['nested_stop'], isolate=True))
             parent.refresh_from_db()
             nested.refresh_from_db()
@@ -90,54 +82,6 @@ class NestedProcessStopTests(TransactionTestCase):
     def test_crash_releases_nested_work_for_the_same_jobs_retry(self):
         self.check_stopped_job('crash')
 
-    def test_explicit_owner_still_refuses_a_transition(self):
-        widget = Widget.objects.create(status='draft')
-        owner = State(widget, 'status')
-        self.assertTrue(owner.lock())
-        token = StateLock.objects.get(key=owner._get_hash()).token
-        calls = []
-        transition = Transition('finish', sources=['draft'], target='finished',
-                                side_effects=[lambda instance, **kwargs: calls.append(instance.pk)])
-        state = State(widget, 'status', process_name='nested_stop')
-        try:
-            with self.assertRaises(TransitionNotAllowed):
-                transition.change_state(state)
-            self.assertEqual(StateLock.objects.get(key=owner._get_hash()).token, token)
-            self.assertEqual(calls, [])
-        finally:
-            owner.unlock()
-        transition.change_state(state)
-        self.assertEqual(calls, [widget.pk])
-
-    def test_active_transition_excludes_another_explicit_lock(self):
-        widget = Widget.objects.create(status='draft')
-        captured = []
-
-        def competing_lock():
-            try:
-                state = State(Widget.objects.get(pk=widget.pk), 'status')
-                acquired = state.lock()
-                if acquired:
-                    state.unlock()
-                return acquired
-            finally:
-                connections.close_all()
-
-        def inspect(instance, **kwargs):
-            captured.append(copy_context())
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                self.assertFalse(pool.submit(captured[0].run, competing_lock).result(timeout=5))
-            self.assertFalse(State(instance, 'status').lock(), 'A nested call on the same state stays refused.')
-            self.assertTrue(State(instance, 'status').is_locked())
-
-        transition = Transition('finish', sources=['draft'], target='finished', side_effects=[inspect])
-        transition.change_state(State(widget, 'status', process_name='nested_stop'))
-        later = State(widget, 'status')
-        self.assertTrue(captured[0].run(later.lock))
-        try:
-            self.assertTrue(later.is_locked())
-        finally:
-            later.unlock()
 
     def test_callback_can_start_the_next_transition(self):
         widget = Widget.objects.create(status='draft')
@@ -150,4 +94,3 @@ class NestedProcessStopTests(TransactionTestCase):
         first.change_state(State(widget, 'status', process_name='nested_stop'))
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'finished')
-        self.assertFalse(State(widget, 'status').is_locked())

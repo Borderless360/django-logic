@@ -4,12 +4,24 @@
 [![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master)
 [![License](https://img.shields.io/pypi/l/django-logic.svg)](https://github.com/Borderless360/django-logic/blob/master/LICENSE)
 
-Django Logic gives a Django project one layer for its business rules.
-A process declares which actions a record supports, who may run them, and what changes.
-Views, tasks and admin pages call the same action.
+Django Logic gives a Django app a business logic layer. Put each operation a caller
+can request, such as approving an order, behind a named transition. Its declaration
+says when the operation is allowed, who can run it, and which functions do the work.
+A single action is useful on its own. When several actions form a workflow, they use
+the same building blocks.
+
+This follows the use-case idea from *Clean Architecture*. Views, admin pages,
+management commands and tasks call the same application code. A view extracts the
+actor from the request. The rule for approving the order lives in the process.
+The business functions can work directly with Django models and can be tested
+without constructing an HTTP request.
 
 ```python
+# A view acting for the signed-in user
 order.process.approve(user=request.user)
+
+# A management command acting for an identified operator
+order.process.approve(user=operator)
 ```
 
 | Place | Responsibility |
@@ -36,13 +48,11 @@ Create the record and validate form input before calling a transition.
   `SELECT FOR UPDATE SKIP LOCKED`, and SQLite has no row locks.
   Use psycopg 3.2 or later, or Django’s supported psycopg2 driver.
   The `postgres` installation extra installs psycopg 3.
-- The `default` PostgreSQL database stores committed state-lock ownership for every
-  transition caller. SQLite is supported for single-process business tests with the
-  test runtime enabled. Other database backends are refused.
+- PostgreSQL row locks protect concurrent changes. SQLite supports single-process development tests.
 
 ## Install
 
-The current release is **6.0.0**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
+This guide describes **6.0.0**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
 Before upgrading, follow the [upgrade and rollback requirements](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 
@@ -63,9 +73,7 @@ That one entry is the whole library: the `TransitionMessage` table and
 its migrations, the `dl_worker` and `dl_transitions` commands, and every
 system check. Configure the database below.
 
-Synchronous-only applications use the same entry and ownership tables. PostgreSQL
-keeps ownership committed separately from business changes. SQLite tests use their
-ordinary connection and cannot establish concurrent production guarantees.
+Synchronous-only applications use the same installed app and migrations.
 
 ```bash
 python manage.py migrate
@@ -167,7 +175,7 @@ Each declaration option has one purpose:
   receive `exception=` and are best-effort. Use them for optional reporting.
   Required compensation belongs in a saved business job.
 
-Required database changes can use `atomic=True`. Use `DatabaseTransition` when all work can be rolled back by PostgreSQL.
+A synchronous action commits its side effects and target together. Its optional callbacks run after the outer transaction commits.
 See [locks and transactions](https://github.com/Borderless360/django-logic/blob/master/docs/transactions.md) for callback timing, nested actions and external-request limits.
 
 Declare a `Transition` with no `target` for work that needs conditions,
@@ -348,10 +356,7 @@ completes the row.
 
 `in_progress_state` is available only on background transitions with a target.
 Several transitions may share it; each saved job records its exact transition.
-A synchronous transition cannot declare it. Use `submission_context` for required
-database preparation that must commit together with the background job and its
-in-progress state. A failed submission rolls all of them back. See the
-[submission contract](https://github.com/Borderless360/django-logic/blob/master/docs/background-jobs.md#preparing-a-submission).
+Use `transaction.atomic()` when related database changes must commit with a submitted job. The action checks its conditions and permissions against the locked record.
 
 If another action changes the model's state while a job waits, that change wins.
 The worker completes the job as `superseded` and skips its side effects.

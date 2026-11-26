@@ -106,51 +106,24 @@ class SyncProcessAvailabilityScenario(StateTraceMixin, ProcessScenario):
         self.assertEqual(error.current_state, 'draft')
         self.assertIn("state 'draft'", str(error))
 
-    def test_eligibility_query_does_not_bypass_another_actions_lock(self):
-        widget = self.create_instance(status='draft')
-        process = self._process(widget)
-        holder = State(widget, 'status', 'sync_proc')
-        self.assertTrue(holder.lock())
-        try:
-            self.assertNotIn('approve', process.get_available_actions())
-            self.assertEqual(process.get_available_actions(action_name='approve', include_locked=True), ['approve'])
-            with self.assertRaises(TransitionNotAllowed):
-                process.approve()
-            widget.refresh_from_db()
-            self.assertEqual((widget.status, widget.se_log), ('draft', ''))
-            self.assertTrue(holder.is_locked())
-        finally:
-            holder.unlock()
-        process.approve()
-        self.assert_state(widget, 'notified')
 
     def test_eligibility_query_keeps_source_and_transition_permission_checks(self):
         user = get_user_model().objects.create(username='eligibility_customer', is_staff=False)
         widget = self.create_instance(status='draft')
         process = self._process(widget)
-        holder = State(widget, 'status', 'sync_proc')
-        self.assertTrue(holder.lock())
-        try:
-            self.assertEqual(process.get_available_actions(user=user, action_name='staff_only', include_locked=True), [])
-            self.assertEqual(list(process.get_available_transitions(action_name='notify', include_locked=True)), [])
-            with self.assertRaises(TransitionNotAllowed):
-                process.staff_only(user=user)
-            widget.refresh_from_db()
-            self.assertEqual((widget.status, widget.se_log), ('draft', ''))
-        finally:
-            holder.unlock()
+        self.assertEqual(process.get_available_actions(user=user, action_name='staff_only'), [])
+        self.assertEqual(list(process.get_available_transitions(action_name='notify')), [])
+        with self.assertRaises(TransitionNotAllowed):
+            process.staff_only(user=user)
+        widget.refresh_from_db()
+        self.assertEqual((widget.status, widget.se_log), ('draft', ''))
 
     def test_eligibility_query_keeps_condition_selection(self):
         widget = self.create_instance(status='draft', kwargs_seen=['flag'])
         process = self._process(widget)
-        holder = State(widget, 'status', 'sync_proc')
-        self.assertTrue(holder.lock())
-        try:
-            matches = list(process.get_available_transitions(action_name='cancel', include_locked=True))
-            self.assertEqual(len(matches), 1)
-            self.assertEqual(matches[0].target, 'archived')
-        finally:
-            holder.unlock()
+        matches = list(process.get_available_transitions(action_name='cancel'))
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].target, 'archived')
         process.cancel()
         self.assert_state(widget, 'archived')
         self.assertIn('cancel_flagged,', widget.se_log)
@@ -214,26 +187,6 @@ class SyncProcessDrivingScenario(StateTraceMixin, ProcessScenario):
         self.assert_state(widget, 'poked_failed')
         self.assert_failure_callbacks_ran(['fcb_on_poke_fail'])
 
-    def test_a_held_lock_refuses_a_no_target_transition(self):
-        # A transition with no target takes the lock like any other, so a
-        # concurrent holder refuses it before its side-effects run, and
-        # the holder's lock survives. Drive through the entrypoint with a
-        # pre-held lock.
-        widget = self.create_instance(status='draft')
-        state = self._process(widget).state
-        self.assertTrue(state.lock(), 'pre-condition: acquire the lock')
-        try:
-            self.transition(
-                widget, 'poke_fail', expect_raises=TransitionNotAllowed,
-            )
-            self.assertTrue(
-                state.is_locked(),
-                'the refused transition released a lock another holder owns',
-            )
-            # Nothing ran, so nothing was written.
-            self.assert_state(widget, 'draft')
-        finally:
-            state.unlock()
 
     def test_kwargs_are_forwarded_to_side_effects(self):
         from tests.background.models import SYNC_LAST_KWARGS

@@ -46,11 +46,10 @@ class CrossMachineCascadeContract(ProcessScenario):
         )
         self.assert_raised(ValueError, match='inner machine failed')
 
-        # (1)+(2) inner machine is contained in ITS failed_state, ITS failure
-        # callback ran.
+        # The outer required work rolled back the nested state and discarded its hooks.
         inner.refresh_from_db()
-        self.assertEqual(inner.status, 'inner_failed')
-        self.assertIn('inner_fcb,', inner.cb_log)
+        self.assertEqual(inner.status, 'draft')
+        self.assertNotIn('inner_fcb,', inner.cb_log)
 
         # (3) outer machine landed in ITS failed_state; outer failure callback
         # ran (tracked, since it lives on the driven process).
@@ -60,7 +59,7 @@ class CrossMachineCascadeContract(ProcessScenario):
         # (4) the side-effect BEFORE the nested call ran; the one AFTER it was
         # skipped when the nested call raised.
         outer.refresh_from_db()
-        self.assertIn('outer_before,', outer.se_log)
+        self.assertEqual(outer.se_log, '')
         self.assertNotIn('outer_after,', outer.se_log)
         self.assert_side_effects_ran(['cascade_outer_before'])
         self.assert_side_effects_not_ran(['cascade_outer_after'])
@@ -75,6 +74,5 @@ class CrossMachineCascadeContract(ProcessScenario):
             'outer:before',
             'outer:call_inner',
             'inner:side_effect',
-            'inner:failure_callback',
             'outer:failure_callback',
         ])

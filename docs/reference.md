@@ -8,7 +8,7 @@ Business rules belong in application functions. Worker configuration belongs in 
 | Import | Purpose |
 | --- | --- |
 | `from django_logic import Process, ProcessManager` | Declare a process and bind it to a model field. |
-| `from django_logic import Transition, DatabaseTransition` | Run a synchronous action; the database-only class requires PostgreSQL. |
+| `from django_logic import Transition` | Run a synchronous action. |
 | `from django_logic.background import BackgroundTransition` | Save an action for a worker. |
 | `from django_logic.background import Defer, PermanentFailure` | Wait until a specified time, or report a failure that retrying cannot fix. |
 | `from django_logic.background import sync_execution` | Run background work inline within one block. |
@@ -28,7 +28,6 @@ Business rules belong in application functions. Worker configuration belongs in 
 ## Transition declarations
 
 `Transition(action_name, sources, target=None, ...)` declares an action that runs in the caller.
-`DatabaseTransition` accepts the same options and requires all work to be reversible in the same PostgreSQL database.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -43,7 +42,6 @@ Business rules belong in application functions. Worker configuration belongs in 
 | `failed_state` | `None` | State saved when failure handling can safely update the record. |
 | `refusal_messages` | `{}` | Business explanations indexed by `RefusalReason`. |
 | `lock` | `True` | Protect the record's state. `False` cannot be combined with target or failed-state writes. |
-| `atomic` | `False` | Roll required database writes and the target save back together on error. |
 
 Background jobs accept those business options and add the following:
 
@@ -55,7 +53,6 @@ Background jobs accept those business options and add the following:
 | `atomic` | `True` | Roll back the failed attempt's database writes; use `False` for independently committed provider receipts. |
 | `no_retry_on` | `()` | Exception types that end the job immediately as failed. |
 | `fairness_key` | `None` | A string or `fn(instance, **kwargs)` that returns the group between which workers take turns. |
-| `submission_context` | `None` | A context manager that prepares and saves business inputs in the job submission transaction. |
 
 Background jobs cannot use `lock=False`. The job and its accepted state must be saved together.
 See [background jobs](background-jobs.md) for preparation and deferral examples.
@@ -162,7 +159,7 @@ Pass dates as ISO strings and decimal amounts as strings when precision matters.
 The engine manages `tr_id`, `root_id`, `parent_id`, `process_class`, `owning_process_class` and runtime `context`.
 `process_class` and `owning_process_class` are dotted-path strings, not Python class objects.
 `context` is a shared scratch dictionary for the hooks of one execution. It is not saved, and each retry starts with an empty dictionary.
-It differs from `submission_context` (transactional preparation) and `JOB_CONTEXT` (saved application audit context).
+Use `JOB_CONTEXT` for saved application audit context.
 `user_id` is written from `user=` and restored by the worker.
 `state`, `exception` and `request` are reserved at the call boundary.
 A failure callback receives `exception=` after the engine handles the failure:
@@ -186,7 +183,6 @@ Set these keys inside `DJANGO_LOGIC`. Omitted keys use their defaults.
 | --- | --- | --- |
 | `BACKGROUND_EXECUTION` | `'pull'` | Workers run saved jobs; `'sync'` runs inline and requires `enable_sync()` before startup. |
 | `DEFAULT_QUEUE` | `'django_logic'` | Queue for declarations without `queue=`. |
-| `LOCK_TIMEOUT` | `7200` | Positive ownership-lease duration in seconds. Confirmed job-process exits release their locks sooner. An unobserved interruption can leave ownership until expiry; expiry does not prove an external request stopped. |
 | `TRANSITION_MESSAGE_MAX_ERRORS` | `5` | Positive integer limit on recorded errors before a job completes as failed. |
 | `TRANSITION_MESSAGE_RETRY_MINUTES` | `2` | Nonnegative wait after a recorded error. |
 | `TRANSITION_MESSAGE_CLEANUP_DAYS` | `7` | Age before completed job history is eligible for cleanup; the newest failed job per record and process is retained. |
@@ -204,8 +200,6 @@ Run `python manage.py check --tag django_logic` after configuring the applicatio
 | Check ID | Meaning |
 | --- | --- |
 | `django_logic.pull_mode_needs_postgresql` | Background workers require PostgreSQL. |
-| `django_logic.state_lock_database` | State ownership requires the default PostgreSQL database; explicitly enabled single-process tests may use SQLite. |
-| `django_logic.state_lock_routing` | Both ownership tables must be migrated and written on the default database. |
 | `django_logic.transition_message_routing` | Jobs and their bound models must use the same default database. |
 | `django_logic.unread_setting` | A configured setting is not a supported key. |
 

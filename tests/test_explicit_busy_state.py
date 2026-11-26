@@ -77,7 +77,6 @@ class BackgroundBusyStateTests(TestCase):
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, 'draft')
         self.assertFalse(TransitionMessage.objects.exists())
-        self.assertFalse(invoice.explicit_busy_proc.state.is_locked())
 
     @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=1))
     def test_inline_execution_completes_the_saved_job(self):

@@ -13,10 +13,8 @@ The core mechanism is:
 Reference: docs/research/race-condition-issue
 """
 import threading
-import time
 from unittest.mock import patch
 
-from django.core.cache import cache
 from django.db import connections
 from django.test import tag
 
@@ -28,7 +26,6 @@ from tests.stability.base import (
 )
 from tests.stability.models import (
     Order, OrderProcess,
-    side_effect_one, side_effect_two, side_effect_three,
 )
 
 
@@ -119,48 +116,6 @@ class TestConcurrentTransitionRequests(StabilityTestCase):
 
 
 @tag('stability')
-class TestRaceBetweenUserActionAndBackground(StabilityTestCase):
-    """
-    2.5 -- While a background transition is in_progress, a user tries
-    to trigger a different transition on the same instance.
-
-    Must be rejected: the state lock is held for the critical section, so
-    get_available_transitions offers nothing while it is.
-    """
-
-    def test_user_action_rejected_while_in_progress(self):
-        order = Order.objects.create(status='approved')
-        state = State(order, 'status', process_name='process')
-
-        self.assertTrue(state.lock())
-        self.track_lock(state)
-
-        process = OrderProcess(field_name='status', instance=order)
-        available = list(process.get_available_transitions(action_name='cancel'))
-        self.assertEqual(len(available), 0,
-            "No transitions should be available while state is locked")
-
-        state.unlock()
-        self._tracked_lock_keys.discard(state._get_hash())
-
-    def test_different_transition_rejected_when_locked(self):
-        """Even if source state matches, the lock prevents execution."""
-        order = Order.objects.create(status='approved')
-        state = State(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        self.assertTrue(state.lock())
-
-        process = OrderProcess(field_name='status', instance=order)
-        with self.assertRaises(TransitionNotAllowed) as ctx:
-            process.ship()
-        self.assertIn("locked", str(ctx.exception).lower())
-
-        state.unlock()
-        self._tracked_lock_keys.discard(state._get_hash())
-
-
-@tag('stability')
 class TestRapidSuccessiveTransitions(StabilityTestCase):
     """
     2.6 -- Complete transition A, then immediately trigger transition B.
@@ -171,26 +126,22 @@ class TestRapidSuccessiveTransitions(StabilityTestCase):
     def test_sequential_transitions_no_lock_leak(self):
         order = Order.objects.create(status='draft')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         process = OrderProcess(field_name='status', instance=order)
         process.approve()
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')
-        self.assert_unlocked(state)
 
         process2 = OrderProcess(field_name='status', instance=order)
         process2.fulfill()
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfilled')
-        self.assert_unlocked(state)
 
     def test_three_rapid_transitions(self):
         order = Order.objects.create(status='draft')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         process = OrderProcess(field_name='status', instance=order)
         process.approve()
@@ -206,5 +157,3 @@ class TestRapidSuccessiveTransitions(StabilityTestCase):
         process.complete()
         order.refresh_from_db()
         self.assertEqual(order.status, 'completed')
-
-        self.assert_unlocked(state)

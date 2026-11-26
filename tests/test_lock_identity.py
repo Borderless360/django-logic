@@ -21,13 +21,6 @@ class LockIdentityTests(TestCase):
             State(proxy, 'status').instance_key,
         )
 
-    def test_a_proxy_cannot_take_a_lock_the_concrete_model_holds(self):
-        invoice = Invoice.objects.create(status='draft')
-        proxy = InvoiceProxy.objects.get(pk=invoice.pk)
-        held = State(invoice, 'status')
-        self.assertTrue(held.lock())
-        self.addCleanup(held.unlock)
-        self.assertFalse(State(proxy, 'status').lock())
 
     def test_an_mti_child_shares_the_key_of_the_parent_that_declares_it(self):
         child = MtiChild.objects.create(status='draft')

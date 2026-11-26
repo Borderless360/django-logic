@@ -95,6 +95,7 @@ def run_non_atomic(transition_message_id):
 def _run_attempt(transition_message_id, alias):
     """Run one attempt. ``alias`` is the connection that holds the job row."""
     from django_logic.background.runner import (
+        _active_job,
         _decode_kwargs,
         _handle_failure,
         _handle_restore_failure,
@@ -172,6 +173,8 @@ def _run_attempt(transition_message_id, alias):
 
         def complete():
             with state.protected():
+                if _active_job.get().chose_result(state):
+                    return _handle_success(transition_message, transition, state, kwargs)
                 superseded = _superseded_outcome(
                     transition_message, transition, state, kwargs, after_side_effects=True,
                 )

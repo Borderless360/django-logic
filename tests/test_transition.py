@@ -14,18 +14,13 @@ context contract. Fixtures live in tests/background/models.py; binding in
 tests/background/apps.py.
 """
 from tests import StateTraceMixin
-from unittest import mock
 
-from django.core.cache import cache
 from django.test import override_settings
 
-from django_logic.exceptions import TransitionNotAllowed
-from django_logic.state import State
 from django_logic.testing import ProcessScenario
 from tests.background.models import (
     CALLBACK_SEEN_STATE,
     SYNC_LAST_KWARGS,
-    SYNC_ORDER,
     Widget,
     WidgetAmbiguousCallbackProcess,
     WidgetContextProcess,
@@ -94,19 +89,6 @@ class TransitionSideEffectsScenario(StateTraceMixin, ProcessScenario):
         self.assert_side_effects_not_ran(['se_reject_attempt'])
         self.assert_failure_callbacks_ran(['fcb_on_fail'])
 
-    def test_lock_is_released_after_success(self):
-        widget = self.create_instance(status='draft')
-        self.transition(widget, 'approve')
-        self.assertFalse(self._process(widget).state.is_locked())
-
-    def test_lock_is_released_after_failure(self):
-        widget = self.create_instance(status='draft')
-        self.transition(
-            widget, 'reject',
-            expect_raises=ValueError, fail_side_effect='se_reject_attempt', fail_with=ValueError('boom'),
-        )
-        self.assertFalse(self._process(widget).state.is_locked())
-
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
 class ActionScenario(StateTraceMixin, ProcessScenario):
@@ -131,108 +113,6 @@ class ActionScenario(StateTraceMixin, ProcessScenario):
         self.assert_state(widget, 'poked_failed')
         self.assert_state_trace(['poked_failed'])
         self.assert_failure_callbacks_ran(['fcb_on_poke_fail'])
-
-    def test_a_held_lock_refuses_a_no_target_transition(self):
-        # A transition with no target takes the lock like any other, so a
-        # concurrent holder refuses it before its side-effects run, and
-        # the holder's lock survives.
-        widget = self.create_instance(status='draft')
-        state = self._process(widget).state
-        self.assertTrue(state.lock(), 'pre-condition: acquire the lock')
-        try:
-            self.transition(
-                widget, 'poke_fail', expect_raises=TransitionNotAllowed,
-            )
-            self.assertTrue(
-                state.is_locked(),
-                'the refused transition released a lock another holder owns',
-            )
-            # Nothing ran, so nothing was written.
-            self.assert_state(widget, 'draft')
-        finally:
-            state.unlock()
-
-    def test_failed_state_write_happens_under_the_lock(self):
-        # The write must happen while the Transition itself holds the lock —
-        # observed by reading the lock key at write time (#185).
-        widget = self.create_instance(status='draft')
-        real_set_state = State.set_state
-        locked_at_write = []
-
-        def observing(state, value):
-            locked_at_write.append(state.is_locked())
-            real_set_state(state, value)
-
-        with mock.patch.object(State, 'set_state', autospec=True,
-                               side_effect=observing):
-            self.transition(
-                widget, 'poke_fail',
-                expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
-            )
-        self.assert_state(widget, 'poked_failed')
-        self.assertEqual(
-            locked_at_write, [True],
-            'failed_state was written without holding the state lock',
-        )
-
-    def test_concurrent_transition_cannot_start_during_failed_state_write(self):
-        # The #185 TOCTOU: is_locked()-then-write left a window where a
-        # concurrent Transition could acquire the lock and the Transition's stale
-        # write then clobbered that flight's state. The atomic acquire closes
-        # it — a rival lock() attempt mid-write must lose.
-        widget = self.create_instance(status='draft')
-        real_set_state = State.set_state
-        rival_lock_results = []
-
-        def racing(state, value):
-            rival = State(state.instance, state.field_name,
-                          process_name=state.process_name)
-            acquired = rival.lock()
-            rival_lock_results.append(acquired)
-            if acquired:
-                # Only reachable when the fix regressed; keep the shared
-                # cache clean for the rest of the suite.
-                rival.unlock()
-            real_set_state(state, value)
-
-        with mock.patch.object(State, 'set_state', autospec=True,
-                               side_effect=racing):
-            self.transition(
-                widget, 'poke_fail',
-                expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
-            )
-        self.assertEqual(
-            rival_lock_results, [False],
-            'a concurrent transition could start during the failed_state write',
-        )
-        self.assert_state(widget, 'poked_failed')
-
-    def test_lock_released_after_failed_state_write(self):
-        # The write-scoped lock (#185) must not outlive the write.
-        widget = self.create_instance(status='draft')
-        self.transition(
-            widget, 'poke_fail',
-            expect_raises=ValueError, fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
-        )
-        self.assert_state(widget, 'poked_failed')
-        self.assertFalse(self._process(widget).state.is_locked())
-
-    def test_lock_released_when_failed_state_write_raises(self):
-        # A rejected failed_state write must not replace the original
-        # side-effect exception (#178) nor leak the write-scoped lock (#185).
-        widget = self.create_instance(status='draft')
-        with mock.patch.object(State, 'set_state', autospec=True,
-                               side_effect=RuntimeError('db refused')):
-            self.transition(
-                widget, 'poke_fail',
-                fail_side_effect='se_poke_attempt', fail_with=ValueError('poke broke'),
-                expect_raises=ValueError,
-            )
-        self.assert_raised(ValueError, match='poke broke')
-        self.assert_failure_callbacks_ran(['fcb_on_poke_fail'])
-        self.assertFalse(self._process(widget).state.is_locked())
-        # The rejected write never landed — the object stays put.
-        self.assert_state(widget, 'draft')
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)

@@ -211,7 +211,7 @@ class RefusalMessageTests(TestCase):
         self.assertIsNone(error.reason)
         self.assertEqual(error.user_message, "Action 'go' is not allowed")
 
-    def test_custom_validity_that_delegates_keeps_the_stock_check_message(self):
+    def test_custom_validity_that_delegates_returns_a_generic_refusal(self):
         @commands.refusal_message('Add a document.')
         def condition(instance, **kwargs):
             return False
@@ -224,8 +224,9 @@ class RefusalMessageTests(TestCase):
             transitions = [UserRequired('go', sources=['draft'], conditions=[condition])]
 
         self.assertEqual(self.refused(self.process(Workflow).go).user_message, "Action 'go' is not allowed")
-        self.assertEqual(self.refused(lambda: self.process(Workflow).go(user=object())).user_message,
-                         "Action 'go' is not allowed: Add a document.")
+        error = self.refused(lambda: self.process(Workflow).go(user=object()))
+        self.assertIsNone(error.reason)
+        self.assertEqual(error.user_message, "Action 'go' is not allowed")
 
     def test_strict_permission_failure_does_not_claim_an_unrun_callable(self):
         permission = Mock(return_value=True)
@@ -249,14 +250,6 @@ class RefusalMessageTests(TestCase):
             })]
 
         process = self.process(Workflow)
-        self.assertTrue(process.state.lock())
-        try:
-            error = self.refused(process.go)
-            self.assertEqual(error.user_message, "Action 'go' is not allowed: This invoice is being updated.")
-            self.assertEqual(str(error), 'State is locked')
-            self.assertIs(type(error), TransitionNotAllowed)
-        finally:
-            process.state.unlock()
         Invoice.objects.filter(pk=self.invoice.pk).update(status='approved')
         error = self.refused(process.go)
         self.assertEqual(error.user_message, "Action 'go' is not allowed: The invoice already changed.")
@@ -305,13 +298,6 @@ class RefusalMessageTests(TestCase):
         self.assertIs(caught.exception, technical)
         self.assertFalse(hasattr(technical, 'user_message'))
 
-    def test_raw_transition_calls_keep_user_message_unset(self):
-        process = self.process(Process)
-        self.assertTrue(process.state.lock())
-        self.addCleanup(process.state.unlock)
-        error = self.refused(lambda: Transition('go', sources=['draft']).change_state(process.state))
-        self.assertIsNone(error.user_message)
-        self.assertEqual(str(error), 'State is locked')
 
     @override_settings(DJANGO_LOGIC=dl_settings(TRANSITION_MESSAGE_RETRY_MINUTES=2))
     def test_background_runtime_refusals_keep_types_and_default_wording(self):
@@ -406,7 +392,7 @@ class MessageCallableTests(SimpleTestCase):
             return False
 
         class Workflow(Process):
-            transitions = [Transition('go', sources=['draft'], conditions=[first, second])]
+            transitions = [Transition('go', sources=['draft'], conditions=[first, second], lock=False)]
 
         def refuse(flag):
             instance = Invoice(pk=123, status='draft', is_available=flag)

@@ -19,13 +19,10 @@ Pinned for every shape:
 * hook order — side-effects run while the persisted state is still the source,
   and callbacks run only after the target write is readable. On terminal
   failure, failed_state is written first and the failure callbacks second;
-* callback follow-ups — the same background transition runs with the same typed
+* callback follow-ups — the same background transition runs with the same JSON
   kwargs and a live ``user`` whether the parent is synchronous or background,
   with a target or without one, and never sees ``request``.
 """
-from datetime import datetime, timezone as tz
-from decimal import Decimal
-from uuid import UUID
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -39,12 +36,12 @@ from tests import dl_settings
 
 _SYNC_SETTINGS = dl_settings(TRANSITION_MESSAGE_MAX_ERRORS=3)
 
-TYPED_KWARGS = dict(
-    when=datetime(2026, 6, 4, 12, 30, 0, tzinfo=tz.utc),
-    amount=Decimal('19.99'),
-    some_id=UUID('12345678-1234-5678-1234-567812345678'),
-    pair=(1, 'two'),
-    tags={'a', 'b'},
+JSON_KWARGS = dict(
+    when='2026-06-04T12:30:00+00:00',
+    amount='19.99',
+    some_id='12345678-1234-5678-1234-567812345678',
+    pair=[1, 'two'],
+    tags=['a', 'b'],
     flag=True,
     note='x',
 )
@@ -170,14 +167,14 @@ class ParityMatrixTests(TestCase):
     def test_hook_kwargs_identical_across_all_four_classes(self):
         results = {}
         for action in ALL_ACTIONS:
-            _drive(self._fresh(), action, user=self.user, **dict(TYPED_KWARGS))
+            _drive(self._fresh(), action, user=self.user, **dict(JSON_KWARGS))
             results[action] = self._hook_kwargs()
             self.assertEqual(SEEN['user'].pk, self.user.pk, action)
             self.assertEqual(SEEN['owning_process_class'], f'{__name__}.ParityProcess')
 
         for action in ALL_ACTIONS:
-            self.assertEqual(results[action], TYPED_KWARGS, action)
-            for key, value in TYPED_KWARGS.items():
+            self.assertEqual(results[action], JSON_KWARGS, action)
+            for key, value in JSON_KWARGS.items():
                 self.assertIs(type(results[action][key]), type(value), f'{action}.{key}')
 
     def test_request_is_refused_at_the_call_in_all_four_shapes(self):
@@ -276,19 +273,19 @@ class ParityMatrixTests(TestCase):
 
     def test_callback_followups_work_equivalently_across_all_four_shapes(self):
         # The parent's shape must not change what the follow-up receives:
-        # the same typed kwargs and a live user. Every shape chains — a
+        # the same JSON kwargs and a live user. Every shape chains — a
         # transition with no target included.
         for parent in CHAIN_PARENTS:
             HOP_SEEN.clear()
             widget = self._fresh()
-            kwargs = dict(TYPED_KWARGS)
+            kwargs = dict(JSON_KWARGS)
             _drive(widget, parent, user=self.user, **kwargs)
             widget.refresh_from_db()
             self.assertEqual(widget.status, 'chained', parent)
             hop_kwargs = {k: v for k, v in HOP_SEEN.items()
                           if k not in _ENGINE_KEYS}
-            self.assertEqual(hop_kwargs, TYPED_KWARGS, parent)
-            for key, value in TYPED_KWARGS.items():
+            self.assertEqual(hop_kwargs, JSON_KWARGS, parent)
+            for key, value in JSON_KWARGS.items():
                 self.assertIs(type(hop_kwargs[key]), type(value),
                               f'{parent}.{key}')
             self.assertEqual(HOP_SEEN['user'].pk, self.user.pk, parent)

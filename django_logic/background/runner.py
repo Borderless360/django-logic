@@ -47,7 +47,8 @@ from __future__ import annotations
 
 import importlib
 from contextlib import ExitStack, nullcontext
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 from django.apps import apps
@@ -68,6 +69,19 @@ from django_logic.process import _iter_process_tree, _transition_context
 
 
 @dataclass
+class _JobActions:
+    pk: int
+    results: dict = field(default_factory=dict)
+
+    def chose_result(self, state):
+        key = (state.instance_key, state.process_name)
+        return key in self.results and self.results[key] == state.get_persisted_state()
+
+
+_active_job = ContextVar('django_logic_active_job', default=None)
+
+
+@dataclass
 class _Outcome:
     """What the worker's atomic block produced — drives best-effort hooks."""
 
@@ -85,14 +99,13 @@ def run_background_transition(transition_message_id: int) -> None:
     Designed to be call-compatible from both the pull worker loop and an
     inline sync dispatcher.
     """
-    # Save the start before the attempt's transaction so reports and retry
-    # checks can read it even when the attempt later rolls back.
-    if not TransitionMessage.stamp_attempt_started(transition_message_id):
-        transition_logger.info(
-            f'TransitionMessage#{transition_message_id}: skipping this dispatch '
-            f'because the job is locked, completed, missing, or waiting until its eligible_at time.'
-        )
-        return
+    rows = TransitionMessage.objects.filter(pk=transition_message_id, is_completed=False).filter(
+        Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
+    if TransitionMessage.claim_start(TransitionMessage.ready_to_start(rows)) is not None:
+        run_claimed_transition(transition_message_id)
+
+
+def run_claimed_transition(transition_message_id):
     with ExitStack() as stack:
         try:
             stack.enter_context(restored_job_context(transition_message_id))
@@ -106,6 +119,7 @@ def run_background_transition(transition_message_id: int) -> None:
 
 def _run_background_transition(transition_message_id):
     token = _running_job_attempt.set(True)
+    job_token = _active_job.set(_JobActions(transition_message_id))
     try:
         outcome = _run_atomic(transition_message_id)
         if isinstance(outcome, _NonAtomicAttempt):
@@ -114,6 +128,7 @@ def _run_background_transition(transition_message_id):
     except _NothingToDo:
         return
     finally:
+        _active_job.reset(job_token)
         _running_job_attempt.reset(token)
 
     # Best-effort hooks after the transaction commits.
@@ -296,6 +311,10 @@ def _complete_terminal_failure(
     try:
         # A failed business-row check must not discard the job's recorded error.
         with transaction.atomic(using=using or state.instance._state.db or DEFAULT_DB_ALIAS), state.protected():
+            job = _active_job.get()
+            if job is not None and job.chose_result(state):
+                _finish_failed_job(transition_message, exception, measure_duration=measure_duration)
+                return (transition, state, kwargs, exception)
             matches, expected, current = _state_guard_matches(transition, state)
             write_error = None
             if matches and transition.failed_state:
@@ -443,7 +462,7 @@ def _run_atomic_state(transition_message, transition, state, instance, kwargs, d
         def execute_and_complete():
             _execute_attempt(instance, transition, state, kwargs)
             with state.protected():
-                if transition.target is None:
+                if transition.target is None and not _active_job.get().chose_result(state):
                     superseded = _superseded_outcome(
                         transition_message, transition, state, kwargs, after_side_effects=True,
                     )
@@ -491,13 +510,6 @@ def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> Transiti
         )
         raise _NothingToDo() from exc
 
-    from django_logic.lock_ownership import another_process_holds_job_locks
-    if another_process_holds_job_locks(transition_message_id):
-        transition_logger.info(
-            f'TransitionMessage#{transition_message_id}: another job process still owns state locks; '
-            'waiting for their release without counting a retry error.'
-        )
-        raise _NothingToDo()
     return message
 
 
@@ -605,7 +617,7 @@ def _execute_attempt(instance, transition, state, kwargs) -> None:
             command(instance, **kwargs)
         # A rejected target write rolls back the required work and counts
         # toward the retry limit, like a side-effect failure.
-        if transition.target is not None:
+        if transition.target is not None and not _active_job.get().chose_result(state):
             state.set_state(transition.target)
             transition_logger.info(
                 f'{kwargs.get("tr_id")} '

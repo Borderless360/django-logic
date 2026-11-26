@@ -7,7 +7,6 @@ from django.test import TransactionTestCase
 from django_logic.background import fairness, pull
 from django_logic.background.models import TransitionMessage
 from django_logic.database import set_local_timeouts
-from django_logic.lock_ownership import _lock_connection
 from tests.stability.base import requires_postgres
 
 
@@ -168,22 +167,3 @@ class DatabaseTimeoutTests(TransactionTestCase):
                     self.assertIsNone(fairness.claim_fair(TransitionMessage.objects.filter(pk=-1)))
                 self.assertEqual(observed, [expected])
                 self.assert_timeouts(*original)
-
-    def test_independent_lock_connection_preserves_its_stricter_defaults(self):
-        cases = (
-            ('0', '0', (5000, 2000)),
-            ('600ms', '40ms', (600, 40)),
-            ('5s', '2s', (5000, 2000)),
-            ('9s', '4s', (5000, 2000)),
-        )
-        options = connection.settings_dict['OPTIONS']
-        existing = options.get('options', '')
-        for statement, lock, expected in cases:
-            with self.subTest(statement=statement, lock=lock):
-                configured = f'{existing} -c statement_timeout={statement} -c lock_timeout={lock}'
-                with patch.dict(options, {'options': configured}):
-                    with _lock_connection() as alias:
-                        self.assertNotEqual(alias, 'default')
-                        self.assertTrue(connections[alias].in_atomic_block)
-                        self.assert_timeouts(*expected, using=alias)
-                self.assert_timeouts(0, 0)

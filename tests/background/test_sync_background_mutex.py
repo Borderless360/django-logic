@@ -78,7 +78,6 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         # Transition.change_state must unlock before it re-raises, or the
         # instance stays locked with nothing left to unlock it.
         state = State(self.widget, 'status', 'process')
-        self.assertFalse(state.is_locked())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')
 
@@ -120,7 +119,6 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.assertEqual(ran, [])
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')
-        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
     def test_gate_raises_the_transient_type(self):
         # The refusal clears once the background work finishes, so a generic
@@ -145,7 +143,6 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
             ctx.exception, TransitionTemporarilyUnavailable)
         self.assertIn('stranded', str(ctx.exception))
         # The refusal path must still release the lock.
-        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
     def test_attempt_past_its_timeout_and_retry_window_is_stranded(self):
         # The timeout has passed, nothing was recorded since, and no worker
@@ -207,7 +204,6 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
         self.assertIn('stranded', str(ctx.exception))
         # No second row was created, and the lock was released.
         self.assertEqual(TransitionMessage.objects.count(), 1)
-        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
 
     def test_running_row_rejects_a_second_enqueue_as_transient(self):
         # Control for the test above: a row that is still being retried keeps
@@ -272,7 +268,6 @@ class SyncTransitionGatedByTransitionMessageTests(TestCase):
             action.change_state(state)
 
         self.assertEqual(hooks, ['failure_callbacks'])
-        self.assertFalse(state.is_locked())
 
 
 @override_settings(DJANGO_LOGIC=_SYNC_SETTINGS)
@@ -288,24 +283,6 @@ class BackgroundEnqueueMutexTests(TransactionTestCase):
         self.addCleanup(cache.clear)
         self.widget = Widget.objects.create()  # status='draft'
 
-    def test_locked_state_rejects_background_transition_and_creates_no_row(self):
-        # The reverse direction: a synchronous transition holds the cache lock,
-        # so enqueue fails before it writes a row or the in_progress_state.
-        state = State(self.widget, 'status', 'process')
-        self.assertTrue(state.lock())
-        self.addCleanup(state.unlock)
-
-        with sync_execution():
-            with self.assertRaises(TransitionNotAllowed) as ctx:
-                self.widget.process.fulfil()
-
-        self.assertEqual(str(ctx.exception), 'State is locked')
-        self.assertEqual(TransitionMessage.objects.count(), 0)
-        self.widget.refresh_from_db()
-        self.assertEqual(self.widget.status, 'draft')
-
-        state.unlock()
-        self.assertFalse(state.is_locked())
 
     def test_enqueue_releases_lock_when_rejected_as_already_in_progress(self):
         # The partial unique constraint rejects a second uncompleted row as
@@ -318,7 +295,6 @@ class BackgroundEnqueueMutexTests(TransactionTestCase):
 
         self.assertIn('already in progress', str(ctx.exception))
         state = State(self.widget, 'status', 'process')
-        self.assertFalse(state.is_locked())
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'draft')  # no in_progress write
         # Only the pre-existing row survives — the rejected attempt rolled
@@ -344,7 +320,6 @@ class BackgroundEnqueueMutexTests(TransactionTestCase):
 
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'fulfilled')
-        self.assertFalse(State(self.widget, 'status', 'process').is_locked())
         row = TransitionMessage.objects.get()
         self.assertTrue(row.is_completed)
 

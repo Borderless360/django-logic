@@ -13,7 +13,7 @@ from django_logic.background import BackgroundTransition, Defer
 from django_logic.background.fairness import FairnessGroup
 from django_logic.background.models import TransitionMessage
 from django_logic.background.pull import claim_next
-from django_logic.background.runner import run_background_transition
+from django_logic.background.runner import run_claimed_transition
 from tests import dl_settings
 from tests.background.models import Widget
 from tests.stability.base import requires_postgres
@@ -53,7 +53,7 @@ class FairClaimTests(TransactionTestCase):
 
         self.assertEqual(claim_next([message.queue_name]), message.pk)
         self.assertTrue(FairnessGroup.objects.filter(key=message.fairness_key).exists())
-        run_background_transition(message.pk)
+        run_claimed_transition(message.pk)
         widget.refresh_from_db()
         self.assertEqual(widget.status, 'fulfilled')
 
@@ -125,7 +125,7 @@ class FairClaimTests(TransactionTestCase):
             waiting_job = TransitionMessage.objects.get(instance_id=str(waiting.pk))
             for seconds in (11, 1):
                 self.assertEqual(claim_next(['fair-test']), waiting_job.pk)
-                run_background_transition(waiting_job.pk)
+                run_claimed_transition(waiting_job.pk)
                 clock[0] += timedelta(seconds=seconds)
             waiting_job.refresh_from_db()
             self.assertEqual((waiting_job.deferral_count, waiting_job.errors_count), (2, 0))
@@ -143,7 +143,7 @@ class FairClaimTests(TransactionTestCase):
                 chosen = claim_next(['fair-test'])
                 self.assertIsNotNone(chosen)
                 first_round.append(TransitionMessage.objects.get(pk=chosen))
-                run_background_transition(chosen)
+                run_claimed_transition(chosen)
                 clock[0] += timedelta(seconds=2)
             self.assertEqual(len({row.fairness_key for row in first_round}), 13)
             self.assertEqual(
@@ -159,7 +159,7 @@ class FairClaimTests(TransactionTestCase):
                 chosen = claim_next(['fair-test'])
                 if chosen is None:
                     break
-                run_background_transition(chosen)
+                run_claimed_transition(chosen)
                 clock[0] += timedelta(seconds=2)
             self.assertFalse(TransitionMessage.objects.filter(is_completed=False).exists())
             waiting.refresh_from_db()

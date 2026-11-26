@@ -38,11 +38,9 @@ class WorkerFailureIsolationTests(SimpleTestCase):
 
         with patch.object(safety_nets, 'detect_stuck_transitions', detect_stuck_transitions), \
                 patch.object(safety_nets, 'cleanup_completed_transitions', cleanup_completed_transitions), \
-                patch('django_logic.lock_ownership.cleanup_expired_locks',
-                      side_effect=lambda: calls.append('expired_locks')), \
                 self.assertLogs('django-logic', level='ERROR') as captured:
             self.assertIsNone(pull._run_safety_nets())
-        self.assertEqual(calls, ['detect', 'cleanup', 'expired_locks'])
+        self.assertEqual(calls, ['detect', 'cleanup'])
         self.assertEqual(len(captured.records), 1)
         self.assertIn('detect_stuck_transitions failed', captured.records[0].getMessage())
         self.assertIn('stuck-row scan cannot finish', captured.records[0].getMessage())

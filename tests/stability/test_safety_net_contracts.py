@@ -8,11 +8,8 @@ the instance at its source, a completed state is not retried, stuck rows
 are identified by the row (not the state), and terminal states are
 identifiable for cleanup.
 """
-from datetime import timedelta
 
-from django.core.cache import cache
 from django.test import tag
-from django.utils import timezone
 
 from django_logic.state import State
 
@@ -27,28 +24,12 @@ class TestRetryVisibilityContract(StabilityTestCase):
     ``queue_name``.
     """
 
-    def test_a_crashed_sync_run_leaves_the_instance_at_its_source(self):
-        """A hard-killed synchronous run leaves no trace: the uncompleted
-        row is background-only, so the instance stays at its source state.
-        The transition can run again once the lock TTL expires.
-        """
-        order = Order.objects.create(status='approved')
-        state = State(order, 'status', process_name='process')
-        self.track_lock(state)
-        # The crashed run's only residue is its lock.
-        self.assertTrue(state.lock())
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'approved')
-        state.unlock()
-        self._tracked_lock_keys.discard(state._get_hash())
 
     def test_completed_state_should_not_be_retried(self):
         """Instances that reached a terminal state need no retry."""
         for terminal_state in ('fulfilled', 'fulfillment_failed', 'cancelled', 'completed'):
             order = Order.objects.create(status=terminal_state)
             state = State(order, 'status', process_name='process')
-            self.assertFalse(state.is_locked())
 
     def test_fulfill_transition_available_from_its_source(self):
         """Sync transitions resolve from their declared sources only —
@@ -80,7 +61,6 @@ class TestStuckTransitionDetection(StabilityTestCase):
         in-progress marker for sync work anymore."""
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.assertFalse(state.is_locked())
         self.assertEqual(Order.objects.filter(status='approved').count(), 1)
 
 

@@ -64,7 +64,6 @@ class ChunkContinuationTests(TransactionTestCase):
         self.assertEqual(self.widget.kwargs_seen, {'cursor': cursor})
         self.assertEqual(self.widget.se_log, log)
         self.assertEqual(self.widget.status, status)
-        self.assertFalse(self.widget.chunk_import.state.is_locked())
 
     def resume(self, job):
         TransitionMessage.objects.filter(pk=job.pk).update(eligible_at=timezone.now() - timedelta(seconds=1))

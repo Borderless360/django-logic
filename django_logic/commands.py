@@ -9,7 +9,7 @@ import logging
 
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, transaction
 
-from django_logic.exceptions import TransitionTemporarilyUnavailable, _record_failed_check
+from django_logic.exceptions import RefusalReason, TransitionTemporarilyUnavailable
 from django_logic.logger import (
     _running_job_attempt,
     transition_logger,
@@ -177,55 +177,46 @@ def refusal_message(text):
 
 
 class Conditions(BaseCommand):
-    def execute(self, instance, **kwargs):
-        for command in self.commands:
-            if not command(instance, **kwargs):
-                _record_failed_check(self, command)
-                return False
-        return True
+    def execute(self, instance, *args, **kwargs):
+        for check in self.commands:
+            if not check(instance, *args, **kwargs):
+                return check
+        return None
 
 
-class Permissions(BaseCommand):
+class Permissions(Conditions):
     def execute(self, instance, user, **kwargs):
-        # user=None means "no user context" — treated as permitted.
-        # Callers that need authenticated-only transitions must enforce that
-        # at the caller site.
         if user is None:
-            return True
-        for command in self.commands:
-            if not command(instance, user, **kwargs):
-                _record_failed_check(self, command)
-                return False
-        return True
+            return None
+        return super().execute(instance, user, **kwargs)
 
 
 class StrictPermissions(Permissions):
-    """Permissions that refuse a call with no user.
-
-    For a branch a person owns, when one action name is split across nested
-    processes by who is asking. With the default, a call with no user would
-    match the person's branch and the automation branch at once, and the
-    engine would refuse the action as ambiguous.
-    """
+    """Allow only a person who passes the declared permissions."""
 
     def execute(self, instance, user, **kwargs):
         if not user:
-            return False
+            return self
         return super().execute(instance, user, **kwargs)
 
 
 class NoUserPermissions(Permissions):
-    """Permissions that refuse a call with a user.
-
-    The mirror of ``StrictPermissions``, for the branch that only code
-    runs — a scheduled task, a follow-up from an API view. A person must
-    not reach it, or it competes with the branch that person belongs to.
-    """
+    """Allow only a system call."""
 
     def execute(self, instance, user, **kwargs):
         if user:
-            return False
-        return super().execute(instance, user, **kwargs)
+            return self
+        return None
+
+
+def guard_failure(permissions, conditions, instance, user):
+    failed = permissions.execute(instance, user)
+    if failed is not None:
+        return RefusalReason.PERMISSION, getattr(failed, '_django_logic_refusal_message', None)
+    failed = conditions.execute(instance)
+    if failed is not None:
+        return RefusalReason.CONDITION, getattr(failed, '_django_logic_refusal_message', None)
+    return None
 
 
 class SideEffects(BaseCommand):
@@ -237,9 +228,6 @@ class SideEffects(BaseCommand):
 
     def execute(self, state: State, **kwargs):
         command_name = 'before the first side effect'
-        atomic_sync = self._transition.atomic
-        previous_state = state.get_state()
-
         def run_commands():
             nonlocal command_name
             for command in self.commands:
@@ -252,8 +240,7 @@ class SideEffects(BaseCommand):
                 command(state.instance, **kwargs)
 
         def run_required_changes():
-            nonlocal previous_state, command_name
-            previous_state = state.get_persisted_state()
+            nonlocal command_name
             run_commands()
             command_name = 'target-state save'
             self._transition._write_target_state(state, **kwargs)
@@ -262,18 +249,9 @@ class SideEffects(BaseCommand):
             transition_logger.info(
                 f'{kwargs.get("tr_id")} SideEffects {len(self.commands)}'
             )
-            using, in_transaction = _in_open_transaction(state.instance)
-            if atomic_sync:
-                _run_in_savepoint(using, run_required_changes)
-            elif in_transaction:
-                _run_keeping_writes(using, run_commands)
-            else:
-                run_commands()
+            using = state.instance._state.db or DEFAULT_DB_ALIAS
+            _run_in_savepoint(using, run_required_changes)
         except Exception as error:
-            if atomic_sync:
-                # The database has undone the required writes. Failure hooks
-                # must not observe a target that was saved and then undone.
-                setattr(state.instance, state.field_name, previous_state)
             _log_hook_error(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                 f'{command_name} failed action={self._transition.action_name} '
@@ -281,18 +259,7 @@ class SideEffects(BaseCommand):
                 error,
                 extra={'job_failure': 'attempt'} if _running_job_attempt.get() else {},
             )
-            if atomic_sync:
-                if not reload_after_rollback(state, prefix=kwargs.get('tr_id')):
-                    if self._transition.lock:
-                        self._transition._release_lock(state, **kwargs)
-                    raise
-            self._transition.fail_transition(state, error, **kwargs)
             raise
-        else:
-            if atomic_sync:
-                self._transition._complete_after_target(state, **kwargs)
-            else:
-                self._transition.complete_transition(state, **kwargs)
 
 
 class Callbacks(BaseCommand):
@@ -307,6 +274,24 @@ class Callbacks(BaseCommand):
     a transaction and outside one. A transition that a callback starts
     keeps its failed state when it fails.
     """
+
+    def after_commit(self, state, using, kwargs):
+        from django_logic.conf import sync_enabled
+        from django_logic.process import _transition_context
+
+        def run():
+            token = _transition_context.set({'root_id': kwargs.get('root_id'), 'tr_id': kwargs.get('tr_id')})
+            try:
+                self.execute(state, **kwargs)
+            finally:
+                _transition_context.reset(token)
+
+        blocks = transaction.get_connection(using).atomic_blocks
+        if sync_enabled() and blocks and all(getattr(block, '_from_testcase', False) for block in blocks):
+            # Django TestCase never commits its wrapper. An application atomic block still controls delivery.
+            run()
+        else:
+            transaction.on_commit(run, using=using)
 
     def execute(self, state: State, **kwargs):
         transition_logger.info(

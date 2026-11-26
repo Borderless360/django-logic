@@ -1,4 +1,3 @@
-from contextvars import ContextVar
 from enum import StrEnum
 
 
@@ -12,56 +11,6 @@ class RefusalReason(StrEnum):
     BACKGROUND_IN_FLIGHT = 'background_in_flight'
     BACKGROUND_STRANDED = 'background_stranded'
     AMBIGUOUS = 'ambiguous'
-
-
-# A declaration is shared across callers. Keep diagnostic state on this call.
-_validity_refusal = ContextVar('_validity_refusal', default=None)
-
-
-def _record_validity_refusal(owner, reason):
-    capture = _validity_refusal.get()
-    if capture is not None and capture['owner'] is owner:
-        capture['reason'] = reason
-
-
-def _record_failed_check(bundle, command):
-    capture = _validity_refusal.get()
-    if capture is not None and capture['bundle'] is bundle:
-        capture['failed_check'] = command
-
-
-def _execute_validity_bundle(owner, bundle, *args):
-    """Capture only checks from this owner's active bundle."""
-    capture = _validity_refusal.get()
-    if capture is None or capture['owner'] is not owner:
-        return bundle.execute(*args)
-    previous = capture['bundle'], capture['failed_check']
-    capture['bundle'], capture['failed_check'] = bundle, None
-    try:
-        valid = bundle.execute(*args)
-        capture['message'] = (
-            getattr(capture['failed_check'], '_django_logic_refusal_message', None)
-            if not valid else None
-        )
-        return valid
-    finally:
-        capture['bundle'], capture['failed_check'] = previous
-
-
-def _check_validity(owner, *args):
-    """Call the existing override once and capture its stock guard result."""
-    capture = {'owner': owner, 'reason': None, 'message': None,
-               'bundle': None, 'failed_check': None}
-    token = _validity_refusal.set(capture)
-    try:
-        valid = owner.is_valid(*args)
-        return (
-            valid,
-            capture['reason'] if not valid else None,
-            capture['message'] if not valid else None,
-        )
-    finally:
-        _validity_refusal.reset(token)
 
 
 class TransitionNotAllowed(Exception):

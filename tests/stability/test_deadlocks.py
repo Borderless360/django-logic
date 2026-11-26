@@ -12,27 +12,19 @@ controlled rejections (TransitionNotAllowed). Tests cover:
 
 Reference: docs/research/race-condition-issue (lines 62-80, 92-106)
 """
-import time
-import threading
-from unittest.mock import patch
 
-from django.core.cache import cache
-from django.db import transaction
-from django.db.models.query import QuerySet
-from django.test import override_settings, tag
+from django.test import tag
 
 from django_logic import Transition
 from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 
 from tests.stability.base import (
-    StabilityTestCase, WorkerCrashSimulated, run_concurrent,
-    requires_real_redis,
+    StabilityTestCase,
 )
 from tests.stability.models import (
     Order, OrderProcess, OrderProcessWithNestedCallback,
-    side_effect_one, side_effect_two,
-    trigger_nested_transition,
+    side_effect_one,
 )
 
 
@@ -58,7 +50,6 @@ class TestNestedTransitionLockContention(StabilityTestCase):
         """
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         # OrderProcessWithNestedCallback shares the 'process' name with the
         # app-bound OrderProcess, so we drive it directly without rebinding the
@@ -74,7 +65,6 @@ class TestNestedTransitionLockContention(StabilityTestCase):
         order.refresh_from_db()
         # Callback triggers complete() which succeeds because lock is released
         self.assertEqual(order.status, 'completed')
-        self.assert_unlocked(state)
 
     def test_side_effect_nested_same_instance_rejected(self):
         """
@@ -87,7 +77,6 @@ class TestNestedTransitionLockContention(StabilityTestCase):
 
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         process_cls = type('NestedSEProcess', (OrderProcess,), {
             'transitions': [
@@ -107,7 +96,6 @@ class TestNestedTransitionLockContention(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfillment_failed')
-        self.assert_unlocked(state)
 
 
 @tag('stability')
@@ -126,8 +114,6 @@ class TestNestedTransitionDifferentInstance(StabilityTestCase):
 
         state1 = State(order1, 'status', process_name='process')
         state2 = State(order2, 'status', process_name='process')
-        self.track_lock(state1)
-        self.track_lock(state2)
 
         def approve_order2(instance, **kwargs):
             fresh_order2 = Order.objects.get(pk=order2.pk)
@@ -154,86 +140,6 @@ class TestNestedTransitionDifferentInstance(StabilityTestCase):
 
         self.assertEqual(order1.status, 'fulfilled')
         self.assertEqual(order2.status, 'approved')
-        self.assert_unlocked(state1)
-        self.assert_unlocked(state2)
-
-    def test_callback_on_locked_different_instance_fails_gracefully(self):
-        """If order #2 is already locked, the callback fails but is swallowed."""
-        order1 = Order.objects.create(status='approved')
-        order2 = Order.objects.create(status='draft')
-
-        state1 = State(order1, 'status', process_name='process')
-        state2 = State(order2, 'status', process_name='process')
-        self.track_lock(state1)
-        self.track_lock(state2)
-
-        self.assertTrue(state2.lock())
-
-        def try_approve_locked_order2(instance, **kwargs):
-            fresh = Order.objects.get(pk=order2.pk)
-            p = OrderProcess(field_name='status', instance=fresh)
-            p.approve()
-
-        process_cls = type('LockedCrossProcess', (OrderProcess,), {
-            'transitions': [
-                Transition(
-                    action_name='fulfill',
-                    sources=['approved'],
-                    target='fulfilled',
-                    side_effects=[side_effect_one],
-                    callbacks=[try_approve_locked_order2],
-                )
-            ]
-        })
-
-        process = process_cls(field_name='status', instance=order1)
-        process.fulfill()
-
-        order1.refresh_from_db()
-        order2.refresh_from_db()
-
-        self.assertEqual(order1.status, 'fulfilled')
-        self.assertEqual(order2.status, 'draft')
-        self.assert_unlocked(state1)
-
-        state2.unlock()
-        self._tracked_lock_keys.discard(state2._get_hash())
-
-
-@tag('stability')
-class TestLockTimeoutAndExpiry(StabilityTestCase):
-    """
-    3.4 -- Lock expires after LOCK_TIMEOUT. After expiry, the instance
-    becomes available for new transitions.
-    """
-
-    @override_settings(DJANGO_LOGIC={'LOCK_TIMEOUT': 1})
-    def test_lock_expires_after_timeout(self):
-        order = Order.objects.create(status='approved')
-        s = State(order, 'status', process_name='process')
-
-        self.assertTrue(s.lock())
-        self.assertTrue(s.is_locked())
-
-        time.sleep(1.5)
-
-        self.assertFalse(s.is_locked())
-
-
-    @override_settings(DJANGO_LOGIC={'LOCK_TIMEOUT': 1})
-    def test_new_transition_succeeds_after_lock_expiry(self):
-        order = Order.objects.create(status='approved')
-        s = State(order, 'status', process_name='process')
-
-        self.assertTrue(s.lock())
-
-        time.sleep(1.5)
-
-        process = OrderProcess(field_name='status', instance=order)
-        process.fulfill()
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilled')
 
 
 @tag('stability')
@@ -249,7 +155,6 @@ class TestLockReleaseOnEveryFailurePath(StabilityTestCase):
     def _test_lock_released_on_exception(self, exception_cls, msg="test error"):
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         def failing_se(instance, **kwargs):
             raise exception_cls(msg)
@@ -270,7 +175,6 @@ class TestLockReleaseOnEveryFailurePath(StabilityTestCase):
         with self.assertRaises(exception_cls):
             process.fulfill()
 
-        self.assert_unlocked(state)
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfillment_failed')
 
@@ -296,7 +200,6 @@ class TestLockReleaseOnEveryFailurePath(StabilityTestCase):
         """Lock must be released even when no failed_state is configured."""
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         def failing_se(instance, **kwargs):
             raise ValueError("no failed_state configured")
@@ -315,39 +218,3 @@ class TestLockReleaseOnEveryFailurePath(StabilityTestCase):
         process = process_cls(field_name='status', instance=order)
         with self.assertRaises(ValueError):
             process.fulfill()
-
-        self.assert_unlocked(state)
-
-
-@tag('stability')
-class TestLockStoreFailure(StabilityTestCase):
-    """An unavailable ownership store must never allow unprotected work."""
-
-    def test_lock_failure_is_visible(self):
-        state = State(Order.objects.create(status='approved'), 'status', process_name='process')
-        with patch('django_logic.lock_ownership._lock_connection', side_effect=ConnectionError('Store unavailable')):
-            with self.assertRaises(ConnectionError):
-                state.lock()
-
-    def test_visibility_failure_does_not_report_unlocked(self):
-        state = State(Order.objects.create(status='approved'), 'status', process_name='process')
-        with patch('django_logic.lock_ownership._lock_connection', side_effect=ConnectionError('Store unavailable')):
-            with self.assertRaises(ConnectionError), transaction.atomic():
-                state.is_locked()
-        # Outside a transaction, the check reads through the default connection.
-        with patch.object(QuerySet, 'exists', side_effect=ConnectionError('Store unavailable')):
-            with self.assertRaises(ConnectionError):
-                state.is_locked()
-
-    def test_failed_unlock_retains_ownership_until_release_succeeds(self):
-        state = State(Order.objects.create(status='approved'), 'status', process_name='process')
-        self.assertTrue(state.lock())
-        self.track_lock(state)
-        token = state._lock_token
-        with patch('django_logic.lock_ownership._lock_connection', side_effect=ConnectionError('Store unavailable')):
-            with self.assertRaises(ConnectionError):
-                state.unlock()
-        self.assertEqual(state._lock_token, token)
-        self.assertTrue(state.is_locked())
-        state.unlock()
-        self.assertFalse(state.is_locked())

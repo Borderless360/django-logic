@@ -9,7 +9,7 @@ in a savepoint when (and only when) the caller is inside an open
 transaction, and one failed callback no longer prevents the rest of the
 callback list from running.
 """
-from django.db import IntegrityError, transaction
+from django.db import transaction
 from django.test import TestCase, TransactionTestCase
 
 from django_logic.process import Process, ProcessManager
@@ -194,7 +194,8 @@ class CallbackKeepsItsWritesInTransactionTests(TestCase):
         self.assertEqual(self.invoice.status, 'failed')
 
     def test_transition_started_by_a_callback_keeps_its_failed_state(self):
-        _keep_writes_process(self.invoice).start_another()
+        with self.captureOnCommitCallbacks(execute=True):
+            _keep_writes_process(self.invoice).start_another()
 
         other = Invoice.objects.get(customer_received=True)
         self.assertEqual(other.status, 'failed')
