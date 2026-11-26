@@ -73,9 +73,18 @@ class _JobActions:
     pk: int
     results: dict = field(default_factory=dict)
 
+    def remember_result(self, state, value):
+        # Background jobs use the default database. A same-named table in another database is independent.
+        if (state.instance._state.db or DEFAULT_DB_ALIAS) == DEFAULT_DB_ALIAS:
+            self.results[state.instance_key] = value
+
     def chose_result(self, state):
-        key = (state.instance_key, state.process_name)
-        return key in self.results and self.results[key] == state.get_persisted_state()
+        key = state.instance_key
+        if key not in self.results or self.results[key] != state.get_persisted_state():
+            return False
+        # A nested action can save a different ORM instance for the same row.
+        setattr(state.instance, state.field_name, self.results[key])
+        return True
 
 
 _active_job = ContextVar('django_logic_active_job', default=None)
@@ -462,13 +471,7 @@ def _run_atomic_state(transition_message, transition, state, instance, kwargs, d
         def execute_and_complete():
             _execute_attempt(instance, transition, state, kwargs)
             with state.protected():
-                if transition.target is None and not _active_job.get().chose_result(state):
-                    superseded = _superseded_outcome(
-                        transition_message, transition, state, kwargs, after_side_effects=True,
-                    )
-                    if superseded is not None:
-                        return superseded
-                return _handle_success(transition_message, transition, state, kwargs)
+                return _complete_after_side_effects(transition_message, transition, state, kwargs)
         try:
             return _run_in_savepoint(
                 instance._state.db or DEFAULT_DB_ALIAS, execute_and_complete,
@@ -589,45 +592,30 @@ def _superseded_outcome(
     return _Outcome(terminal=True, succeeded=False)
 
 
-def _execute_attempt(instance, transition, state, kwargs) -> None:
-    """Run the side-effects, then the target write, in ONE savepoint, so an
-    attempt writes everything or nothing. Raises whatever the attempt raised.
+def _complete_after_side_effects(transition_message, transition, state, kwargs, *, using=None):
+    """With the business row locked, preserve an explicit result or apply the expected target."""
+    if not _active_job.get().chose_result(state):
+        superseded = _superseded_outcome(transition_message, transition, state, kwargs, after_side_effects=True)
+        if superseded is not None:
+            return superseded
+        if transition.target is not None:
+            database = {'using': using} if using is not None else {}
+            state.set_state(transition.target, **database)
+            transition_logger.info(f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} {transition.target}')
+    return _handle_success(transition_message, transition, state, kwargs)
 
-    A failed attempt rolls back every side-effect write. A DatabaseError
-    breaks only this savepoint, so the outer transaction can still record
-    the error and complete the job when its retries are exhausted.
 
-    It runs through _run_in_savepoint on the INSTANCE's alias: set_state
-    routes its write to the instance's connection, so a savepoint opened
-    on DEFAULT would guard the wrong one.
-
-    A side effect that raises a database error and swallows it
-    (`try: obj.save() except IntegrityError: pass` with no nested atomic)
-    makes Django discard the savepoint and nothing propagates. The attempt
-    then returns as a success but committed none of its writes, so we count
-    it as the failure it is.
-    """
-    def _attempt():
+def _execute_attempt(instance, transition, state, kwargs):
+    """Isolate required work so a suppressed database error cannot appear successful."""
+    def run_commands():
         for command in transition.side_effects.commands:
             transition_logger.info(
-                f'{kwargs.get("tr_id")} '
-                f'{TransitionEventType.SIDE_EFFECT.value} '
+                f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                 f'{getattr(command, "__name__", repr(command))}'
             )
             command(instance, **kwargs)
-        # A rejected target write rolls back the required work and counts
-        # toward the retry limit, like a side-effect failure.
-        if transition.target is not None and not _active_job.get().chose_result(state):
-            state.set_state(transition.target)
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} '
-                f'{TransitionEventType.SET_STATE.value} '
-                f'{transition.target}'
-            )
 
-    _run_in_savepoint(
-        instance._state.db or DEFAULT_DB_ALIAS, _attempt,
-    )
+    _run_in_savepoint(instance._state.db or DEFAULT_DB_ALIAS, run_commands)
 
 
 def _handle_restore_failure(

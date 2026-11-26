@@ -239,7 +239,7 @@ class Transition:
             from django_logic.background.runner import _active_job
             job = _active_job.get()
             if job is not None:
-                job.results[(state.instance_key, state.process_name)] = self.target
+                job.remember_result(state, self.target)
             transition_logger.info(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                 f'{self.target}'

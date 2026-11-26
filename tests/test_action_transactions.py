@@ -33,6 +33,29 @@ def review_result(invoice, fail=False, **kwargs):
         raise PermanentFailure('review failed')
 
 
+def accept_another_copy(invoice, **kwargs):
+    fresh = Invoice.objects.get(pk=invoice.pk)
+    Review(field_name='status', instance=fresh).accept()
+
+
+def record_accepted_result(invoice, **kwargs):
+    Invoice.objects.filter(pk=invoice.pk).update(customer_received=(invoice.status == 'accepted'))
+
+
+def choose_failure_state(invoice, **kwargs):
+    Decisions(field_name='status', instance=invoice).reject()
+    raise PermanentFailure('review requires attention')
+
+
+class Decisions(Process):
+    process_name = 'decisions'
+    transitions = [Transition('reject', sources=['running'], target='rejected')]
+
+
+def move_record(invoice, **kwargs):
+    Invoice.objects.filter(pk=invoice.pk).update(status='cancelled')
+
+
 def note_completion(invoice, **kwargs):
     Invoice.objects.filter(pk=invoice.pk).update(customer_received=True)
 
@@ -48,6 +71,12 @@ class Review(Process):
                              permissions=[received], side_effects=[review_result]),
         BackgroundTransition('upload', sources=['draft'], in_progress_state='running', target='done',
                              failed_state='failed', atomic=False, side_effects=[review_result]),
+        BackgroundTransition('review_copy', sources=['draft'], in_progress_state='running', target='done',
+                             side_effects=[accept_another_copy], callbacks=[record_accepted_result]),
+        BackgroundTransition('cancel_during_review', sources=['draft'], in_progress_state='running', target='done',
+                             side_effects=[move_record]),
+        BackgroundTransition('review_failure', sources=['draft'], in_progress_state='running', target='done',
+                             failed_state='failed', atomic=False, side_effects=[choose_failure_state]),
         Transition('finish', sources=['draft'], target='done', callbacks=[note_completion]),
     ]
 
@@ -147,6 +176,23 @@ class ActionCommitTests(TransactionTestCase):
         self.assertFalse(job.ended_in_failure)
         self.assertEqual(self.invoice.status, 'accepted')
 
+    def test_completion_hooks_read_a_result_chosen_on_another_copy_of_the_record(self):
+        self.process.review_copy()
+        job = TransitionMessage.objects.get()
+        run_background_transition(job.pk)
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'accepted')
+        self.assertTrue(self.invoice.customer_received)
+
+    def test_an_atomic_job_does_not_overwrite_an_unrelated_state_change(self):
+        self.process.cancel_during_review()
+        job = TransitionMessage.objects.get()
+        run_background_transition(job.pk)
+        self.invoice.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'cancelled')
+        self.assertEqual(job.completion_kind, 'superseded')
+
     @requires_postgres
     def test_non_atomic_attempt_preserves_its_chosen_result_on_failure(self):
         self.process.upload(fail=True)
@@ -156,6 +202,17 @@ class ActionCommitTests(TransactionTestCase):
         self.invoice.refresh_from_db()
         self.assertTrue(job.ended_in_failure)
         self.assertEqual(self.invoice.status, 'accepted')
+
+    @requires_postgres
+    def test_required_failure_decision_on_the_same_field_keeps_the_job_failure(self):
+        self.process.review_failure()
+        job = TransitionMessage.objects.get()
+        run_background_transition(job.pk)
+        self.invoice.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(self.invoice.status, 'rejected')
+        self.assertTrue(job.ended_in_failure)
+        self.assertIn('review requires attention', job.last_error_message)
 
     @requires_postgres
     def test_other_workers_skip_a_claim_and_can_recover_a_stopped_process(self):
