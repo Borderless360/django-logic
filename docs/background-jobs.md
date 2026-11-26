@@ -267,14 +267,3 @@ execution, errors, deferrals and time waiting for a worker. `duration_ms`
 measures only the last attempt and excludes completion callbacks.
 
 Missing historical measurements remain unknown. Cleanup limits the available job history.
-
-`transition_statistics(since=cutoff, queues=None, using=None)` groups retained
-jobs by queue, model, process class and action. Counts describe each
-selected job's recorded history, not events that happened within the window.
-`initial_wait_ms` uses only `first_started_at`; `last_attempt_duration_ms` uses
-only recorded `duration_ms` values. Each contains `samples`, `p50`, `p90` and
-`max`. Percentiles use the nearest rank. Missing measurements are excluded.
-`repeated_starts` includes deferrals and competing recorded starts. It is not an
-exact retry count. These records cannot establish total runtime or utilization.
-`dl_transitions --stats --since 7d --json` exposes the same report without
-changing jobs.

@@ -14,7 +14,6 @@ from django.utils import timezone
 
 from django_logic.background.models import TransitionMessage
 from django_logic.background.safety_nets import _claimable
-from django_logic.background.worker_presence import record_worker_presence
 from django_logic.testing import open_transition_message
 from tests.background.models import Widget
 from tests import dl_settings
@@ -103,9 +102,6 @@ class ListUncompletedTests(TestCase):
         self.assertIn('dl_worker --queues retry_without_worker', listing)
         self.assertNotIn('running on a worker now', listing)
         self.assertNotIn('no worker has ever started it', listing)
-        self.assertEqual(list(TransitionMessage.objects.values()), before)
-        record_worker_presence(['retry_without_worker'])
-        self.assertIn('recent worker presence but no queue progress', self._listing())
         self.assertEqual(list(TransitionMessage.objects.values()), before)
 
     def test_due_error_retry_reports_queue_guidance_instead_of_running(self):

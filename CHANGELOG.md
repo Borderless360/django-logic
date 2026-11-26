@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.0.0] — 2026-11-26
+
+- Background jobs accept plain JSON arguments. Finish jobs containing legacy type tags before upgrading.
+- Use the job table for reporting. The worker and the job list use queue progress to report waiting jobs.
+- Looking up an undeclared action raises `AttributeError`. A declared action can still refuse a call.
+
 ## [5.3.1] — 2026-11-25
 
 ### Fixed

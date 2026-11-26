@@ -133,7 +133,11 @@ class ResolverReasonTests(TestCase):
             conditions = [deny]
             transitions = [Transition('go', sources=['draft'])]
 
-        self.refusal(lambda: self.process(Workflow).missing_action(), RefusalReason.UNKNOWN_ACTION)
+        process = self.process(Workflow)
+        self.assertTrue(hasattr(process, 'go'))
+        self.assertFalse(hasattr(process, 'missing_action'))
+        with self.assertRaises(AttributeError):
+            process.missing_action()
 
     def test_first_matching_branch_explains_refusal_without_unrelated_guards(self):
         class Unrelated(Process):
@@ -208,7 +212,6 @@ class ResolverReasonTests(TestCase):
             transitions = [Transition('go', sources=['draft'], conditions=[nested_refusal])]
 
         self.refusal(lambda: self.process(Outer).go(), RefusalReason.CONDITION)
-        self.refusal(lambda: self.process(Outer).missing_action(), RefusalReason.UNKNOWN_ACTION)
 
     def test_opaque_override_cannot_inherit_another_objects_validity_reason(self):
         other = Transition('other', sources=['draft'], permissions=[deny_permission])

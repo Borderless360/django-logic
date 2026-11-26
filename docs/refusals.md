@@ -9,11 +9,12 @@ also attach `user_message`, ready to display. `str(error)` contains diagnostic d
 | `permission` | A process or transition permission check failed. |
 | `condition` | A process or transition condition check failed. |
 | `source_state` | The current or persisted state is outside the transition's sources. |
-| `unknown_action` | No process declaration has this action name. |
 | `locked` | The state lock could not be acquired. |
 | `background_in_flight` | An uncompleted background transition still has retry coverage. |
 | `background_stranded` | An uncompleted background transition is no longer being retried. |
 | `ambiguous` | More than one transition passed the checks for this action. |
+
+An undeclared action raises `AttributeError` at lookup. Use `hasattr(process, name)` to check whether a process declares an action.
 
 A PostgreSQL row-lock timeout raises `TransitionTemporarilyUnavailable` with reason `locked`.
 A state-lock refusal raises plain `TransitionNotAllowed` with that same reason.

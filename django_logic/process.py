@@ -35,7 +35,6 @@ _DEFAULT_REFUSAL_MESSAGES = {
     RefusalReason.PERMISSION: 'you do not have permission to perform this action.',
     RefusalReason.CONDITION: 'this record does not meet the requirements for this action.',
     RefusalReason.SOURCE_STATE: 'this action cannot run in the current state of this record.',
-    RefusalReason.UNKNOWN_ACTION: 'this action does not exist.',
     RefusalReason.LOCKED: 'this record is locked.',
     RefusalReason.BACKGROUND_IN_FLIGHT: 'a background transition is in progress. Try again shortly.',
     RefusalReason.BACKGROUND_STRANDED: (
@@ -110,12 +109,7 @@ class Process:
             )
 
     def __getattr__(self, item):
-        # Names that start with an underscore are never action names. copy,
-        # pickle, mock and IPython probe dunder names with getattr and must get
-        # a normal AttributeError, and hasattr(process, '_x') must not be True
-        # for every name. Any other missing attribute is treated as an action
-        # name and resolved when it is called.
-        if item.startswith('_'):
+        if item.startswith('_') or item not in _declared_action_names(type(self)):
             raise AttributeError(item)
 
         def transition_method(**kwargs):
@@ -360,8 +354,10 @@ class Process:
         transition_logger.info(message)
         refusal = next(
             (reasons[0] for reasons in refusals.values() if reasons),
-            _Refusal(RefusalReason.UNKNOWN_ACTION, None, self, None),
+            None,
         )
+        if refusal is None:
+            raise AttributeError(action_name)
         error = TransitionNotAllowed(message, reason=refusal.reason)
         self._set_refusal_message(error, action_name, refusal.process, refusal.transition, refusal.message)
         error.current_state = current_state
@@ -384,6 +380,12 @@ def _iter_process_tree(process_cls, _seen=None):
     yield process_cls
     for sub_process_cls in process_cls.nested_processes:
         yield from _iter_process_tree(sub_process_cls, _seen)
+
+
+@cache
+def _declared_action_names(process_class):
+    return frozenset(transition.action_name for owner in _iter_process_tree(process_class)
+                     for transition in owner.transitions)
 
 
 def _validate_action_names_not_shadowed(process_cls):

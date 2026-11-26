@@ -52,9 +52,7 @@ uncompleted, in progress.
 | `owning class`, `owning job` | the declaring class or the job that performs the work |
 | `tm`, `msg`, `inst` | `transition_message`, `message`, `instance` |
 
-`tests/test_voice.py` checks selected retired phrases in the library and current
-docs. Reviewers check the remaining wording rules and abbreviations. It skips `CHANGELOG.md` on purpose: the changelog is a historical
-record, so it must keep naming the words and APIs that shipped at the time.
+Reviewers check the wording of changed code and guides. Keep release history in `CHANGELOG.md`.
 
 ### Writing to people — no riddles
 

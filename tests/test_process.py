@@ -101,7 +101,7 @@ class SyncProcessAvailabilityScenario(StateTraceMixin, ProcessScenario):
     def test_refusal_names_the_current_state(self):
         widget = self.create_instance(status='draft')
         with self.assertRaises(TransitionNotAllowed) as caught:
-            self._process(widget).no_such_action()
+            self._process(widget).notify()
         error = caught.exception
         self.assertEqual(error.current_state, 'draft')
         self.assertIn("state 'draft'", str(error))

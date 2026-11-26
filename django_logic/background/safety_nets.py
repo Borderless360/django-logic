@@ -34,7 +34,6 @@ from django_logic.background.runner import (
     finalize_stuck_attempt,
     run_background_transition,
 )
-from django_logic.background.worker_presence import queue_worker_presence
 from django_logic.logger import logger
 
 
@@ -152,15 +151,6 @@ def detect_stuck_transitions() -> int:
             )
             continue
         behind = f' {rows - 1} more rows wait behind it.' if rows > 1 else ''
-        if queue_worker_presence(queue_name):
-            logger.error(
-                f'detect_stuck_transitions: queue {queue_name!r} has a recent '
-                f'worker presence record, but no progress for {report_after} '
-                f'minutes. TransitionMessage#{oldest_pk} has waited '
-                f'{age_minutes} minutes.{behind} Check worker capacity, '
-                'other queues sharing its slots, and blocked jobs.'
-            )
-            continue
         logger.error(
             f'detect_stuck_transitions: TransitionMessage#{oldest_pk} has '
             f'waited {age_minutes} minutes on queue {queue_name!r}, and no '

@@ -524,11 +524,8 @@ def _run_safety_nets(queues=()) -> None:
         cleanup_completed_transitions,
         detect_stuck_transitions,
     )
-    from django_logic.background.worker_presence import record_worker_presence
     from django_logic.lock_ownership import cleanup_expired_locks
 
-    # Cache access stays outside the worker that enforces job deadlines.
-    record_worker_presence(queues)
 
     for step in (
         detect_stuck_transitions,

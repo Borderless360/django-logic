@@ -4,13 +4,26 @@
 [![Coverage Status](https://coveralls.io/repos/github/Borderless360/django-logic/badge.svg?branch=master)](https://coveralls.io/github/Borderless360/django-logic?branch=master)
 [![License](https://img.shields.io/pypi/l/django-logic.svg)](https://github.com/Borderless360/django-logic/blob/master/LICENSE)
 
-Django Logic is a workflow library for Django. You declare the states of a
-model, the transitions between them, and the code each transition runs. The
-declaration lives in one place, away from views, models and forms.
+Django Logic gives a Django project one layer for its business rules.
+A process declares which actions a record supports, who may run them, and what changes.
+Views, tasks and admin pages call the same action.
 
-Work that is slow, external or retriable is a background transition.
-django-logic saves it as a database row. A worker process claims the row and
-runs it.
+```python
+order.process.approve(user=request.user)
+```
+
+| Place | Responsibility |
+| --- | --- |
+| `models.py` | Store the record and its state field. |
+| `process.py` | Declare actions, source states, targets, permissions and conditions. |
+| `conditions.py`, `permissions.py`, `actions.py` | Implement each rule as a function that takes the record. |
+| Views, tasks, admin and commands | Call an action on an existing record. |
+
+Create the record and validate form input before calling a transition.
+
+1. Pass `user` when a person acts. The default permission class treats a call without a user as a system call.
+2. An ordinary `save()` preserves a bound state field on an existing record. For a deliberate correction, name the field in `update_fields`.
+3. A worker can repeat a background side effect. Use a saved receipt or an idempotency key for external requests.
 
 ## Requirements
 
@@ -26,11 +39,10 @@ runs it.
 - The `default` PostgreSQL database stores committed state-lock ownership for every
   transition caller. SQLite is supported for single-process business tests with the
   test runtime enabled. Other database backends are refused.
-- A shared cache is useful for worker-presence observations. State locks do not use it.
 
 ## Install
 
-The current release is **5.3.1**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
+The current release is **6.0.0**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
 Before upgrading, follow the [upgrade and rollback requirements](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 
@@ -49,7 +61,7 @@ INSTALLED_APPS = [
 
 That one entry is the whole library: the `TransitionMessage` table and
 its migrations, the `dl_worker` and `dl_transitions` commands, and every
-system check. Configure the database and cache described below.
+system check. Configure the database below.
 
 Synchronous-only applications use the same entry and ownership tables. PostgreSQL
 keeps ownership committed separately from business changes. SQLite tests use their
@@ -57,18 +69,6 @@ ordinary connection and cannot establish concurrent production guarantees.
 
 ```bash
 python manage.py migrate
-```
-
-For worker-presence observations across processes, install the cache backend you use
-and point `default` at a shared service. For example, with the `redis` package:
-
-```python
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': os.environ['REDIS_URL'],
-    }
-}
 ```
 
 Every `DJANGO_LOGIC` key has a default, so you need no other configuration to
@@ -275,6 +275,35 @@ for reserved names and the temporary `context` dictionary shared by hooks.
 
 See [refused actions](https://github.com/Borderless360/django-logic/blob/master/docs/refusals.md) for reason codes, temporary refusals and messages for users.
 
+## Test your process
+
+`django_logic.testing` gives you `ProcessScenario`, a test base class that runs
+a whole workflow inline, background transitions included. A test reads like the
+business process.
+
+```python
+from django_logic.testing import ProcessScenario
+
+
+class TestOrderFulfilment(ProcessScenario):
+    process_class = OrderProcess
+    model = Order
+    state_field = 'status'
+
+    def test_happy_path(self):
+        order = self.create_instance(status='approved')
+        self.background_transition(order, 'fulfil')
+        self.assert_state(order, 'fulfilled')
+        self.assert_side_effects_ran(['book_courier'])
+```
+
+For deployment-wide inline tests, call `django_logic.conf.enable_sync()` in test settings and set
+`DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'sync'`. Boot refuses that setting without the explicit opt-in.
+Production deployments normally use `pull`. Business code can use `django_logic.background.sync_execution()` for one block that needs an immediate result.
+That block runs in the caller's process and starts no retry loop.
+A committed unfinished job can still be claimed by workers serving its queue.
+See the [testing guide](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) for database requirements, transaction behavior and the scenario catalog.
+
 ## Background transitions
 
 `BackgroundTransition` runs its side-effects on a worker process, and retries
@@ -365,35 +394,6 @@ for process-local state requirements and delivery limits.
 `--concurrency=N` says how many attempts one worker runs at a time. The default
 is 1. Each attempt runs in its own job process and holds a database connection.
 See [running workers](https://github.com/Borderless360/django-logic/blob/master/docs/workers.md) for deployment size, queue diagnostics, retry commands and maintenance.
-
-## Test your process
-
-`django_logic.testing` gives you `ProcessScenario`, a test base class that runs
-a whole workflow inline, background transitions included. A test reads like the
-business process.
-
-```python
-from django_logic.testing import ProcessScenario
-
-
-class TestOrderFulfilment(ProcessScenario):
-    process_class = OrderProcess
-    model = Order
-    state_field = 'status'
-
-    def test_happy_path(self):
-        order = self.create_instance(status='approved')
-        self.background_transition(order, 'fulfil')
-        self.assert_state(order, 'fulfilled')
-        self.assert_side_effects_ran(['book_courier'])
-```
-
-For deployment-wide inline tests, call `django_logic.conf.enable_sync()` in test settings and set
-`DJANGO_LOGIC['BACKGROUND_EXECUTION'] = 'sync'`. Boot refuses that setting without the explicit opt-in.
-Production deployments normally use `pull`. Business code can use `django_logic.background.sync_execution()` for one block that needs an immediate result.
-That block runs in the caller's process and starts no retry loop.
-A committed unfinished job can still be claimed by workers serving its queue.
-See the [testing guide](https://github.com/Borderless360/django-logic/blob/master/docs/TESTING_GUIDE.md) for database requirements, transaction behavior and the scenario catalog.
 
 ## More documentation
 

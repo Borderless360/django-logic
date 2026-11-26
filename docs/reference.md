@@ -12,7 +12,6 @@ Business rules belong in application functions. Worker configuration belongs in 
 | `from django_logic.background import BackgroundTransition` | Save an action for a worker. |
 | `from django_logic.background import Defer, PermanentFailure` | Wait until a specified time, or report a failure that retrying cannot fix. |
 | `from django_logic.background import sync_execution` | Run background work inline within one block. |
-| `from django_logic.background import in_flight, transition_statistics, queue_worker_presence` | Read job and worker observations. |
 | `from django_logic.background import AlreadyInProgress` | Handle a refused duplicate submission. |
 | `from django_logic.exceptions import TransitionNotAllowed, TransitionTemporarilyUnavailable, RefusalReason` | Handle unavailable actions. |
 | `from django_logic.commands import StrictPermissions, NoUserPermissions, refusal_message` | Require a person, require automation, or explain a failed business check. |
@@ -157,10 +156,8 @@ Pass model identifiers and load current records when the worker runs.
 Conditions receive only the instance; permissions also receive the user.
 Required functions and callbacks receive business arguments plus engine trace values.
 
-JSON values, `datetime`, `date`, `time`, `Decimal`, `UUID`, tuples, sets and frozen sets round-trip through saved arguments.
-Dictionary keys must be strings. Unsupported objects are refused before saving a job.
-Datetime conversion preserves the instant and numeric offset, but not the original zone identity or `fold` flag.
-Unknown or malformed saved type tags fail restoration rather than reaching business code as a different type.
+Use JSON strings, finite numbers, booleans, null, lists and dictionaries with string keys.
+Pass dates as ISO strings and decimal amounts as strings when precision matters.
 
 The engine manages `tr_id`, `root_id`, `parent_id`, `process_class`, `owning_process_class` and runtime `context`.
 `process_class` and `owning_process_class` are dotted-path strings, not Python class objects.

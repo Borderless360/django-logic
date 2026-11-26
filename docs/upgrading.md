@@ -1,5 +1,20 @@
 # Upgrading and rollback
 
+## From 5.3.1 to 6.0
+
+Finish unfinished jobs with typed arguments on the old release before switching workers.
+Run this read-only check. The count must reach zero.
+
+```sql
+SELECT count(*) FROM django_logic_background_transitionmessage
+WHERE NOT is_completed AND kwargs::text LIKE '%"__dl_type__"%';
+```
+
+Pass plain JSON when submitting new jobs. Convert dates and UUIDs to strings.
+The worker refuses old type tags before calling any business functions.
+Read job counts and timings from `TransitionMessage`. The operator command lists or wakes jobs.
+Undeclared actions raise `AttributeError`. Use `hasattr(process, name)` for optional actions.
+
 ## From 5.2.2 to 5.3.0
 
 Migrations 0021 and 0022 each add one index to the job table. Completed-job cleanup reads through them.

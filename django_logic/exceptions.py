@@ -8,7 +8,6 @@ class RefusalReason(StrEnum):
     PERMISSION = 'permission'
     CONDITION = 'condition'
     SOURCE_STATE = 'source_state'
-    UNKNOWN_ACTION = 'unknown_action'
     LOCKED = 'locked'
     BACKGROUND_IN_FLIGHT = 'background_in_flight'
     BACKGROUND_STRANDED = 'background_stranded'
