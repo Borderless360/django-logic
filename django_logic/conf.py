@@ -38,12 +38,6 @@ def _conf() -> dict:
     return conf
 
 
-def lock_timeout():
-    """Effective global ``LOCK_TIMEOUT`` in seconds — read on every call
-    (not cached at import time)."""
-    return _validated_number('LOCK_TIMEOUT', 7200, minimum=0, exclusive=True)
-
-
 #: Set by :func:`enable_sync`. Boot reads it to decide whether
 #: ``BACKGROUND_EXECUTION='sync'`` is allowed in this process.
 _sync_enabled = False
@@ -260,7 +254,6 @@ def validate_on_ready() -> None:
     max_errors()
     retry_minutes()
     cleanup_days()
-    lock_timeout()
     if mode == EXECUTION_SYNC:
         _reject_sync_without_opt_in()
     # The pull-mode database and cache rules are system checks

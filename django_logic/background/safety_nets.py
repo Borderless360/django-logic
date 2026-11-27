@@ -34,7 +34,6 @@ from django_logic.background.runner import (
     finalize_stuck_attempt,
     run_background_transition,
 )
-from django_logic.background.worker_presence import queue_worker_presence
 from django_logic.logger import logger
 
 
@@ -44,7 +43,6 @@ _CLEANUP_BATCH_SIZE = 1000
 def _claimable(queues: list[str] | None = None):
     """Rows a worker may take now. The one place the visibility rule is
     written — the pull claim and the sync retry pass both read it."""
-    from django_logic.lock_ownership import jobs_with_state_locks
     retry_cutoff = timezone.now() - timedelta(
         minutes=conf.retry_minutes())
     rows = TransitionMessage.objects.filter(
@@ -53,7 +51,7 @@ def _claimable(queues: list[str] | None = None):
     ).filter(
         Q(last_error_dt__isnull=True) | Q(last_error_dt__lt=retry_cutoff)
     )
-    rows = rows.filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now())).exclude(pk__in=jobs_with_state_locks())
+    rows = rows.filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
     if queues is not None:
         rows = rows.filter(queue_name__in=queues)
     return rows.order_by('created', 'pk')
@@ -113,9 +111,7 @@ def detect_stuck_transitions() -> int:
     It writes one line per queue, so a long backlog does not write one
     line per row every minute. A queue a worker still takes rows from is
     behind, which is a WARNING. A queue no worker takes rows from is an
-    ERROR. Recent worker presence distinguishes missing workers from workers
-    that serve this queue but have made no progress. Presence does not lower
-    the severity of a queue with no progress.
+    ERROR. Recent starts and completions provide the evidence for each queue.
 
     Returns the number of rows finalized.
     """
@@ -152,15 +148,6 @@ def detect_stuck_transitions() -> int:
             )
             continue
         behind = f' {rows - 1} more rows wait behind it.' if rows > 1 else ''
-        if queue_worker_presence(queue_name):
-            logger.error(
-                f'detect_stuck_transitions: queue {queue_name!r} has a recent '
-                f'worker presence record, but no progress for {report_after} '
-                f'minutes. TransitionMessage#{oldest_pk} has waited '
-                f'{age_minutes} minutes.{behind} Check worker capacity, '
-                'other queues sharing its slots, and blocked jobs.'
-            )
-            continue
         logger.error(
             f'detect_stuck_transitions: TransitionMessage#{oldest_pk} has '
             f'waited {age_minutes} minutes on queue {queue_name!r}, and no '
@@ -234,11 +221,12 @@ def _delete_in_batches(eligible, alias) -> int:
     while True:
         with transaction.atomic(using=alias):
             message_ids = list(
-                eligible.order_by('modified', 'pk').values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
+                eligible.select_for_update(skip_locked=True).order_by('modified', 'pk')
+                .values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
             )
             if not message_ids:
                 break
             # Recheck eligibility because a row can change after selection.
-            count, _ = eligible.filter(pk__in=message_ids).delete()
-        deleted += count
+            _, counts = eligible.filter(pk__in=message_ids).delete()
+        deleted += counts.get(TransitionMessage._meta.label, 0)
     return deleted

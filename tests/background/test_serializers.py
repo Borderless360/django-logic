@@ -1,4 +1,4 @@
-"""kwargs serialization: typed round-trip, user_id swap."""
+"""Plain JSON arguments and user restoration."""
 import json
 from datetime import date, datetime, time, timezone as tz
 from decimal import Decimal
@@ -8,15 +8,8 @@ from uuid import UUID
 from django.test import SimpleTestCase
 
 from django_logic.background.serializers import (
-    decode_value, deserialize_kwargs, restore_user, serialize_kwargs,
-    KwargsSerializationError,
+    KwargsSerializationError, deserialize_kwargs, restore_user, serialize_kwargs,
 )
-
-
-def _roundtrip(kwargs):
-    persisted = serialize_kwargs(kwargs)
-    # The persisted form must be valid JSON as-is (what the DB row stores).
-    return json.loads(json.dumps(persisted))
 
 
 class SerializeKwargsTests(SimpleTestCase):
@@ -32,56 +25,15 @@ class SerializeKwargsTests(SimpleTestCase):
         self.assertNotIn('user', out)
         self.assertEqual(out['user_id'], 42)
 
-    def test_typed_values_round_trip_identically(self):
-        aware = datetime(2024, 1, 2, 3, 4, 5, tzinfo=tz.utc)
-        naive = datetime(2026, 6, 4, 12, 30, 0)
-        original = {
-            'aware': aware,
-            'naive': naive,
-            'day': date(2024, 1, 2),
-            'at': time(23, 59, 1),
-            'amount': Decimal('19.99'),
-            'some_id': UUID('12345678-1234-5678-1234-567812345678'),
-            'pair': (1, 'two'),
-            'tags': {'a', 'b'},
-            'frozen': frozenset({3}),
-        }
-        restored = decode_value(_roundtrip(dict(original)))
-        self.assertEqual(restored, original)
-        for key in original:
-            self.assertIs(type(restored[key]), type(original[key]), key)
+    def test_non_json_arguments_name_the_field(self):
+        for value in (datetime.now(tz.utc), date.today(), time(12), Decimal('1'), UUID(int=1),
+                      (1, 2), {1}, frozenset({1})):
+            with self.subTest(value=value), self.assertRaisesRegex(TypeError, 'items'):
+                serialize_kwargs({'items': [{'value': value}]})
 
-    def test_nested_containers_round_trip(self):
-        original = {
-            'list': [UUID(int=1), date(2024, 1, 1), (Decimal('1'), {'x'})],
-            'dict': {'nested': {'deeper': datetime(2024, 5, 6, tzinfo=tz.utc)}},
-        }
-        self.assertEqual(decode_value(_roundtrip(dict(original))), original)
-
-    def test_caller_dict_containing_the_tag_key_is_escaped(self):
-        original = {'payload': {'__dl_type__': 'not-ours', 'value': 1}}
-        self.assertEqual(decode_value(_roundtrip(dict(original))), original)
-
-    def test_plain_json_strings_remain_strings(self):
-        # Ordinary JSON strings do not acquire a Python date or UUID type.
-        payload = {'when': '2024-01-02T03:04:05+00:00', 'some_id': 'abc', 'n': 1}
-        self.assertEqual(decode_value(dict(payload)), payload)
-
-    def test_unknown_tag_is_refused(self):
-        row = {'v': {'__dl_type__': 'from_the_future', 'value': 'x'}}
-        with self.assertRaisesMessage(KwargsSerializationError, "Unknown kwargs type tag 'from_the_future'"):
-            decode_value(row)
-
-    def test_malformed_tag_is_refused(self):
-        values = (
-            ('datetime', 'not-a-datetime'), ('datetime', None),
-            ('dict', None), ('tuple', None), ('set', None), ('frozenset', None),
-            ('uuid', 'not-a-uuid'),
-        )
-        for tag, value in values:
-            with self.subTest(tag=tag, value=value):
-                with self.assertRaisesMessage(KwargsSerializationError, f"Cannot restore kwargs type tag {tag!r}"):
-                    decode_value({'item': {'__dl_type__': tag, 'value': value}})
+    def test_legacy_tag_refused_before_hook(self):
+        with self.assertRaisesMessage(KwargsSerializationError, 'legacy typed job argument'):
+            deserialize_kwargs({'items': [{'__dl_type__': 'date', 'value': '2026-01-01'}]})
 
     def test_tr_ids_stringified_when_uuid(self):
         tr_id = UUID(int=99)
@@ -163,10 +115,3 @@ class RestoreUserTests(SimpleTestCase):
         kwargs = {'other': 1}
         restore_user(kwargs)
         self.assertEqual(kwargs, {'other': 1})
-
-
-class InvalidTypeTagTests(SimpleTestCase):
-    def test_null_or_unhashable_tags_are_refused(self):
-        for tag in (None, [], {}):
-            with self.subTest(tag=tag), self.assertRaises(KwargsSerializationError):
-                decode_value({'__dl_type__': tag, 'value': 'not business data'})

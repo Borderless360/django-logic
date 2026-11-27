@@ -66,9 +66,10 @@ def _claim_in_transaction(rows, groups, started):
         examined.append(group.key)
         # An older job waiting for newer work must not keep taking its turn.
         # A missing or earlier due time preserves the job's creation order.
-        pk = rows.filter(fairness_key=group.key).order_by(
+        candidates = rows.filter(fairness_key=group.key).order_by(
             Greatest('created', Coalesce('eligible_at', 'created')), 'created', 'pk',
-        ).select_for_update(skip_locked=True).values_list('pk', flat=True).first()
+        )
+        pk = rows.model.claim_start(candidates)
         # An unavailable group's turn also advances. Otherwise many
         # long-running groups could occupy every bounded scan forever.
         groups.filter(key=group.key).update(last_served_at=timezone.now())

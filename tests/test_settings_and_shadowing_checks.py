@@ -31,11 +31,9 @@ from django.test import (
 
 from django_logic.background.transitions import BackgroundTransition
 from django_logic.checks import (
-    check_background_database_routing,
     check_pull_mode_database,
-    check_state_lock_store,
 )
-from django_logic.conf import lock_timeout
+from django_logic.conf import default_queue
 from django_logic.process import (
     ModelProcessBinding,
     Process,
@@ -44,29 +42,6 @@ from django_logic.process import (
 from django_logic.transition import Transition
 from tests import dl_settings
 from tests.models import Invoice
-
-
-class StateOwnershipSetupTests(SimpleTestCase):
-    def test_other_databases_do_not_silently_join_business_transactions(self):
-        for vendor in ('mysql', 'oracle'):
-            with self.subTest(vendor=vendor), patch(
-                'django.db.connections', {'default': SimpleNamespace(vendor=vendor)},
-            ):
-                self.assertEqual([finding.id for finding in check_state_lock_store(None)],
-                                 ['django_logic.state_lock_database'])
-
-    def test_sqlite_requires_explicit_test_runtime(self):
-        with patch('django.db.connections', {'default': SimpleNamespace(vendor='sqlite')}), \
-                patch('django_logic.conf.sync_enabled', return_value=False):
-            self.assertEqual([finding.id for finding in check_state_lock_store(None)],
-                             ['django_logic.state_lock_database'])
-
-    def test_migration_router_cannot_omit_either_ownership_table(self):
-        with patch('django.db.connections', {'default': SimpleNamespace(vendor='postgresql')}), \
-                patch('django.db.router.allow_migrate_model', return_value=False):
-            findings = check_state_lock_store(None)
-        self.assertEqual([finding.id for finding in findings],
-                         ['django_logic.state_lock_routing', 'django_logic.state_lock_routing'])
 
 
 class _BindingHelper:
@@ -122,7 +97,6 @@ class OneEntryInstallTests(_BindingHelper, SimpleTestCase):
                  if app_label == 'django_logic_background'}
         self.assertIn('0001_squashed_0010_proxy_model_label', names)
         self.assertIn('0011_operation_contract', names)
-
 
 
 class RequestParamHookTests(_BindingHelper, SimpleTestCase):
@@ -202,11 +176,11 @@ class NonDictSettingsBlockTests(SimpleTestCase):
     def test_core_validation_names_the_setting(self):
         # Including the falsy non-dicts: '' used to read as "unset", so a
         # DJANGO_LOGIC built from an empty env var was silently ignored.
-        for bad in ('LOCK_TIMEOUT=7200', ['LOCK_TIMEOUT'], 7200, '', []):
+        for bad in ('DEFAULT_QUEUE=queue', ['DEFAULT_QUEUE'], 7200, '', []):
             with self.subTest(value=bad):
                 with override_settings(DJANGO_LOGIC=bad):
                     with self.assertRaises(ImproperlyConfigured) as ctx:
-                        lock_timeout()
+                        default_queue()
                 self.assertIn('DJANGO_LOGIC must be a dict', str(ctx.exception))
                 self.assertIn(type(bad).__name__, str(ctx.exception))
 
@@ -231,7 +205,7 @@ class NonDictSettingsBlockTests(SimpleTestCase):
         for value in (None, {}):
             with self.subTest(value=value):
                 with override_settings(DJANGO_LOGIC=value):
-                    lock_timeout()
+                    default_queue()
 
 
 # --- F1: only the ROOT's attributes can shadow an action_name -----------

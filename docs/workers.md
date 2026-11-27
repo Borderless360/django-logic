@@ -21,11 +21,14 @@ This lets required newer work run before an older job checks its result again.
 Jobs without a deferral keep their submission order, including jobs without a fairness key.
 A failed attempt waits until its retry time. The configured error limit stops repeated failures.
 Error retries keep their submission order once the retry wait ends.
-A lost business connection releases its row lock. Unexpired state locks taken by
-that job still prevent a retry until confirmed-stop cleanup or their configured
-lease expires. A process-owner record alone does not delay a job that has no such
-locks; database-only work can recover as soon as its database transaction ends.
-External side effects still require application duplicate protection.
+A lost business connection releases its row lock. If a worker exits between selecting a job and acquiring its execution lock, another worker can recover the job after five seconds. External side effects require application duplicate protection.
+
+When a job calls a synchronous transition on its own state field, the selected
+state and its job record commit together. A savepoint rollback restores the
+previous choice. If a non-atomic job commits a choice and then retries, its
+side effects can run again and complete the remaining work. Give external
+requests a durable receipt or idempotency key. A later change to a different
+state still supersedes the job.
 
 Each job runs in a separate process. The worker records crashes and stops
 jobs that exceed their declared timeout. The job row remains the source for recovery.
@@ -47,9 +50,6 @@ An unknown `BACKGROUND_EXECUTION` value fails at startup.
 Each job runs in its own process. When that process finishes, the worker can start another job.
 The worker continues checking timeouts while it records failures and runs maintenance.
 If a database lock prevents failure recording, the worker keeps the failure and retries the write.
-Any unexpired state locks keep other workers from starting that job while cleanup
-and failure recording wait. A worker that selected the job earlier checks these
-locks again before application work and refuses without counting another error.
 When the wait persists, a warning names the job and elapsed wait.
 Inspect the PostgreSQL lock holder so the worker can record the failure before another attempt starts.
 
@@ -71,12 +71,7 @@ model writes independently. Applications may open additional connections. Budget
 `workers × (concurrency + 2)` connections per queue group for atomic jobs.
 For `atomic=False` jobs, budget `workers × (2 × concurrency + 2)`. The two extras
 are the worker's LISTEN connection and its separate maintenance process.
-Each time the library takes or releases a state lock, it opens one short
-independent connection. A lock check does the same inside a transaction on the
-default database; outside one, it reads through the default connection. Add one
-possible concurrent connection per active job or application thread using state
-locks. Measure request latency and concurrent throughput with the actual
-database topology. Add any connections that consumer callbacks open. Keep the total under the
+Add any connections that consumer callbacks open. Keep the total under the
 database plan's cap, or under the pgbouncer pool size. A worker that
 cannot connect logs and retries; a database at its cap refuses the web
 processes too, so leave headroom for them.
@@ -107,8 +102,6 @@ Monitor the worker process directly:
 
 - a process supervisor that restarts the worker and reports the restart
   (on Heroku, dyno-crash alerts);
-- a heartbeat check — a cron or Sentry cron monitor that fails if no
-  recent worker presence remains for a queue;
 - `python manage.py dl_transitions` during an incident: it lists the
   uncompleted rows and names the ones nothing is serving.
 
@@ -124,25 +117,6 @@ slot for the whole window, a queue it serves still gets the ERROR, because
 nothing has run from that queue for that long. Give that queue its own
 worker or more slots. The ERROR only fires while some worker is alive to
 run it, which is why the process alert comes first.
-
-Each maintenance process records every queue its worker serves in the shared
-cache. A full worker still starts this process. The observation expires after
-the retry window. Stopping one worker never deletes another worker's observation.
-This is recent maintenance evidence, not proof that a worker is still running
-or that a queue is making progress. A stopped worker can remain visible until
-the record expires. Cache failures can also leave presence unknown or absent.
-
-When an observation exists but no job has progressed, the ERROR says to check
-capacity, other served queues and blocked jobs. Without it, the message suggests
-starting a worker. Recent presence never downgrades a stalled queue to a WARNING.
-`queue_worker_presence(queue_name)` exposes this evidence without changing jobs.
-The job list uses the latest recorded error or deferral to distinguish waiting work from an unfinished attempt.
-An expired wait does not mean the previous attempt is still running.
-Text statistics include the full declaring process class, so same-named provider actions remain distinguishable.
-Cache writes run inside the bounded maintenance process. A blocked cache cannot
-delay the worker's job timeout checks. Cache failure leaves database progress
-checks unchanged. The default cache must be shared between reporting processes
-and workers; an in-memory cache cannot provide cross-process observations.
 
 ## Provider receipts that must survive a failed attempt
 
@@ -180,30 +154,12 @@ cannot stop that request; the application must prevent duplicate external change
 ```bash
 python manage.py dl_transitions
 python manage.py dl_transitions --send 1234
-python manage.py dl_transitions --stats --since 7d --queues django_logic --json
 ```
 
 `dl_transitions` lists every uncompleted background transition and says why
 each one is not moving: it has spent every attempt, it waits out the retry
 pause, its last attempt has no recorded result, or it waits for worker capacity.
-The report also distinguishes recent worker presence from actual queue progress. `--queues` narrows the list.
-For queue ordering and presence alerts, see the selection and monitoring sections above.
-
-`--stats` reports retained jobs created during the selected period, grouped by
-queue, model, process and transition. It includes outcomes, errors,
-recorded starts, repeated starts and deferrals. Initial waiting uses the first
-recorded start. Duration covers the last measured attempt, excluding completion
-callbacks. Each timing includes its sample count, median, 90th percentile and
-maximum in milliseconds. Missing history stays unknown. Repeated starts include
-deferrals and competing starts; they are not an exact retry count. The report
-cannot infer total runtime or worker utilization. It changes no job records.
-Use `--json` for machine-readable output. `--queue` also accepts the queue filter.
-
-The same report is available as
-`django_logic.background.transition_statistics(since=cutoff, queues=None, using=None)`.
-`cutoff` is a datetime; the optional database alias selects where to read jobs.
-`queue_worker_presence(queue_name)` returns `True` for recent presence, `False`
-for no retained observation, or `None` when the cache cannot answer.
+Use `--queues` to filter the list.
 
 `--send <pk>` clears the retry wait on one job and wakes its workers.
 The job can then run when a worker has capacity. The command runs no business functions itself.

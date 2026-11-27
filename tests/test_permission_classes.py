@@ -41,14 +41,14 @@ class _Guest:
 class ClassTests(SimpleTestCase):
     def test_strict_refuses_no_user_then_runs_its_commands(self):
         strict = StrictPermissions(commands=[_is_staff])
-        self.assertFalse(strict.execute(None, None))
-        self.assertFalse(strict.execute(None, _Guest()))
-        self.assertTrue(strict.execute(None, _Staff()))
+        self.assertIs(strict.execute(None, None), strict)
+        self.assertIs(strict.execute(None, _Guest()), _is_staff)
+        self.assertIsNone(strict.execute(None, _Staff()))
 
     def test_no_user_refuses_a_user_and_permits_none(self):
         automation = NoUserPermissions(commands=[])
-        self.assertFalse(automation.execute(None, _Staff()))
-        self.assertTrue(automation.execute(None, None))
+        self.assertIs(automation.execute(None, _Staff()), automation)
+        self.assertIsNone(automation.execute(None, None))
 
 
 class PersonBranch(Process):

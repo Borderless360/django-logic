@@ -14,7 +14,6 @@ from django.test import TestCase, override_settings
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
-from django_logic.exceptions import TransitionNotAllowed
 from django_logic.logger import TransitionEventType
 from tests.models import Invoice
 
@@ -41,57 +40,6 @@ class LockLoggingProcess(Process):
             side_effects=[_noop],
         ),
     ]
-
-
-@override_settings(DJANGO_LOGIC=_SYNC)
-class FailedLockAcquisitionLoggingTests(TestCase):
-    def setUp(self):
-        super().setUp()
-        ProcessManager.bind_model_process(
-            Invoice, LockLoggingProcess, state_field='status')
-        self.addCleanup(
-            unbind_model_process, Invoice, LockLoggingProcess)
-        cache.clear()
-        self.addCleanup(cache.clear)
-
-    def _locked_by_someone_else(self, inv):
-        # A foreign holder: same key, different token — exactly the leaked-lock
-        # shape from the incident (the holder is gone, the key remains).
-        inv.lock_logging_proc.state.lock()
-
-    def test_sync_failed_acquire_is_logged_with_the_instance_key(self):
-        inv = Invoice.objects.create(status='draft')
-        self._locked_by_someone_else(inv)
-        key = inv.lock_logging_proc.state.instance_key
-
-        with self.assertLogs('django-logic.transition', level='INFO') as logs:
-            with self.assertRaises(TransitionNotAllowed):
-                inv.lock_logging_proc.go()
-
-        wanted = [
-            line for line in logs.output
-            if f'{TransitionEventType.LOCK.value} failed {key}' in line
-        ]
-        self.assertTrue(wanted, logs.output)
-        # INFO per #154 — losing the lock race is expected concurrency, and at
-        # ERROR ten days of it would have paged for the wrong reason.
-        self.assertTrue(wanted[0].startswith('INFO:'), wanted[0])
-
-    def test_background_failed_acquire_is_logged_with_the_instance_key(self):
-        inv = Invoice.objects.create(status='draft')
-        self._locked_by_someone_else(inv)
-        key = inv.lock_logging_proc.state.instance_key
-
-        with self.assertLogs('django-logic.transition', level='INFO') as logs:
-            with self.assertRaises(TransitionNotAllowed):
-                inv.lock_logging_proc.bg()
-
-        self.assertTrue(
-            any(f'{TransitionEventType.LOCK.value} failed {key}' in line
-                for line in logs.output),
-            logs.output,
-        )
-
 
 
 @override_settings(DJANGO_LOGIC=_SYNC)
@@ -158,23 +106,3 @@ class LifecycleLinesCarryInstanceKeyTests(TestCase):
         self.assertTrue(
             any(f'{TransitionEventType.UNLOCK.value} {key}' in line
                 for line in logs.output), logs.output)
-
-    def test_revalidation_failure_unlock_is_visible(self):
-        inv = Invoice.objects.create(status='draft')
-        key = inv.lock_logging_proc.state.instance_key
-        # Move the persisted state out from under the resolved transition so
-        # the under-lock revalidation fails after a successful acquire.
-        Invoice.objects.filter(pk=inv.pk).update(status='elsewhere')
-
-        with self.assertLogs('django-logic.transition', level='INFO') as logs:
-            with self.assertRaises(TransitionNotAllowed):
-                inv.lock_logging_proc.go()
-
-        self.assertTrue(
-            any(f'{TransitionEventType.UNLOCK.value} {key} '
-                f'after revalidation failure' in line
-                for line in logs.output),
-            logs.output,
-        )
-        # And the lock really is free for the next caller.
-        self.assertFalse(inv.lock_logging_proc.state.is_locked())

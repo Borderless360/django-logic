@@ -1,6 +1,7 @@
 # Refused actions
 
 `TransitionNotAllowed.reason` is a `RefusalReason` from `django_logic.exceptions`.
+An override of `is_valid` can still refuse an action. That override supplies no reason code or check-specific message.
 Its values are strings and can be included in JSON responses. Process calls
 also attach `user_message`, ready to display. `str(error)` contains diagnostic detail.
 
@@ -9,17 +10,20 @@ also attach `user_message`, ready to display. `str(error)` contains diagnostic d
 | `permission` | A process or transition permission check failed. |
 | `condition` | A process or transition condition check failed. |
 | `source_state` | The current or persisted state is outside the transition's sources. |
-| `unknown_action` | No process declaration has this action name. |
 | `locked` | The state lock could not be acquired. |
 | `background_in_flight` | An uncompleted background transition still has retry coverage. |
 | `background_stranded` | An uncompleted background transition is no longer being retried. |
 | `ambiguous` | More than one transition passed the checks for this action. |
 
+An undeclared action raises `AttributeError` at lookup. Use `hasattr(process, name)` to check whether a process declares an action.
+
 A PostgreSQL row-lock timeout raises `TransitionTemporarilyUnavailable` with reason `locked`.
 A state-lock refusal raises plain `TransitionNotAllowed` with that same reason.
 Use the exception type, not `reason='locked'` alone, to decide whether to suggest a short retry.
 On PostgreSQL, a plain state-lock refusal can mean a nested call to the same record, or a lock left after a process stopped or lost its connection.
-Check for a nested action first. Otherwise inspect the unfinished work and provider results. A worker removes its process's locks after confirmed exit; an unobserved interruption can retain them for the remaining `LOCK_TIMEOUT`. Expiry alone does not prove an external operation stopped.
+Inspect nested side effects and concurrent transactions touching the same row.
+
+
 Do not remove a lock while another call may still act on the record.
 SQLite is supported only for single-process tests; concurrent production state guarantees require PostgreSQL.
 When declarations share an action name, prefer a transition whose sources
@@ -105,17 +109,4 @@ leave `user_message=None`; process configuration applies to Process calls.
 
 ## Checking eligibility while another action runs
 
-`process.get_available_actions(..., include_locked=True)` and
-`process.get_available_transitions(..., include_locked=True)` check the object's
-current state, conditions and permissions even when another action holds its
-state lock. This lets an application distinguish a temporary wait from a business
-rule that forbids an action. The default hides actions that need a
-held lock. One listing reads that lock once, for the process and its nested processes.
-
-Inside `DatabaseTransition`, the lock is visible only within the current call.
-Other connections can list those actions, but calls still wait for the PostgreSQL row lock or refuse after its timeout.
-
-These queries do not acquire or release locks, save a request, or guarantee that
-an action can run immediately. Calling the action still acquires its normal
-locks, checks the latest persisted state and rejects conflicting unfinished
-work. Applications must handle a later refusal without damaging existing data.
+Action listings evaluate conditions and permissions on the supplied model. They take no lock. When an action is called, it acquires the business-row lock, checks a fresh copy of the record, and checks for conflicting unfinished work. Callers must handle a refusal even after listing an action.

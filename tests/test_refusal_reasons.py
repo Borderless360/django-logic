@@ -133,7 +133,11 @@ class ResolverReasonTests(TestCase):
             conditions = [deny]
             transitions = [Transition('go', sources=['draft'])]
 
-        self.refusal(lambda: self.process(Workflow).missing_action(), RefusalReason.UNKNOWN_ACTION)
+        process = self.process(Workflow)
+        self.assertTrue(hasattr(process, 'go'))
+        self.assertFalse(hasattr(process, 'missing_action'))
+        with self.assertRaises(AttributeError):
+            process.missing_action()
 
     def test_first_matching_branch_explains_refusal_without_unrelated_guards(self):
         class Unrelated(Process):
@@ -194,11 +198,11 @@ class ResolverReasonTests(TestCase):
             transitions = [UserRequired('go', sources=['draft'], conditions=[deny])]
 
         self.refusal(lambda: self.process(Workflow).go(), None)
-        self.refusal(lambda: self.process(Workflow).go(user=object()), RefusalReason.CONDITION)
+        self.refusal(lambda: self.process(Workflow).go(user=object()), None)
 
     def test_nested_resolver_does_not_replace_the_outer_condition_reason(self):
         class Inner(Process):
-            transitions = [Transition('go', sources=['draft'], permissions=[deny_permission])]
+            transitions = [Transition('go', sources=['draft'], lock=False, permissions=[deny_permission])]
 
         def nested_refusal(instance, **kwargs):
             self.refusal(lambda: self.process(Inner).go(user=object()), RefusalReason.PERMISSION)
@@ -208,7 +212,6 @@ class ResolverReasonTests(TestCase):
             transitions = [Transition('go', sources=['draft'], conditions=[nested_refusal])]
 
         self.refusal(lambda: self.process(Outer).go(), RefusalReason.CONDITION)
-        self.refusal(lambda: self.process(Outer).missing_action(), RefusalReason.UNKNOWN_ACTION)
 
     def test_opaque_override_cannot_inherit_another_objects_validity_reason(self):
         other = Transition('other', sources=['draft'], permissions=[deny_permission])
@@ -438,17 +441,12 @@ class ConcurrentReasonTests(SimpleTestCase):
     def test_shared_transition_keeps_each_callers_reason(self):
         barrier = Barrier(2, timeout=5)
 
-        class PausedTransition(Transition):
-            def is_valid(self, instance, user=None):
-                valid = super().is_valid(instance, user)
-                barrier.wait()
-                return valid
-
         def permission(instance, user, **kwargs):
+            barrier.wait()
             return user == 'condition'
 
         class Workflow(Process):
-            transitions = [PausedTransition('go', sources=['draft'], permissions=[permission], conditions=[deny])]
+            transitions = [Transition('go', sources=['draft'], lock=False, permissions=[permission], conditions=[deny])]
 
         def refuse(user):
             instance = Invoice(pk=123, status='draft')
@@ -486,16 +484,6 @@ class ExecutionGateReasonTests(TestCase):
             kwargs={'process_class': f'{__name__}.ExecutionGateProcess'},
         )
 
-    def test_lock_refusals_preserve_plain_class_and_message_on_both_paths(self):
-        self.assertTrue(self.process.state.lock())
-        self.addCleanup(self.process.state.unlock)
-        for call in (self.process.touch, self.process.work):
-            with self.subTest(call=call), self.assertRaises(TransitionNotAllowed) as caught:
-                call()
-            self.assertIs(type(caught.exception), TransitionNotAllowed)
-            self.assertEqual(str(caught.exception), 'State is locked')
-            self.assertEqual(caught.exception.reason, RefusalReason.LOCKED)
-        self.assertEqual(TransitionMessage.objects.count(), 0)
 
     def test_pending_work_preserves_transient_and_duplicate_classes(self):
         self.pending()
@@ -525,5 +513,4 @@ class ExecutionGateReasonTests(TestCase):
                 call()
             self.assertIs(type(caught.exception), TransitionNotAllowed)
             self.assertEqual(caught.exception.reason, RefusalReason.SOURCE_STATE)
-            self.assertFalse(self.process.state.is_locked())
         self.assertEqual(TransitionMessage.objects.count(), 0)

@@ -77,7 +77,6 @@ from django_logic.conf import enable_sync
 enable_sync()
 
 DJANGO_LOGIC = {
-    'LOCK_TIMEOUT': 7200,
     'BACKGROUND_EXECUTION': 'sync',
     'TRANSITION_MESSAGE_MAX_ERRORS': 5,
     'TRANSITION_MESSAGE_RETRY_MINUTES': 2,

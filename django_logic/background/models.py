@@ -22,8 +22,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from django.db import OperationalError, models, transaction
-from django.db.models.functions import Coalesce
+from django.db import OperationalError, connections, models, transaction
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
@@ -89,8 +88,7 @@ class TransitionMessage(TimeStampedModel):
     # failure). ``duration_ms`` measures the last attempt only; null if
     # the worker never ran.
     started_at = models.DateTimeField(blank=True, null=True)
-    # Two workers can record starts before only one obtains the execution lock.
-    # These count recorded starts, not provider requests.
+    # A claim remains recorded even if the process exits before its first side effect.
     first_started_at = models.DateTimeField(blank=True, null=True)
     start_attempt_count = models.PositiveIntegerField(default=0)
     completed_at = models.DateTimeField(blank=True, null=True)
@@ -253,7 +251,7 @@ class TransitionMessage(TimeStampedModel):
         return False
 
     @classmethod
-    def retry_status(cls, instance, process_name: str):
+    def retry_status(cls, instance, process_name: str, *, excluding_job=None):
         """``None`` (no uncompleted row), ``RETRYING``, or ``STRANDED``.
 
         One classification shared by the unfinished-job check, enqueue's constraint
@@ -280,8 +278,11 @@ class TransitionMessage(TimeStampedModel):
         """
         from django_logic import conf
 
+        rows = cls.in_flight_for(instance, process_name)
+        if excluding_job is not None:
+            rows = rows.exclude(pk=excluding_job)
         row = (
-            cls.in_flight_for(instance, process_name)
+            rows
             .order_by('-modified')
             .values('pk', 'modified', 'started_at', 'eligible_at')
             .first()
@@ -302,64 +303,32 @@ class TransitionMessage(TimeStampedModel):
             return cls.STRANDED
         return cls.RETRYING
 
+    @staticmethod
+    def ready_to_start(rows):
+        # A process which never starts holds up its job for at most five seconds.
+        return rows.filter(
+            models.Q(started_at__isnull=True) | models.Q(started_at__lt=timezone.now() - timedelta(seconds=5))
+            | models.Q(last_error_dt__gte=models.F('started_at'))
+            | models.Q(last_deferred_at__gte=models.F('started_at'))
+        )
+
     @classmethod
-    def stamp_attempt_started(cls, transition_message_id: int) -> bool:
-        """Mark an attempt as beginning, in its own committed statement.
-
-        Deliberately called from *outside* the attempt's ``atomic`` block.
-        The start times and count must be visible to other connections while
-        the attempt runs, and must survive the attempt rolling back.
-        A hung attempt holds its transaction open (a write
-        inside it is invisible to other connections), and a crashed worker
-        rolls the stamp back with it. Written here it survives both
-        cases.
-
-        Durability is mode-dependent:
-
-        * **Pull mode** — the worker is the top-level unit of work with
-          no surrounding transaction, so this UPDATE autocommits and is
-          visible to other connections immediately.
-        * **Inline execution inside a caller's ``atomic()``** — part of the
-          caller's transaction, invisible until the caller commits.
-          Harmless: the INSERT that created the row is in that same
-          transaction, so the row and this stamp become visible (or roll
-          back) together — and the "attempt" is the caller's own thread,
-          which nothing else could rescue anyway.
-
-        Acquires the row lock with ``nowait`` first and gives up if another
-        attempt holds it. Not an optimisation: a bare ``UPDATE`` BLOCKS on
-        the live attempt's row lock, defeating the skip-if-locked design.
-        A held row means a live attempt has already stamped itself, so
-        there is nothing to record and ``_run_atomic`` will skip anyway.
-
-        Because a losing dispatcher never writes, ``started_at`` only ever
-        moves forward, and ``duration_ms`` cannot absorb lock wait.
-
-        Returns True if the marker was written.
-        """
+    def claim_start(cls, rows):
+        """Select and mark one start before releasing its row to the job process."""
+        connection = connections[rows.db]
         now = timezone.now()
-        try:
-            with transaction.atomic():
-                held = (
-                    cls.objects
-                    .select_for_update(nowait=True)
-                    .filter(pk=transition_message_id, is_completed=False)
-                    .filter(models.Q(eligible_at__isnull=True) | models.Q(eligible_at__lte=now))
-                    .exists()
-                )
-                if not held:
-                    return False
-                cls.objects.filter(
-                    pk=transition_message_id, is_completed=False
-                ).update(
-                    started_at=now, modified=now,
-                    first_started_at=Coalesce('first_started_at', now),
-                    start_attempt_count=models.F('start_attempt_count') + 1,
-                )
-        except OperationalError:
-            # Locked by a live attempt: it owns the marker.
-            return False
-        return True
+        candidate = rows.select_for_update(skip_locked=True).values('pk')[:1]
+        with transaction.atomic(using=rows.db), connection.cursor() as cursor:
+            select, parameters = candidate.query.get_compiler(using=rows.db).as_sql()
+            table = connection.ops.quote_name(cls._meta.db_table)
+            timestamp = connection.ops.adapt_datetimefield_value(now)
+            cursor.execute(
+                f'UPDATE {table} SET started_at = %s, modified = %s, '
+                f'first_started_at = COALESCE(first_started_at, %s), start_attempt_count = start_attempt_count + 1 '
+                f'WHERE id = ({select}) RETURNING id', [timestamp, timestamp, timestamp, *parameters],
+            )
+            result = cursor.fetchone()
+        return result[0] if result else None
 
     def mark_as_completed(
         self, measure_duration: bool = True, *, ended_in_failure: bool = False, completion_kind=None,
@@ -444,6 +413,16 @@ class TransitionMessage(TimeStampedModel):
             note = f'{label}: {note}'
         self.failure_side_effect_error = db_safe_text(note)
         self.save(using=self._state.db, update_fields=['failure_side_effect_error', 'modified'])
+
+
+class JobStateResult(models.Model):
+    """The state a job selected through a synchronous transition on its own record."""
+
+    job = models.OneToOneField(TransitionMessage, primary_key=True, on_delete=models.CASCADE, related_name='+')
+    value = models.TextField()
+
+    class Meta:
+        app_label = 'django_logic_background'
 
 
 def in_flight(instance, process_name: str = 'process') -> bool:

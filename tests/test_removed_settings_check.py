@@ -27,8 +27,6 @@ class UnreadSettingsCheckTests(SimpleTestCase):
         self.assertEqual(findings[0].id, 'django_logic.unread_setting')
         self.assertIn('LOG_KWARGS_REDACTOR', findings[0].msg)
         self.assertIn('MY_OWN_KEY', findings[0].msg)
-        self.assertIn('no effect', findings[0].msg)
-        self.assertIn('changelog', findings[0].hint)
 
     @override_settings(DJANGO_LOGIC=None)
     def test_a_missing_or_odd_setting_does_not_crash_the_check_run(self):

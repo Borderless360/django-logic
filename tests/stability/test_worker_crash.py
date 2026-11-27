@@ -4,12 +4,10 @@ These tests check saved state, cache-lock release and explicit repeated calls.
 An ordinary test exception is not proof of hard process-stop recovery.
 Real background-worker recovery tests live in tests.background.
 """
-from unittest.mock import patch, MagicMock
 
 from django.core.cache import cache
 from django.test import tag
 
-from django_logic.exceptions import TransitionNotAllowed
 from django_logic.state import State
 
 from tests.stability.base import (
@@ -19,8 +17,6 @@ from tests.stability.base import (
 from tests.stability.models import (
     Order, OrderProcess,
     side_effect_one, side_effect_two, side_effect_three,
-    callback_one, callback_two,
-    failure_callback,
 )
 
 
@@ -34,7 +30,6 @@ class TestCrashDuringSideEffects(StabilityTestCase):
     def test_crash_during_second_side_effect_then_recover(self):
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         sim = CrashSimulator(crash_during='side_effect_two')
         patched_effects = [sim.wrap(fn) for fn in [
@@ -59,7 +54,7 @@ class TestCrashDuringSideEffects(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfillment_failed')
-        self.assertIn('se1,', order.side_effect_log)
+        self.assertEqual(order.side_effect_log, '')
         self.assertNotIn('se3,', order.side_effect_log)
 
     def test_idempotent_side_effects_survive_retry(self):
@@ -69,7 +64,6 @@ class TestCrashDuringSideEffects(StabilityTestCase):
 
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         sim = CrashSimulator(crash_during='side_effect_two')
 
@@ -148,7 +142,6 @@ class TestCrashDuringCallbacks(StabilityTestCase):
 
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         process_cls = type('CallbackCrashProcess', (OrderProcess,), {
             'transitions': [
@@ -167,30 +160,6 @@ class TestCrashDuringCallbacks(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfilled')
-        self.assert_unlocked(state)
-
-
-@tag('stability')
-class TestCommittedStateWithHeldCacheLock(StabilityTestCase):
-    """
-    A direct state write commits independently of the held cache lock.
-    This test creates no background job and does not exercise worker delivery.
-    """
-
-    def test_state_set_but_dispatch_fails_lock_remains(self):
-        order = Order.objects.create(status='approved')
-        state = State(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        self.assertTrue(state.lock())
-        state.set_state('fulfilling')
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'fulfilling')
-        self.assert_locked(state)
-
-        state.unlock()
-        self._tracked_lock_keys.discard(state._get_hash())
 
 
 @tag('stability')
@@ -202,7 +171,6 @@ class TestMaxRetriesExhausted(StabilityTestCase):
     def test_repeated_failures_reach_failed_state(self):
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
         max_retries = 3
 
         for i in range(max_retries):
@@ -238,7 +206,6 @@ class TestMaxRetriesExhausted(StabilityTestCase):
         source with no in-progress state written — it can run again, not parked."""
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         def failing_se(instance, **kwargs):
             raise ValueError("oops")
@@ -260,4 +227,3 @@ class TestMaxRetriesExhausted(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')
-        self.assert_unlocked(state)

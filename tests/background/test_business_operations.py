@@ -1,5 +1,5 @@
 """Interactive and automatic requests share ordinary business actions."""
-from contextlib import contextmanager
+from django.db import transaction
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -7,7 +7,7 @@ from django.core.cache import cache
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
-from django_logic import DatabaseTransition, Process, ProcessManager
+from django_logic import Transition, Process, ProcessManager
 from django_logic.background import BackgroundTransition, Defer, PermanentFailure
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
@@ -30,20 +30,13 @@ def record_approval(instance, refuse=False, **kwargs):
 class DocumentProcess(Process):
     process_name = 'document'
     transitions = [
-        DatabaseTransition('begin_review', sources=['draft'], target='reviewing'),
-        DatabaseTransition(
+        Transition('begin_review', sources=['draft'], target='reviewing'),
+        Transition(
             'approve', sources=['reviewing'], target='approved', failed_state='failed',
-            atomic=True, side_effects=[record_approval],
+            side_effects=[record_approval],
         ),
-        DatabaseTransition('cancel_review', sources=['reviewing'], target='cancelled'),
+        Transition('cancel_review', sources=['reviewing'], target='cancelled'),
     ]
-
-
-@contextmanager
-def begin_review(transition, state, kwargs, *, using):
-    state.instance.status = 'reviewing'
-    state.instance.save(update_fields=['status'], using=using)
-    yield
 
 
 def review_document(instance, refuse=False, **kwargs):
@@ -60,21 +53,30 @@ class DocumentReviewProcess(Process):
         BackgroundTransition(
             'review', sources=['draft', 'reviewing', 'approved', 'failed'],
             queue='interactive-review', atomic=False, no_retry_on=(DocumentRefused,),
-            submission_context=begin_review, side_effects=[review_document],
+            side_effects=[review_document],
         ),
         BackgroundTransition(
             'review_automatically', sources=['draft', 'reviewing', 'approved', 'failed'],
             queue='automatic-review', atomic=False, no_retry_on=(DocumentRefused,),
-            submission_context=begin_review, side_effects=[review_document],
+            side_effects=[review_document],
         ),
     ]
 
 
-@contextmanager
-def submit_document_reviews(transition, state, kwargs, *, using):
-    for document in Widget.objects.filter(pk__in=kwargs['document_ids']).order_by('pk'):
-        document.document_review.review()
-    yield
+@transaction.atomic
+def request_review(document, *, automatic=False, **kwargs):
+    document.document.begin_review()
+    if automatic:
+        document.document_review.review_automatically(**kwargs)
+    else:
+        document.document_review.review(**kwargs)
+
+
+@transaction.atomic
+def submit_document_reviews(batch, document_ids):
+    for document in Widget.objects.filter(pk__in=document_ids).order_by('pk'):
+        request_review(document)
+    batch.batch_review.review_documents(document_ids=document_ids)
 
 
 def check_document_reviews(instance, document_ids, **kwargs):
@@ -91,7 +93,7 @@ class BatchReviewProcess(Process):
         BackgroundTransition(
             'review_documents', sources=['draft'], in_progress_state='reviewing',
             target='approved', failed_state='failed', queue='batch-review',
-            submission_context=submit_document_reviews, side_effects=[check_document_reviews],
+            side_effects=[check_document_reviews],
         ),
     ]
 
@@ -109,8 +111,8 @@ class BusinessOperationTests(TransactionTestCase):
     def test_interactive_and_automatic_queues_run_the_same_business_action(self):
         interactive = Widget.objects.create()
         automatic = Widget.objects.create()
-        interactive.document_review.review()
-        automatic.document_review.review_automatically()
+        request_review(interactive)
+        request_review(automatic, automatic=True)
         first = TransitionMessage.for_instance(interactive, 'document_review').get()
         second = TransitionMessage.for_instance(automatic, 'document_review').get()
         self.assertEqual(first.queue_name, 'interactive-review')
@@ -135,14 +137,14 @@ class BusinessOperationTests(TransactionTestCase):
             raise RuntimeError('The review request could not be saved.')
 
         with patch.object(TransitionMessage, 'save', refuse_job), self.assertRaises(RuntimeError):
-            document.document_review.review()
+            request_review(document)
         document.refresh_from_db()
         self.assertEqual(document.status, 'draft')
         self.assertFalse(TransitionMessage.objects.exists())
 
     def test_final_job_write_failure_does_not_repeat_committed_approval(self):
         document = Widget.objects.create()
-        document.document_review.review()
+        request_review(document)
         job = TransitionMessage.objects.get()
         complete = TransitionMessage.mark_as_completed
 
@@ -173,7 +175,7 @@ class BusinessOperationTests(TransactionTestCase):
         self.assertEqual((immediate.status, immediate.se_log), ('failed', ''))
 
         queued = Widget.objects.create()
-        queued.document_review.review_automatically(refuse=True)
+        request_review(queued, automatic=True, refuse=True)
         job = TransitionMessage.objects.get()
         run_background_transition(job.pk)
         queued.refresh_from_db()
@@ -185,7 +187,7 @@ class BusinessOperationTests(TransactionTestCase):
 
     def test_cancelled_review_does_not_change_the_document(self):
         document = Widget.objects.create()
-        document.document_review.review()
+        request_review(document)
         job = TransitionMessage.objects.get()
         document.document.cancel_review()
 
@@ -199,7 +201,7 @@ class BusinessOperationTests(TransactionTestCase):
 
     def test_batch_job_waits_for_all_saved_document_reviews(self):
         batch, first, second = (Widget.objects.create() for _ in range(3))
-        batch.batch_review.review_documents(document_ids=[first.pk, second.pk])
+        submit_document_reviews(batch, document_ids=[first.pk, second.pk])
         parent = TransitionMessage.for_instance(batch, 'batch_review').get()
         first_job = TransitionMessage.for_instance(first, 'document_review').get()
         second_job = TransitionMessage.for_instance(second, 'document_review').get()
@@ -237,6 +239,6 @@ class BusinessOperationTests(TransactionTestCase):
             return result
 
         with patch.object(TransitionMessage, 'save', refuse_batch), self.assertRaises(RuntimeError):
-            batch.batch_review.review_documents(document_ids=[first.pk, second.pk])
+            submit_document_reviews(batch, document_ids=[first.pk, second.pk])
         self.assertFalse(TransitionMessage.objects.exists())
         self.assertEqual(list(Widget.objects.values_list('status', flat=True)), ['draft', 'draft', 'draft'])

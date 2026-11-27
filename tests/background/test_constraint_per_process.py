@@ -21,7 +21,6 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django_logic.background import sync_execution
 from django_logic.background.exceptions import AlreadyInProgress
 from django_logic.background.models import TransitionMessage
-from django_logic.state import State
 from tests.background.models import Widget
 from tests import dl_settings
 
@@ -108,7 +107,6 @@ class SameProcessDuplicateTests(TransactionTestCase):
 
         # Enqueue releases the cache lock on the way out, so the instance is
         # not left locked.
-        self.assertFalse(State(widget, 'status', 'process').is_locked())
 
 
 class ConstraintAtDatabaseLevelTests(TransactionTestCase):

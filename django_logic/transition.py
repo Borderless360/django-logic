@@ -2,8 +2,8 @@
 
 A ``Transition`` moves an instance from one of its source states to its
 target state, running side-effects on success and either callbacks or
-failure callbacks on completion. Everything happens synchronously, in
-the caller's call frame — validate, lock, run, write the target state.
+failure callbacks after commit. The required work and target save execute
+in the caller's transaction.
 
 ``target=None`` declares a transition that writes no state on success.
 It runs under the same contract as every other transition: it takes the
@@ -28,26 +28,25 @@ worker runs the side-effects and writes the final state). Definitions
 live in ``django_logic.background.transitions`` (enqueue) and
 ``django_logic.background.runner`` (execute).
 """
-from contextlib import ExitStack
+from functools import partial
+from contextlib import contextmanager
 from uuid import UUID
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, transaction
 
 from django_logic.commands import (
+    guard_failure,
     Callbacks,
     Conditions,
     Permissions,
     SideEffects,
-    reload_after_rollback,
-    write_failed_state,
+    write_failed_state, reload_after_rollback,
 )
 from django_logic.exceptions import (
     RefusalReason,
     TransitionNotAllowed,
     TransitionTemporarilyUnavailable,
-    _execute_validity_bundle,
-    _record_validity_refusal,
 )
 from django_logic.logger import (
     transition_logger,
@@ -77,36 +76,14 @@ def _refuse_engine_param_kwargs(action_name: str, kwargs: dict) -> None:
             f"{action_name}() received {', '.join(repr(k) for k in clashing)}, "
             f"which name the engine's own parameters on the state-change path. "
             f"Passing them breaks the failure path (no failed_state, the real "
-            f"exception replaced, and the state lock held until its TTL). "
+            f"exception replaced, and a missing failure report). "
             f"Rename the value, or nest it — e.g. "
             f"{action_name}(payload={{'exception': …}})."
         )
 
 
 class Transition:
-    """Synchronous transition from a source state to a target state.
-
-    Execution order on success:
-      1. take the PostgreSQL row lock and the state lock
-      2. revalidate under the lock: the persisted state is still a valid
-         source AND no background transition is in flight on this
-         process (uncompleted ``TransitionMessage``)
-      3. run side-effects
-      4. on success: set ``target``, release the state lock, run callbacks
-      5. on failure: set ``failed_state`` (so failure hooks observe the
-         contained state), release the state lock, run ``failure_callbacks`` (and re-raise)
-
-    ``in_progress_state`` belongs to background submissions and is saved with their job.
-    On PostgreSQL, a locked synchronous call keeps database changes inside a transaction through its callbacks.
-    An interruption before that transaction commits discards its changes.
-    Other databases and ``lock=False`` do not open this transaction; the caller must supply one when needed.
-
-    ``atomic=True`` is an explicit synchronous option: required side effects
-    and the final state save succeed or roll back together on the instance's
-    database. After rollback, failure handling sees the reloaded instance.
-    Failure-state writes and callbacks happen after that rollback. The default
-    ``atomic=False`` allows a failed side effect to leave earlier writes saved.
-    """
+    """One action whose required changes commit together on the record database."""
 
     #: ``True`` on ``BackgroundTransition``. A public, stable attribute
     #: rather than an ``isinstance`` check: ``Process.__init_subclass__``
@@ -118,7 +95,7 @@ class Transition:
 
     def __init__(
         self, action_name: str, sources: list, target: str | None = None,
-        *, lock: bool = True, atomic: bool = False,
+        *, lock: bool = True,
         conditions=(), permissions=(), side_effects=(), callbacks=(),
         failure_callbacks=(), failed_state=None, refusal_messages=None,
     ):
@@ -129,17 +106,6 @@ class Transition:
         # identical to a state-writing transition, unless lock=False.
         self.target = target
         self.lock = bool(lock)
-        if type(atomic) is not bool:
-            raise ImproperlyConfigured(
-                f"Transition {action_name!r}: atomic must be True or False."
-            )
-        self.atomic = atomic
-        if atomic and not self.is_background and type(self).complete_transition is not Transition.complete_transition:
-            raise ImproperlyConfigured(
-                f"Transition {action_name!r}: atomic=True does not support a "
-                'complete_transition override. Put required work in '
-                'side_effects and optional follow-ups in callbacks.'
-            )
         if not self.lock and self.target is not None:
             raise ImproperlyConfigured(
                 f"Transition {action_name!r}: lock=False needs target=None. "
@@ -166,18 +132,6 @@ class Transition:
                 f"state write, and a state write must serialise on the lock. "
                 f"Record the failure in a failure_callback instead."
             )
-        if self.failed_state and not self.is_background and not self.atomic and not side_effects:
-            # Nothing can raise between the lock and the target write, so
-            # the state is never written and the declaration reads as if a
-            # failure path existed. A background transition keeps it: the
-            # worker can fail before the target write.
-            raise ImproperlyConfigured(
-                f"Transition {action_name!r}: failed_state names where the "
-                f"instance reaches when a side effect raises, and this "
-                f"transition has no side effects, so {self.failed_state!r} "
-                f"can never be written. Remove failed_state or add the side "
-                f"effect."
-            )
         self.failure_callbacks = Callbacks(failure_callbacks)
         self.side_effects = SideEffects(side_effects, transition=self)
         self.callbacks = Callbacks(callbacks)
@@ -194,196 +148,115 @@ class Transition:
     def __repr__(self):
         return self.__str__()
 
+    def _guard_failure(self, instance, user):
+        return guard_failure(self.permissions, self.conditions, instance, user)
+
     def is_valid(self, instance, user=None) -> bool:
-        permitted = _execute_validity_bundle(self, self.permissions, instance, user)
-        if not permitted:
-            _record_validity_refusal(self, RefusalReason.PERMISSION)
-            return permitted
-        valid = _execute_validity_bundle(self, self.conditions, instance)
-        if not valid:
-            _record_validity_refusal(self, RefusalReason.CONDITION)
-        return valid
+        return self._guard_failure(instance, user) is None
+
+    def _current_call(self, state):
+        from django_logic.process import _transition_context
+        call = (_transition_context.get() or {}).get('call')
+        if call is not None and call['state'] is state and call['transition'] is self and not call.get('entered'):
+            return call
+        return None
+
+    @contextmanager
+    def _execution_scope(self, state, user, call, tr_id):
+        if call is not None:
+            # A subclass can call another transition directly. Only this invocation owns the dispatch lock.
+            with state.executing_action():
+                transition_logger.info(f'{tr_id} {TransitionEventType.LOCK.value} {state.instance_key}')
+                call['entered'] = True
+                try:
+                    yield
+                finally:
+                    call.pop('entered', None)
+                    transition_logger.info(f'{tr_id} {TransitionEventType.UNLOCK.value} {state.instance_key}')
+            return
+        if not self.lock:
+            with transaction.atomic(using=state.instance._state.db):
+                yield
+            return
+        with state.protected() as fresh:
+            if getattr(fresh, state.field_name) not in self.sources:
+                raise TransitionNotAllowed('The persisted state no longer permits this action.', reason=RefusalReason.SOURCE_STATE)
+            if not self.is_valid(fresh, user):
+                raise TransitionNotAllowed('The record no longer permits this action.')
+            with state.executing_action():
+                yield
 
     def change_state(self, state: State, **kwargs) -> UUID | None:
         _refuse_engine_param_kwargs(self.action_name, kwargs)
-        atomic_sync = self.atomic
-        if not self.lock and not atomic_sync:
-            return self._change_state(state, **kwargs)
+        using = state.instance._state.db or DEFAULT_DB_ALIAS
+        call = self._current_call(state)
+        run_callbacks = True
         error = None
-        with ExitStack() as protection:
-            if atomic_sync:
-                # Keep commit callbacks outside required-work failure handling,
-                # including on SQLite and on a lock-free action. An exception
-                # after commit cannot be reported as a rolled-back decision.
-                using = state.instance._state.db or DEFAULT_DB_ALIAS
-                protection.enter_context(transaction.atomic(using=using))
+        with self._execution_scope(state, kwargs.get('user'), call, kwargs.get('tr_id')):
+            transition_logger.info(
+                f'{kwargs.get("tr_id")} {TransitionEventType.START.value} '
+                f'{kwargs.get("process_class", "").split(".")[-1]} {self.action_name} {state.instance_key} '
+                f'{kwargs.get("root_id")} {kwargs.get("parent_id")}',
+                extra={'kwargs': dict(kwargs), 'state_hash': state._get_hash()},
+            )
             if self.lock:
-                protection.enter_context(state.protected())
+                self._ensure_no_background_in_flight(state)
+            else:
+                transition_logger.info(f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} skipped {state.instance_key} — lock=False')
+            self._init_transition_context(kwargs)
             try:
-                result = self._change_state(state, **kwargs)
+                self.side_effects.execute(state, **kwargs)
             except Exception as exception:
-                # Preserve the failed-state write before reporting the action's failure.
+                # Commit the failure state before reporting the original failure to the caller.
                 error = exception
+                run_callbacks = reload_after_rollback(state, prefix=kwargs.get('tr_id'))
+                if run_callbacks:
+                    run_callbacks = self.fail_transition(state, error, **kwargs) is not False
+                if call is not None:
+                    call['failure'] = exception
+        callbacks = self.callbacks if error is None else self.failure_callbacks
+        if run_callbacks and callbacks.commands:
+            if error is not None:
+                kwargs['exception'] = error
+            register = partial(callbacks.after_commit, state, using, kwargs)
+            if call is not None:
+                call['after'].append(register)
+            else:
+                register()
         if error is not None:
             raise error
-        return result
-
-    def _change_state(self, state: State, **kwargs) -> UUID | None:
-        process_class = kwargs.get('process_class', '')
-        process_class_name = process_class.split('.')[-1] if process_class else ''
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.START.value} '
-            f'{process_class_name} {self.action_name} {state.instance_key} '
-            f'{kwargs.get("root_id")} {kwargs.get("parent_id")}',
-            # A copy, not the live dict: the caller mutates kwargs after
-            # the log call, and records are formatted lazily.
-            extra={'kwargs': dict(kwargs), 'state_hash': state._get_hash()},
-        )
-
-        if not self.lock:
-            # No lock, so none of the checks the lock makes meaningful: the
-            # source re-read closes a race that only matters before a state
-            # write, and the background gate protects the state field this
-            # transition never touches. One lifecycle line, so a per-instance
-            # log filter does not read a Start with no Lock as a frozen row.
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-                f'skipped {state.instance_key} — lock=False'
-            )
-            self._init_transition_context(kwargs)
-            self.side_effects.execute(state, **kwargs)
-            return kwargs.get('tr_id')
-
-        # Lock acquisition is conditional in the database and returns False if
-        # the state is already locked, so the acquire alone is sufficient.
-        # A separate is_locked() pre-check only adds a TOCTOU window and a
-        # redundant round-trip (a stale is_locked()==True could even reject
-        # a transition the atomic lock() would have granted).
-        locked = state.lock()
-        if not locked:
-            # Logged BEFORE the raise, or a permanently frozen instance is
-            # indistinguishable from a healthy start: both emit one Start line
-            # and nothing else. INFO, not ERROR: losing the lock race is an
-            # expected concurrency outcome; it is the *pattern* of failed
-            # acquisitions with no interleaved Unlock that signals a leak.
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-                f'failed {state.instance_key} — state is locked'
-            )
-            raise TransitionNotAllowed("State is locked", reason=RefusalReason.LOCKED)
-
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-            f'{state.instance_key}'
-        )
-
-        # The state may change between selecting the transition and taking
-        # its lock. Read it again under the lock and release on refusal.
-        try:
-            self._ensure_db_state_in_sources(state)
-            self._ensure_no_background_in_flight(state)
-        except Exception:
-            state.unlock()
-            # Without this line the per-instance lifecycle shows a Lock
-            # with no Unlock — a revalidation failure reading as a leak.
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
-                f'{state.instance_key} after revalidation failure'
-            )
-            raise
-
-        self._init_transition_context(kwargs)
-        self.side_effects.execute(state, **kwargs)
         return kwargs.get('tr_id')
 
     def complete_transition(self, state: State, **kwargs):
-        """Write the target, release the state lock, then run callbacks.
-
-        Releasing the state lock lets a callback call another transition on this instance.
-        A locked PostgreSQL call still holds its database lock and transaction through callbacks.
-        Other connections see the prior state until the outermost transaction commits.
-        A process interruption during callbacks can discard the state write too.
-        Background jobs use separate success hooks after their execution block.
-
-        A failed target write must still release the lock (otherwise the
-        instance's FSM freezes until the lock TTL): the transition fails
-        loudly either way, but a leaked lock turns one failed request into
-        hours of rejected transitions.
-
-        A ``lock=False`` transition releases no lock.
-        """
-        try:
-            self._write_target_state(state, **kwargs)
-        except Exception:
-            transition_logger.error(
-                f'{kwargs.get("tr_id")} target-state write failed for '
-                f'{state.instance_key}; releasing the lock before re-raising.'
-            )
-            self._release_lock(state, **kwargs)
-            raise
-        self._complete_after_target(state, **kwargs)
+        """Write the target, then let subclasses save required follow-up work in this transaction."""
+        self._write_target_state(state, **kwargs)
+        if self.lock:
+            state.finish_action()
 
     def _write_target_state(self, state: State, **kwargs):
         if self.target is not None:
             state.set_state(self.target)
+            from django_logic.background.runner import _active_job
+            job = _active_job.get()
+            if job is not None:
+                job.remember_result(state)
             transition_logger.info(
                 f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
                 f'{self.target}'
             )
 
-    def _complete_after_target(self, state: State, **kwargs):
-        if self.lock:
-            self._release_lock(state, **kwargs)
-
-        self.callbacks.execute(state, **kwargs)
-
     def fail_transition(self, state: State, exception: Exception, **kwargs):
-        # try/finally: a failed failed_state write must still release the
-        # lock; the original side-effect exception keeps propagating out of
-        # SideEffects.execute either way.
-        try:
-            if self.failed_state:
-                # A rejected state write must not replace the original work failure.
-                write_error = write_failed_state(
-                    state, self.failed_state,
-                    prefix=f'{kwargs.get("tr_id")}',
-                    consequence='The original failure is re-raised unchanged.',
-                )
-                if write_error is not None and self.atomic:
-                    if not reload_after_rollback(state, prefix=kwargs.get('tr_id')):
-                        return
-        finally:
-            if self.lock:
-                self._release_lock(state, **kwargs)
-
-        self.failure_callbacks.execute(state, exception=exception, **kwargs)
-
-    @staticmethod
-    def _release_lock(state: State, **kwargs):
-        """Release the state lock and log the Unlock lifecycle line."""
-        state.unlock()
-        # Include the record identity so operators can find its lock messages.
-        transition_logger.info(
-            f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
-            f'{state.instance_key}'
-        )
+        if self.failed_state:
+            write_error = write_failed_state(
+                state, self.failed_state, prefix=kwargs.get('tr_id'),
+                consequence='The original failure is re-raised unchanged.',
+            )
+            if write_error is not None:
+                return reload_after_rollback(state, prefix=kwargs.get('tr_id'))
 
     @staticmethod
     def _init_transition_context(kwargs: dict) -> None:
         kwargs.setdefault('context', {})
-
-    def _ensure_db_state_in_sources(self, state: State) -> None:
-        """Re-read the persisted state and verify it is still a valid
-        source for this transition. Must be called while holding the lock.
-        """
-        db_state = state.get_persisted_state()
-        if db_state not in self.sources:
-            raise TransitionNotAllowed(
-                f"Transition '{self.action_name}' is not allowed: the "
-                f"persisted state {db_state!r} is no longer one of its "
-                f"source states (a concurrent transition won the race).",
-                reason=RefusalReason.SOURCE_STATE,
-            )
 
     def _ensure_no_background_in_flight(self, state: State) -> None:
         """Reject any lock-taking synchronous transition — with a target or
@@ -406,8 +279,12 @@ class Transition:
         """
         from django_logic.background.models import TransitionMessage
 
+        from django_logic.background.runner import _active_job
+
+        job = _active_job.get()
         status = TransitionMessage.retry_status(
-            state.instance, state.process_name)
+            state.instance, state.process_name, excluding_job=job.pk if job else None)
+
         if status is None:
             return
         if status == TransitionMessage.STRANDED:

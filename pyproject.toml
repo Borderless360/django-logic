@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-logic"
-version = "5.3.1"
+version = "6.0.0"
 description = "Declarative business logic & state machines for Django — sync and durable background transitions"
 readme = "README.md"
 license = { text = "MIT License" }
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["django", "fsm", "state-machine", "workflow", "background", "business-logic"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Intended Audience :: Developers",
     "Framework :: Django",

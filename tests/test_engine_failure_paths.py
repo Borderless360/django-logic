@@ -6,13 +6,11 @@ defect they were meant to catch.
 """
 from tests import unbind_model_process
 import logging
-from datetime import timedelta
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.cache import cache
 from django.db.models.signals import pre_save
 from django.test import TestCase, override_settings
-from django.utils import timezone
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.background import BackgroundTransition
@@ -280,10 +278,6 @@ class ReservedKwargTests(_BindCleanup, TestCase):
                 invoice.refresh_from_db()
                 # Refused before the lock and before any state write.
                 self.assertEqual(invoice.status, 'draft')
-                self.assertFalse(
-                    invoice.reserved_kwarg_proc.state.is_locked(),
-                    'the refusal left the state locked',
-                )
 
     def test_action_refuses(self):
         invoice = Invoice.objects.create(status='draft')

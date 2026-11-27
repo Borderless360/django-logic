@@ -19,9 +19,8 @@ shared between both modes.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from copy import deepcopy
 from uuid import UUID
+from functools import partial
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db import transaction, router, DEFAULT_DB_ALIAS
@@ -41,36 +40,8 @@ from django_logic.logger import (
     transition_logger,
     TransitionEventType,
 )
-from django_logic.state import State, _enqueue_lock
+from django_logic.state import State
 from django_logic.transition import Transition, _refuse_engine_param_kwargs
-
-
-@contextmanager
-def _submission_scope(transition, state, kwargs, *, using):
-    if transition.submission_context is None:
-        yield
-        return
-    protected = {'process_class', 'owning_process_class', 'tr_id', 'root_id',
-                 'parent_id', 'user', 'user_id', 'state', 'exception', 'request'}
-    identity = deepcopy({key: value for key, value in kwargs.items() if key in protected})
-    instance_key = (TransitionMessage.instance_key(state.instance, state.process_name),
-                    state.field_name, type(state.instance))
-
-    def check_identity():
-        if ({key: value for key, value in kwargs.items() if key in protected} != identity
-                or (TransitionMessage.instance_key(state.instance, state.process_name),
-                    state.field_name, type(state.instance)) != instance_key):
-            raise ImproperlyConfigured('submission_context must not change the job identity or user.')
-
-    context = transition.submission_context(transition, state, kwargs, using=using)
-    finished = False
-    with context:
-        check_identity()
-        yield
-        finished = True
-    if not finished:
-        raise ImproperlyConfigured('submission_context must not suppress submission errors.')
-    check_identity()
 
 
 class BackgroundTransition(Transition):
@@ -127,7 +98,6 @@ class BackgroundTransition(Transition):
         no_retry_on: tuple = (),
         atomic: bool = True,
         fairness_key=None,
-        submission_context=None,
         in_progress_state=None,
         **kwargs,
     ):
@@ -164,16 +134,13 @@ class BackgroundTransition(Transition):
             )
         if fairness_key is not None and not isinstance(fairness_key, str) and not callable(fairness_key):
             raise ImproperlyConfigured(f"BackgroundTransition '{action_name}': fairness_key must be a string or callable.")
-        if submission_context is not None and not callable(submission_context):
-            raise ImproperlyConfigured(f"BackgroundTransition '{action_name}': submission_context must be callable.")
-        self.submission_context = submission_context
         self.fairness_key = fairness_key
         self.atomic = atomic
         self.queue = queue
         self.timeout = timeout
         self.no_retry_on = no_retry_on
         super().__init__(
-            action_name=action_name, sources=sources, target=target, atomic=atomic, **kwargs
+            action_name=action_name, sources=sources, target=target, **kwargs
         )
 
         self.in_progress_state = in_progress_state
@@ -223,7 +190,11 @@ class BackgroundTransition(Transition):
             from django_logic.background.non_atomic import validate_non_atomic
             # The test runtime runs the job inside the caller's transaction.
             validate_non_atomic(
-                state.instance, require_autocommit=conf.sync_mode() and not conf.sync_enabled())
+                state.instance, require_autocommit=(
+                    conf.sync_mode() and not conf.sync_enabled()
+                    and (self._current_call(state) or {}).get('caller_in_transaction', True)
+                ),
+            )
         process_class = kwargs.get('process_class', '')
         process_class_name = process_class.split('.')[-1] if process_class else ''
         queue_name = self.get_queue_name()
@@ -235,71 +206,28 @@ class BackgroundTransition(Transition):
             extra={'kwargs': dict(kwargs), 'state_hash': state._get_hash()},
         )
 
-        # The resolver already ran the conditions and permissions; the
-        # synchronous path does not run them again, and neither does this
-        # one. The guard that matters runs under the lock below:
-        # _ensure_db_state_in_sources.
-
-        # The lock covers only this step: check the source state, save the
-        # TransitionMessage, write in_progress_state. After it, the
-        # uncompleted TransitionMessage refuses concurrent transitions.
-        # On PostgreSQL the business row is the lock and the step writes no
-        # cache key, so a process that dies here leaves no lock behind.
-        with state.protected(), _enqueue_lock(state) as locked:
-            if not locked:
-                # Logged before the raise, at INFO, with the instance key — a
-                # frozen instance must not read as "the transition starts and
-                # the worker drops it".
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-                    f'failed {state.instance_key} — state is locked'
-                )
-                raise TransitionNotAllowed("State is locked", reason=RefusalReason.LOCKED)
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} {TransitionEventType.LOCK.value} '
-                f'{state.instance_key}'
-            )
+        call = self._current_call(state)
+        with self._execution_scope(state, kwargs.get('user'), call, kwargs.get('tr_id')):
             try:
-                # Same under-the-lock revalidation as the synchronous path:
-                # the source check ran before the lock was acquired.
-                self._ensure_db_state_in_sources(state)
-                try:
-                    transition_message = self._enqueue_atomic(
-                        state, kwargs, queue_name)
-                except AlreadyInProgress:
-                    # Nothing is retrying a stranded row, so "try again shortly"
-                    # would be wrong forever. Queried here, after
-                    # _enqueue_atomic's rolled-back atomic, so the connection is
-                    # healthy; still under the lock. A row that completed
-                    # in the window keeps AlreadyInProgress — it just finished,
-                    # so retrying is exactly right.
-                    if TransitionMessage.retry_status(
-                        state.instance, state.process_name,
-                    ) == TransitionMessage.STRANDED:
-                        raise TransitionNotAllowed(
-                            f"BackgroundTransition '{self.action_name}' is not "
-                            f"allowed: an uncompleted TransitionMessage for "
-                            f"{state.instance_key} is stranded — nothing is "
-                            f"retrying it. Likely causes: no worker serves its "
-                            f"queue, or a worker outage longer than the retry "
-                            f"window. Start a worker for that queue "
-                            f"(dl_worker --queues ...) — it takes the row at "
-                            f"once — or complete the row.",
-                            reason=RefusalReason.BACKGROUND_STRANDED,
-                        )
-                    raise
-            finally:
-                transition_logger.info(
-                    f'{kwargs.get("tr_id")} {TransitionEventType.UNLOCK.value} '
-                    f'{state.instance_key}'
-                )
+                transition_message = self._enqueue_atomic(state, kwargs, queue_name)
+            except AlreadyInProgress:
+                if TransitionMessage.retry_status(state.instance, state.process_name) == TransitionMessage.STRANDED:
+                    raise TransitionNotAllowed(
+                        f"BackgroundTransition '{self.action_name}' has a stranded job with no recent progress. "
+                        "Check that a worker serves its queue.",
+                        reason=RefusalReason.BACKGROUND_STRANDED,
+                    )
+                raise
 
         if conf.sync_mode():
             # Inline, bypassing transaction.on_commit, so Django's
             # TestCase (whose wrapping transaction never commits) still
             # executes the worker path. Exceptions propagate to the caller.
             from django_logic.background.runner import run_background_transition
-            run_background_transition(transition_message.pk)
+            if call is None:
+                run_background_transition(transition_message.pk)
+            else:
+                call['after'].append(partial(run_background_transition, transition_message.pk))
         else:
             # The committed row is what the workers run; the notification
             # only says "ask the database now", so a lost one costs one
@@ -314,7 +242,7 @@ class BackgroundTransition(Transition):
     ) -> TransitionMessage:
         """Atomic: set in_progress_state + create TransitionMessage row.
 
-        Refuse an existing unfinished job before submission preparation.
+        Refuse an existing unfinished job before creating a new one.
         The caller holds the business-row lock on PostgreSQL.
         """
         state_using = state.instance._state.db
@@ -327,54 +255,49 @@ class BackgroundTransition(Transition):
             ).exists():
                 raise AlreadyInProgress(f"Another background transition is already in progress for process '{state.process_name}'.",
                                         reason=RefusalReason.BACKGROUND_IN_FLIGHT)
-            working_kwargs = deepcopy(kwargs) if self.submission_context is not None else dict(kwargs)
-            with _submission_scope(self, state, working_kwargs, using=using):
-                kwargs = working_kwargs
-                try:
-                    serialized = serialize_kwargs(kwargs)
-                except KwargsSerializationError:
-                    # Re-raise so the precise refusal message is not wrapped
-                    # as "not JSON-serializable".
-                    raise
-                except TypeError as e:
-                    raise ImproperlyConfigured(
-                        f"BackgroundTransition '{self.action_name}' received a "
-                        f"kwarg that is not JSON-serializable: {e}. Every value "
-                        f"passed to a background transition must be persistable "
-                        f"on the TransitionMessage row."
-                    ) from e
-                resolved_fairness = (self.fairness_key(state.instance, **kwargs)
-                                     if callable(self.fairness_key) else self.fairness_key) or ''
-                if (not isinstance(resolved_fairness, str) or len(resolved_fairness) > 255
-                        or '\x00' in resolved_fairness):
-                    raise ValueError('fairness_key must be a string of at most 255 characters without NUL.')
-                from django_logic.background.context import capture_job_context
-                transition_message = rows.create(
-                    # Keep the proxy class so the worker restores its behavior.
-                    **TransitionMessage.instance_key(
-                        state.instance, state.process_name),
-                    proxy_model_label=TransitionMessage.proxy_label_for(
-                        state.instance),
-                    field_name=state.field_name,
-                    transition_name=self.action_name,
-                    # Nested processes can declare the same action name.
-                    owning_process_class=kwargs['owning_process_class'],
-                    fairness_key=resolved_fairness,
-                    queue_name=queue_name,
-                    timeout_seconds=self.timeout,
-                    kwargs=serialized,
-                    job_context=capture_job_context(),
+            try:
+                serialized = serialize_kwargs(kwargs)
+            except KwargsSerializationError:
+                # Re-raise so the precise refusal message is not wrapped
+                # as "not JSON-serializable".
+                raise
+            except TypeError as e:
+                raise ImproperlyConfigured(
+                    f"BackgroundTransition '{self.action_name}' received a "
+                    f"kwarg that is not JSON-serializable: {e}. Every value "
+                    f"passed to a background transition must be persistable "
+                    f"on the TransitionMessage row."
+                ) from e
+            resolved_fairness = (self.fairness_key(state.instance, **kwargs)
+                                 if callable(self.fairness_key) else self.fairness_key) or ''
+            if (not isinstance(resolved_fairness, str) or len(resolved_fairness) > 255
+                    or '\x00' in resolved_fairness):
+                raise ValueError('fairness_key must be a string of at most 255 characters without NUL.')
+            from django_logic.background.context import capture_job_context
+            transition_message = rows.create(
+                # Keep the proxy class so the worker restores its behavior.
+                **TransitionMessage.instance_key(
+                    state.instance, state.process_name),
+                proxy_model_label=TransitionMessage.proxy_label_for(
+                    state.instance),
+                field_name=state.field_name,
+                transition_name=self.action_name,
+                # Nested processes can declare the same action name.
+                owning_process_class=kwargs['owning_process_class'],
+                fairness_key=resolved_fairness,
+                queue_name=queue_name,
+                timeout_seconds=self.timeout,
+                kwargs=serialized,
+                job_context=capture_job_context(),
+            )
+            if self.in_progress_state:
+                # Model constraint errors must not appear as duplicate jobs.
+                state.set_state(self.in_progress_state, using=state_using)
+                transition_logger.info(
+                    f'{kwargs.get("tr_id")} '
+                    f'{TransitionEventType.SET_STATE.value} '
+                    f'{self.in_progress_state}'
                 )
-                if self.in_progress_state:
-                    # Model constraint errors must not appear as duplicate jobs.
-                    state.set_state(self.in_progress_state, using=state_using)
-                    transition_logger.info(
-                        f'{kwargs.get("tr_id")} '
-                        f'{TransitionEventType.SET_STATE.value} '
-                        f'{self.in_progress_state}'
-                    )
-            if transaction.get_rollback(using=using):
-                raise ImproperlyConfigured('submission_context must not silently roll back the submission.')
 
         transition_logger.info(
             f'{kwargs.get("tr_id")} TransitionMessage#{transition_message.pk} '

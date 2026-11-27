@@ -52,9 +52,7 @@ uncompleted, in progress.
 | `owning class`, `owning job` | the declaring class or the job that performs the work |
 | `tm`, `msg`, `inst` | `transition_message`, `message`, `instance` |
 
-`tests/test_voice.py` checks selected retired phrases in the library and current
-docs. Reviewers check the remaining wording rules and abbreviations. It skips `CHANGELOG.md` on purpose: the changelog is a historical
-record, so it must keep naming the words and APIs that shipped at the time.
+Reviewers check the wording of changed code and guides. Keep release history in `CHANGELOG.md`.
 
 ### Writing to people — no riddles
 
@@ -91,19 +89,15 @@ never `getattr(process, action_name)` with the name held in a variable.
 ## The architecture rule (locked — do not drift back)
 
 Save required work with the business change in one database transaction.
-Workers recover that work from its saved job. Ordinary state locks use
-separately committed PostgreSQL ownership records with a configured expiry.
-Apply these rules:
+Workers recover that work from its saved job. Protect state changes with PostgreSQL business-row locks.
 
 - **No durable busy marker without a durable owner.** A busy state written
   to the database with no row that owns its recovery parks the instance
   without recovery when a job process stops. Save a recoverable job with the busy state.
 - **PostgreSQL protects state through the actual transaction commit.**
   State changes take the business-row lock and wait at most two seconds for
-  another transaction to commit before they refuse. Independently committed
-  ownership also prevents overlapping external calls while its timeout remains valid.
-  A worker removes its job process's ownership only after confirmed exit.
-  Saving a background job writes no ownership record on PostgreSQL.
+  another transaction to commit before they refuse. Provider calls need application idempotency keys or durable receipts.
+
   Workers separately lock their job row. Finalization takes
   the job lock before the business row. Enqueue must not wait for an unfinished
   job while holding its business row. Allow for a separate connection when

@@ -7,9 +7,6 @@ class DjangoLogicConfig(AppConfig):
     The label ``django_logic_background`` identifies the job table,
     migration records, and content types.
 
-    A consumer that never declares a background transition needs nothing
-    beyond this entry: the ownership tables are still required. PostgreSQL provides independent
-    lock ownership; the enabled single-process test runtime can use SQLite.
     """
     name = 'django_logic'
     label = 'django_logic_background'

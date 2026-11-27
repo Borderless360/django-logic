@@ -5,10 +5,9 @@ These tests exercise synchronous transitions and direct state writes.
 """
 import threading
 import unittest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch
 
 from django.db import transaction, connections
-from django.core.cache import cache
 from django.test import SimpleTestCase, tag
 
 from django_logic import Transition, Process
@@ -17,7 +16,6 @@ from django_logic.state import State
 from tests.stability.base import StabilityTestCase, requires_postgres
 from tests.stability.models import (
     Order, OrderProcess,
-    side_effect_one, side_effect_two,
 )
 
 
@@ -112,7 +110,6 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
         lock. This test pins what the lock looks like afterwards."""
         order = Order.objects.create(status='draft')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         try:
             with transaction.atomic():
@@ -139,22 +136,6 @@ class TestTransactionOnCommitOrdering(StabilityTestCase):
 class TestCommittedStateAndCacheLock(StabilityTestCase):
     """Committed state survives cache-lock release; an explicit call can run from a valid source."""
 
-    def test_committed_state_write_persists_with_the_lock(self):
-        """A committed set_state persists whatever happens to the cache lock.
-        The write is durable; the lock is advisory and expires on a timeout."""
-        order = Order.objects.create(status='approved')
-        state = State(order, 'status', process_name='process')
-        self.track_lock(state)
-
-        self.assertTrue(state.lock())
-        state.set_state('shipped')
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'shipped')
-        self.assert_locked(state)
-
-        state.unlock()
-        self._tracked_lock_keys.discard(state._get_hash())
 
     def test_recovery_is_a_plain_re_dispatch_from_the_source(self):
         """A synchronous run writes no marker, so a lost run leaves the instance
@@ -187,7 +168,6 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         def db_failing_se(instance, **kwargs):
             raise OperationalError("connection lost")
@@ -210,7 +190,6 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'fulfillment_failed')
-        self.assert_unlocked(state)
 
     def test_side_effect_db_error_without_failed_state(self):
         """Without a failed_state, a database error leaves the instance at its
@@ -219,7 +198,6 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
         order = Order.objects.create(status='approved')
         state = State(order, 'status', process_name='process')
-        self.track_lock(state)
 
         def db_failing_se(instance, **kwargs):
             raise OperationalError("connection lost")
@@ -241,7 +219,6 @@ class TestDatabaseConnectionLoss(StabilityTestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'approved')
-        self.assert_unlocked(state)
 
 
 @tag('stability')

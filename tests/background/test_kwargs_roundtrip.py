@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
+from django.core.exceptions import ImproperlyConfigured
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
@@ -34,8 +35,8 @@ class KwargsRoundTripTests(TestCase):
     def test_side_effect_receives_restored_user_and_context(self):
         self.widget.process.fulfil(
             user=self.user,
-            when=_WHEN,
-            some_uuid=_UUID,
+            when=_WHEN.isoformat(),
+            some_uuid=str(_UUID),
         )
         seen = bg_models.LAST_KWARGS
 
@@ -77,25 +78,10 @@ class KwargsRoundTripTests(TestCase):
             'tests.background.models.NestedBgChildProcess',
         )
 
-    def test_typed_kwargs_arrive_with_original_types(self):
-        # The worker receives the same Python types the identical synchronous
-        # transition would. Without this a regression back to plain strings
-        # goes unnoticed.
-        self.widget.process.fulfil(
-            when=_WHEN,
-            some_uuid=_UUID,
-            amount=Decimal('19.99'),
-            pair=(1, 'two'),
-            tags={'a', 'b'},
-        )
-        seen = bg_models.LAST_KWARGS
-        self.assertEqual(seen['when'], _WHEN)
-        self.assertIs(type(seen['when']), datetime)
-        self.assertEqual(seen['some_uuid'], _UUID)
-        self.assertIs(type(seen['some_uuid']), UUID)
-        self.assertEqual(seen['amount'], Decimal('19.99'))
-        self.assertEqual(seen['pair'], (1, 'two'))
-        self.assertEqual(seen['tags'], {'a', 'b'})
+    def test_non_json_argument_leaves_no_job(self):
+        with self.assertRaisesRegex(ImproperlyConfigured, 'amount'):
+            self.widget.process.fulfil(amount=Decimal('19.99'))
+        self.assertFalse(TransitionMessage.objects.exists())
 
     def test_plain_json_strings_pass_through_unchanged(self):
         # Plain JSON strings remain strings; only tagged values are decoded.
@@ -133,7 +119,7 @@ class KwargsRoundTripTests(TestCase):
             kwargs={'process_class': 'tests.background.models.WidgetProcess', 'when': bad},
         )
         for expected_errors in range(1, 4):
-            with self.assertRaisesMessage(KwargsSerializationError, "Cannot restore kwargs type tag 'datetime'"):
+            with self.assertRaisesMessage(KwargsSerializationError, "legacy typed job argument"):
                 run_background_transition(transition_message.pk)
             transition_message.refresh_from_db()
             self.assertEqual(transition_message.errors_count, expected_errors)

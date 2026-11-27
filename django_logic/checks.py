@@ -4,32 +4,6 @@ from django.core import checks
 from django_logic.process import ProcessManager
 
 
-@checks.register('django_logic')
-def check_state_lock_store(app_configs, **kwargs):
-    """All callers must use the same writable default database for lock ownership."""
-    from django.db import DEFAULT_DB_ALIAS, connections, router
-    from django_logic.conf import sync_enabled
-    from django_logic.lock_ownership import JobProcessOwner, StateLock
-
-    findings = []
-    vendor = connections[DEFAULT_DB_ALIAS].vendor
-    if vendor != 'postgresql' and not (vendor == 'sqlite' and sync_enabled()):
-        findings.append(checks.Error(
-            'State lock ownership requires the default PostgreSQL database.',
-            hint='Use PostgreSQL. SQLite is supported only in the enabled single-process test runtime.',
-            id='django_logic.state_lock_database',
-        ))
-    for model in (JobProcessOwner, StateLock):
-        if (router.db_for_write(model) != DEFAULT_DB_ALIAS
-                or not router.allow_migrate_model(DEFAULT_DB_ALIAS, model)):
-            findings.append(checks.Error(
-                f'{model._meta.label} must be stored and migrated on the default database.',
-                hint='Keep both internal ownership tables on the same default database used by every caller.',
-                id='django_logic.state_lock_routing',
-            ))
-    return findings
-
-
 def _process_tree_has_background_transition(process_class) -> bool:
     """Does ``process_class`` (or any process nested under it) declare a
     background transition? Duck-typed via ``is_background`` so the check
@@ -165,7 +139,6 @@ _KNOWN_SETTINGS = frozenset({
     'BACKGROUND_EXECUTION',
     'DEFAULT_QUEUE',
     'JOB_PROCESS_FINISH', 'JOB_CONTEXT',
-    'LOCK_TIMEOUT',
     'TRANSITION_MESSAGE_MAX_ERRORS',
     'TRANSITION_MESSAGE_RETRY_MINUTES',
     'TRANSITION_MESSAGE_CLEANUP_DAYS',

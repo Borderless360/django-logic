@@ -1,16 +1,13 @@
 """Opt-in synchronous transactions keep required writes and their state together."""
 
 from django.core.cache import cache
-from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, transaction
 from django.db.models.signals import post_init, post_save
-from django.test import SimpleTestCase, TransactionTestCase
+from django.test import TransactionTestCase
 
-from django_logic import DatabaseTransition, Process, ProcessManager, Transition
-from django_logic.background import BackgroundTransition
+from django_logic import Process, ProcessManager, Transition
 from tests import unbind_model_process
 from tests.models import Invoice
-from tests.stability.base import requires_postgres
 
 
 def save_required_work(instance, **kwargs):
@@ -27,32 +24,6 @@ def save_then_fail(instance, **kwargs):
 def save_then_database_error(instance, **kwargs):
     save_required_work(instance)
     Invoice.objects.using(instance._state.db).create(status=None)
-
-
-class AtomicDeclarationTests(SimpleTestCase):
-    def test_synchronous_default_and_explicit_false_keep_existing_behavior(self):
-        self.assertFalse(Transition('go', sources=['draft']).atomic)
-        self.assertFalse(Transition('go', sources=['draft'], atomic=False).atomic)
-        self.assertTrue(Transition('go', sources=['draft'], atomic=True).atomic)
-
-    def test_only_boolean_values_are_allowed(self):
-        for value in (None, 0, 1, 'false', [], {}):
-            with self.subTest(value=value), self.assertRaises(ImproperlyConfigured):
-                Transition('go', sources=['draft'], atomic=value)
-
-    def test_background_defaults_and_explicit_options_are_unchanged(self):
-        self.assertTrue(BackgroundTransition('go', sources=['draft']).atomic)
-        self.assertTrue(BackgroundTransition('go', sources=['draft'], atomic=True).atomic)
-        self.assertFalse(BackgroundTransition('go', sources=['draft'], atomic=False).atomic)
-
-    def test_atomic_mode_refuses_custom_completion_instead_of_skipping_it(self):
-        class CustomCompletion(Transition):
-            def complete_transition(self, state, **kwargs):
-                return super().complete_transition(state, **kwargs)
-
-        CustomCompletion('go', sources=['draft'], atomic=False)
-        with self.assertRaises(ImproperlyConfigured):
-            CustomCompletion('go', sources=['draft'], atomic=True)
 
 
 class AtomicSynchronousTests(TransactionTestCase):
@@ -88,7 +59,6 @@ class AtomicSynchronousTests(TransactionTestCase):
         self.assertEqual(stored.status, state)
         self.assertFalse(stored.customer_received)
         self.assertFalse(Invoice.objects.using(instance._state.db).filter(status='required').exists())
-        self.assertFalse(instance.sync_atomic_test.state.is_locked())
 
     def reject_target_after_save(self, sender, instance, **kwargs):
         if instance.pk == self.invoice.pk and instance.status == 'done':
@@ -96,17 +66,16 @@ class AtomicSynchronousTests(TransactionTestCase):
             raise ValueError('target save failed')
 
     def test_success_saves_required_work_and_target(self):
-        self.bind(Transition('go', sources=['draft'], target='done', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='done',
                              side_effects=[save_required_work]))
         self.invoice.sync_atomic_test.go()
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'done')
         self.assertTrue(self.invoice.customer_received)
         self.assertEqual(Invoice.objects.filter(status='required').count(), 1)
-        self.assertFalse(self.invoice.sync_atomic_test.state.is_locked())
 
     def test_atomic_empty_target_saves_required_work_and_empty_state(self):
-        self.bind(Transition('go', sources=['draft'], target='', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='',
                              side_effects=[save_required_work]))
 
         self.invoice.sync_atomic_test.go()
@@ -115,7 +84,6 @@ class AtomicSynchronousTests(TransactionTestCase):
         self.assertEqual(self.invoice.status, '')
         self.assertTrue(self.invoice.customer_received)
         self.assertEqual(Invoice.objects.filter(status='required').count(), 1)
-        self.assertFalse(self.invoice.sync_atomic_test.state.is_locked())
 
     def test_atomic_empty_target_save_failure_discards_required_changes(self):
         def reject_empty_target(sender, instance, **kwargs):
@@ -123,7 +91,7 @@ class AtomicSynchronousTests(TransactionTestCase):
                 Invoice.objects.create(status='empty_audit')
                 raise ValueError('empty target save failed')
 
-        self.bind(Transition('go', sources=['draft'], target='', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='',
                              side_effects=[save_required_work],
                              failure_callbacks=[self.record_failure]))
         self.connect(post_save, reject_empty_target)
@@ -136,7 +104,7 @@ class AtomicSynchronousTests(TransactionTestCase):
         self.assertEqual(self.observed, [('draft', False, caught.exception)])
 
     def test_non_database_failure_discards_all_required_writes(self):
-        self.bind(Transition('go', sources=['draft'], target='done', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='done',
                              side_effects=[save_then_fail], failure_callbacks=[self.record_failure]))
         with self.assertRaisesRegex(ValueError, 'required work failed') as caught:
             self.invoice.sync_atomic_test.go()
@@ -144,7 +112,7 @@ class AtomicSynchronousTests(TransactionTestCase):
         self.assertEqual(self.observed, [('draft', False, caught.exception)])
 
     def test_database_failure_rolls_back_and_connection_remains_usable(self):
-        self.bind(Transition('go', sources=['draft'], target='done', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='done',
                              side_effects=[save_then_database_error],
                              failure_callbacks=[self.record_failure]))
         with self.assertRaises(IntegrityError) as caught:
@@ -154,7 +122,7 @@ class AtomicSynchronousTests(TransactionTestCase):
         Invoice.objects.create(status='healthy')
 
     def test_target_post_save_failure_discards_target_and_earlier_writes(self):
-        self.bind(Transition('go', sources=['draft'], target='done', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='done',
                              side_effects=[save_required_work], failure_callbacks=[self.record_failure]))
         self.connect(post_save, self.reject_target_after_save)
         with self.assertRaisesRegex(ValueError, 'target save failed') as caught:
@@ -168,7 +136,7 @@ class AtomicSynchronousTests(TransactionTestCase):
             if instance.pk == self.invoice.pk and instance.status == 'done':
                 raise ValueError('target read failed')
 
-        self.bind(Transition('go', sources=['draft'], target='done', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='done',
                              side_effects=[save_required_work], failure_callbacks=[self.record_failure]))
         self.connect(post_init, refuse_target_read)
         with self.assertRaisesRegex(ValueError, 'target read failed') as caught:
@@ -183,7 +151,7 @@ class AtomicSynchronousTests(TransactionTestCase):
             instance.save()
 
         self.bind(Transition('go', sources=['draft'], target='done', failed_state='failed',
-                             atomic=True, side_effects=[save_then_fail],
+                             side_effects=[save_then_fail],
                              failure_callbacks=[save_failure_record]))
         with self.assertRaisesRegex(ValueError, 'required work failed') as caught:
             self.invoice.sync_atomic_test.go()
@@ -196,7 +164,7 @@ class AtomicSynchronousTests(TransactionTestCase):
             Invoice.objects.create(status=None)
 
         self.bind(Transition('go', sources=['draft'], target='done', failed_state='failed',
-                             atomic=True, side_effects=[save_then_fail],
+                             side_effects=[save_then_fail],
                              failure_callbacks=[broken_failure_callback, self.record_failure]))
         with self.assertRaisesRegex(ValueError, 'required work failed') as caught:
             self.invoice.sync_atomic_test.go()
@@ -211,7 +179,7 @@ class AtomicSynchronousTests(TransactionTestCase):
                 raise RuntimeError('failure state save failed')
 
         self.bind(Transition('go', sources=['draft'], target='done', failed_state='failed',
-                             atomic=True, side_effects=[save_then_fail],
+                             side_effects=[save_then_fail],
                              failure_callbacks=[self.record_failure]))
         self.connect(post_save, refuse_failed_save)
         with self.assertRaisesRegex(ValueError, 'required work failed') as caught:
@@ -233,7 +201,7 @@ class AtomicSynchronousTests(TransactionTestCase):
             instance.save()
 
         self.bind(Transition('go', sources=['draft'], target='done', failed_state='failed',
-                             atomic=True, side_effects=[save_then_fail],
+                             side_effects=[save_then_fail],
                              failure_callbacks=[save_failure_record]))
         self.connect(post_save, dirty_failed_save)
         with self.assertRaisesRegex(ValueError, 'required work failed') as caught:
@@ -256,7 +224,7 @@ class AtomicSynchronousTests(TransactionTestCase):
                 raise RuntimeError('recovery read failed')
 
         self.bind(Transition('go', sources=['draft'], target='done', failed_state='failed',
-                             atomic=True, side_effects=[fail_work],
+                             side_effects=[fail_work],
                              failure_callbacks=[self.record_failure]))
         self.connect(post_init, refuse_recovery_read)
         with self.assertLogs('django-logic.transition', level='ERROR') as logs:
@@ -264,7 +232,6 @@ class AtomicSynchronousTests(TransactionTestCase):
                 self.invoice.sync_atomic_test.go()
         recovering.clear()
         self.assertEqual(self.invoice.status, 'draft')
-        self.assertFalse(self.invoice.sync_atomic_test.state.is_locked())
         self.assertEqual(self.observed, [])
         self.assertFalse(Invoice.objects.get(pk=self.invoice.pk).customer_received)
         self.assertFalse(Invoice.objects.filter(status__in=['required', 'failed']).exists())
@@ -278,7 +245,7 @@ class AtomicSynchronousTests(TransactionTestCase):
             except IntegrityError:
                 pass
 
-        self.bind(Transition('go', sources=['draft'], atomic=True,
+        self.bind(Transition('go', sources=['draft'],
                              side_effects=[suppress_database_error],
                              failure_callbacks=[self.record_failure]))
         with self.assertRaisesRegex(Exception, 'rolled back'):
@@ -298,9 +265,9 @@ class AtomicSynchronousTests(TransactionTestCase):
             transaction.on_commit(lambda: published.append(instance.pk), using=instance._state.db)
 
         self.bind(
-            Transition('go', sources=['draft'], target='done', atomic=True,
+            Transition('go', sources=['draft'], target='done',
                        side_effects=[change_child]),
-            Transition('child', sources=['draft'], target='child_done', atomic=True,
+            Transition('child', sources=['draft'], target='child_done',
                        side_effects=[save_required_work], callbacks=[publish_child_after_commit]),
         )
         self.connect(post_save, self.reject_target_after_save)
@@ -320,10 +287,10 @@ class AtomicSynchronousTests(TransactionTestCase):
             child.sync_atomic_test.child()
 
         self.bind(
-            Transition('go', sources=['draft'], target='done', failed_state='failed', atomic=True,
+            Transition('go', sources=['draft'], target='done', failed_state='failed',
                        side_effects=[change_child]),
             Transition('child', sources=['draft'], target='child_done', failed_state='child_failed',
-                       atomic=True, side_effects=[save_then_fail]),
+                       side_effects=[save_then_fail]),
         )
         with self.assertRaisesRegex(ValueError, 'required work failed'):
             self.invoice.sync_atomic_test.go()
@@ -342,9 +309,9 @@ class AtomicSynchronousTests(TransactionTestCase):
             transaction.on_commit(publish, using=instance._state.db, robust=False)
 
         self.bind(
-            Transition('go', sources=['draft'], target='done', atomic=True,
+            Transition('go', sources=['draft'], target='done',
                        side_effects=[save_and_schedule_publication], failure_callbacks=[self.record_failure]),
-            Transition('poke', sources=['draft'], lock=False, atomic=True,
+            Transition('poke', sources=['draft'], lock=False,
                        side_effects=[save_and_schedule_publication], failure_callbacks=[self.record_failure]),
         )
         for action, expected_state in [('go', 'done'), ('poke', 'draft')]:
@@ -360,32 +327,13 @@ class AtomicSynchronousTests(TransactionTestCase):
                 invoice.refresh_from_db()
                 self.assertEqual(invoice.status, expected_state)
                 self.assertTrue(invoice.customer_received)
-                self.assertFalse(invoice.sync_atomic_test.state.is_locked())
         self.assertEqual(Invoice.objects.filter(status='required').count(), 2)
         self.assertEqual(self.observed, [])
 
-    def test_default_retains_non_database_failure_writes(self):
-        self.bind(Transition('go', sources=['draft'], target='done', side_effects=[save_then_fail]))
-        with self.assertRaisesRegex(ValueError, 'required work failed'):
-            self.invoice.sync_atomic_test.go()
-        self.invoice.refresh_from_db()
-        self.assertEqual(self.invoice.status, 'draft')
-        self.assertTrue(self.invoice.customer_received)
-        self.assertEqual(Invoice.objects.filter(status='required').count(), 1)
-        self.assertFalse(self.invoice.sync_atomic_test.state.is_locked())
-
-    def test_explicit_false_retains_non_database_failure_writes(self):
-        self.bind(Transition('go', sources=['draft'], target='done', atomic=False,
-                             side_effects=[save_then_fail]))
-        with self.assertRaisesRegex(ValueError, 'required work failed'):
-            self.invoice.sync_atomic_test.go()
-        self.invoice.refresh_from_db()
-        self.assertTrue(self.invoice.customer_received)
-        self.assertEqual(Invoice.objects.filter(status='required').count(), 1)
 
     def test_required_transaction_and_recovery_follow_instance_database_alias(self):
         invoice = Invoice.objects.using('other').create(pk=self.invoice.pk, status='draft')
-        self.bind(Transition('go', sources=['draft'], target='done', failed_state='failed', atomic=True,
+        self.bind(Transition('go', sources=['draft'], target='done', failed_state='failed',
                              side_effects=[save_then_fail], failure_callbacks=[self.record_failure]))
         with self.assertRaisesRegex(ValueError, 'required work failed'):
             invoice.sync_atomic_test.go()
@@ -404,10 +352,10 @@ class AtomicSynchronousTests(TransactionTestCase):
             instance.sync_atomic_test.follow(**kwargs)
 
         self.bind(
-            Transition('go', sources=['draft'], target='done', atomic=True,
+            Transition('go', sources=['draft'], target='done',
                        side_effects=[save_required_work],
                        callbacks=[broken_callback, later_callback, follow_after_success]),
-            Transition('follow', sources=['done'], target='followed', atomic=True,
+            Transition('follow', sources=['done'], target='followed',
                        side_effects=[save_then_fail]),
         )
         self.invoice.sync_atomic_test.go()
@@ -416,11 +364,10 @@ class AtomicSynchronousTests(TransactionTestCase):
         self.assertTrue(self.invoice.customer_received)
         self.assertEqual(Invoice.objects.filter(status='required').count(), 1)
         self.assertEqual(self.observed, ['done'])
-        self.assertFalse(self.invoice.sync_atomic_test.state.is_locked())
 
     def test_no_side_effects_target_failure_writes_failed_state_and_can_retry(self):
         self.bind(Transition('go', sources=['draft', 'failed'], target='done', failed_state='failed',
-                             atomic=True, failure_callbacks=[self.record_failure]))
+                             failure_callbacks=[self.record_failure]))
         self.connect(post_save, self.reject_target_after_save)
         with self.assertRaisesRegex(ValueError, 'target save failed'):
             self.invoice.sync_atomic_test.go()
@@ -429,40 +376,3 @@ class AtomicSynchronousTests(TransactionTestCase):
         post_save.disconnect(self.reject_target_after_save, sender=Invoice)
         self.invoice.sync_atomic_test.go()
         self.assertEqual(self.invoice.status, 'done')
-
-    def test_lock_free_atomic_failure_does_not_release_another_callers_lock(self):
-        self.bind(Transition('go', sources=['draft'], atomic=True, lock=False,
-                             side_effects=[save_then_fail]))
-        other_state = self.invoice.sync_atomic_test.state
-        self.assertTrue(other_state.lock())
-        self.addCleanup(other_state.unlock)
-        with self.assertRaisesRegex(ValueError, 'required work failed'):
-            self.invoice.sync_atomic_test.go()
-        self.assertTrue(other_state.is_locked())
-        self.invoice.refresh_from_db()
-        self.assertEqual(self.invoice.status, 'draft')
-        self.assertFalse(self.invoice.customer_received)
-        self.assertFalse(Invoice.objects.filter(status='required').exists())
-
-    @requires_postgres
-    def test_database_transition_saves_required_work_and_target(self):
-        self.bind(DatabaseTransition('go', sources=['draft'], target='done', atomic=True,
-                                     side_effects=[save_required_work]))
-        self.invoice.sync_atomic_test.go()
-        self.invoice.refresh_from_db()
-        self.assertEqual(self.invoice.status, 'done')
-        self.assertTrue(self.invoice.customer_received)
-        self.assertEqual(Invoice.objects.filter(status='required').count(), 1)
-        self.assertFalse(self.invoice.sync_atomic_test.state.is_locked())
-
-    @requires_postgres
-    def test_database_transition_target_failure_rolls_back_work_and_records_failed_state(self):
-        self.bind(DatabaseTransition('go', sources=['draft'], target='done', failed_state='failed',
-                                     atomic=True, side_effects=[save_required_work],
-                                     failure_callbacks=[self.record_failure]))
-        self.connect(post_save, self.reject_target_after_save)
-        with self.assertRaisesRegex(ValueError, 'target save failed') as caught:
-            self.invoice.sync_atomic_test.go()
-        self.assert_rolled_back(state='failed')
-        self.assertFalse(Invoice.objects.filter(status='target_audit').exists())
-        self.assertEqual(self.observed, [('failed', False, caught.exception)])

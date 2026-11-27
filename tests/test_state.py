@@ -1,4 +1,3 @@
-from unittest.mock import patch
 
 from django.test import TestCase
 
@@ -16,17 +15,6 @@ class StateTestCase(TestCase):
     def test_get_persisted_state(self):
         self.assertEqual(self.state.get_persisted_state(), 'draft')
 
-    def test_lock(self):
-        self.assertFalse(self.state.is_locked())
-        self.state.lock()
-        self.assertTrue(self.state.is_locked())
-
-        # nothing should happen
-        self.state.lock()
-        self.assertTrue(self.state.is_locked())
-
-        self.state.unlock()
-        self.assertFalse(self.state.is_locked())
 
     def test_set_state(self):
         self.state.set_state('void')
@@ -40,5 +28,3 @@ class StateTestCase(TestCase):
             self.state.set_state('void')
         self.state.instance.refresh_from_db()
         self.assertEqual(self.state.instance.status, 'void')
-
-

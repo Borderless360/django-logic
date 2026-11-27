@@ -95,10 +95,10 @@ def run_non_atomic(transition_message_id):
 def _run_attempt(transition_message_id, alias):
     """Run one attempt. ``alias`` is the connection that holds the job row."""
     from django_logic.background.runner import (
+        _complete_after_side_effects,
         _decode_kwargs,
         _handle_failure,
         _handle_restore_failure,
-        _handle_success,
         _lock_uncompleted_row,
         _restore_for_attempt,
         _superseded_outcome,
@@ -172,18 +172,7 @@ def _run_attempt(transition_message_id, alias):
 
         def complete():
             with state.protected():
-                superseded = _superseded_outcome(
-                    transition_message, transition, state, kwargs, after_side_effects=True,
-                )
-                if superseded is not None:
-                    return superseded
-                if transition.target is not None:
-                    state.set_state(transition.target, using=alias)
-                    transition_logger.info(
-                        f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} '
-                        f'{transition.target}'
-                    )
-                return _handle_success(transition_message, transition, state, kwargs)
+                return _complete_after_side_effects(transition_message, transition, state, kwargs, using=alias)
 
         try:
             return _run_in_savepoint(alias, complete)

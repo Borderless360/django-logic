@@ -15,7 +15,6 @@ from django.test import tag
 
 from django_logic import Process, ProcessManager, Transition
 from django_logic.exceptions import TransitionNotAllowed
-from django_logic.state import State
 
 from tests.stability.base import StabilityTestCase, requires_postgres, run_concurrent
 from tests.stability.models import Order
@@ -73,13 +72,3 @@ class LockFreeTransitionUnderThreadsTests(StabilityTestCase):
         refused = [error for _, error in outcomes if isinstance(error, TransitionNotAllowed)]
         self.assertTrue(refused, 'ten overlapping callers on one lock, none refused')
         self.assertEqual(len(_posted) + len(refused), 10)
-
-    def test_it_runs_under_a_foreign_lock_and_leaves_that_lock_held(self):
-        holder = State(self.order, 'status', 'store_process')
-        self.assertTrue(holder.lock())
-        self.track_lock(holder)
-        outcomes = self._ten('post_parcel')
-        self.assertEqual([error for _, error in outcomes if error], [])
-        self.assertEqual(len(_posted), 10)
-        self.assertTrue(holder.is_locked(), 'a lock-free transition freed a foreign lock')
-        holder.unlock()

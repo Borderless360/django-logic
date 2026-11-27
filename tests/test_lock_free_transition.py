@@ -22,7 +22,6 @@ from django_logic.exceptions import (
     TransitionTemporarilyUnavailable,
 )
 from django_logic.logger import TransitionEventType
-from django_logic.state import State
 from tests.models import Invoice
 
 
@@ -107,46 +106,16 @@ class RunTests(TestCase):
         _ran.clear()
         self.invoice = Invoice.objects.create(status='draft')
 
-    def _someone_else_holds_the_lock(self):
-        other = State(self.invoice, 'status', 'lockfree')
-        self.assertTrue(other.lock())
-        return other
-
-    def test_it_runs_while_another_transition_holds_the_lock(self):
-        self._someone_else_holds_the_lock()
-        self.invoice.lockfree.post(parcel=1)
-        self.assertEqual(_ran, [('side_effect', 1), ('callback', 1)])
-
-    def test_a_lock_taking_sibling_is_still_refused(self):
-        self._someone_else_holds_the_lock()
-        with self.assertRaisesRegex(TransitionNotAllowed, 'State is locked'):
-            self.invoice.lockfree.go()
-
-    def test_it_stays_listed_while_the_row_is_locked(self):
-        self._someone_else_holds_the_lock()
-        actions = list(self.invoice.lockfree.get_available_actions())
-        self.assertIn('post', actions)
-        self.assertNotIn('go', actions)
-
-    def test_it_never_releases_a_lock_it_did_not_take(self):
-        other = self._someone_else_holds_the_lock()
-        self.invoice.lockfree.post(parcel=1)
-        self.assertTrue(other.is_locked(), 'the lock-free transition freed a foreign lock')
-        other.unlock()
-        self.assertFalse(other.is_locked())
 
     def test_a_failure_runs_the_failure_callbacks_and_re_raises(self):
-        other = self._someone_else_holds_the_lock()
         with self.assertRaisesRegex(ValueError, 'the store said no'):
             self.invoice.lockfree.post_fails()
         self.assertEqual(_ran, [('failure', 'ValueError')])
-        self.assertTrue(other.is_locked())
 
     def test_it_writes_no_state_and_leaves_no_lock(self):
         self.invoice.lockfree.post(parcel=1)
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, 'draft')
-        self.assertFalse(State(self.invoice, 'status', 'lockfree').is_locked())
 
     def test_conditions_and_permissions_still_gate_it(self):
         with self.assertRaises(TransitionNotAllowed):

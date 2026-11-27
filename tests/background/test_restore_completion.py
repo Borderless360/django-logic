@@ -1,8 +1,10 @@
 """Missing work completes under its job lock, and failed writes remain visible."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 from django.db import DatabaseError, OperationalError, connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
+from django.utils import timezone
 
 from django_logic.background.models import TransitionMessage
 from django_logic.background.runner import run_background_transition
@@ -74,6 +76,7 @@ class RestoreCompletionTests(TransactionTestCase):
         self.assertFalse(self.message.is_completed)
         self.assertEqual(self.message.last_error_message, '')
 
+        TransitionMessage.objects.filter(pk=self.message.pk).update(started_at=timezone.now() - timedelta(seconds=6))
         run_background_transition(self.message.pk)
         self.message.refresh_from_db()
         self.assertTrue(self.message.is_completed)

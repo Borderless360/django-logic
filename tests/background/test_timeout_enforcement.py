@@ -365,7 +365,7 @@ class RunOnceAccountingTests(TransactionTestCase):
 
         with patch('django_logic.background.pull.claim_next',
                    return_value=1), \
-                patch('django_logic.background.runner.run_background_transition',
+                patch('django_logic.background.runner.run_claimed_transition',
                       side_effect=crash), \
                 patch('django_logic.background.pull._record_attempt_error',
                       side_effect=[RuntimeError('the write is refused'),

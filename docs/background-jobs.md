@@ -20,53 +20,21 @@ Applications that combine refresh requests must save their own requested version
 
 ## Preparing a submission
 
-Use `submission_context` when accepting work must also lock related records,
-recheck business conditions or save trusted inputs.
+Put checks in the process or transition's conditions and permissions. Submission evaluates them on a fresh copy of the locked record. Pass any trusted inputs the worker needs as JSON arguments.
+
+To commit related database changes and the job together, open a transaction in the caller.
 
 ```python
-from contextlib import contextmanager
 from django.db import transaction
-from django_logic.background import BackgroundTransition
 
 
-@contextmanager
-def prepare_shipping(transition, state, kwargs, *, using):
-    order = Order.objects.using(using).select_for_update().get(pk=state.instance.pk)
-    check_shipping_allowed(order)
-    kwargs["parcel_ids"] = list(order.parcels.using(using).values_list("pk", flat=True))
-    yield
-    transaction.on_commit(lambda: record_shipping_request(order.pk), using=using, robust=True)
-
-
-BackgroundTransition(
-    "ship", sources=["ready"], target="shipped",
-    in_progress_state="shipping", submission_context=prepare_shipping,
-    side_effects=[ship_saved_parcels],
-)
+@transaction.atomic
+def submit_shipping(order, user):
+    manifest = create_shipping_manifest(order)
+    order.process.ship(manifest_id=manifest.pk, user=user)
 ```
 
-The callable returns a synchronous context manager. The engine gives it the
-transition, bound `State`, a detached argument dictionary and the database alias.
-Add, replace or remove ordinary application arguments before `yield`. The
-engine serializes those arguments, creates the job and writes its in-progress
-state before the context exits. The context cannot change the bound record,
-process or engine-managed user and trace arguments.
-
-Preparation and its database writes use the transaction that saves the job.
-Use the supplied `using` alias for queries and `transaction.on_commit` callbacks.
-A refusal, serialization error or failed submission rolls those writes back.
-If another submission already saved unfinished work, the engine raises
-`AlreadyInProgress` before running preparation.
-Do not suppress errors or mark the transaction for a silent rollback.
-
-Keep the context short and local: no provider calls or other irreversible work.
-After-commit callbacks are appropriate for best-effort external history. They
-do not make that history transactional or recover it after a caller crash.
-Use durable database records when that distinction matters.
-
-The context ends before job execution, including inline execution. An outer
-caller transaction can still retain its database locks until commit.
-Retries and previously saved jobs do not run the context again. Each job receives its own saved inputs.
+A refusal or other exception rolls back the manifest and the job together.
 
 ## Expected waiting
 
@@ -242,15 +210,9 @@ The library retains fairness-group records; completed-job cleanup does not delet
 
 ## Measurements retained after completion
 
-Each job retains `first_started_at` and `start_attempt_count`. The worker saves them
-before trying to execute the job, together with `started_at`.
-They survive an attempt rollback or a job process crash. A job already locked
-at this check, or waiting for a future `eligible_at`, does not increase the count.
-The worker releases this short lock before taking the lock used during execution.
-Two workers can therefore record a start before only one executes the job.
-`start_attempt_count` counts these saved start markers, not executed side effects
-or provider requests. `first_started_at` is the first recorded start attempt,
-which can precede the worker that actually performs the work.
+The worker selects an eligible job and records `started_at`, `first_started_at` and `start_attempt_count` in the same update. Other workers skip the selection while its process starts. A process that dies before taking the job-row lock leaves the job available after five seconds. A running process holds the job-row lock through its attempt.
+
+`start_attempt_count` counts recorded claims. A recorded claim can outlive its worker before the first side effect starts.
 
 Every recorded `Defer` increases `deferral_count` without increasing
 `errors_count`. The worker also saves `last_deferred_at`,
@@ -267,14 +229,3 @@ execution, errors, deferrals and time waiting for a worker. `duration_ms`
 measures only the last attempt and excludes completion callbacks.
 
 Missing historical measurements remain unknown. Cleanup limits the available job history.
-
-`transition_statistics(since=cutoff, queues=None, using=None)` groups retained
-jobs by queue, model, process class and action. Counts describe each
-selected job's recorded history, not events that happened within the window.
-`initial_wait_ms` uses only `first_started_at`; `last_attempt_duration_ms` uses
-only recorded `duration_ms` values. Each contains `samples`, `p50`, `p90` and
-`max`. Percentiles use the nearest rank. Missing measurements are excluded.
-`repeated_starts` includes deferrals and competing recorded starts. It is not an
-exact retry count. These records cannot establish total runtime or utilization.
-`dl_transitions --stats --since 7d --json` exposes the same report without
-changing jobs.

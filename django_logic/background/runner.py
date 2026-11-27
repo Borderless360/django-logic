@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import importlib
 from contextlib import ExitStack, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,13 +59,43 @@ from django.utils import timezone
 
 from django_logic import conf
 from django_logic.background.context import JobContextError, restored_job_context
-from django_logic.background.models import TransitionMessage, _TEXT_LIMIT, db_safe_text
+from django_logic.background.models import JobStateResult, TransitionMessage, _TEXT_LIMIT, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
 from django_logic.background.transitions import BackgroundTransition
 from django_logic.commands import _run_in_savepoint, write_failed_state
 from django_logic.logger import TransitionEventType, _running_job_attempt, transition_logger
 from django_logic.process import _iter_process_tree, _transition_context
+
+
+@dataclass
+class _JobActions:
+    pk: int
+    state_key: str | None = None
+    wrote_result: bool = False  # A savepoint may have rolled the write back.
+
+    def remember_result(self, state):
+        using = state.instance._state.db or DEFAULT_DB_ALIAS
+        if using == DEFAULT_DB_ALIAS and self.state_key == state.instance_key:
+            # This write must commit or roll back with the nested action's business state.
+            column = state.instance._meta.get_field(state.field_name)
+            JobStateResult.objects.using(using).update_or_create(
+                job_id=self.pk, defaults={'value': column.value_to_string(state.instance)},
+            )
+            self.wrote_result = True
+
+
+def _selected_state(message, state):
+    job = _active_job.get()
+    # Only a previous attempt or a nested write in this attempt can have left a decision.
+    if job is not None and job.pk == message.pk and message.start_attempt_count == 1 and not job.wrote_result:
+        return None
+    stored = (JobStateResult.objects.using(message._state.db).filter(job_id=message.pk)
+              .values_list('value', flat=True).first())
+    return state.instance._meta.get_field(state.field_name).to_python(stored) if stored is not None else None
+
+
+_active_job = ContextVar('django_logic_active_job', default=None)
 
 
 @dataclass
@@ -85,14 +116,13 @@ def run_background_transition(transition_message_id: int) -> None:
     Designed to be call-compatible from both the pull worker loop and an
     inline sync dispatcher.
     """
-    # Save the start before the attempt's transaction so reports and retry
-    # checks can read it even when the attempt later rolls back.
-    if not TransitionMessage.stamp_attempt_started(transition_message_id):
-        transition_logger.info(
-            f'TransitionMessage#{transition_message_id}: skipping this dispatch '
-            f'because the job is locked, completed, missing, or waiting until its eligible_at time.'
-        )
-        return
+    rows = TransitionMessage.objects.filter(pk=transition_message_id, is_completed=False).filter(
+        Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
+    if TransitionMessage.claim_start(TransitionMessage.ready_to_start(rows)) is not None:
+        run_claimed_transition(transition_message_id)
+
+
+def run_claimed_transition(transition_message_id):
     with ExitStack() as stack:
         try:
             stack.enter_context(restored_job_context(transition_message_id))
@@ -106,6 +136,7 @@ def run_background_transition(transition_message_id: int) -> None:
 
 def _run_background_transition(transition_message_id):
     token = _running_job_attempt.set(True)
+    job_token = _active_job.set(_JobActions(transition_message_id))
     try:
         outcome = _run_atomic(transition_message_id)
         if isinstance(outcome, _NonAtomicAttempt):
@@ -114,6 +145,7 @@ def _run_background_transition(transition_message_id):
     except _NothingToDo:
         return
     finally:
+        _active_job.reset(job_token)
         _running_job_attempt.reset(token)
 
     # Best-effort hooks after the transaction commits.
@@ -296,9 +328,12 @@ def _complete_terminal_failure(
     try:
         # A failed business-row check must not discard the job's recorded error.
         with transaction.atomic(using=using or state.instance._state.db or DEFAULT_DB_ALIAS), state.protected():
-            matches, expected, current = _state_guard_matches(transition, state)
+            selected = _selected_state(transition_message, state)
+            matches, expected, current = _state_guard_matches(transition, state, selected)
             write_error = None
-            if matches and transition.failed_state:
+            if matches and selected is not None:
+                setattr(state.instance, state.field_name, current)
+            elif matches and transition.failed_state:
                 write_error = write_failed_state(
                     state, transition.failed_state,
                     prefix=prefix, consequence=consequence, using=using,
@@ -406,6 +441,7 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
         if restore_error is not None:
             return _handle_restore_failure(transition_message, restore_error)
         instance, process, transition = restored
+        _active_job.get().state_key = process.state.instance_key
         if not transition.atomic:
             return _NonAtomicAttempt()
         state = process.state
@@ -443,13 +479,7 @@ def _run_atomic_state(transition_message, transition, state, instance, kwargs, d
         def execute_and_complete():
             _execute_attempt(instance, transition, state, kwargs)
             with state.protected():
-                if transition.target is None:
-                    superseded = _superseded_outcome(
-                        transition_message, transition, state, kwargs, after_side_effects=True,
-                    )
-                    if superseded is not None:
-                        return superseded
-                return _handle_success(transition_message, transition, state, kwargs)
+                return _complete_after_side_effects(transition_message, transition, state, kwargs)
         try:
             return _run_in_savepoint(
                 instance._state.db or DEFAULT_DB_ALIAS, execute_and_complete,
@@ -473,8 +503,10 @@ def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> Transiti
     """
     try:
         message = (
+            # A non-atomic job may insert its state decision on its separate business connection.
+            # The weaker PostgreSQL lock allows that foreign key while excluding other workers.
             TransitionMessage.objects.using(using)
-            .select_for_update(nowait=True)
+            .select_for_update(nowait=True, no_key=True)
             .filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
             .get(pk=transition_message_id, is_completed=False)
         )
@@ -491,13 +523,6 @@ def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> Transiti
         )
         raise _NothingToDo() from exc
 
-    from django_logic.lock_ownership import another_process_holds_job_locks
-    if another_process_holds_job_locks(transition_message_id):
-        transition_logger.info(
-            f'TransitionMessage#{transition_message_id}: another job process still owns state locks; '
-            'waiting for their release without counting a retry error.'
-        )
-        raise _NothingToDo()
     return message
 
 
@@ -546,7 +571,7 @@ def _restore_for_attempt(transition_message):
 
 
 def _superseded_outcome(
-    transition_message, transition, state, kwargs, *, after_side_effects=False,
+    transition_message, transition, state, kwargs, *, after_side_effects=False, selected=None,
 ) -> '_Outcome | None':
     """The state guard: stop if something else moved the instance.
 
@@ -556,8 +581,12 @@ def _superseded_outcome(
     Returns the superseded ``_Outcome``, or ``None`` when the state still
     matches and the attempt should proceed.
     """
-    matches, expected, current = _state_guard_matches(transition, state)
+    if not after_side_effects:
+        selected = _selected_state(transition_message, state)
+    matches, expected, current = _state_guard_matches(transition, state, selected)
     if matches:
+        if selected is not None:
+            setattr(state.instance, state.field_name, current)
         return None
     skipped = (
         'Final state write skipped; earlier side effects may have completed.'
@@ -577,45 +606,32 @@ def _superseded_outcome(
     return _Outcome(terminal=True, succeeded=False)
 
 
-def _execute_attempt(instance, transition, state, kwargs) -> None:
-    """Run the side-effects, then the target write, in ONE savepoint, so an
-    attempt writes everything or nothing. Raises whatever the attempt raised.
+def _complete_after_side_effects(transition_message, transition, state, kwargs, *, using=None):
+    """With the business row locked, preserve an explicit result or apply the expected target."""
+    selected = _selected_state(transition_message, state)
+    superseded = _superseded_outcome(
+        transition_message, transition, state, kwargs, after_side_effects=True, selected=selected,
+    )
+    if superseded is not None:
+        return superseded
+    if transition.target is not None and selected is None:
+        database = {'using': using} if using is not None else {}
+        state.set_state(transition.target, **database)
+        transition_logger.info(f'{kwargs.get("tr_id")} {TransitionEventType.SET_STATE.value} {transition.target}')
+    return _handle_success(transition_message, transition, state, kwargs)
 
-    A failed attempt rolls back every side-effect write. A DatabaseError
-    breaks only this savepoint, so the outer transaction can still record
-    the error and complete the job when its retries are exhausted.
 
-    It runs through _run_in_savepoint on the INSTANCE's alias: set_state
-    routes its write to the instance's connection, so a savepoint opened
-    on DEFAULT would guard the wrong one.
-
-    A side effect that raises a database error and swallows it
-    (`try: obj.save() except IntegrityError: pass` with no nested atomic)
-    makes Django discard the savepoint and nothing propagates. The attempt
-    then returns as a success but committed none of its writes, so we count
-    it as the failure it is.
-    """
-    def _attempt():
+def _execute_attempt(instance, transition, state, kwargs):
+    """Isolate required work so a suppressed database error cannot appear successful."""
+    def run_commands():
         for command in transition.side_effects.commands:
             transition_logger.info(
-                f'{kwargs.get("tr_id")} '
-                f'{TransitionEventType.SIDE_EFFECT.value} '
+                f'{kwargs.get("tr_id")} {TransitionEventType.SIDE_EFFECT.value} '
                 f'{getattr(command, "__name__", repr(command))}'
             )
             command(instance, **kwargs)
-        # A rejected target write rolls back the required work and counts
-        # toward the retry limit, like a side-effect failure.
-        if transition.target is not None:
-            state.set_state(transition.target)
-            transition_logger.info(
-                f'{kwargs.get("tr_id")} '
-                f'{TransitionEventType.SET_STATE.value} '
-                f'{transition.target}'
-            )
 
-    _run_in_savepoint(
-        instance._state.db or DEFAULT_DB_ALIAS, _attempt,
-    )
+    _run_in_savepoint(instance._state.db or DEFAULT_DB_ALIAS, run_commands)
 
 
 def _handle_restore_failure(
@@ -795,7 +811,7 @@ class _RestoreError(Exception):
     """
 
 
-def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
+def _state_guard_matches(transition, state, selected=None) -> tuple[bool, str, str]:
     """Does the persisted state still match what enqueue left behind?
 
     * Transition with ``in_progress_state`` — enqueue wrote it, so the
@@ -806,6 +822,8 @@ def _state_guard_matches(transition, state) -> tuple[bool, str, str]:
     Returns ``(matches, expected_description, current_state)``.
     """
     current = state.get_persisted_state()
+    if selected is not None:
+        return current == selected, f"the job's selected state {selected!r}", current
     if transition.in_progress_state:
         return (
             current == transition.in_progress_state,

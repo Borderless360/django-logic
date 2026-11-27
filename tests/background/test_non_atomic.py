@@ -548,6 +548,7 @@ class NonAtomicProviderTests(TransactionTestCase):
         self.assertEqual(self.widget.status, 'submitting')
         self.assertFalse(transition_message.is_completed)
         self.assertEqual(later_calls, [])
+        TransitionMessage.objects.filter(pk=transition_message.pk).update(started_at=timezone.now() - timedelta(seconds=6))
         run_background_transition(transition_message.pk)
         self.widget.refresh_from_db()
         self.assertEqual(self.widget.status, 'submitted')

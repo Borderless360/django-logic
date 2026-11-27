@@ -1,5 +1,34 @@
 # Upgrading and rollback
 
+## From 5.3.1 to 6.0
+
+Finish unfinished jobs with typed arguments on the old release before switching workers.
+Run this read-only check. The count must reach zero.
+
+```sql
+SELECT count(*) FROM django_logic_background_transitionmessage
+WHERE NOT is_completed AND kwargs::text LIKE '%"__dl_type__"%';
+```
+
+Pass plain JSON when submitting new jobs. Convert dates and UUIDs to strings.
+The worker refuses old type tags before calling any business functions.
+Read job counts and timings from `TransitionMessage`. The operator command lists or wakes jobs.
+A custom `is_valid` override still returns a boolean. When it refuses, the reason is unspecified.
+Condition and permission bundles now return the failed check or `None`.
+Undeclared actions raise `AttributeError`. Use `hasattr(process, name)` for optional actions.
+
+Pause producers and let the old workers finish any jobs that require the old declarations or argument format. Stop the workers and let open transactions finish before applying migrations 0023 and 0024. Migration 0023 drops the two ownership tables. Migration 0024 creates a table for the state a job chooses through a synchronous transition on its own record. The choice commits with the business change, so a later attempt can finish the remaining work. Start 6.0 producers and workers after migrating. Mixing versions during this change can leave an old process querying a dropped table.
+
+Replace `DatabaseTransition` with `Transition` and remove `atomic` from synchronous declarations. Required work and the target now roll back together on failure. Move reversible submission preparation into a caller transaction and remove `submission_context`. Remove `LOCK_TIMEOUT` and `include_locked` from settings and action listings. Optional callbacks of synchronous calls run after the surrounding transaction commits.
+
+For rollback, pause producers and let the 6.0 workers finish jobs whose behavior depends on the new release. Migration 0024 checks for unfinished jobs with a saved state decision before removing that table. Once the following count is zero, stop the workers, run the downgrade with the 6.0 code installed, and migrate `django_logic_background` to 0022 before starting 5.3.1. Restored lock tables start empty.
+
+```sql
+SELECT count(*) FROM django_logic_background_jobstateresult AS result
+JOIN django_logic_background_transitionmessage AS job ON job.id = result.job_id
+WHERE NOT job.is_completed;
+```
+
 ## From 5.2.2 to 5.3.0
 
 Migrations 0021 and 0022 each add one index to the job table. Completed-job cleanup reads through them.

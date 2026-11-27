@@ -13,9 +13,8 @@ The claim's WHERE clause is the retry rule:
   visible again;
 * a row whose attempt runs right now is row-locked by that attempt, so
   ``SKIP LOCKED`` passes over it;
-* a lost job connection releases its row lock; unexpired state locks
-  still delay a retry until the worker confirms exit and removes them,
-  or their configured duration ends.
+* a lost job connection releases its row lock. A recently claimed job
+  whose worker never started can be claimed again after five seconds.
 
 ``LISTEN/NOTIFY`` is the wake-up: enqueue fires one payload-free
 notification after commit, and a waiting worker asks the database at
@@ -42,7 +41,6 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from uuid import uuid4
 
 from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
                        transaction)
@@ -50,10 +48,6 @@ from django.db import (DEFAULT_DB_ALIAS, Error, connections, router,
 from django_logic.logger import logger
 from django_logic.database import set_local_timeouts
 from django_logic.background import reporting
-from django_logic.lock_ownership import (
-    create_process_owner, retire_process_owner, retire_unstarted_owner, set_process_owner,
-)
-
 #: One channel for every queue. The notification carries no payload and
 #: means only "ask the database now"; the claim's queue filter does the
 #: routing, so per-queue channels would buy nothing.
@@ -101,24 +95,14 @@ def notify_workers() -> None:
 def claim_next(queues: list[str], *, exclude_pks=()) -> int | None:
     """Return the pk of one claimable row for ``queues``, or ``None``.
 
-    The lock taken by ``SKIP LOCKED`` is released when this short
-    transaction ends; the runner then takes its own row lock for the
-    attempt. Several workers can select the same row during that gap.
-    Competing starts are common when workers share queues with few fairness groups.
-    Non-atomic jobs expose another gap while the runner changes connections.
-    The runner's row lock prevents overlapping execution. A competing process
-    can record a start and exit without running the job's side effects.
-
-    ``exclude_pks`` names the rows this worker already runs. One worker
-    claims faster than its own job processes take their row locks, so
-    without this it would claim the same head row into every free slot.
+    Selecting a job records its start. A stopped worker leaves the job available after a short wait.
     """
     from django_logic.background.safety_nets import _claimable
     from django_logic.background.fairness import claim_fair
     from django_logic.background.models import TransitionMessage
 
     alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
-    rows = _claimable(queues).using(alias)
+    rows = TransitionMessage.ready_to_start(_claimable(queues).using(alias))
     if exclude_pks:
         rows = rows.exclude(pk__in=exclude_pks)
     return claim_fair(rows)
@@ -135,7 +119,7 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
     failing one. The call returns only after the failure is recorded,
     so a caller never loses that record.
     """
-    from django_logic.background.runner import run_background_transition
+    from django_logic.background.runner import run_claimed_transition
 
     pk = claim_next(queues)
     if pk is None:
@@ -147,7 +131,7 @@ def run_once(queues: list[str], *, isolate: bool) -> bool:
         while attempts or pending:
             _harvest(attempts, pending, block=True)
     else:
-        run_background_transition(pk)
+        run_claimed_transition(pk)
     return True
 
 
@@ -166,8 +150,6 @@ class _Attempt:
     last_deferred_warning: float | None = None
     result_fd: int | None = None
     work_exit_code: int | None = None
-    owner_id: object = None
-    cleanup_only: bool = False
 
 
 @contextmanager
@@ -189,7 +171,7 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, pending, qu
     fork; each side then opens its own lazily.
     """
     from django_logic.background.models import TransitionMessage
-    from django_logic.background.runner import run_background_transition
+    from django_logic.background.runner import run_claimed_transition
     from django_logic.conf import job_process_finish
 
     finish = job_process_finish()
@@ -201,8 +183,6 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, pending, qu
         from django.core.exceptions import ImproperlyConfigured
         raise ImproperlyConfigured('Start job processes outside a caller transaction.')
     read_fd = write_fd = None
-    owner_id = uuid4()
-    registration_started = False
     try:
         if finish is not None:
             read_fd, write_fd = os.pipe()
@@ -211,23 +191,14 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, pending, qu
             if pk is not None:
                 rows = TransitionMessage.objects.filter(pk=pk)
                 timeout_seconds = rows.values_list('timeout_seconds', flat=True).first()
-            registration_started = True
-            create_process_owner(pk, owner_id=owner_id)
         connections.close_all()
         attempt_pid = os.fork()
     except BaseException:
         if read_fd is not None:
             os.close(read_fd)
             os.close(write_fd)
-        if registration_started:
-            cleanup = _Attempt(pk=pk, timeout_seconds=None, deadline=None,
-                               owner_id=owner_id, cleanup_only=True)
-            if not _try_account(cleanup):
-                cleanup.next_retry_at = time.monotonic() + BUSY_POLL_SECONDS
-                pending.append(cleanup)
         raise
     if attempt_pid == 0:
-        set_process_owner(owner_id, pk)
         # A platform can send its stop signal to every process. The worker then
         # waits for this job; only the platform's kill ends it early.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -241,7 +212,7 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, pending, qu
             if pk is None:
                 _run_safety_nets(queues)
             else:
-                run_background_transition(pk)
+                run_claimed_transition(pk)
             status = 0
         except BaseException:
             if pk is None:
@@ -265,7 +236,6 @@ def _start_attempt(pk: int | None, attempts: dict[int, _Attempt], *, pending, qu
             else time.monotonic() + timeout_seconds
         ),
         result_fd=read_fd,
-        owner_id=owner_id,
     )
 
 
@@ -403,16 +373,7 @@ def _try_account(attempt: _Attempt) -> bool:
     nothing to enforce their ``timeout=``.
     """
     try:
-        if attempt.owner_id is not None:
-            with _supervisor_transaction(DEFAULT_DB_ALIAS):
-                if attempt.cleanup_only:
-                    retire_unstarted_owner(attempt.owner_id)
-                else:
-                    retire_process_owner(attempt.owner_id)
-                    _account(attempt, attempt.exit_code)
-            attempt.owner_id = None
-        else:
-            _account(attempt, attempt.exit_code)
+        _account(attempt, attempt.exit_code)
     except Exception as exc:
         cause = exc.__cause__
         if (getattr(cause, 'sqlstate', None)
@@ -425,7 +386,7 @@ def _try_account(attempt: _Attempt) -> bool:
                     and (attempt.last_deferred_warning is None
                          or now - attempt.last_deferred_warning >= ACCOUNTING_WARNING_REPEAT_SECONDS)):
                 logger.warning(
-                    'pull: releasing ownership and recording the result for TransitionMessage#%s has waited %.1fs '
+                    'pull: recording the result for TransitionMessage#%s has waited %.1fs '
                     'for a database lock. The worker retains the error and retries; '
                     'check the PostgreSQL lock holder if the wait continues.',
                     attempt.pk, waited,
@@ -434,7 +395,7 @@ def _try_account(attempt: _Attempt) -> bool:
                 attempt.last_deferred_warning = now
             return False
         logger.error(
-            'pull: could not release ownership or record the result for '
+            'pull: could not record the result for '
             'TransitionMessage#%s (%s: %s); the worker keeps it and '
             'retries the write.',
             attempt.pk, type(exc).__name__, exc,
@@ -524,16 +485,11 @@ def _run_safety_nets(queues=()) -> None:
         cleanup_completed_transitions,
         detect_stuck_transitions,
     )
-    from django_logic.background.worker_presence import record_worker_presence
-    from django_logic.lock_ownership import cleanup_expired_locks
 
-    # Cache access stays outside the worker that enforces job deadlines.
-    record_worker_presence(queues)
 
     for step in (
         detect_stuck_transitions,
         cleanup_completed_transitions,
-        cleanup_expired_locks,
     ):
         try:
             step()

@@ -13,7 +13,7 @@ from django_logic.background import BackgroundTransition
 class QueueValidationTests(SimpleTestCase):
     def test_background_declaration_errors_identify_the_action(self):
         for options in (
-            {'lock': False}, {'fairness_key': 42}, {'submission_context': 42},
+            {'lock': False}, {'fairness_key': 42},
             {'in_progress_state': 'busy', 'target': None},
             {'in_progress_state': 'busy', 'failed_state': 'busy'},
         ):

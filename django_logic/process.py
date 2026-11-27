@@ -12,14 +12,12 @@ from contextvars import ContextVar
 from functools import cache, wraps
 
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
+from django.db import DEFAULT_DB_ALIAS, transaction
 
-from django_logic.commands import Conditions, Permissions
+from django_logic.commands import Conditions, Permissions, guard_failure
 from django_logic.exceptions import (
     RefusalReason,
     TransitionNotAllowed,
-    _check_validity,
-    _execute_validity_bundle,
-    _record_validity_refusal,
 )
 from django_logic.logger import transition_logger
 from django_logic.state import State
@@ -35,7 +33,6 @@ _DEFAULT_REFUSAL_MESSAGES = {
     RefusalReason.PERMISSION: 'you do not have permission to perform this action.',
     RefusalReason.CONDITION: 'this record does not meet the requirements for this action.',
     RefusalReason.SOURCE_STATE: 'this action cannot run in the current state of this record.',
-    RefusalReason.UNKNOWN_ACTION: 'this action does not exist.',
     RefusalReason.LOCKED: 'this record is locked.',
     RefusalReason.BACKGROUND_IN_FLIGHT: 'a background transition is in progress. Try again shortly.',
     RefusalReason.BACKGROUND_STRANDED: (
@@ -110,12 +107,7 @@ class Process:
             )
 
     def __getattr__(self, item):
-        # Names that start with an underscore are never action names. copy,
-        # pickle, mock and IPython probe dunder names with getattr and must get
-        # a normal AttributeError, and hasattr(process, '_x') must not be True
-        # for every name. Any other missing attribute is treated as an action
-        # name and resolved when it is called.
-        if item.startswith('_'):
+        if item.startswith('_') or item not in _action_declarations(type(self)):
             raise AttributeError(item)
 
         def transition_method(**kwargs):
@@ -135,10 +127,61 @@ class Process:
             kwargs.setdefault('tr_id', parent_ctx['tr_id'])
 
         user = kwargs.get('user')
-        transition, owning_process = self._resolve_transition_with_owner(
-            action_name, user
-        )
+        declarations = _action_declarations(type(self)).get(action_name, ())
+        if self.state.instance._state.db not in (None, DEFAULT_DB_ALIAS) and all(
+            declaration.is_background and not declaration.atomic for declaration, owner in declarations
+        ):
+            from django_logic.background.non_atomic import validate_non_atomic
+            validate_non_atomic(self.state.instance, require_autocommit=False)
+        selected = None
+        has_unlocked = any(not declaration.lock for declaration, owner in declarations)
+        if has_unlocked:
+            try:
+                selected, owner = self._resolve_transition_with_owner(action_name, user)
+            except TransitionNotAllowed:
+                if not any(declaration.lock for declaration, owner in declarations):
+                    raise
+            else:
+                if not selected.lock:
+                    return self._call_transition(action_name, selected, owner, kwargs)
 
+        after = []
+        failure = None
+        caller_in_transaction = transaction.get_connection(self.state.instance._state.db).in_atomic_block
+        with self.state.protected() as fresh:
+            current = type(self)(instance=fresh, field_name=self.state.field_name)
+            transition, owner = current._resolve_transition_with_owner(action_name, user)
+            if not has_unlocked and len(declarations) > 1:
+                # A previously available declaration must not silently become a different action.
+                caller = self.state.instance
+                cached_relations = caller._state.fields_cache or getattr(caller, '_prefetched_objects_cache', None)
+                if cached_relations or any(
+                    caller.__dict__[field.attname] != getattr(fresh, field.attname)
+                    for field in fresh._meta.concrete_fields if field.attname in caller.__dict__
+                ):
+                    try:
+                        selected, _ = self._resolve_transition_with_owner(action_name, user)
+                    except TransitionNotAllowed:
+                        pass
+            if selected is not None and selected is not transition:
+                refusal = TransitionNotAllowed('Another declaration now matches this record.', reason=RefusalReason.CONDITION)
+                self._set_refusal_message(refusal, action_name, owner, transition)
+                raise refusal
+            call = {'state': self.state, 'transition': transition, 'after': after, 'caller_in_transaction': caller_in_transaction}
+            try:
+                result = self._call_transition(action_name, transition, owner, kwargs, call)
+            except Exception as error:
+                if call.get('failure') is not error:
+                    raise
+                failure = error
+
+        for callback in after:
+            callback()
+        if failure is not None:
+            raise failure
+        return result
+
+    def _call_transition(self, action_name, transition, owning_process, kwargs, call=None):
         tr_id = uuid.uuid4()
         target_note = (
             f"to {transition.target}" if transition.target is not None
@@ -161,7 +204,7 @@ class Process:
         )
 
         token = _transition_context.set(
-            {'root_id': kwargs['root_id'], 'tr_id': kwargs['tr_id']}
+            {'root_id': kwargs['root_id'], 'tr_id': kwargs['tr_id'], 'call': call}
         )
         try:
             return transition.change_state(self.state, **kwargs)
@@ -190,150 +233,78 @@ class Process:
         prefix = f"Action '{action_name}' is {outcome}"
         error.user_message = prefix if message is None else f'{prefix}: {message}'
 
-    def is_valid(self, user=None) -> bool:
-        permissions = self.permissions_class(commands=self.permissions)
-        conditions = Conditions(commands=self.conditions)
-        instance = self.state.instance
-        permitted = _execute_validity_bundle(self, permissions, instance, user)
-        if not permitted:
-            _record_validity_refusal(self, RefusalReason.PERMISSION)
-            return permitted
-        valid = _execute_validity_bundle(self, conditions, instance)
-        if not valid:
-            _record_validity_refusal(self, RefusalReason.CONDITION)
-        return valid
+    def _guard_failure(self, user):
+        return guard_failure(self.permissions_class(commands=self.permissions), Conditions(commands=self.conditions),
+                             self.state.instance, user)
 
-    def get_available_actions(self, user=None, action_name=None, *, include_locked=False):
-        """List eligible actions, optionally including those hidden by a held state lock."""
+    def is_valid(self, user=None) -> bool:
+        return self._guard_failure(user) is None
+
+    def get_available_actions(self, user=None, action_name=None):
+        """List actions available on the supplied record."""
         return sorted(
             {
                 transition.action_name
                 for transition in self.get_available_transitions(
-                    user, action_name, include_locked=include_locked)
+                    user, action_name)
             }
         )
 
-    def get_available_transitions(self, user=None, action_name=None, *, include_locked=False):
-        """Check current state, conditions and permissions without acquiring a lock.
+    def get_available_transitions(self, user=None, action_name=None):
+        """Check state, conditions and permissions without locking the record."""
+        matches, _ = self._find_transitions(action_name, user)
+        yield from (transition for transition, owner in matches)
 
-        ``include_locked`` changes only this query. Calling the action checks conditions and permissions before locking.
-        Under the lock, execution checks persisted state and conflicting unfinished work again.
-        """
-        for transition, _owner in self._iter_available_with_owner(
-            user=user,
-            action_name=action_name,
-            include_locked=include_locked,
-        ):
-            yield transition
+    def _find_transitions(self, action_name, user):
+        from django_logic.transition import Transition
 
-    def _iter_available_with_owner(
-        self,
-        user=None,
-        action_name=None,
-        include_locked=False,
-        _seen=None,
-        _refusals=None,
-        _is_locked=None,
-    ):
-        """Like :meth:`get_available_transitions`, but yield
-        ``(transition, owning_process)`` pairs.
+        matches = []
+        refusals = {}
+        visited = set()
+        current = self.state.get_state()
 
-        ``owning_process`` is the (possibly nested) ``Process`` instance that
-        declared the transition — what enqueue records so the worker can
-        identify the exact background transition among siblings that share
-        an ``action_name`` and use conditions to choose. Iteration order
-        and filtering are identical to ``get_available_transitions``; that
-        method is a thin wrapper that drops the owner.
-        """
-        # Visit each Process CLASS once per walk: a class reachable by two
-        # paths shares its transition objects, so it must yield them once
-        # (twice reads as "several transitions available" and no condition
-        # can satisfy the hint), and a nested cycle must terminate. Deduping
-        # by class keeps one ``action_name`` on *distinct* nested classes
-        # legal. Mirrors ``_iter_process_tree``.
-        if _seen is None:
-            _seen = set()
-        if id(type(self)) in _seen:
-            return
-        _seen.add(id(type(self)))
+        def refusal_for(owner, base, *args):
+            if type(owner).is_valid is base.is_valid:
+                return owner._guard_failure(*args)
+            return None if owner.is_valid(*args) else (None, None)
 
-        if _refusals is None:
-            valid, reason, message = self.is_valid(user), None, None
-        else:
-            valid, reason, message = _check_validity(self, user)
-        if not valid:
-            if _refusals is not None:
-                declarations = [
-                    transition
-                    for process_class in _iter_process_tree(
-                        type(self), _seen=_seen - {id(type(self))},
-                    )
-                    for transition in process_class.transitions
-                    if transition.action_name == action_name
-                ]
-                if any(
-                    self.state.get_state() in transition.sources
-                    for transition in declarations
-                ):
-                    _refusals['process'].append(_Refusal(reason, message, self, None))
-                elif declarations:
-                    _refusals['source'].append(_Refusal(RefusalReason.SOURCE_STATE, None, self, None))
-            return
+        def visit(process):
+            owner = type(process)
+            if id(owner) in visited:
+                return
+            visited.add(id(owner))
+            failure = refusal_for(process, Process, user)
+            if failure is not None:
+                if action_name is not None:
+                    declarations = (item for branch in _iter_process_tree(owner, visited - {id(owner)})
+                                    for item in branch.transitions if item.action_name == action_name)
+                    for item in declarations:
+                        if current in item.sources:
+                            refusals.setdefault('process', _Refusal(*failure, process, None))
+                            break
+                        refusals.setdefault('source', _Refusal(RefusalReason.SOURCE_STATE, None, process, None))
+                return
+            for item in process.transitions:
+                if action_name is not None and item.action_name != action_name:
+                    continue
+                if current not in item.sources:
+                    refusals.setdefault('source', _Refusal(RefusalReason.SOURCE_STATE, None, process, item))
+                    continue
+                failure = refusal_for(item, Transition, self.state.instance, user)
+                if failure is None:
+                    matches.append((item, process))
+                else:
+                    refusals.setdefault('transition', _Refusal(*failure, process, item))
+            for child in process.nested_processes:
+                visit(child(state=self.state))
 
-        # A held lock hides the transitions that would take it. A lock=False
-        # transition runs regardless, so it stays listed.
-        # Nested processes share this state, so one listing reads its lock once.
-        if _is_locked is None:
-            _is_locked = cache(self.state.is_locked)
-        locked = not include_locked and _is_locked()
-
-        for transition in self.transitions:
-            if action_name is not None and transition.action_name != action_name:
-                continue
-            if locked and transition.lock:
-                continue
-
-            if self.state.get_state() not in transition.sources:
-                if _refusals is not None:
-                    _refusals['source'].append(_Refusal(RefusalReason.SOURCE_STATE, None, self, transition))
-                continue
-            if _refusals is None:
-                valid, reason, message = transition.is_valid(self.state.instance, user), None, None
-            else:
-                valid, reason, message = _check_validity(transition, self.state.instance, user)
-            if valid:
-                yield transition, self
-            elif _refusals is not None:
-                _refusals['transition'].append(_Refusal(reason, message, self, transition))
-
-        for sub_process_class in self.nested_processes:
-            sub_process = sub_process_class(state=self.state)
-            yield from sub_process._iter_available_with_owner(
-                user=user,
-                action_name=action_name,
-                include_locked=include_locked,
-                _seen=_seen,
-                _refusals=_refusals,
-                _is_locked=_is_locked,
-            )
+        visit(self)
+        # A checked declaration explains more than an inaccessible sibling or a different source state.
+        refusal = next((refusals[scope] for scope in ('transition', 'process', 'source') if scope in refusals), None)
+        return matches, refusal
 
     def _resolve_transition_with_owner(self, action_name: str, user=None):
-        """Resolve ``action_name`` to ``(transition, owning_process)``.
-
-        Exactly one match is required, after conditions/permissions
-        filtering with ``include_locked=True``. Also returns the declaring
-        process so the caller can record it for worker restore.
-        """
-        # Prefer a checked transition over a different branch's process guard.
-        refusals = {'transition': [], 'process': [], 'source': []}
-        matches = list(
-            self._iter_available_with_owner(
-                action_name=action_name,
-                user=user,
-                include_locked=True,
-                _refusals=refusals,
-            )
-        )
+        matches, refusal = self._find_transitions(action_name, user)
         if len(matches) == 1:
             return matches[0]
 
@@ -358,10 +329,8 @@ class Process:
             f"The instance is in state {current_state!r}."
         )
         transition_logger.info(message)
-        refusal = next(
-            (reasons[0] for reasons in refusals.values() if reasons),
-            _Refusal(RefusalReason.UNKNOWN_ACTION, None, self, None),
-        )
+        if refusal is None:
+            raise AttributeError(action_name)
         error = TransitionNotAllowed(message, reason=refusal.reason)
         self._set_refusal_message(error, action_name, refusal.process, refusal.transition, refusal.message)
         error.current_state = current_state
@@ -384,6 +353,15 @@ def _iter_process_tree(process_cls, _seen=None):
     yield process_cls
     for sub_process_cls in process_cls.nested_processes:
         yield from _iter_process_tree(sub_process_cls, _seen)
+
+
+@cache
+def _action_declarations(process_class):
+    actions = {}
+    for owner in _iter_process_tree(process_class):
+        for transition in owner.transitions:
+            actions.setdefault(transition.action_name, []).append((transition, owner))
+    return actions
 
 
 def _validate_action_names_not_shadowed(process_cls):

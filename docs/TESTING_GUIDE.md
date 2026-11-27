@@ -64,7 +64,7 @@ DJANGO_LOGIC = {
 ```
 
 SQLite supports synchronous process tests and default atomic background jobs.
-`DatabaseTransition` and `BackgroundTransition(atomic=False)` require PostgreSQL, including inline tests.
+`BackgroundTransition(atomic=False)` requires PostgreSQL, including inline tests.
 Inline tests start no worker process. Use PostgreSQL and a shared cache to verify concurrent behavior.
 
 If a specific test file needs inline execution while the global setting is
