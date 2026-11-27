@@ -110,17 +110,11 @@ Applications may use these fields to group activity by transition or record.
 A background submission appends its queue information after these fields.
 `state_hash` is also attached to the log record.
 
-A refused state lock logs at INFO before raising:
-
-```text
-tr_id Lock failed instance_key — state is locked
-```
-
-Repeated `Lock failed` lines without an intervening `Unlock` for the same
-record can indicate an unfinished transition or an expired owner that left a lock.
-Check the running job and the configured lock timeout before retrying.
-A successful release after failed validation logs
-`Unlock instance_key after revalidation failure`.
+When another PostgreSQL transaction holds the record for longer than two
+seconds, `django-logic.transition` logs a warning naming the record.
+The caller receives `TransitionTemporarilyUnavailable` with reason
+`locked` and can retry. Repeated warnings for the same record are a reason
+to inspect the database transaction holding its row lock.
 
 `lock=False` logs `Lock skipped instance_key — lock=False` and releases no lock.
 Background completion and failure logs describe saved job outcomes.

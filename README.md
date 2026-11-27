@@ -189,10 +189,8 @@ store, the work is the parcel, and two parcels must not wait for each
 other. A `lock=False` transition takes no state lock and is not refused
 while a background transition is uncompleted. It keeps `conditions`,
 `permissions`, `side_effects`, `callbacks` and `failure_callbacks`.
-A callback is best-effort; a transition it starts can be refused while the row is locked. A `lock=False` transition cannot declare a `target` or a
-`failed_state` — a state write must serialise on that state — and
-`BackgroundTransition` refuses it. `get_available_actions()` lists it
-while the row is locked, because it can be called.
+Only synchronous actions that leave the state unchanged can use `lock=False`.
+To write a `target` or a `failed_state`, keep the default row lock.
 
 ```python
 def post_tracking(instance, **kwargs):
