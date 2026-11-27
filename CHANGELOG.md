@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [6.0.1] — 2026-11-27
 
 - A background job submitted by a user stops if that account is deleted before execution.
   Previously, the worker ran the job without a user, allowing application code to treat it as system work.
