@@ -53,8 +53,6 @@ Create the record and validate form input before calling a transition.
 ## Install
 
 This guide describes **6.0.1**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
-Before upgrading, follow the [upgrade and rollback requirements](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
-
 
 ```bash
 pip install "django-logic[postgres]"
@@ -81,10 +79,6 @@ python manage.py migrate
 
 Every `DJANGO_LOGIC` key has a default, so you need no other configuration to
 start.
-
-### Upgrading from 5.3.1
-
-Finish jobs with typed arguments, update declarations and stop the old producers and workers before applying migrations 0023 and 0024. Restart on the same application and library version. The checklist covers rollback and earlier releases. See the [upgrade checklist](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 ## Declare a process
 
