@@ -12,6 +12,8 @@
   Migration 0023 removes the separate state lock tables. Remove `DatabaseTransition`,
   `LOCK_TIMEOUT` and `submission_context` as described in the [upgrade guide](docs/upgrading.md).
 - A job can use a synchronous action on its own process to choose its outcome.
+  Migration 0024 records that choice in the business transaction. A retry resumes from the
+  committed choice, and rolling back a savepoint discards the choice made inside it.
   Workers claim a job and record its start in one SQL statement.
 - Custom `is_valid` methods still determine availability. Their boolean result supplies no
   guard-specific reason or user-facing message.

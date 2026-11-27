@@ -415,6 +415,16 @@ class TransitionMessage(TimeStampedModel):
         self.save(using=self._state.db, update_fields=['failure_side_effect_error', 'modified'])
 
 
+class JobStateResult(models.Model):
+    """The state a job selected through a synchronous transition on its own record."""
+
+    job = models.OneToOneField(TransitionMessage, primary_key=True, on_delete=models.CASCADE, related_name='+')
+    value = models.TextField()
+
+    class Meta:
+        app_label = 'django_logic_background'
+
+
 def in_flight(instance, process_name: str = 'process') -> bool:
     """Whether a background transition is still being retried for
     ``instance`` + ``process_name``.

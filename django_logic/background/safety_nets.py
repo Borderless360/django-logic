@@ -221,11 +221,12 @@ def _delete_in_batches(eligible, alias) -> int:
     while True:
         with transaction.atomic(using=alias):
             message_ids = list(
-                eligible.order_by('modified', 'pk').values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
+                eligible.select_for_update(skip_locked=True).order_by('modified', 'pk')
+                .values_list('pk', flat=True)[:_CLEANUP_BATCH_SIZE]
             )
             if not message_ids:
                 break
             # Recheck eligibility because a row can change after selection.
-            count, _ = eligible.filter(pk__in=message_ids).delete()
-        deleted += count
+            _, counts = eligible.filter(pk__in=message_ids).delete()
+        deleted += counts.get(TransitionMessage._meta.label, 0)
     return deleted

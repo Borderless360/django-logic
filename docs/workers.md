@@ -23,6 +23,13 @@ A failed attempt waits until its retry time. The configured error limit stops re
 Error retries keep their submission order once the retry wait ends.
 A lost business connection releases its row lock. If a worker exits between selecting a job and acquiring its execution lock, another worker can recover the job after five seconds. External side effects require application duplicate protection.
 
+When a job calls a synchronous transition on its own state field, the selected
+state and its job record commit together. A savepoint rollback restores the
+previous choice. If a non-atomic job commits a choice and then retries, its
+side effects can run again and complete the remaining work. Give external
+requests a durable receipt or idempotency key. A later change to a different
+state still supersedes the job.
+
 Each job runs in a separate process. The worker records crashes and stops
 jobs that exceed their declared timeout. The job row remains the source for recovery.
 

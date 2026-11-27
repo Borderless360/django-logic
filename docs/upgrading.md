@@ -17,11 +17,17 @@ A custom `is_valid` override still returns a boolean. When it refuses, the reaso
 Condition and permission bundles now return the failed check or `None`.
 Undeclared actions raise `AttributeError`. Use `hasattr(process, name)` for optional actions.
 
-Before migration 0023, stop all old producers and workers and allow their open actions to finish. The migration drops the two ownership tables. Start 6.0 producers and workers after migrating. Mixing versions during this change can leave an old process querying a dropped table.
+Pause producers and let the old workers finish any jobs that require the old declarations or argument format. Stop the workers and let open transactions finish before applying migrations 0023 and 0024. Migration 0023 drops the two ownership tables. Migration 0024 creates a table for the state a job chooses through a synchronous transition on its own record. The choice commits with the business change, so a later attempt can finish the remaining work. Start 6.0 producers and workers after migrating. Mixing versions during this change can leave an old process querying a dropped table.
 
 Replace `DatabaseTransition` with `Transition` and remove `atomic` from synchronous declarations. Required work and the target now roll back together on failure. Move reversible submission preparation into a caller transaction and remove `submission_context`. Remove `LOCK_TIMEOUT` and `include_locked` from settings and action listings. Optional callbacks of synchronous calls run after the surrounding transaction commits.
 
-For rollback, stop 6.0 processes and migrate `django_logic_background` to 0022 before starting 5.3.1. Restored lock tables start empty. Drain jobs whose behavior depends on the new API before rolling back.
+For rollback, pause producers and let the 6.0 workers finish jobs whose behavior depends on the new release. Migration 0024 checks for unfinished jobs with a saved state decision before removing that table. Once the following count is zero, stop the workers, run the downgrade with the 6.0 code installed, and migrate `django_logic_background` to 0022 before starting 5.3.1. Restored lock tables start empty.
+
+```sql
+SELECT count(*) FROM django_logic_background_jobstateresult AS result
+JOIN django_logic_background_transitionmessage AS job ON job.id = result.job_id
+WHERE NOT job.is_completed;
+```
 
 ## From 5.2.2 to 5.3.0
 

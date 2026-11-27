@@ -84,7 +84,7 @@ start.
 
 ### Upgrading from 5.3.1
 
-Finish jobs with typed arguments, update declarations and stop the old producers and workers before applying migration 0023. Restart on the same application and library version. The checklist covers rollback and earlier releases. See the [upgrade checklist](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
+Finish jobs with typed arguments, update declarations and stop the old producers and workers before applying migrations 0023 and 0024. Restart on the same application and library version. The checklist covers rollback and earlier releases. See the [upgrade checklist](https://github.com/Borderless360/django-logic/blob/master/docs/upgrading.md).
 
 ## Declare a process
 
