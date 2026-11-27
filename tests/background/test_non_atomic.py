@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError, InterfaceError, OperationalError, connection, connections, transaction
@@ -126,6 +127,35 @@ class NonAtomicProviderTests(TransactionTestCase):
     def request_count(self):
         path = Path(self.request_path)
         return len(path.read_text().splitlines()) if path.exists() else 0
+
+    def test_deleted_user_between_job_checks_stops_provider_work_and_callbacks(self):
+        from django_logic.background.non_atomic import run_non_atomic
+
+        user = get_user_model().objects.create(username='deleted-submitter')
+        job = self.enqueue(user=user)
+        user_id = user.pk
+
+        def delete_user_then_run(job_id):
+            user.delete()
+            return run_non_atomic(job_id)
+
+        with patch('django_logic.background.non_atomic.run_non_atomic', side_effect=delete_user_then_run):
+            run_background_transition(job.pk)
+
+        job.refresh_from_db()
+        self.widget.refresh_from_db()
+        self.assertTrue(job.is_completed)
+        self.assertTrue(job.ended_in_failure)
+        self.assertIn('[unrestorable]', job.last_error_message)
+        self.assertIn('submitting user', job.last_error_message)
+        self.assertEqual(job.kwargs['user_id'], user_id)
+        self.assertEqual(self.widget.status, 'submitting')
+        self.assertEqual(self.widget.se_log, '')
+        self.assertEqual(self.widget.cb_log, '')
+        self.assertEqual(self.request_count(), 0)
+        run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.start_attempt_count, 1)
 
     def test_confirmed_response_survives_report_failure_and_retry_does_not_resubmit(self):
         transition_message = self.enqueue()

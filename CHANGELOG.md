@@ -1,5 +1,13 @@
 # Changelog
 
+## [6.0.1] — 2026-11-27
+
+- A background job submitted by a user stops if that account is deleted before execution.
+  Previously, the worker ran the job without a user, allowing application code to treat it as system work.
+  The worker now records a failed job without running business functions or callbacks, including during failure maintenance.
+  The business state remains unchanged. Review the job before submitting replacement work under an authorized user.
+  Jobs submitted without a user still run normally. This change requires no database migration.
+
 ## [6.0.0] — 2026-11-27
 
 - Background jobs accept plain JSON arguments. Finish jobs containing legacy type tags before upgrading.

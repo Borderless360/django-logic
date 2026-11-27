@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from uuid import UUID
 
+from django_logic.background.exceptions import _RestoreError
+
 
 class KwargsSerializationError(TypeError):
     """Rejection of kwargs that enqueue would otherwise mutate silently
@@ -108,7 +110,8 @@ def restore_user(kwargs: dict) -> None:
     from django.contrib.auth import get_user_model
     try:
         kwargs['user'] = get_user_model().objects.get(pk=user_id)
-    except get_user_model().DoesNotExist:
-        # The user disappeared between enqueue and execute; leave user=None so
-        # permission checks treat the work as system-initiated.
-        kwargs['user'] = None
+    except get_user_model().DoesNotExist as error:
+        raise _RestoreError(
+            f'The submitting user {user_id!r} no longer exists. '
+            'Review the job before submitting replacement work under an authorized user.'
+        ) from error
