@@ -1,6 +1,6 @@
 # Changelog
 
-## [6.0.0] — 2026-11-26
+## [6.0.0] — 2026-11-27
 
 - Background jobs accept plain JSON arguments. Finish jobs containing legacy type tags before upgrading.
 - Use the job table for reporting. The worker and the job list use queue progress to report waiting jobs.
