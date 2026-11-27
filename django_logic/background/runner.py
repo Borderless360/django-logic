@@ -59,6 +59,7 @@ from django.utils import timezone
 
 from django_logic import conf
 from django_logic.background.context import JobContextError, restored_job_context
+from django_logic.background.exceptions import _RestoreError
 from django_logic.background.models import JobStateResult, TransitionMessage, _TEXT_LIMIT, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
@@ -282,6 +283,9 @@ def _finalize_stuck_row(
         return None
 
     kwargs, decode_error = _decode_kwargs(transition_message)
+    if isinstance(decode_error, _RestoreError):
+        _complete_restore_failure(transition_message, decode_error, earlier_error=transition_message.last_error_message)
+        return None
     if decode_error is not None:
         # kwargs that no longer decode must not block the finalization:
         # failed_state and the completion still land, so retries stop.
@@ -436,6 +440,8 @@ def _run_atomic(transition_message_id: int) -> _Outcome | _NonAtomicAttempt:
         set_sentry_context(transition_message)
 
         kwargs, decode_error = _decode_kwargs(transition_message)
+        if isinstance(decode_error, _RestoreError):
+            return _handle_restore_failure(transition_message, decode_error)
 
         restored, restore_error = _restore_for_attempt(transition_message)
         if restore_error is not None:
@@ -803,12 +809,6 @@ def _run_success_hooks(outcome: _Outcome) -> None:
         )
     finally:
         _transition_context.reset(token)
-
-
-class _RestoreError(Exception):
-    """The TransitionMessage refers to a model/instance/transition that
-    no longer exists. The row is marked completed to stop the retry loop.
-    """
 
 
 def _state_guard_matches(transition, state, selected=None) -> tuple[bool, str, str]:

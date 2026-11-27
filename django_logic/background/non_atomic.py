@@ -11,6 +11,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 
 from django_logic import conf
+from django_logic.background.exceptions import _RestoreError
 from django_logic.background.models import TransitionMessage
 from django_logic.commands import _run_in_savepoint, _run_keeping_writes
 from django_logic.logger import TransitionEventType, transition_logger
@@ -115,6 +116,8 @@ def _run_attempt(transition_message_id, alias):
             _check_job_transaction(job_connection, raw_job_connection, job_transaction_id)
 
     kwargs, decode_error = _decode_kwargs(transition_message)
+    if isinstance(decode_error, _RestoreError):
+        return _handle_restore_failure(transition_message, decode_error)
     restored, restore_error = _restore_for_attempt(transition_message)
     if restore_error is not None:
         return _handle_restore_failure(transition_message, restore_error)

@@ -1,6 +1,10 @@
 from django_logic.exceptions import TransitionTemporarilyUnavailable
 
 
+class _RestoreError(Exception):
+    """A saved job's model, instance, transition or submitting user no longer exists."""
+
+
 class PermanentFailure(Exception):
     """Raise from a background side-effect to say: another attempt gets the
     same answer, so do not retry.

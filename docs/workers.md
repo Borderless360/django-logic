@@ -3,6 +3,12 @@
 The database stores each submitted job and its retry history.
 Workers select available jobs directly from that database.
 
+The worker restores the user saved when the job was submitted.
+If that account no longer exists, the worker records a failed job and stops it without retrying.
+It leaves the business state unchanged and runs no business functions or callbacks.
+Review the failed job before submitting replacement work under an authorized user.
+Jobs submitted without a user still run as system work.
+
 `dl_worker` requires Linux. On macOS or Windows, run the worker in a Linux VM
 or container. The command refuses other operating systems before running its
 checks or starting worker activity. Native macOS jobs can abort when looking
