@@ -506,6 +506,9 @@ def _iter_hooks(process_cls):
                 for fn in hooks:
                     yield fn, owner
         for transition in proc_cls.transitions:
+            record_failure = getattr(transition, '_required_failure_recorder', None)
+            if record_failure is not None:
+                yield record_failure, f'{owner}.{transition.action_name}.record_failure'
             for attr in hook_attrs:
                 wrapper = getattr(transition, attr)
                 for fn in wrapper.commands:

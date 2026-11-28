@@ -181,6 +181,8 @@ Optional callbacks for completed jobs are not retried.
 
 - `detect_stuck_transitions` completes jobs that have used their error allowance.
   It writes `failed_state` and runs failure callbacks only when the saved state still applies and can be checked under its lock.
+  For `record_failure`, it saves the required business outcome with failed-job completion.
+  A failed recording remains pending for maintenance; ordinary workers do not repeat its provider work.
   Otherwise, it records why the business state was left unchanged.
   It also reports queues without progress, as described under monitoring.
 - `cleanup_completed_transitions` deletes completed jobs older than `TRANSITION_MESSAGE_CLEANUP_DAYS`.

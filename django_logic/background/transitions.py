@@ -53,6 +53,11 @@ class BackgroundTransition(Transition):
     durable row under the state lock.
 
     Optional:
+        - ``record_failure`` — a required database function called with
+          ``instance, exception=error, **saved_kwargs`` when business work
+          permanently fails. It chooses the business outcome and commits
+          with the failed job. It cannot be combined with ``failed_state``.
+          If recording fails, maintenance retries only that function.
         - ``atomic`` — defaults to True. With False, each side-effect
           keeps its committed model writes when later work fails. The job
           remains locked on a separate PostgreSQL connection. Final state
@@ -97,6 +102,7 @@ class BackgroundTransition(Transition):
         timeout: int | None = None,
         no_retry_on: tuple = (),
         atomic: bool = True,
+        record_failure=None,
         fairness_key=None,
         in_progress_state=None,
         **kwargs,
@@ -132,6 +138,11 @@ class BackgroundTransition(Transition):
             raise ImproperlyConfigured(
                 f"BackgroundTransition '{action_name}': atomic must be True or False."
             )
+        if record_failure is not None and not callable(record_failure):
+            raise ImproperlyConfigured('record_failure must be a callable or None.')
+        if record_failure is not None and kwargs.get('failed_state') is not None:
+            raise ImproperlyConfigured('Use record_failure or failed_state, not both; record_failure chooses the business outcome.')
+        self._required_failure_recorder = record_failure
         if fairness_key is not None and not isinstance(fairness_key, str) and not callable(fairness_key):
             raise ImproperlyConfigured(f"BackgroundTransition '{action_name}': fairness_key must be a string or callable.")
         self.fairness_key = fairness_key
@@ -169,6 +180,11 @@ class BackgroundTransition(Transition):
         # Before the lock, and before the kwargs are serialized into a row
         # the worker would fail on for the same reason.
         _refuse_engine_param_kwargs(self.action_name, kwargs)
+        if self._required_failure_recorder is not None and (
+            (state.instance._state.db or DEFAULT_DB_ALIAS) != DEFAULT_DB_ALIAS
+            or router.db_for_write(type(state.instance), instance=state.instance) != DEFAULT_DB_ALIAS
+        ):
+            raise ImproperlyConfigured('record_failure requires business writes and jobs on the default database.')
         if not all(isinstance(kwargs.get(key), str) and kwargs[key]
                    for key in ('process_class', 'owning_process_class')) or not state.field_name:
             raise ImproperlyConfigured(

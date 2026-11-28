@@ -46,6 +46,7 @@ re-raising out of the worker loop would only add noise.
 from __future__ import annotations
 
 import importlib
+from datetime import timedelta
 from contextlib import ExitStack, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -53,13 +54,13 @@ from typing import Any
 
 from django.apps import apps
 from django.conf import settings
-from django.db import DEFAULT_DB_ALIAS, OperationalError, transaction
+from django.db import DEFAULT_DB_ALIAS, DatabaseError, OperationalError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
 from django_logic import conf
 from django_logic.background.context import JobContextError, restored_job_context
-from django_logic.background.exceptions import _RestoreError
+from django_logic.background.exceptions import _RecordedFailure, _RestoreError
 from django_logic.background.models import JobStateResult, TransitionMessage, _TEXT_LIMIT, db_safe_text
 from django_logic.background.observability import set_sentry_context
 from django_logic.background.serializers import deserialize_kwargs
@@ -109,6 +110,7 @@ class _Outcome:
     transition: BackgroundTransition | None = None
     state_obj: Any = None
     kwargs: dict | None = None
+    failure_pending: bool = False
 
 
 def run_background_transition(transition_message_id: int) -> None:
@@ -143,6 +145,11 @@ def _run_background_transition(transition_message_id):
         if isinstance(outcome, _NonAtomicAttempt):
             from django_logic.background.non_atomic import run_non_atomic
             outcome = run_non_atomic(transition_message_id)
+        if outcome.failure_pending:
+            # The failure decision has committed. A stopped handler must not repeat business work.
+            _finalize_stuck_attempt(
+                transition_message_id, exception=outcome.exception, measure_duration=True,
+            )
     except _NothingToDo:
         return
     finally:
@@ -194,6 +201,9 @@ def finalize_stuck_attempt(transition_message_id: int) -> bool:
         try:
             stack.enter_context(restored_job_context(transition_message_id))
         except JobContextError as error:
+            if isinstance(error.__cause__, DatabaseError):
+                # A temporary context lookup failure must not discard required business recording.
+                raise
             return _record_context_failure(transition_message_id, error, finalizing=True)
         return _finalize_stuck_attempt(transition_message_id)
 
@@ -213,7 +223,7 @@ def _record_context_failure(transition_message_id, error, *, finalizing=False):
         return _handle_restore_failure(job, error).terminal
 
 
-def _finalize_stuck_attempt(transition_message_id):
+def _finalize_stuck_attempt(transition_message_id, *, exception=None, measure_duration=False):
     hooks = None
     with transaction.atomic():
         try:
@@ -231,6 +241,9 @@ def _finalize_stuck_attempt(transition_message_id):
             )
             return False
 
+        if transition_message.eligible_at is not None and transition_message.eligible_at > timezone.now():
+            return False
+
         transition_logger.warning(
             f'Stuck transition: TransitionMessage#{transition_message.pk} '
             f'{transition_message.recorded_model_label}#{transition_message.instance_id} '
@@ -241,20 +254,22 @@ def _finalize_stuck_attempt(transition_message_id):
         # Build an exception from the stored last_error_message so the failure
         # callbacks see the same kind of error the last attempt would have
         # passed them.
-        err = RuntimeError(
-            f'[detect_stuck] {transition_message.last_error_message or "transition stuck"}'
+        err = exception if exception is not None else _RecordedFailure(
+            transition_message.last_error_message or 'The job process stopped before recording its result.',
+            transition_message.failure_types,
         )
-        hooks = _finalize_stuck_row(transition_message, err)
+        hooks = _finalize_stuck_row(transition_message, err, measure_duration=measure_duration)
 
     # Run failure_callbacks after the atomic commits (best-effort).
     if hooks is not None:
         _run_failure_callbacks(*hooks)
-    return True
+    return transition_message.is_completed
 
 
 def _finalize_stuck_row(
     transition_message: TransitionMessage,
     exception: BaseException,
+    *, measure_duration=False,
 ):
     """Complete a failed job during maintenance.
 
@@ -278,11 +293,33 @@ def _finalize_stuck_row(
         # transaction and take the completion below down with it.
         with transaction.atomic():
             _, process, transition = _restore(transition_message)
+    except DatabaseError:
+        # A database outage does not establish that the business record is missing.
+        raise
     except Exception as exc:
+        if transition_message.failure_pending:
+            _retry_failure_record(transition_message, exc)
+            return None
         _complete_restore_failure(transition_message, exc)
         return None
 
+    if transition_message.failure_pending and transition._required_failure_recorder is None:
+        _retry_failure_record(
+            transition_message,
+            RuntimeError('The required record_failure function is missing from this application version.'),
+        )
+        return None
+
     kwargs, decode_error = _decode_kwargs(transition_message)
+    if transition._required_failure_recorder is not None and decode_error is not None:
+        if isinstance(decode_error, DatabaseError):
+            raise decode_error
+        _complete_restore_failure(
+            transition_message,
+            _RestoreError(f'Saved arguments or user could not be restored: {type(decode_error).__name__}: {decode_error}'),
+            earlier_error=transition_message.last_error_message,
+        )
+        return None
     if isinstance(decode_error, _RestoreError):
         _complete_restore_failure(transition_message, decode_error, earlier_error=transition_message.last_error_message)
         return None
@@ -295,6 +332,14 @@ def _finalize_stuck_row(
         )
     state = process.state
 
+    if transition._required_failure_recorder is not None:
+        if not transition_message.failure_pending and transition_message.errors_count < conf.max_errors():
+            return None
+        return _record_required_failure(
+            transition_message, transition, state, kwargs, exception,
+            measure_duration=measure_duration,
+        )
+
     # A maintenance finalization is not a worker attempt. started_at belongs to
     # the abandoned attempt, so measuring from it would inflate duration_ms.
     return _complete_terminal_failure(
@@ -303,6 +348,75 @@ def _finalize_stuck_row(
         consequence='Completing the row anyway so it stops retrying.',
         measure_duration=False,
     )
+
+
+def _mark_failure_pending(job, error=None):
+    job.failure_pending = True
+    fields = ['failure_pending', 'modified']
+    if error is not None:
+        job.failure_types = [
+            f'{cls.__module__}.{cls.__qualname__}' for cls in type(error).__mro__
+            if issubclass(cls, BaseException)
+        ]
+        fields.append('failure_types')
+    job.save(using=job._state.db, update_fields=fields)
+
+
+def _retry_failure_record(job, error):
+    job.record_failure_side_effect_error(error, label='record_failure')
+    job.eligible_at = timezone.now() + timedelta(minutes=conf.retry_minutes())
+    job.deferral_reason = 'Waiting to record the required business failure.'
+    job.save(using=job._state.db, update_fields=['eligible_at', 'deferral_reason', 'modified'])
+    transition_logger.warning(
+        'Background job %s still needs its required business failure record: %s. '
+        'Maintenance will retry the record without repeating business work.', job.pk, error,
+    )
+
+
+def _record_required_failure(job, transition, state, kwargs, exception, *, measure_duration):
+    """Save the application outcome and failed job together, or leave both for recovery."""
+    _mark_failure_pending(job)
+    using = job._state.db or DEFAULT_DB_ALIAS
+
+    def record():
+        if using != DEFAULT_DB_ALIAS or state.instance._state.db != DEFAULT_DB_ALIAS:
+            raise RuntimeError('record_failure requires business writes and the job on the default database.')
+        with state.protected():
+            state.instance.refresh_from_db(using=using)
+            selected = _selected_state(job, state)
+            matches, expected, current = _state_guard_matches(transition, state, selected)
+            if not matches:
+                job.mark_as_superseded(
+                    f'[superseded] failure recording expected {expected}, found {current!r}. '
+                    'The business state changed; the required failure function was not run.'
+                )
+                return None
+            def apply():
+                # Ordinary transition checks see the failed job in the same transaction.
+                _finish_failed_job(job, exception, measure_duration=measure_duration)
+                token = _transition_context.set({'tr_id': kwargs.get('tr_id'), 'root_id': kwargs.get('root_id')})
+                job_token = _active_job.set(None)
+                try:
+                    transition._required_failure_recorder(state.instance, exception=exception, **kwargs)
+                finally:
+                    _active_job.reset(job_token)
+                    _transition_context.reset(token)
+                return (transition, state, kwargs, exception)
+
+            # Detect a suppressed database error before the protecting transaction can discard it silently.
+            return _run_in_savepoint(using, apply)
+
+    try:
+        return _run_in_savepoint(using, record)
+    except Exception as error:
+        # Completion and required writes rolled back; keep the original failure decision and reason.
+        job.refresh_from_db(using=using)
+        _retry_failure_record(job, error)
+        transition_logger.exception(
+            'Background job %s could not record its required business failure; '
+            'maintenance will retry the failure record without repeating business work.', job.pk,
+        )
+        return None
 
 
 def _complete_terminal_failure(
@@ -514,7 +628,7 @@ def _lock_uncompleted_row(transition_message_id: int, *, using=None) -> Transiti
             TransitionMessage.objects.using(using)
             .select_for_update(nowait=True, no_key=True)
             .filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=timezone.now()))
-            .get(pk=transition_message_id, is_completed=False)
+            .get(pk=transition_message_id, is_completed=False, failure_pending=False)
         )
     except TransitionMessage.DoesNotExist as exc:
         transition_logger.info(
@@ -745,6 +859,11 @@ def _handle_failure(
 
     exhausted = transition_message.errors_count >= conf.max_errors()
     terminal = exhausted or _failure_is_permanent(transition, error)
+    if terminal and transition._required_failure_recorder is not None:
+        _mark_failure_pending(transition_message, error)
+        return _Outcome(
+            terminal=False, succeeded=False, exception=error, failure_pending=True,
+        )
     if terminal and not exhausted:
         transition_logger.info(
             f'{kwargs.get("tr_id")} {transition.action_name} failed '
