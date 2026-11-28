@@ -141,6 +141,64 @@ See [interactive and automatic requests](recipes/interactive-and-automatic.md).
 Finish outstanding jobs before changing their recorded action, process or field.
 The worker uses the exact saved identity and never substitutes a similarly named declaration.
 
+## Required failure records
+
+Use `BackgroundTransition(record_failure=fn)` when a failed job must update the
+business record. The function receives `instance, exception=error, **saved_kwargs`,
+including the restored submitting `user` and the original action's `tr_id`.
+Choose either `record_failure` or `failed_state`. The function can call an ordinary
+application transition that chooses the failure state and saves its reason:
+
+```python
+from django_logic.background import BackgroundTransition, failure_matches
+
+def record_fulfilment_failure(order, *, exception, user=None, tr_id, **kwargs):
+    if failure_matches(exception, StockUnavailable):
+        order.process.wait_for_stock(user=user, original_action=tr_id)
+    else:
+        order.process.require_attention(user=user, original_action=tr_id)
+
+BackgroundTransition(
+    "fulfil", sources=["ready"], in_progress_state="fulfilling", target="fulfilled",
+    side_effects=[fulfil_order], record_failure=record_fulfilment_failure,
+)
+```
+
+The application's failure actions retain their normal permissions and conditions.
+Pass the restored user to those actions; do not substitute a system user. A genuine
+system-submitted job still has no user. A missing or deleted user, or invalid saved
+arguments, stops the job without running the required function or its callbacks.
+Temporary database errors during restoration leave recovery available.
+
+The worker first commits its decision that business work has permanently failed.
+It then locks the job and business record on the default database and marks the job
+failed inside that transaction before calling the function. The function's own
+checks can see that failed job. Other connections see both the failed job and the
+business changes only after they commit. If the function fails or the process stops
+before commit, its changes and completion are discarded together. Maintenance
+retries the required failure record after the configured retry wait; it does not
+repeat the provider work. Repeated recovery after a successful commit does nothing.
+Temporary `Defer` waits do not call this function. A later business state that no
+longer matches the saved job is preserved, and the job finishes as superseded.
+
+Keep this function to required database work on the default database. External
+requests cannot be committed with these changes. Failure callbacks remain optional
+and run after the required record commits; they are not a substitute for this function.
+This applies to both ordinary atomic jobs and `atomic=False` jobs. For the latter,
+the provider receipts stay committed while failure recording uses the default
+connection after the separate job connection closes. Inline test execution still
+obeys any enclosing application transaction.
+
+On the first failure, `exception` is the original object. Recovery carries its saved
+reason and exception class/ancestor names as inert text. Use
+`failure_matches(exception, ErrorType)` or a tuple of types when the outcome depends
+on the original type. The function does not import or construct saved types. Keep
+those application type names stable while their jobs remain pending. If a process
+stops before identifying a business exception, no business type is recorded and
+those matches are false. The incoming `tr_id` identifies the original action;
+a nested action generates its own identifier, so save the incoming value under a
+business-specific argument when it is needed for correlation.
+
 ## Application context
 
 An application can preserve audit attribution or tracing across worker processes with `DJANGO_LOGIC['JOB_CONTEXT']`.

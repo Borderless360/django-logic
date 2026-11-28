@@ -5,6 +5,28 @@ class _RestoreError(Exception):
     """A saved job's model, instance, transition or submitting user no longer exists."""
 
 
+class _RecordedFailure(RuntimeError):
+    """A saved failure reason and inert names of its original exception types."""
+
+    def __init__(self, message, type_names):
+        super().__init__(message)
+        self.type_names = tuple(name for name in type_names if isinstance(name, str))
+
+
+def failure_matches(exception, exception_type):
+    """Match a failure's original type, including after the worker has restarted.
+
+    ``exception_type`` is an exception class or tuple of classes. Saved names
+    are compared as text; this function never imports or constructs a type.
+    """
+    types = exception_type if isinstance(exception_type, tuple) else (exception_type,)
+    if any(not isinstance(cls, type) or not issubclass(cls, BaseException) for cls in types):
+        raise TypeError('failure_matches expects an exception class or tuple of exception classes.')
+    if isinstance(exception, _RecordedFailure):
+        return any(f'{cls.__module__}.{cls.__qualname__}' in exception.type_names for cls in types)
+    return isinstance(exception, types)
+
+
 class PermanentFailure(Exception):
     """Raise from a background side-effect to say: another attempt gets the
     same answer, so do not retry.

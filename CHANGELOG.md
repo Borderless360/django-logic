@@ -1,5 +1,17 @@
 # Changelog
 
+## [6.1.0] — 2026-11-28
+
+- `BackgroundTransition(record_failure=fn)` records a required business failure
+  in the same database transaction as failed-job completion. It also runs during
+  recovery after a job process stops on its final attempt. A failed recording
+  remains available for maintenance without repeating provider work. Saved users,
+  application permissions and temporary deferrals keep their existing meaning.
+- `failure_matches(exception, ErrorType)` preserves business error distinctions
+  after recovery by comparing saved exception type names without importing them.
+- Migration 0025 adds the saved failure decision and type names. Apply it before
+  starting this version. Replace old workers before enabling `record_failure`.
+
 ## [6.0.1] — 2026-11-27
 
 - A background job submitted by a user stops if that account is deleted before execution.

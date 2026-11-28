@@ -62,6 +62,10 @@ class TransitionMessage(TimeStampedModel):
     last_deferral_reason = models.TextField(blank=True, default='')
     completion_kind = models.CharField(max_length=16, blank=True, default='')
     is_completed = models.BooleanField(default=False)
+    # Business work has ended; only its required failure record may still run.
+    failure_pending = models.BooleanField(default=False, db_default=False)
+    # Names only: recovery never imports or reconstructs an exception from these values.
+    failure_types = models.JSONField(default=list, blank=True, db_default=[])
     errors_count = models.PositiveIntegerField(default=0)
     last_error_dt = models.DateTimeField(blank=True, null=True)
     last_error_message = models.TextField(blank=True)
@@ -306,7 +310,7 @@ class TransitionMessage(TimeStampedModel):
     @staticmethod
     def ready_to_start(rows):
         # A process which never starts holds up its job for at most five seconds.
-        return rows.filter(
+        return rows.filter(failure_pending=False).filter(
             models.Q(started_at__isnull=True) | models.Q(started_at__lt=timezone.now() - timedelta(seconds=5))
             | models.Q(last_error_dt__gte=models.F('started_at'))
             | models.Q(last_deferred_at__gte=models.F('started_at'))
@@ -352,6 +356,9 @@ class TransitionMessage(TimeStampedModel):
         self.deferral_reason = ''
         self.completion_kind = completion_kind or ('failed' if ended_in_failure else 'succeeded')
         update_fields = ['is_completed', 'completed_at', 'modified', 'completion_kind', 'eligible_at', 'deferral_reason']
+        if self.failure_pending:
+            self.failure_pending = False
+            update_fields.append('failure_pending')
         if ended_in_failure:
             self.ended_in_failure = True
             update_fields.append('ended_in_failure')

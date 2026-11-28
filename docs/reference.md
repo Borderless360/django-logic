@@ -11,6 +11,7 @@ Business rules belong in application functions. Worker configuration belongs in 
 | `from django_logic import Transition` | Run a synchronous action. |
 | `from django_logic.background import BackgroundTransition` | Save an action for a worker. |
 | `from django_logic.background import Defer, PermanentFailure` | Wait until a specified time, or report a failure that retrying cannot fix. |
+| `from django_logic.background import failure_matches` | Match the original exception type during ordinary failure handling or recovery. |
 | `from django_logic.background import sync_execution` | Run background work inline within one block. |
 | `from django_logic.background import AlreadyInProgress` | Handle a refused duplicate submission. |
 | `from django_logic.exceptions import TransitionNotAllowed, TransitionTemporarilyUnavailable, RefusalReason` | Handle unavailable actions. |
@@ -51,6 +52,7 @@ Background jobs accept those business options and add the following:
 | `queue` | `DEFAULT_QUEUE` | Name of the worker queue. |
 | `timeout` | `None` | Positive integer seconds before the worker stops the job process. |
 | `atomic` | `True` | Roll back the failed attempt's database writes; use `False` for independently committed provider receipts. |
+| `record_failure` | `None` | Required `fn(instance, exception=error, **saved_kwargs)` that saves the business failure with job completion. Cannot be combined with `failed_state`. |
 | `no_retry_on` | `()` | Exception types that end the job immediately as failed. |
 | `fairness_key` | `None` | A string or `fn(instance, **kwargs)` that returns the group between which workers take turns. |
 

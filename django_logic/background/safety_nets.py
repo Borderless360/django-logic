@@ -47,6 +47,7 @@ def _claimable(queues: list[str] | None = None):
         minutes=conf.retry_minutes())
     rows = TransitionMessage.objects.filter(
         is_completed=False,
+        failure_pending=False,
         errors_count__lt=conf.max_errors(),
     ).filter(
         Q(last_error_dt__isnull=True) | Q(last_error_dt__lt=retry_cutoff)
@@ -160,7 +161,9 @@ def detect_stuck_transitions() -> int:
     max_errors = conf.max_errors()
     stuck_ids = list(
         TransitionMessage.objects
-        .filter(is_completed=False, errors_count__gte=max_errors)
+        .filter(is_completed=False)
+        .filter(Q(failure_pending=True) | Q(errors_count__gte=max_errors))
+        .filter(Q(eligible_at__isnull=True) | Q(eligible_at__lte=now))
         .values_list('pk', flat=True)
     )
     finalized = 0

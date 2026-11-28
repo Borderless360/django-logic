@@ -1,5 +1,19 @@
 # Upgrading and rollback
 
+## Adopting required failure records
+
+Apply migration 0025, then upgrade the library on every worker before deploying
+application declarations that use `record_failure`. Verify that no older worker
+remains: older maintenance processes scan every queue and do not understand a saved
+pending failure. After all workers use the new runtime, enable the new declarations
+in an ordinary application deployment. This two-step adoption is needed only before
+first use of `record_failure`; it requires no application fallback code.
+
+The migration adds two fields with database defaults. Existing job identities,
+arguments and results are preserved. A worker on the new runtime leaves a saved
+pending failure unfinished if its application version has no required handler;
+its diagnostic identifies the missing function so a compatible version can finish it.
+
 ## From 5.3.1 to 6.0
 
 Finish unfinished jobs with typed arguments on the old release before switching workers.

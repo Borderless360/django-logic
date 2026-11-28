@@ -14,6 +14,7 @@ Public API:
 * :class:`PermanentFailure` — raise from a side-effect to say the failure
   is permanent: the worker takes the terminal path instead of retrying.
 * :class:`Defer` — wait until a declared time without counting an error.
+* :func:`failure_matches` — match the original exception type after failure recovery.
 * :class:`AlreadyInProgress` — submission was refused because this process has an unfinished job.
 
 All symbols are importable after Django's app registry is ready
@@ -32,6 +33,7 @@ _PUBLIC = {
     'retry_pending': ('django_logic.background.safety_nets', 'retry_pending'),
     'in_flight': ('django_logic.background.models', 'in_flight'),
     'PermanentFailure': ('django_logic.background.exceptions', 'PermanentFailure'),
+    'failure_matches': ('django_logic.background.exceptions', 'failure_matches'),
 }
 
 __all__ = list(_PUBLIC.keys())

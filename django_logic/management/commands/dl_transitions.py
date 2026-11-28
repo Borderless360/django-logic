@@ -87,6 +87,8 @@ class Command(BaseCommand):
     def _why(row, claimable, max_errors, report_after, age_minutes,
              queue_is_served):
         """One line saying why this row is where it is."""
+        if row.failure_pending:
+            return 'business work has failed; maintenance retries recording the required failure outcome'
         if row.eligible_at is not None and row.eligible_at > timezone.now():
             return f'waiting until {row.eligible_at.isoformat()}: {row.deferral_reason}'
         if row.errors_count >= max_errors:
@@ -132,6 +134,8 @@ class Command(BaseCommand):
                 f'TransitionMessage#{pk} is not an uncompleted row. '
                 f'A completed row is finished; nothing re-sends it.'
             )
+        if row.failure_pending:
+            raise CommandError('Business work has failed. Maintenance retries its required failure record; --send cannot repeat the work.')
         if row.eligible_at is not None and row.eligible_at > timezone.now():
             raise CommandError('This job is deferred. --send does not override provider or application waiting.')
         if row.errors_count >= conf.max_errors():

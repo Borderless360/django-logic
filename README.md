@@ -52,7 +52,7 @@ Create the record and validate form input before calling a transition.
 
 ## Install
 
-This guide describes **6.0.1**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its fixes.
+This guide describes **6.1.0**. See the [changelog](https://github.com/Borderless360/django-logic/blob/master/CHANGELOG.md) for its changes.
 
 ```bash
 pip install "django-logic[postgres]"
@@ -364,6 +364,9 @@ The worker completes the job as `superseded` and skips its side effects.
 - Raise `PermanentFailure` from `django_logic.background` when a retry cannot
   help. The worker then takes the failure path on the first attempt. For an
   exception type you do not own, list it in `no_retry_on=(CustomsRefusal,)`.
+- Use `record_failure=fn` when a failed job must save a business reason or call
+  an explicit failure action. Its database changes commit with the failed job,
+  including recovery after a worker stops. See [required failure records](docs/background-jobs.md#required-failure-records).
 - While a row is uncompleted, a second background transition on the same
   instance and process raises `AlreadyInProgress`, and a synchronous transition
   on it raises `TransitionTemporarilyUnavailable`. Keep required functions in

@@ -126,10 +126,15 @@ class JobStateResultTests(TransactionTestCase):
         self.assertFalse(JobStateResult.objects.exists())
 
     def test_downgrade_waits_for_jobs_with_committed_decisions(self):
+        latest = MigrationExecutor(connection).loader.graph.leaf_nodes('django_logic_background')
+
         def migrate_to(target):
             MigrationExecutor(connection).migrate([('django_logic_background', target)])
 
-        self.addCleanup(migrate_to, '0024_job_state_result')
+        def restore_latest():
+            MigrationExecutor(connection).migrate(latest)
+
+        self.addCleanup(restore_latest)
         self.review.review()
         job = TransitionMessage.objects.get()
         JobStateResult.objects.create(job=job, value='approved')

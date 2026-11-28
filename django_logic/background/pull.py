@@ -463,8 +463,13 @@ def _record_attempt_error(pk: int, message: str) -> None:
     alias = router.db_for_write(TransitionMessage) or DEFAULT_DB_ALIAS
     rows = TransitionMessage.objects.using(alias).filter(pk=pk)
     with _supervisor_transaction(alias):
-        rows.select_for_update(nowait=True).values_list('pk', flat=True).first()
+        job = rows.select_for_update(nowait=True).values('pk', 'failure_pending').first()
         now = timezone.now()
+        if job and job['failure_pending']:
+            rows.filter(is_completed=False).update(
+                failure_side_effect_error=db_safe_text(message), modified=now,
+            )
+            return
         updated = rows.filter(is_completed=False).update(
             errors_count=F('errors_count') + 1,
             last_error_message=db_safe_text(message),
