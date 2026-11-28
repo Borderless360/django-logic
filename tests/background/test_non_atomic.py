@@ -130,14 +130,27 @@ class NonAtomicProviderTests(TransactionTestCase):
 
     def test_deleted_user_between_job_checks_stops_provider_work_and_callbacks(self):
         from django_logic.background.non_atomic import run_non_atomic
+        from tests.background.test_read_replica import ActorReplicaRouter
 
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_setting('lock_timeout')")
+            previous_timeout = cursor.fetchone()[0]
+            cursor.execute("SELECT set_config('lock_timeout', '2s', false)")
+
+        def restore_timeout():
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('lock_timeout', %s, false)", [previous_timeout])
+
+        self.addCleanup(restore_timeout)
         user = get_user_model().objects.create(username='deleted-submitter')
         job = self.enqueue(user=user)
         user_id = user.pk
+        get_user_model().objects.using('other').create(pk=user_id, username='stale-submitter')
 
         def delete_user_then_run(job_id):
             user.delete()
-            return run_non_atomic(job_id)
+            with override_settings(DATABASE_ROUTERS=[ActorReplicaRouter()]):
+                return run_non_atomic(job_id)
 
         with patch('django_logic.background.non_atomic.run_non_atomic', side_effect=delete_user_then_run):
             run_background_transition(job.pk)
@@ -156,6 +169,23 @@ class NonAtomicProviderTests(TransactionTestCase):
         run_background_transition(job.pk)
         job.refresh_from_db()
         self.assertEqual(job.start_attempt_count, 1)
+
+    def test_new_user_missing_from_replica_can_complete_non_atomic_job(self):
+        from tests.background.test_read_replica import ActorReplicaRouter
+
+        user = get_user_model().objects.create(username='new-submitter')
+        job = self.enqueue(user=user)
+        with override_settings(DATABASE_ROUTERS=[ActorReplicaRouter()]):
+            self.assertFalse(get_user_model().objects.filter(pk=user.pk).exists())
+            run_background_transition(job.pk)
+        job.refresh_from_db()
+        self.widget.refresh_from_db()
+        self.assertTrue(job.is_completed)
+        self.assertFalse(job.ended_in_failure)
+        self.assertEqual(job.errors_count, 0)
+        self.assertEqual(self.widget.status, 'submitted')
+        self.assertEqual(self.widget.cb_log, 'callback,')
+        self.assertEqual(self.request_count(), 1)
 
     def test_confirmed_response_survives_report_failure_and_retry_does_not_resubmit(self):
         transition_message = self.enqueue()

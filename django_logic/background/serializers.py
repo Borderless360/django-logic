@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from uuid import UUID
 
+from django.db import router
+
 from django_logic.background.exceptions import _RestoreError
 
 
@@ -108,9 +110,11 @@ def restore_user(kwargs: dict) -> None:
         return
 
     from django.contrib.auth import get_user_model
+    model = get_user_model()
     try:
-        kwargs['user'] = get_user_model().objects.get(pk=user_id)
-    except get_user_model().DoesNotExist as error:
+        # A replica can miss a new user or still contain a deleted account.
+        kwargs['user'] = model.objects.using(router.db_for_write(model)).get(pk=user_id)
+    except model.DoesNotExist as error:
         raise _RestoreError(
             f'The submitting user {user_id!r} no longer exists. '
             'Review the job before submitting replacement work under an authorized user.'

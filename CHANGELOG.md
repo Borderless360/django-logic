@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Background workers restore business records and submitting users from each model's
+  write database. A lagging read replica can no longer make a new record look missing
+  or let a deleted user run work. State reads after a save or a failed attempt stay
+  on the database used by that operation. If restoration fails, the worker records
+  the failure through the connection already holding that job, avoiding a wait on
+  its own database lock. Existing restrictions on job-table routing
+  and `atomic=False` business-model routing remain unchanged. No migration is required.
+
 ## [6.0.1] — 2026-11-27
 
 - A background job submitted by a user stops if that account is deleted before execution.

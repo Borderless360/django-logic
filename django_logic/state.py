@@ -126,7 +126,8 @@ class State:
             # Callbacks and callers must see the state that the database accepted.
             setattr(self.instance, self.field_name, previous)
             raise
-        self.instance.refresh_from_db(fields=[self.field_name], **database_kwargs)
+        # Read the state that this save wrote, even if ordinary reads use a replica.
+        self.instance.refresh_from_db(using=self.instance._state.db, fields=[self.field_name])
 
     @property
     def instance_key(self):

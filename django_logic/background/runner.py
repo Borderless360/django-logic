@@ -53,7 +53,7 @@ from typing import Any
 
 from django.apps import apps
 from django.conf import settings
-from django.db import DEFAULT_DB_ALIAS, OperationalError, transaction
+from django.db import DEFAULT_DB_ALIAS, OperationalError, router, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -491,8 +491,8 @@ def _run_atomic_state(transition_message, transition, state, instance, kwargs, d
                 instance._state.db or DEFAULT_DB_ALIAS, execute_and_complete,
             )
         except Exception as error:
-            transition_message.refresh_from_db()
-            instance.refresh_from_db(fields=[state.field_name])
+            transition_message.refresh_from_db(using=transition_message._state.db)
+            instance.refresh_from_db(using=instance._state.db, fields=[state.field_name])
             return _handle_failure(
                 transition_message, transition, state, kwargs, error
             )
@@ -673,7 +673,10 @@ def _complete_restore_failure(transition_message, error, *, earlier_error=None):
         note = note[:_TEXT_LIMIT - len(earlier_note)] + earlier_note
     transition_message.last_error_message = note
     transition_message.last_error_dt = timezone.now()
-    transition_message.save(update_fields=['last_error_message', 'last_error_dt', 'modified'])
+    transition_message.save(
+        using=transition_message._state.db,
+        update_fields=['last_error_message', 'last_error_dt', 'modified'],
+    )
     _finish_failed_job(transition_message, error, measure_duration=False)
     transition_logger.error(
         f'TransitionMessage#{transition_message.pk} cannot be restored: {error}. '
@@ -859,7 +862,10 @@ def _restore(transition_message: TransitionMessage):
         # strand the instance in in_progress_state with no failed_state and no
         # retries. Framework code that reloads by pk must ignore default
         # manager filters, as Django does for related objects.
-        instance = model._base_manager.get(pk=transition_message.instance_id)
+        # A replica may not yet contain this record or its latest state.
+        instance = model._base_manager.using(router.db_for_write(model)).get(
+            pk=transition_message.instance_id,
+        )
     except model.DoesNotExist as exc:
         raise _RestoreError(
             f'{transition_message.app_label}.{transition_message.model_name}#{transition_message.instance_id} not found'
